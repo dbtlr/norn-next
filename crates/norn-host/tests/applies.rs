@@ -966,18 +966,24 @@ fn a_write_refuses_an_element_violation_it_introduces_and_not_one_standing() {
 }
 
 /// A vault schema whose rules a write can breach in every per-element and
-/// whole-document way: a closed list field with a length limit, a field an
-/// area requires, a field another area forbids, and a field two rules close
-/// over sets sharing no member, which no rule requires, so the schema loads.
+/// whole-document way: a closed list field with a length limit, a typed
+/// field and a list-shaped one, a field an area requires, a field another
+/// area forbids, a field two rules close over sets sharing no member — which
+/// no rule requires, so the schema loads — a rule placing what it selects,
+/// and a second placing elsewhere what a different key selects.
 const AGREEMENT_SCHEMA: &str = "version: 1
 fields:
   status: { type: text, shape: list }
+  count: { type: number, shape: single }
+  labels: { type: text, shape: list }
 rules:
   states: { one_of: { status: { values: [todo, done], synonyms: { complete: done } } }, max_length: { status: 4 } }
   tasks: { match: { path: 'tasks/**' }, required: { status: } }
   notes: { match: { path: 'notes/**' }, forbidden: { owner: } }
   early: { one_of: { phase: { values: [draft] } } }
   late: { one_of: { phase: { values: [final] } } }
+  placed: { match: { frontmatter: { kind: placed } }, allowed_paths: { paths: ['placed/**'] } }
+  shelved: { match: { frontmatter: { shelf: top } }, allowed_paths: { paths: ['shelf/**'] } }
 ";
 
 /// A schema finding by its identity: kind, field and offending value.
@@ -1027,9 +1033,18 @@ fn identities_at(
 /// write the gate admits leaves no finding the validator did not already
 /// report, across setting, pushing and popping a list's elements, moving into
 /// a required area, removing what an area requires, creating what lacks or
-/// holds what an area requires or forbids, and writing a field whose closed
-/// sets share no member, which is refused as that conflict rather than as a
-/// value outside an empty set.
+/// holds what an area requires or forbids, swapping a forbidden or conflicted
+/// field's whole value, writing beside a standing missing field, moving out
+/// of a rule's place, creating what two rules place in no common place, and writing
+/// a value of the wrong type or shape; a field whose closed sets share no
+/// member is refused as that conflict rather than as a value outside an
+/// empty set.
+///
+/// A finding is keyed here by kind, field and offending value, which the
+/// validator reports. The gate's identity also holds the combined constraint
+/// and the value's equality key, so a write that changes only those — a value
+/// moved under another rule's closed set, a tag respelled in another case —
+/// is outside this table and is pinned in the applier's gate tests.
 #[test]
 fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_report() {
     let (_sandbox, vault) = a_vault("host-applies-gate-agreement");
@@ -1109,6 +1124,65 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
             "notes/owned.md",
             OperationKind::set_frontmatter(target("notes/owned.md"), "phase", text("draft")),
             &[FindingKind::FieldRulesConflict],
+        ),
+        (
+            "a swap of a conflicted field's whole value",
+            "notes/owned.md",
+            "notes/owned.md",
+            OperationKind::set_frontmatter(target("notes/owned.md"), "phase", text("final")),
+            &[FindingKind::FieldRulesConflict],
+        ),
+        (
+            "a swap of a forbidden field's whole value",
+            "notes/owned.md",
+            "notes/owned.md",
+            OperationKind::set_frontmatter(target("notes/owned.md"), "owner", text("you")),
+            &[FindingKind::Forbidden],
+        ),
+        (
+            "a write beside a standing missing field",
+            "tasks/bare.md",
+            "tasks/bare.md",
+            OperationKind::set_frontmatter(target("tasks/bare.md"), "title", text("Bare")),
+            &[],
+        ),
+        (
+            "a create in its rule's place",
+            "placed/a.md",
+            "placed/a.md",
+            OperationKind::create_document(path("placed/a.md"), "---\nkind: placed\n---\n# A\n"),
+            &[],
+        ),
+        (
+            "a move out of its rule's place",
+            "placed/a.md",
+            "loose/a.md",
+            OperationKind::move_document(path("placed/a.md"), path("loose/a.md")),
+            &[FindingKind::Misplaced],
+        ),
+        (
+            "a create two rules place in no common place",
+            "placed/b.md",
+            "placed/b.md",
+            OperationKind::create_document(
+                path("placed/b.md"),
+                "---\nkind: placed\nshelf: top\n---\n# B\n",
+            ),
+            &[FindingKind::DocumentRulesConflict],
+        ),
+        (
+            "a value of the wrong type",
+            moved,
+            moved,
+            OperationKind::set_frontmatter(target(moved), "count", text("many")),
+            &[FindingKind::TypeMismatch],
+        ),
+        (
+            "a value of the wrong shape",
+            moved,
+            moved,
+            OperationKind::set_frontmatter(target(moved), "labels", text("loose")),
+            &[FindingKind::ShapeMismatch],
         ),
     ];
 

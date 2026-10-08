@@ -540,11 +540,11 @@ rules:
 
 /// **A conflict that depends on a document is that document's finding,
 /// naming every rule in it.** Rules whose selectors differ read without
-/// refusal; a document they select together, required and forbidden one field
-/// and allowed no common place, derives a `field/rules-conflict` carrying the
-/// value it holds and a `document/rules-conflict`, each citing every rule in
-/// the conflict in name order, while a document selected by one side alone
-/// derives no finding.
+/// refusal; a document they select together — one field required by two
+/// rules and forbidden by two, and three rules' places sharing none — derives
+/// a `field/rules-conflict` carrying the value it holds and a
+/// `document/rules-conflict`, each citing every rule in the conflict in name
+/// order, while a document selected by one side alone derives no finding.
 #[test]
 fn a_conflict_that_depends_on_a_document_is_its_finding_naming_every_rule() {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "document-conflict")
@@ -554,7 +554,7 @@ fn a_conflict_that_depends_on_a_document_is_its_finding_naming_every_rule() {
         vec![
             (
                 "work/both.md",
-                b"---\ntype: task\nstage: done\nowner: me\n---\n# Both\n".to_vec(),
+                b"---\ntype: task\nstage: done\nflag: on\nowner: me\n---\n# Both\n".to_vec(),
             ),
             (
                 "work/open.md",
@@ -572,6 +572,9 @@ rules:
   closed: { match: { frontmatter: { stage: done } }, forbidden: { owner: } }
   here: { match: { frontmatter: { type: task } }, allowed_paths: { paths: ['work/**'] } }
   there: { match: { frontmatter: { stage: done } }, allowed_paths: { paths: ['archive/**'] } }
+  staffed: { match: { frontmatter: { flag: on } }, required: { owner: } }
+  sealed: { match: { frontmatter: { type: task, flag: on } }, forbidden: { owner: } }
+  yonder: { match: { frontmatter: { stage: done, flag: on } }, allowed_paths: { paths: ['elsewhere/**'] } }
 ",
     );
     let mut findings: Vec<_> = rows
@@ -597,14 +600,14 @@ rules:
                 FindingKind::DocumentRulesConflict.as_str(),
                 None,
                 None,
-                vec!["here", "there"]
+                vec!["here", "there", "yonder"]
             ),
             (
                 "work/both.md",
                 FindingKind::FieldRulesConflict.as_str(),
                 Some("owner"),
                 Some("me"),
-                vec!["closed", "open"]
+                vec!["closed", "open", "sealed", "staffed"]
             ),
         ]
     );
