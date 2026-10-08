@@ -1094,7 +1094,7 @@ fn a_quarantined_holder_moved_respells_none_of_its_links() {
 /// that document to none, and the forecast skips it as not written
 /// literally, because no bytes of its value are its text to respell.
 #[test]
-fn a_backlink_not_written_literally_is_left_with_its_reason() {
+fn an_unplaced_backlink_is_left_with_its_reason() {
     let holder = "---\nsee: [\"[[a]]\"]\nnested:\n  at: \"[[a]]\"\n---\nbody\n";
     let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", holder)]);
     let resolution = fixture.resolution(vec![moving("a.md", "b.md")]);
@@ -1109,7 +1109,7 @@ fn a_backlink_not_written_literally_is_left_with_its_reason() {
     );
     assert_eq!(
         resolution.forecast.links,
-        vec![LinkAdvisory::skipped_not_written_literally(link)]
+        vec![LinkAdvisory::skipped_unplaced(link)]
     );
     applied(fixture.apply(resolution.plan));
     assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
@@ -1130,7 +1130,7 @@ fn a_literal_backlink_beside_an_unplaced_one_is_respelled_alone() {
     let link = key("h.md", LinkFamily::Wikilink, "a");
     assert_eq!(
         resolution.forecast.links,
-        vec![LinkAdvisory::skipped_not_written_literally(link.clone())]
+        vec![LinkAdvisory::skipped_unplaced(link.clone())]
     );
     assert!(
         resolution
@@ -1150,4 +1150,34 @@ fn a_literal_backlink_beside_an_unplaced_one_is_respelled_alone() {
         Some("---\nup: \"[[b]]\"\nsee: [\"[[a]]\"]\n---\nbody\n")
     );
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A key whose links stay for several reasons is advised by the first
+/// ranked, wherever each stands**: a holder's unplaced copy of a backlink
+/// beside a copy the new name cannot be written into stays for two reasons,
+/// and the forecast names the one ranked first whichever copy comes first.
+#[test]
+fn a_key_left_for_several_reasons_is_advised_by_the_first_ranked() {
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    for (holder, to, advisory) in [
+        (
+            "---\nnested:\n  at: \"[[a]]\"\n---\n[[a]] then `code`\n",
+            "a`b.md",
+            LinkAdvisory::skipped_unrepresentable(link.clone()),
+        ),
+        (
+            "---\nsee: [\"[[a]]\"]\nup: \"[[a]]\"\n---\nbody\n",
+            "a\"b.md",
+            LinkAdvisory::skipped_would_corrupt_frontmatter(link.clone()),
+        ),
+        (
+            "---\nup: \"[[a]]\"\nsee: [\"[[a]]\"]\n---\nbody\n",
+            "a\"b.md",
+            LinkAdvisory::skipped_would_corrupt_frontmatter(link.clone()),
+        ),
+    ] {
+        let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", holder)]);
+        let resolution = fixture.resolution(vec![moving("a.md", to)]);
+        assert_eq!(resolution.forecast.links, vec![advisory], "in {holder:?}");
+    }
 }

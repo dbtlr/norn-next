@@ -769,7 +769,7 @@ pub struct LinkRow {
     /// Where the link stands, and `null` for a frontmatter link whose
     /// position cannot be named: one written in a flow sequence, an escaped,
     /// folded or block scalar, or a nested value, whose bytes are not its
-    /// text.
+    /// text, or one in a block whose fields cannot be told apart.
     pub span: Option<Span>,
     /// The bounded head of the documents the target resolves to, in the
     /// resolution ladder's own order, with how many there were.

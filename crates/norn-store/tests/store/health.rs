@@ -587,6 +587,43 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
     );
 }
 
+/// **A link with no place in the source is stored and judged without one.**
+/// A frontmatter wikilink whose value's bytes are not its text reaches the
+/// store with no span: its row reads back with none, it is judged like any
+/// other link, and the finding about it carries no span.
+#[test]
+fn an_unplaced_link_is_stored_and_judged_without_a_span() {
+    let mut documents = targets();
+    let mut holder = derived("src/u.md", &body_of(&["[[missing]]", "[[glossary]]"]));
+    for link in &mut holder.links {
+        link.span = None;
+    }
+    documents.push(holder);
+    let mut judging = Judging::new("health-unplaced", Sensitive, &documents);
+    let stored = judging
+        .request()
+        .stored_facts(&path("src/u.md"))
+        .expect("reading a document")
+        .expect("a written document");
+    assert!(
+        stored.links.len() == 2 && stored.links.iter().all(|link| link.fact.span.is_none()),
+        "{:?}",
+        stored.links
+    );
+    let (findings, _) = judging.judged(&["src/u.md"]);
+    let kinds: Vec<(FindingKind, Option<Span>)> = findings
+        .iter()
+        .map(|finding| (finding.kind, finding.span))
+        .collect();
+    assert_eq!(kinds, [(FindingKind::Broken, None)]);
+    let rows = judging.validated();
+    let row = rows
+        .iter()
+        .find(|row| row.path.as_str() == "src/u.md")
+        .expect("the broken link's finding row");
+    assert_eq!(row.span, None);
+}
+
 /// **A dotted leaf totals both of its reductions.** `[[v1.2]]` names every
 /// `**/v1.2.md` and every `**/v1.md`, so over two of the first and one of the
 /// second it is ambiguous among three, its head merged across the two classes

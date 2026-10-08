@@ -980,7 +980,7 @@ fn a_rewrite_to_naming_a_quarantined_file_is_unresolved() {
 /// unresolved naming its holder, a delete leaving links broken advises it,
 /// and a rewriting delete leaves it as written, skipped with its reason.
 #[test]
-fn a_backlink_not_written_literally_counts_for_every_delete() {
+fn an_unplaced_backlink_counts_for_every_delete() {
     let holder = "---\nsee: [\"[[a]]\"]\n---\nbody\n";
     let fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", holder)]);
     let resolution = fixture.planned(vec![deleting("a.md")]);
@@ -1003,7 +1003,7 @@ fn a_backlink_not_written_literally_counts_for_every_delete() {
     let rewritten = fixture.resolution(vec![rewriting("a.md", "c")]);
     assert_eq!(
         rewritten.forecast.links,
-        vec![LinkAdvisory::skipped_not_written_literally(link)]
+        vec![LinkAdvisory::skipped_unplaced(link)]
     );
     applied(fixture.apply(rewritten.plan));
     assert_eq!(fixture.read("a.md"), None);

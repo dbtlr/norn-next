@@ -139,12 +139,12 @@ impl Document<'_> {
     /// either rewrites the other's bytes, so the inner one is unrepresentable
     /// and the outer one is proven like any other. A frontmatter link with no
     /// place in the source — one in a flow sequence, an escaped or folded
-    /// scalar, a nested value — has no bytes to write over and is
-    /// [`RewriteSkip::NotWrittenLiterally`], whatever its `to`. A matching
-    /// link that cannot carry its `to` is left exactly as written and
-    /// reported in [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that
-    /// says why; it is never forced. A batch that respells nothing returns
-    /// the document's own bytes.
+    /// scalar, a nested value, or a block whose fields cannot be told apart
+    /// — has no bytes to write over and is [`RewriteSkip::Unplaced`],
+    /// whatever its `to`. A matching link that cannot carry its `to` is left
+    /// exactly as written and reported in [`RewrittenLinks::skipped`] with the
+    /// [`RewriteSkip`] that says why; it is never forced. A batch that
+    /// respells nothing returns the document's own bytes.
     ///
     /// The result is proven by reading it back: everything the index derives
     /// from the document reads as it did, where its bytes moved to, with only
@@ -399,10 +399,7 @@ impl Address {
     /// rewrite never changes how a link is addressed, so a protocol other than
     /// the link's own is unrepresentable there.
     fn respell(&self, link: &Link) -> Result<(usize, Range<usize>, String), RewriteSkip> {
-        let at = link
-            .span
-            .ok_or(RewriteSkip::NotWrittenLiterally)?
-            .byte_offset;
+        let at = link.span.ok_or(RewriteSkip::Unplaced)?.byte_offset;
         let token = respelled(link, &self.target)?;
         if link.protocol != self.protocol {
             return Err(RewriteSkip::Unrepresentable);

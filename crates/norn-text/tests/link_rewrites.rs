@@ -214,13 +214,13 @@ fn frontmatter_strings_that_fit_alone_but_not_together_keep_the_first() {
 /// rewrite reaching it leaves it as written and skips it as not written
 /// literally: rewriting it is a whole-value write of its field.
 #[test]
-fn a_frontmatter_link_not_written_literally_is_skipped_as_such() {
+fn an_unplaced_frontmatter_link_is_skipped_as_such() {
     let source =
         "---\nflow: [\"[[Old]]\"]\nescaped: \"\\x5B[Old]]\"\nnested:\n  at: \"[[Old]]\"\n---\n";
     let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
     assert_eq!(out.text, source);
     assert_eq!(out.rewritten, 0);
-    assert_eq!(reasons(&out), [RewriteSkip::NotWrittenLiterally; 3]);
+    assert_eq!(reasons(&out), [RewriteSkip::Unplaced; 3]);
     assert!(out.skipped.iter().all(|skip| skip.link.span.is_none()));
 }
 
@@ -239,10 +239,37 @@ fn a_placed_link_beside_an_unplaced_one_is_respelled_alone() {
     assert_eq!(out.rewritten, 2);
     assert_eq!(
         reasons(&out),
-        [
-            RewriteSkip::NotWrittenLiterally,
-            RewriteSkip::LinkNotRewritable
-        ]
+        [RewriteSkip::Unplaced, RewriteSkip::LinkNotRewritable]
+    );
+}
+
+/// The read-back proof holds unplaced links too: an anchored sequence's item
+/// is placed, and the alias that repeats it elsewhere carries an unplaced copy
+/// of the same link, so respelling the placed one would change what the
+/// alias's link reads as. The edit is refused, and both links are skipped.
+#[test]
+fn an_edit_that_would_change_an_unplaced_link_through_an_alias_is_refused() {
+    let source = "---\na:\n  &s\n  - \"[[A]]\"\nb: *s\n---\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "A", "B");
+    assert_eq!(out.text, source);
+    assert_eq!(out.rewritten, 0);
+    assert_eq!(
+        reasons(&out),
+        [RewriteSkip::WouldCorruptFrontmatter, RewriteSkip::Unplaced]
+    );
+}
+
+/// Skips are in document order whether their links are placed or not: a
+/// placed link before an unplaced one is skipped first, though the unplaced
+/// one has no offset to sort by.
+#[test]
+fn a_placed_skip_before_an_unplaced_one_is_reported_first() {
+    let source = "---\nup: \"[[a]]\"\nsee: [\"[[a]]\"]\n---\nbody\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "a", "a\"b");
+    assert_eq!(out.text, source);
+    assert_eq!(
+        reasons(&out),
+        [RewriteSkip::WouldCorruptFrontmatter, RewriteSkip::Unplaced]
     );
 }
 

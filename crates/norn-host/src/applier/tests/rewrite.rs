@@ -811,15 +811,13 @@ fn a_new_naming_a_quarantined_file_is_unresolved() {
 /// graph and names the old target, but no bytes of the value are its text,
 /// so it is skipped as not written literally and the holder is unchanged.
 #[test]
-fn a_frontmatter_link_not_written_literally_is_skipped_with_its_reason() {
+fn an_unplaced_frontmatter_link_is_skipped_with_its_reason() {
     let holder = "---\nsee: \"\\x5B[a]]\"\n---\nbody\n";
     let mut fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", holder)]);
     let resolution = fixture.resolution(vec![retargeting("a", "c")]);
     assert_eq!(
         resolution.forecast.links,
-        vec![LinkAdvisory::skipped_not_written_literally(key(
-            "h.md", "a"
-        ))]
+        vec![LinkAdvisory::skipped_unplaced(key("h.md", "a"))]
     );
     applied(fixture.apply(resolution.plan));
     assert_eq!(fixture.read("h.md").as_deref(), Some(holder));

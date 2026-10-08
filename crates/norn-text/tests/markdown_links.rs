@@ -403,11 +403,7 @@ fn a_markdown_link_in_a_frontmatter_value_is_not_a_link() {
         "---\nsource: \"[Title](./note.md)\"\nrelated: \"[[Note]]\"\n---\n\n[Body](./b.md)\n",
     );
 
-    let from_values: Vec<Link> = document
-        .field_texts()
-        .iter()
-        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
-        .collect();
+    let from_values = document.frontmatter_wikilinks();
     assert_eq!(targets(&from_values), ["Note"]);
     assert!(
         from_values

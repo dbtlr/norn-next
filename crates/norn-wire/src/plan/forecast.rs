@@ -202,12 +202,15 @@ pub enum LinkAdvisory {
         /// The link.
         link: LinkKey,
     },
-    /// The link is written in a frontmatter value whose bytes are not its
-    /// text — a flow sequence item, an escaped, folded or block scalar, a
-    /// nested value — so no bytes stand for its address and it is left as
-    /// written. Setting the field's whole value is what rewrites it.
+    /// The link has no place in its document's bytes — it is written in a
+    /// frontmatter value whose bytes are not its text, such as a flow
+    /// sequence item, an escaped, folded or block scalar or a nested value,
+    /// or in a frontmatter block whose fields cannot be told apart — so no
+    /// bytes stand for its address and it is left as written. Where the
+    /// block's fields can be edited, setting the field's whole value is what
+    /// rewrites it.
     #[non_exhaustive]
-    SkippedNotWrittenLiterally {
+    SkippedUnplaced {
         /// The link.
         link: LinkKey,
     },
@@ -257,10 +260,10 @@ impl LinkAdvisory {
         LinkAdvisory::SkippedNotRewritable { link }
     }
 
-    /// `link` is written in a frontmatter value whose bytes are not its text,
-    /// and it is left as written.
-    pub const fn skipped_not_written_literally(link: LinkKey) -> Self {
-        LinkAdvisory::SkippedNotWrittenLiterally { link }
+    /// `link` has no place in its document's bytes, and it is left as
+    /// written.
+    pub const fn skipped_unplaced(link: LinkKey) -> Self {
+        LinkAdvisory::SkippedUnplaced { link }
     }
 
     /// The plan leaves `link` broken.

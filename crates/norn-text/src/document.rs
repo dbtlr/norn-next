@@ -376,20 +376,27 @@ impl<'a> Document<'a> {
     /// Every string held in the frontmatter — scalar field values and the
     /// string items of sequences — with the source bytes that produced each.
     ///
-    /// This is the seam a caller scans frontmatter values for syntax through;
-    /// the ranges come from the field layer, so an escaped or line-continued
+    /// The ranges come from the field layer, so an escaped or line-continued
     /// value reports the bytes it was written as rather than nothing. A string
     /// nested deeper — in a map, or in a map or sequence held as an item — is
-    /// not a field's text and is not reported here.
+    /// not a field's text and is not reported here, and neither is any string
+    /// of a block whose split was refused. A frontmatter value's links are
+    /// read through [`Document::frontmatter_wikilinks`], which reads those
+    /// too.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
         self.frontmatter_texts(Depth::Fields)
     }
 
-    /// Every string the frontmatter value holds, at any depth, in document
-    /// order: [`Document::field_texts`]'s, each where it stands among the
+    /// The strings the frontmatter mapping holds, in document order, to
+    /// `depth`.
+    ///
+    /// At [`Depth::Fields`], the fields' own strings: a scalar value, and the
+    /// string items of a sequence. At [`Depth::Values`], every string the
+    /// value holds at any depth: those, each where it stands among the
     /// strings nested deeper — in a map, or in a map or sequence held as a
-    /// sequence's item — which have no range. A block whose split was refused still holds a value, and its
-    /// strings are all reported, with no range, since no byte in it is
+    /// sequence's item — which have no range. A block whose split was refused
+    /// still holds a value: at `Fields` it reports nothing, and at `Values`
+    /// every string it holds, with no range, since no byte in it is
     /// attributable to a field.
     ///
     /// A key is not a string the block holds: it names a property.
@@ -574,10 +581,11 @@ impl<'a> Document<'a> {
     /// The counterpart to [`Document::frontmatter_tags`], and the other half
     /// of what a frontmatter value is scanned for: every string the block
     /// holds is read — scalar values, the string items of sequences and the
-    /// strings of nested values, not just one field — because writing the wikilink form is what opts a
-    /// property into the link graph, whichever property it is. A
-    /// `[title](target)` string is inert text here; the Markdown form is body
-    /// syntax.
+    /// strings of nested values, not just one field — because writing the
+    /// wikilink form is what opts a property into the link graph, whichever
+    /// property it is. A `[title](target)` string is inert text here; the
+    /// Markdown form is body syntax. A block that is not a mapping holds no
+    /// property, and no link is read from it, as no tag is.
     ///
     /// Every link is reported, in document order, and **a link is placed
     /// when the entry's source bytes carry its value literally** — a plain
@@ -598,6 +606,13 @@ impl<'a> Document<'a> {
     /// matches a later literal one claims that one's bytes and the literal
     /// link disappears. The link still stands in the value, and resolving it
     /// needs no place, so it is reported without one.
+    ///
+    /// A block whose split the field layer refused
+    /// ([`Document::split_refusal`]) still parses to a value, and the index
+    /// projects that value's fields, so its links are reported too — every
+    /// one unplaced, a literal one included, since no byte in such a block is
+    /// attributable to a field. Its tags are not: [`Document::frontmatter_tags`]
+    /// reads the `tags` field's own texts, which a refused split withholds.
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         let mut cursor = LineCursor::new(self.source);
         let mut links = Vec::new();

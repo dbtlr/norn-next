@@ -320,10 +320,10 @@ fn a_block_whose_spans_are_untrusted_reports_no_strings() {
     );
 }
 
-/// Frontmatter values are handed out as text plus the bytes that produced
-/// them, and this crate reads no syntax inside them. A caller that wants the
-/// links in a frontmatter value scans the text itself, through the one token
-/// parser, and maps the result back through the range.
+/// Field texts are handed out as text plus the bytes that produced them, and
+/// this crate decomposes no syntax inside them: a value holding a link is a
+/// string here. The one token parser reads a text's wikilinks, which is what
+/// `frontmatter_wikilinks` runs over every string a frontmatter value holds.
 #[test]
 fn frontmatter_values_are_text_this_crate_reads_no_syntax_in() {
     let source = "---\nsee: \"[[Target|Shown]]\"\nmd: \"[text](target.md)\"\n---\nbody\n";

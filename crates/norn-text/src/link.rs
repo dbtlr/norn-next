@@ -165,8 +165,9 @@ pub struct Link {
     /// frontmatter link has one only where its entry's source bytes carry its
     /// value literally; one written in a flow sequence, an escaped, folded or
     /// block scalar, or a nested value has none, because no run of the
-    /// source's bytes is its token's and a place that is not certainly right
-    /// is absent rather than guessed. See
+    /// source's bytes is its token's, and neither has one in a block whose
+    /// fields cannot be told apart. A place that is not certainly right is
+    /// absent rather than guessed. See
     /// [`Document::frontmatter_wikilinks`](crate::Document::frontmatter_wikilinks).
     pub span: Option<SourceSpan>,
 }
@@ -206,6 +207,11 @@ impl Link {
 /// crate that disagreed with the editor about whether a property holds a link
 /// would make link-graph membership an argument. Opting a property into the
 /// link graph is what writing the wikilink form does.
+///
+/// A frontmatter value's links are read through
+/// [`Document::frontmatter_wikilinks`](crate::Document::frontmatter_wikilinks),
+/// which runs this over every string the value holds and places each link
+/// it can; a link this returns is placed in `text`, not in a document.
 pub fn parse_wikilinks_in_text(text: &str) -> Vec<Link> {
     parse_tokens(text, &[])
 }
@@ -601,11 +607,13 @@ pub enum RewriteSkip {
     /// references, whose target is not the bytes it was written as, or one
     /// whose destination could not be located in the token at all.
     LinkNotRewritable,
-    /// The link is written in a frontmatter value whose source bytes are not
-    /// its text — a flow sequence item, an escaped, folded or block scalar, a
-    /// nested value — so no bytes stand for its target to be written over.
-    /// Rewriting it is a write of its field's whole value.
-    NotWrittenLiterally,
+    /// The link has no place in the source, so no bytes stand for its target
+    /// to be written over: it is written in a frontmatter value whose source
+    /// bytes are not its text — a flow sequence item, an escaped, folded or
+    /// block scalar, a nested value, an alias — or in a block whose fields the
+    /// field layer could not tell apart. Where the block's fields can be
+    /// edited, rewriting it is a write of its field's whole value.
+    Unplaced,
     /// The batch names the link's address twice, with two different `to`s,
     /// and which one the link should carry is not this crate's to choose.
     ConflictingRewrites,

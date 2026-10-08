@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(10),
-    "e1f49157cb929e01e7141fee2abde413adb092798cb6ba1bc104e43542c287d1",
+    "7f14cf6e26a1501853f721d14234a14a674e0ce6637148b5fae0698b5e9d162b",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -263,13 +263,20 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         ("archive/old/twin.md", b"# The archived twin\n".to_vec()),
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
         // Frontmatter wikilinks whose values' bytes are not their text — a
-        // flow sequence item, an escaped scalar, a nested map — are links
-        // with no span, one of them broken, whose finding carries none.
+        // flow sequence item, an escaped scalar, a nested map, a list inside
+        // a list — are links with no span, one of them broken, whose finding
+        // carries none.
         (
             "health/unplaced.md",
             b"---\nsee: [\"[[Notes]]\", \"[[nowhere unplaced]]\"]\nescaped: \"\\x5B[Notes#Setext]]\"\n\
-              nested:\n  at: \"[[anchored#^held]]\"\n---\n# Unplaced\n"
+              nested:\n  at: \"[[anchored#^held]]\"\nlists:\n  - - \"[[Glossary]]\"\n---\n# Unplaced\n"
                 .to_vec(),
+        ),
+        // A block whose field split is refused, by a key that is not a
+        // string: its value's literal wikilink is still a link, with no span.
+        (
+            "health/refused.md",
+            b"---\n1: x\nsee: \"[[Notes]]\"\n---\n# Refused\n".to_vec(),
         ),
         // A task both `task` and `filed` select: a missing owner, a
         // forbidden list, a list holding two values outside their closed
@@ -1009,9 +1016,20 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             ("Notes", true),
             ("nowhere unplaced", true),
             ("Notes", true),
-            ("anchored", true)
+            ("anchored", true),
+            ("Glossary", true)
         ],
         "no frontmatter wikilink without a span is exercised"
+    );
+    let refused: Vec<(&str, bool)> = document("health/refused.md")
+        .links
+        .iter()
+        .map(|link| (link.fact.target.as_str(), link.fact.span.is_none()))
+        .collect();
+    assert_eq!(
+        refused,
+        [("Notes", true)],
+        "no wikilink in a block whose split is refused is exercised"
     );
     assert!(
         projection
