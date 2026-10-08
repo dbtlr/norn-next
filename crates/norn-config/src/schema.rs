@@ -61,10 +61,13 @@
 //! ```
 //!
 //! **A field declaration is a type and a shape, and nothing else.** `type` is
-//! one of the five [`FieldType`]s, text where absent; `shape` is `single` or
-//! `list`, and either is admitted where it is absent ([`Shape`]). Whether a
-//! field is required, which values it holds and where a document may stand
-//! are constraints a schema rule states — see [`rules`].
+//! one of the six [`FieldType`]s, text where absent; `shape` is `single` or
+//! `list`, and either is admitted where it is absent ([`Shape`]). A `link`
+//! field holds wikilinks written as strings — `"[[t]]"`, `"[[t#H|alias]]"` —
+//! read through `norn-text` and compared by the link with its alias dropped
+//! ([`typed::link_key`]); an unquoted `[[t]]` is YAML's nested list, never a
+//! string. Whether a field is required, which values it holds and where a
+//! document may stand are constraints a schema rule states — see [`rules`].
 //!
 //! **A creation rule is a template, and so is the inbox.** `target`, `body`
 //! and every string scalar in `frontmatter_defaults` are written in the

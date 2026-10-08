@@ -151,7 +151,7 @@ pub use facts::{
 pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{
-    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, OffsetSpelling,
+    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, LinkKey, OffsetSpelling,
     TAG_CARRIER, TypedOrder,
 };
 pub use find::{

@@ -10,8 +10,8 @@ use crate::common::{
 };
 use norn_store::{
     Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
-    FrontmatterValue, IncrementProvenance, OffsetSpelling, Provenance, StoreError, TypedOrder,
-    induced_failure,
+    FrontmatterValue, IncrementProvenance, LinkKey, OffsetSpelling, Provenance, StoreError,
+    TypedOrder, induced_failure,
 };
 
 /// A presence row at `at`, as the rows are compared.
@@ -127,6 +127,105 @@ fn a_tag_keys_value_rows_hold_the_tag_each_names_under_the_fold() {
         ),
         declared
     );
+}
+
+/// A reading that keeps a `[[…]]` link with its alias dropped, and reads
+/// anything else as no link: the store compares by whatever key the host hands
+/// it and reads no link syntax.
+fn link_key() -> LinkKey {
+    LinkKey::new(|raw| {
+        let inner = raw.strip_prefix("[[")?.strip_suffix("]]")?;
+        Some(format!("[[{}]]", inner.split('|').next()?))
+    })
+}
+
+/// **A link key's value rows hold the key each link reads into**, the alias
+/// dropped, and a text that is no link holds none, as a null holds none. Any
+/// other key's rows hold none, and the tag carrier keeps its tag fold even
+/// where it is declared a link.
+#[test]
+fn a_link_keys_value_rows_hold_the_key_each_link_reads_into() {
+    let value = map(vec![
+        (
+            "related",
+            FrontmatterValue::Sequence(vec![
+                string("[[a|Alias]]"),
+                string("[[a#H]]"),
+                string("plain"),
+                FrontmatterValue::Null,
+            ]),
+        ),
+        ("tags", string("#Work")),
+        ("title", string("[[a]]")),
+    ]);
+    let declared = ContentModel::under("schema")
+        .declare_field("related", FieldDeclaration::link(link_key()))
+        .declare_field("tags", FieldDeclaration::link(link_key()));
+    let folds: Vec<(String, Option<String>)> =
+        FieldRows::derive(&path("docs/linked.md"), Some(&value), &declared)
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value { key, folded, .. } => Some((key.clone(), folded.clone())),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect();
+    assert_eq!(
+        folds,
+        [
+            ("related".to_string(), Some("[[a]]".to_string())),
+            ("related".to_string(), Some("[[a#H]]".to_string())),
+            ("related".to_string(), None),
+            ("related".to_string(), None),
+            ("tags".to_string(), Some("work".to_string())),
+            ("title".to_string(), None),
+        ]
+    );
+}
+
+/// **A pin that moves the schema clears a link key's keys**, as it clears a
+/// declared tag key's folds: they were read under the schema being replaced,
+/// and the walk under the new one derives them again.
+#[test]
+fn a_moved_pin_clears_a_link_keys_keys() {
+    let scratch = Scratch::new("field-pin-link-keys");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    let declared = ContentModel::under("schema-1")
+        .declare_field("project", FieldDeclaration::link(link_key()));
+    let at = "docs/linked.md";
+    write_document(
+        &mut request,
+        &fielded(
+            at,
+            "hash-1",
+            map(vec![("project", string("[[a|A]]"))]),
+            &declared,
+        ),
+    );
+    let keys = |request: &mut norn_store::Request<'_>| -> Vec<Option<String>> {
+        stored_fields(request, at)
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value { folded, .. } => Some(folded.clone()),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect()
+    };
+    assert_eq!(keys(&mut request), [Some("[[a]]".to_string())]);
+
+    request
+        .pin_vault_schema(b"version: 1\nfields: {}\n", "schema-2")
+        .expect("re-pinning a schema");
+    assert_eq!(keys(&mut request), [None]);
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose link keys a pin cleared");
 }
 
 fn string(text: &str) -> FrontmatterValue {

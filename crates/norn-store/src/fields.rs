@@ -156,11 +156,14 @@ pub enum FieldRow {
         /// the key's order is a dated one and the text reads as a date, and
         /// `None` everywhere else.
         offset: Option<OffsetSpelling>,
-        /// The tag the raw text names under a **tag key** — the tag carrier
-        /// [`TAG_CARRIER`], declared or not, or a key declared `tags` — its
-        /// `#` marker dropped and the tag fold applied ([`norn_wire::fold_tag`]):
-        /// what an equality part compares the value by under such a key.
-        /// `None` under any other key, and for a null.
+        /// What an equality part compares the value by under a **folding
+        /// key**, where the raw text reads as one: under a **tag key** — the
+        /// tag carrier [`TAG_CARRIER`], declared or not, or a key declared
+        /// `tags` — the tag it names, its `#` marker dropped and the tag fold
+        /// applied ([`norn_wire::fold_tag`]); under a key declared `link`, the
+        /// link's key as the declaration's [`LinkKey`] reads it, its alias
+        /// dropped. `None` under any other key, for a null, and for a link
+        /// key's text that is no link.
         folded: Option<String>,
         /// Whether this is the key's least value under the raw order.
         least_raw: bool,
@@ -244,7 +247,6 @@ impl FieldRows {
                 path: path.as_str().to_string(),
             });
             let order = declared.typed_order(key);
-            let folds = declared.folds(key);
             let (typed, offsets): (Vec<Option<String>>, Vec<Option<OffsetSpelling>>) = scalars
                 .iter()
                 .map(|raw| {
@@ -258,10 +260,7 @@ impl FieldRows {
             for (index, ((raw, typed), offset)) in
                 scalars.into_iter().zip(typed).zip(offsets).enumerate()
             {
-                let folded = raw
-                    .as_deref()
-                    .filter(|_| folds)
-                    .map(|raw| fold_tag(raw.strip_prefix('#').unwrap_or(raw)));
+                let folded = raw.as_deref().and_then(|raw| declared.fold(key, raw));
                 rows.push(FieldRow::Value {
                     key: key.to_string(),
                     ordinal: index as u32 + 1,
@@ -542,17 +541,44 @@ impl ContentModel {
         self.rules.contains_key(name)
     }
 
-    /// Whether `key` is a **tag key**, whose values are compared under the
-    /// tag fold with their `#` marker optional: the tag carrier
-    /// [`TAG_CARRIER`], declared or not and whatever type it is declared
-    /// with, or a key declared `tags`. Its value rows hold that fold as
+    /// Whether `key` is a **folding key**, whose values are compared by
+    /// something other than their text or a typed sort key: a **tag key** —
+    /// the tag carrier [`TAG_CARRIER`], declared or not and whatever type it
+    /// is declared with, or a key declared `tags` — under the tag fold with
+    /// the `#` marker optional, or a key declared `link`, by the key its
+    /// declaration reads a link into. Its value rows hold that comparison as
     /// [`FieldRow::Value`]'s `folded`.
     pub fn folds(&self, key: &str) -> bool {
+        self.is_tag_key(key) || self.link_key(key).is_some()
+    }
+
+    /// The key `raw` is compared by under the folding key `key`, or nothing
+    /// where `key` does not fold or `raw` does not read as a link under a
+    /// key declared `link`.
+    ///
+    /// **A tag key wins over a link declaration**: the carrier is a tag key
+    /// whatever it is declared, which is the order schema read compares in.
+    pub fn fold(&self, key: &str, raw: &str) -> Option<String> {
+        if self.is_tag_key(key) {
+            return Some(fold_tag(raw.strip_prefix('#').unwrap_or(raw)));
+        }
+        self.link_key(key).and_then(|link| link.read(raw))
+    }
+
+    /// Whether `key` compares under the tag fold.
+    fn is_tag_key(&self, key: &str) -> bool {
         key == TAG_CARRIER
             || self
                 .keys
                 .get(key)
                 .is_some_and(|declaration| declaration.field_type == FieldType::Tags)
+    }
+
+    /// The link reading `key` is declared with, where it is declared `link`.
+    fn link_key(&self, key: &str) -> Option<&LinkKey> {
+        self.keys
+            .get(key)
+            .and_then(|declaration| declaration.link.as_ref())
     }
 
     /// The shape `key` is declared with, where it is declared with one. A
@@ -684,11 +710,13 @@ fn named_after<'a>(
 /// `number`, `boolean` and `date` each take the [`TypedOrder`] their type reads
 /// a raw value into, so a declaration whose type and order disagree on whether
 /// it is typed has no spelling. What an order computes is the host's: it builds
-/// each one from the schema's own reading of the type.
+/// each one from the schema's own reading of the type. A `link` orders by its
+/// raw text like `text` and takes the [`LinkKey`] its values are compared by.
 #[derive(Clone, Debug)]
 pub struct FieldDeclaration {
     field_type: FieldType,
     order: Option<TypedOrder>,
+    link: Option<LinkKey>,
     shape: Option<FieldShape>,
 }
 
@@ -699,6 +727,7 @@ impl FieldDeclaration {
         FieldDeclaration {
             field_type,
             order,
+            link: None,
             shape: None,
         }
     }
@@ -723,6 +752,15 @@ impl FieldDeclaration {
         Self::of(FieldType::Tags, None)
     }
 
+    /// A field declared as a link, ordered by its raw text and compared by
+    /// the key `key` reads each value into.
+    pub fn link(key: LinkKey) -> Self {
+        FieldDeclaration {
+            link: Some(key),
+            ..Self::of(FieldType::Link, None)
+        }
+    }
+
     /// A field declared as a number, ordered by `order`.
     pub const fn number(order: TypedOrder) -> Self {
         Self::of(FieldType::Number, Some(order))
@@ -736,6 +774,38 @@ impl FieldDeclaration {
     /// A field declared as a date, ordered by `order`.
     pub const fn date(order: TypedOrder) -> Self {
         Self::of(FieldType::Date, Some(order))
+    }
+}
+
+/// How a field declared `link` reads a raw value into the key it is compared
+/// by, or into nothing where the text is no link.
+///
+/// The store compares links by this key and never reads link syntax: the host
+/// builds one from the schema's reading of the type, so an equality part, a
+/// closed set and a finding's identity compare a link by one rule. A key is
+/// stored beside the raw text, in a value row's `folded`.
+#[derive(Clone)]
+pub struct LinkKey {
+    read: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
+impl LinkKey {
+    /// The key `read` computes for each raw text that is a link.
+    pub fn new(read: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Self {
+        LinkKey {
+            read: Arc::new(read),
+        }
+    }
+
+    /// The key `raw` is compared by, or nothing where it is no link.
+    pub fn read(&self, raw: &str) -> Option<String> {
+        (self.read)(raw)
+    }
+}
+
+impl fmt::Debug for LinkKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("LinkKey").finish_non_exhaustive()
     }
 }
 

@@ -31,21 +31,22 @@
 //!   own transaction clears every typed value, and the walk that follows
 //!   refills them.
 //!
-//! The `folded` column, the tag a value row names under a **tag key** — the
-//! tag carrier `tags`, declared or not, or a key declared `tags` — its `#`
-//! marker dropped and the tag fold applied, which an equality part compares
-//! the key by:
+//! The `folded` column, what a value row is compared by under a **folding
+//! key**, which an equality part compares the key by: the tag the row names
+//! under a **tag key** — the tag carrier `tags`, declared or not, or a key
+//! declared `tags` — its `#` marker dropped and the tag fold applied, or the
+//! link the row is under a key declared `link`, its alias dropped and nothing
+//! else (the host hands the store the reading that makes it):
 //!
 //! - **Inputs.** The value rows, and, for a key other than the carrier, the
 //!   schema content model's declared field types.
 //! - **Determinism.** Deterministic: the fold is a function of the raw value,
-//!   and whether a key is a tag key a function of the key and its declared
-//!   type.
+//!   and whether a key folds a function of the key and its declared type.
 //! - **Maintenance.** Inside the document's changeset, written by the same
 //!   statement as the value it folds.
 //! - **Invalidation key.** The carrier's is the document's content hash, as
 //!   its raw value's is: the carrier is a tag key under every schema, so its
-//!   fold is a parse fact no pin moves. A declared tag key's is the standing
+//!   fold is a parse fact no pin moves. A declared tag or link key's is the standing
 //!   schema pin: the pin's own transaction clears every fold but the
 //!   carrier's, beside the typed column, and the walk that follows refills
 //!   them.
@@ -112,9 +113,9 @@
 //!   offset_stated)`: whether a date key holds a value of either spelling is
 //!   one seek of it, which is how a read learns that an order or a comparison
 //!   over the key met both.
-//! - `document_fields_folded` holds a tag key's value rows alone, by `(key,
-//!   folded)`: an equality, an inequality and a membership on a tag key are
-//!   one seek of it, and the folds a pin clears are read off it.
+//! - `document_fields_folded` holds a folding key's value rows alone, by `(key,
+//!   folded)`: an equality, an inequality and a membership on a tag key or a
+//!   link key are one seek of it, and the folds a pin clears are read off it.
 
 use crate::fields::FieldContainer;
 

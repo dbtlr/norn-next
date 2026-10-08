@@ -70,16 +70,20 @@ pub enum FieldType {
     Date,
     /// A set of tag names.
     Tags,
+    /// A wikilink written as a string, compared by the link with its alias
+    /// dropped and ordered as the text it is written as.
+    Link,
 }
 
 impl FieldType {
     /// Every type the vocabulary holds, in declaration order.
-    pub const ALL: [FieldType; 5] = [
+    pub const ALL: [FieldType; 6] = [
         FieldType::Text,
         FieldType::Number,
         FieldType::Boolean,
         FieldType::Date,
         FieldType::Tags,
+        FieldType::Link,
     ];
 
     /// The type as the string it is on the wire, which is the string a vault's
@@ -91,6 +95,7 @@ impl FieldType {
             FieldType::Boolean => "boolean",
             FieldType::Date => "date",
             FieldType::Tags => "tags",
+            FieldType::Link => "link",
         }
     }
 }

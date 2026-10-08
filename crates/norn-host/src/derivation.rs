@@ -49,8 +49,8 @@ use norn_config::schema::{
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
     DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, HeldBlock,
-    LinkAnchor, LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource,
-    TypedOrder,
+    LinkAnchor, LinkFact, LinkFamily, LinkKey, OffsetSpelling, Provenance, Span, TagFact,
+    TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{
@@ -1303,6 +1303,7 @@ fn schema_rule(rule: &Rule) -> SchemaRule {
 /// type that does not order as text, with the typed order `kind` reads a raw
 /// value into. A date's order is dated: beside each sort key it says whether
 /// the date stated an offset, which the store records beside the typed key.
+/// A link orders as text and carries the key the schema compares it by.
 fn field_declaration(kind: FieldType) -> FieldDeclaration {
     let order = || TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()));
     match kind {
@@ -1322,6 +1323,15 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
             }
         })),
         FieldType::Tags => FieldDeclaration::tags(),
+        // The store compares a link by the key the schema reads it into and
+        // reads no link syntax itself, so the reading crosses as a closure,
+        // as a typed order does.
+        FieldType::Link => FieldDeclaration::link(LinkKey::new(|raw| {
+            match FieldType::Link.read(raw).ok()? {
+                TypedValue::Link(key) => Some(key),
+                _ => None,
+            }
+        })),
     }
 }
 

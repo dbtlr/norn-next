@@ -2573,7 +2573,7 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             string_constant(branch)
                 .unwrap_or_else(|| panic!("a type branch is not a pinned string: {branch}"))
         })),
-        sorted(["text", "number", "boolean", "date", "tags"])
+        sorted(["text", "number", "boolean", "date", "tags", "link"])
     );
     assert_eq!(
         sorted(

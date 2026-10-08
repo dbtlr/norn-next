@@ -153,8 +153,9 @@ pub enum MatchedColumn {
     Raw,
     /// The declared type's typed sort key.
     Typed,
-    /// The tag a tag key's value names under the tag fold, its `#` marker
-    /// dropped. Where the key's declaration also carries a typed order — the
+    /// What a folding key's value is compared by: the tag a tag key's value
+    /// names under the tag fold, its `#` marker dropped, or the link a link
+    /// key's value is, its alias dropped. Where the key's declaration also carries a typed order — the
     /// tag carrier declared with one — a value counts only where it reads as
     /// that type too.
     Folded,

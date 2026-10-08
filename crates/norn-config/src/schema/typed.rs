@@ -45,12 +45,16 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use norn_text::{LinkFamily, parse_wikilinks_in_text};
+
 /// The declared type of a frontmatter field.
 ///
 /// Plain rather than extensible: a reader that dispatches on the declared type
 /// of a field has to have an answer for every type the schema can declare, and
 /// a new member should break that match rather than fall into a default arm
 /// that compares the new type as text.
+///
+/// There are six: text, number, boolean, date, tags and link.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FieldType {
     /// Any string. This is what an undeclared field is read as too, which is
@@ -65,16 +69,21 @@ pub enum FieldType {
     /// A set of tag names. The facet decides which names are declared; the type
     /// decides that the field's elements are tags rather than free text.
     Tags,
+    /// A wikilink, `[[target]]` and its anchored and aliased forms, written as
+    /// a string. Ordered as the text it is written as and compared by
+    /// [`link_key`]: the link with its alias dropped.
+    Link,
 }
 
 impl FieldType {
     /// Every type the vocabulary holds, in declaration order.
-    pub const ALL: [FieldType; 5] = [
+    pub const ALL: [FieldType; 6] = [
         FieldType::Text,
         FieldType::Number,
         FieldType::Boolean,
         FieldType::Date,
         FieldType::Tags,
+        FieldType::Link,
     ];
 
     /// The type as the schema spells it.
@@ -85,17 +94,19 @@ impl FieldType {
             FieldType::Boolean => "boolean",
             FieldType::Date => "date",
             FieldType::Tags => "tags",
+            FieldType::Link => "link",
         }
     }
 
     /// Whether this type orders its values as the text they are written as.
     ///
     /// Text does by definition, and so does a tag set, whose elements are read
-    /// as text. A type that orders as text needs no typed sort key: its order
+    /// as text, and so does a link, ordered as written although compared by
+    /// its key. A type that orders as text needs no typed sort key: its order
     /// is the raw order, so a declaration of one changes no stored order.
     pub const fn orders_as_text(self) -> bool {
         match self {
-            FieldType::Text | FieldType::Tags => true,
+            FieldType::Text | FieldType::Tags | FieldType::Link => true,
             FieldType::Number | FieldType::Boolean | FieldType::Date => false,
         }
     }
@@ -114,6 +125,9 @@ impl FieldType {
     pub fn read(self, raw: &str) -> Result<TypedValue, NotThisType> {
         match self {
             FieldType::Text | FieldType::Tags => Ok(TypedValue::Text(raw.to_string())),
+            FieldType::Link => link_key(raw)
+                .map(TypedValue::Link)
+                .ok_or(NotThisType { declared: self }),
             FieldType::Number => raw
                 .trim()
                 .parse::<f64>()
@@ -205,6 +219,8 @@ pub enum TypedValue {
     Number(f64),
     Boolean(bool),
     Date(DateValue),
+    /// A link, as its [`link_key`]: the alias is gone and nothing else is.
+    Link(String),
 }
 
 /// **Equality is [`Ord`], not a second opinion about it.** Rust requires
@@ -234,6 +250,7 @@ impl Ord for TypedValue {
             (TypedValue::Number(left), TypedValue::Number(right)) => left.total_cmp(right),
             (TypedValue::Boolean(left), TypedValue::Boolean(right)) => left.cmp(right),
             (TypedValue::Date(left), TypedValue::Date(right)) => left.seconds.cmp(&right.seconds),
+            (TypedValue::Link(left), TypedValue::Link(right)) => left.cmp(right),
             (left, right) => left.rank().cmp(&right.rank()),
         }
     }
@@ -253,6 +270,7 @@ impl TypedValue {
             TypedValue::Number(_) => 1,
             TypedValue::Boolean(_) => 2,
             TypedValue::Date(_) => 3,
+            TypedValue::Link(_) => 4,
         }
     }
 
@@ -287,6 +305,7 @@ impl TypedValue {
             TypedValue::Number(number) => format!("1{:016x}", orderable_float(*number)),
             TypedValue::Boolean(flag) => format!("2{}", u8::from(*flag)),
             TypedValue::Date(date) => format!("3{:016x}", orderable_integer(date.seconds)),
+            TypedValue::Link(key) => format!("4{key}"),
         }
     }
 }
@@ -318,6 +337,44 @@ impl fmt::Display for ComparisonSignal {
             ),
         }
     }
+}
+
+/// The key a link is compared by, or nothing where `raw` is no link.
+///
+/// **A string reads as a link when, with no trimming, it is exactly one
+/// wikilink and nothing else**: [`norn_text`] finds one link in it, of the
+/// wikilink family and not an embed, and that link's token is the whole
+/// string. `[[t]]`, `[[t#Heading]]`, `[[t#^block]]` and `[[t|alias]]` read;
+/// `t`, `see [[t]]`, `[[a]] [[b]]`, `![[t]]`, `[t](t.md)` and a padded
+/// `" [[t]]"` do not. This is the spelling an editor's link property takes,
+/// held stricter where the looseness would harm nothing: only syntax is read,
+/// so a link to a note that does not exist still reads as a link, and whether
+/// it resolves is link health's finding, never a type mismatch.
+///
+/// **The key is the link as written with its alias dropped**, re-rendered
+/// from the parsed link: `[[`, the target with its protocol if it has one,
+/// the anchor or block reference after `#` or `#^`, `]]`. Case, anchor and
+/// target are kept exactly: `[[Alpha]]` and `[[alpha]]` are two keys, as are
+/// `[[alpha]]` and `[[alpha#Plan]]`, `[[alpha]]` and `[[alpha.md]]`, and
+/// `[[alpha]]` and `[[projects/alpha]]`. That last is a declared limit, not
+/// an oversight: the judge reads one document, so two spellings of one
+/// target are told apart because only a vault could say they are one. The
+/// padding the parser trims inside the brackets is no part of the key.
+pub fn link_key(raw: &str) -> Option<String> {
+    let [link] = parse_wikilinks_in_text(raw).try_into().ok()?;
+    if link.family != LinkFamily::Wikilink || link.embed || link.raw != raw {
+        return None;
+    }
+    let protocol = link
+        .protocol
+        .as_deref()
+        .map_or_else(String::new, |scheme| format!("{scheme}://"));
+    let fragment = match (&link.anchor, &link.block_ref) {
+        (Some(anchor), _) => format!("#{anchor}"),
+        (None, Some(block)) => format!("#^{block}"),
+        (None, None) => String::new(),
+    };
+    Some(format!("[[{protocol}{}{fragment}]]", link.target))
 }
 
 /// The bit pattern whose unsigned order is `number`'s numeric order.

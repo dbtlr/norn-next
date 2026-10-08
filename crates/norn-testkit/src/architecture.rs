@@ -106,6 +106,7 @@ pub const ALLOWED_EDGES: &[(&str, &str)] = &[
     ("norn-semantic", "norn-store"),
     ("norn-semantic", "norn-embed"),
     ("norn-config", "norn-wire"),
+    ("norn-config", "norn-text"),
     ("norn-testkit", "norn-fixtures"),
     ("norn-testkit", "norn-wire"),
     ("norn-testkit", "norn-store"),

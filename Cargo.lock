@@ -485,6 +485,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "norn-testkit",
+ "norn-text",
  "norn-wire",
  "serde_yaml",
  "toml",

@@ -5685,6 +5685,14 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
         r#"{"facet":"declared_field","key":"tags","field_type":"tags","shape":"list"}"#
     );
     assert_eq!(
+        wire(&Facet::declared_field(
+            "project",
+            FieldType::Link,
+            Some(FieldShape::Single)
+        )),
+        r#"{"facet":"declared_field","key":"project","field_type":"link","shape":"single"}"#
+    );
+    assert_eq!(
         wire(&Facet::undeclared_tags(TagStance::Report)),
         r#"{"facet":"undeclared_tags","stance":"report"}"#
     );
