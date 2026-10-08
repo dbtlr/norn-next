@@ -431,6 +431,7 @@ fn no_malformed_schema_panics() {
         b"version: 1\nrules:\n  r: { forbidden: { x: { rename_to: 5 } } }\n",
         b"version: 1\nrules:\n  r: { allowed_paths: { paths: [], route: 'x/' } }\n",
         b"version: 1\nrules:\n  r: { allowed_paths: { paths: ['**'], route: '{{path.p}}/' } }\n",
+        b"version: 1\nrules:\n  r: { exclude: 5 }\n",
     ] {
         // An empty file is a valid schema with no declarations; the rest refuse.
         let _ = VaultSchema::parse(bytes);
@@ -872,9 +873,11 @@ fn the_undeclared_tag_stances_are_the_ones_the_wire_carries() {
 }
 
 /// **An integer the schema states is read as written or refused, never
-/// wrapped.** `2^64 + 1` reduced to 64 bits is version 1, and `2^64 + 5` a
-/// limit of 5, so a reader that wrapped would read a schema nobody wrote; the
-/// largest limit the type holds reads as itself.
+/// wrapped, saturated or truncated.** `2^64 + 1` reduced to 64 bits is version
+/// 1, and `2^64 + 5` a limit of 5, so a reader that wrapped would read a schema
+/// nobody wrote; a number written as a float — `1e30`, `4.5`, `1.0` — is not
+/// an integer and is refused rather than clamped or cut; the largest limit
+/// the type holds reads as itself.
 #[test]
 fn an_integer_past_its_type_is_refused_rather_than_wrapped() {
     for (bytes, at) in [
@@ -887,6 +890,22 @@ fn an_integer_past_its_type_is_refused_rather_than_wrapped() {
         let error = VaultSchema::parse(bytes).expect_err("an integer past its type");
         assert!(
             matches!(&error, VaultSchemaError::NotYaml { message } if message.starts_with(at)),
+            "{error}"
+        );
+    }
+
+    for version in [&b"version: 1.0\n"[..], b"version: 1e30\n"] {
+        let error = VaultSchema::parse(version).expect_err("a version written as a float");
+        assert!(
+            matches!(&error, VaultSchemaError::Version { detail } if detail.contains("an integer")),
+            "{error}"
+        );
+    }
+    for limit in ["1e30", "4.5"] {
+        let bytes = format!("version: 1\nrules:\n  r: {{ max_length: {{ title: {limit} }} }}\n");
+        let error = VaultSchema::parse(bytes.as_bytes()).expect_err("a limit written as a float");
+        assert!(
+            matches!(&error, VaultSchemaError::Section { at, .. } if at == "rules.r.max_length.title"),
             "{error}"
         );
     }

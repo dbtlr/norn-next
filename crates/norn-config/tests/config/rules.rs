@@ -1330,7 +1330,11 @@ type Selection<'a> = (&'a str, &'a [(&'a str, AuthoredValue)], &'a [&'a str]);
 /// **Every site that selects rules reads one matcher**: the rules judgment
 /// breaches a document under and the rules whose defaults the fixpoint fills
 /// are exactly the rules selection names, so a rule constrained only by
-/// where a document stands applies inside its area and nowhere else.
+/// where a document stands applies inside its area and nowhere else. Two
+/// rules default `status` differently in areas that exclude each other, so
+/// the fixpoint's settled re-check, which compares each filled field against
+/// every rule matching the result, refuses wherever it selects a rule
+/// selection does not.
 #[test]
 fn judgment_and_the_defaults_fixpoint_select_the_rules_selection_names() {
     let schema = VaultSchema::parse(
@@ -1342,23 +1346,27 @@ rules:
     match: { path: 'projects/<project>/**' }
     exclude: { path: ['projects/*/archive/**'] }
     required: { status: { default: todo } }
+  elsewhere:
+    match: { path: '**' }
+    exclude: { path: ['projects/**'] }
+    required: { status: { default: done } }
   kinded:
     match: { frontmatter: { kind: task } }
     required: { owner: { default: me } }
 ",
     )
-    .expect("a path-only rule and a frontmatter-only rule");
+    .expect("path-only rules and a frontmatter-only rule");
     let field_of = |rule: &str| match rule {
-        "area" => "status",
-        _ => "owner",
+        "kinded" => "owner",
+        _ => "status",
     };
     let task = [("kind", AuthoredValue::string("task"))];
     let cases: [Selection<'_>; 6] = [
         ("projects/norn/a.md", &[], &["area"]),
         ("projects/norn/archive/a.md", &[], &[]),
-        ("notes/a.md", &[], &[]),
-        ("projects.md", &[], &[]),
-        ("notes/a.md", &task, &["kinded"]),
+        ("notes/a.md", &[], &["elsewhere"]),
+        ("projects.md", &[], &["elsewhere"]),
+        ("notes/a.md", &task, &["elsewhere", "kinded"]),
         ("projects/norn/a.md", &task, &["area", "kinded"]),
     ];
     for (path, entries, expected) in cases {
