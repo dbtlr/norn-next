@@ -430,3 +430,84 @@ rules:
         "a value that is no link matches no selector"
     );
 }
+
+// ---- the tags carrier cannot be a link ----
+
+#[test]
+fn the_tags_carrier_declared_a_link_is_refused_at_schema_read() {
+    let refused = VaultSchema::parse(b"version: 1\nfields:\n  tags: { type: link }\n")
+        .expect_err("the carrier declared a link");
+    match refused {
+        VaultSchemaError::Section { at, .. } => assert_eq!(at, "fields.tags.type"),
+        other => panic!("a section refusal: {other}"),
+    }
+}
+
+#[test]
+fn another_key_may_be_declared_a_link_beside_the_tags_carrier() {
+    schema("version: 1\nfields:\n  tags: { type: tags }\n  project: { type: link }\n");
+}
+
+// ---- a key that is a link, and the same link ----
+
+#[test]
+fn a_wikilink_naming_nothing_is_a_type_mismatch() {
+    for empty in ["[[]]", "[[ ]]", "[[|x]]", "[[ |a]]", "[[ | ]]"] {
+        assert_is_a_type_mismatch(empty);
+        assert_eq!(key_of(empty), None, "`{empty}`");
+    }
+}
+
+#[test]
+fn a_same_note_anchor_is_a_link() {
+    assert_reads_as_a_link("[[#H]]");
+    assert_eq!(key_of("[[#H|x]]").as_deref(), Some("[[#H]]"));
+    assert_reads_as_a_link("[[#^b]]");
+}
+
+#[test]
+fn an_empty_anchor_is_no_anchor_in_a_links_key() {
+    assert_eq!(key_of("[[a#]]"), key_of("[[a]]"));
+    assert_eq!(key_of("[[a#|x]]"), key_of("[[a]]"));
+    assert_eq!(key_of("[[vault://a#]]").as_deref(), Some("[[vault://a]]"));
+}
+
+#[test]
+fn an_empty_block_reference_is_no_block_reference_in_a_links_key() {
+    assert_eq!(key_of("[[a#^]]"), key_of("[[a]]"));
+}
+
+#[test]
+fn a_leading_space_in_an_anchor_stays_in_the_key() {
+    assert_eq!(key_of("[[a# H]]").as_deref(), Some("[[a# H]]"));
+}
+
+/// **A key is itself a link with the same key**, whatever spelling it came
+/// from, so a key written back into a document compares equal to the value it
+/// stood for.
+#[test]
+fn a_links_key_reads_as_a_link_with_the_same_key() {
+    for spelling in [
+        "[[t]]",
+        "[[t#Heading]]",
+        "[[t#^block]]",
+        "[[t|alias]]",
+        "[[folder/t#H|a]]",
+        "[[vault://t]]",
+        "[[https://example.com/page|Docs]]",
+        "[[ alpha ]]",
+        "[[#H]]",
+        "[[#^b]]",
+        "[[a#]]",
+        "[[a#^]]",
+        "[[a# H]]",
+        "[[a#b#c]]",
+    ] {
+        let key = key_of(spelling).unwrap_or_else(|| panic!("`{spelling}` reads as a link"));
+        assert_eq!(
+            key_of(&key),
+            Some(key.clone()),
+            "`{spelling}` keyed `{key}`"
+        );
+    }
+}

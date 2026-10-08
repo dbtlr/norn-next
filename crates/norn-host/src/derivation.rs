@@ -42,6 +42,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use norn_config::schema::typed::link_key;
 use norn_config::schema::{
     Breach, FieldType, FindingIdentity, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape,
     TypedValue, UndeclaredTags, VaultSchema,
@@ -1326,12 +1327,7 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
         // The store compares a link by the key the schema reads it into and
         // reads no link syntax itself, so the reading crosses as a closure,
         // as a typed order does.
-        FieldType::Link => FieldDeclaration::link(LinkKey::new(|raw| {
-            match FieldType::Link.read(raw).ok()? {
-                TypedValue::Link(key) => Some(key),
-                _ => None,
-            }
-        })),
+        FieldType::Link => FieldDeclaration::link(LinkKey::new(link_key)),
     }
 }
 

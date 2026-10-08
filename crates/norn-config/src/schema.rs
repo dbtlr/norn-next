@@ -861,6 +861,16 @@ fn read_field(key: &str, declaration: &Value) -> Result<DeclaredField, VaultSche
             section_error(&format!("fields.{key}.type"), "a declared type", value)
         })?,
     };
+    // The tags carrier is compared as tags under every declaration, so a
+    // declaration making it another comparison is refused rather than read
+    // two ways.
+    if key == norn_text::TAGS_FIELD && kind == FieldType::Link {
+        return Err(section_error(
+            &format!("fields.{key}.type"),
+            "a declared type other than `link`: the `tags` carrier holds tags",
+            &Value::String(kind.as_str().to_string()),
+        ));
+    }
     let shape = match at(declaration, "shape") {
         None => None,
         Some(value) => Some(value.as_str().and_then(Shape::named).ok_or_else(|| {

@@ -38,15 +38,16 @@
 //! ([`VaultSchema::equality_key`]): a tag key — the tag carrier `tags`,
 //! declared or not, or a key declared `tags` — by the tag it names under the
 //! tag fold, a key declared `number`, `boolean` or `date` by its typed value,
-//! and any other key exactly as written. A document's list value matches
+//! a key declared `link` by the link with its alias dropped, and any other key
+//! exactly as written. A document's list value matches
 //! where any element does, as a find's equality matches a list field —
 //! except under a key declared [`Shape::Single`]. **A value that does not
 //! read as its key's declared type or shape matches no selector**: a list or
 //! map under a single-shaped key is not the key's value, as a value failing
 //! its type has no typed value to compare. Find's field equality reads a value
-//! the same way — the tag fold on a tag key, and a value of the wrong declared
-//! shape as no value — in the store's own SQL, held to this reading by
-//! `norn-host`'s suite. `match.path` is a glob whose
+//! the same way — the tag fold on a tag key, the link key on a link key, and a
+//! value of the wrong declared shape as no value — in the store's own SQL,
+//! held to this reading by `norn-host`'s suite. `match.path` is a glob whose
 //! whole segments spelled `<name>` are captures, each matching one segment as
 //! a whole-segment `*` does; `exclude.path` lists globs none of which may
 //! match. A rule that selects by neither — or whose selectors normalize to
@@ -882,21 +883,17 @@ fn value_in<'a>(entries: &'a [(String, AuthoredValue)], key: &str) -> Option<&'a
         .map(|(_, value)| value)
 }
 
-/// The frontmatter field a document's tags are written in, the **tag
-/// carrier**. `norn_text::TAGS_FIELD` names the same field; this crate
-/// reaches only the vocabulary, so it spells the name itself.
-const TAGS_FIELD: &str = "tags";
-
 /// The value `raw` is compared by under `field`, declared `declared`.
 ///
 /// A tag key — the tag carrier, declared or not, or a key declared `tags` —
 /// compares by the tag `raw` names: its `#` marker optional, as a frontmatter
 /// tag is read, and under the tag fold ([`fold_tag`]). Any other key compares
-/// by its typed value, which a text key's raw text is. `None` where `raw`
-/// does not read as the declared type.
+/// by its typed value, which a text key's raw text is, and a link key by the
+/// link with its alias dropped ([`link_key`](super::typed::link_key)). `None`
+/// where `raw` does not read as the declared type.
 fn equality_key(field: &str, declared: FieldType, raw: &str) -> Option<TypedValue> {
     let typed = declared.read(raw).ok()?;
-    if field == TAGS_FIELD || declared == FieldType::Tags {
+    if field == norn_text::TAGS_FIELD || declared == FieldType::Tags {
         let name = raw.strip_prefix('#').unwrap_or(raw);
         Some(TypedValue::Text(fold_tag(name)))
     } else {

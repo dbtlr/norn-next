@@ -551,8 +551,9 @@ impl<'a> Request<'a> {
             as u64
             + transaction
                 .execute(&folded_value_discard_sql(), [])
-                .map_err(|error| error::sql("clearing the declared tag keys' folds", error))?
-                as u64;
+                .map_err(|error| {
+                    error::sql("clearing the declared tag and link keys' folds", error)
+                })? as u64;
 
         transaction
             .commit()
@@ -2112,13 +2113,13 @@ pub(crate) const TYPED_VALUE_DISCARD_SQL: &str =
      WHERE typed IS NOT NULL";
 
 /// The statement [`Request::pin_vault_schema`] clears the folds of the keys a
-/// schema declares `tags` with, in the pin's transaction.
+/// schema declares `tags` or `link` with, in the pin's transaction.
 ///
 /// The tag carrier's folds stand: the carrier, [`crate::TAG_CARRIER`], is a
 /// tag key under every schema, so its fold is a parse fact. Every other fold
-/// is there because the schema being replaced declared its key `tags`. Its
-/// predicate implies the fold index's own, so it reads that index — the tag
-/// keys' value rows — and never the rows that hold none.
+/// is there because the schema being replaced declared its key `tags` or
+/// `link`. Its predicate implies the fold index's own, so it reads that
+/// index — the folding keys' value rows — and never the rows that hold none.
 pub(crate) fn folded_value_discard_sql() -> String {
     format!(
         "UPDATE document_fields SET folded = NULL WHERE folded IS NOT NULL AND key <> '{}'",

@@ -359,21 +359,33 @@ impl fmt::Display for ComparisonSignal {
 /// `[[alpha]]` and `[[projects/alpha]]`. That last is a declared limit, not
 /// an oversight: the judge reads one document, so two spellings of one
 /// target are told apart because only a vault could say they are one. The
-/// padding the parser trims inside the brackets is no part of the key.
+/// padding the parser trims inside the brackets is no part of the key, and
+/// neither is an empty anchor or block reference: `[[a#]]` and `[[a]]` are one
+/// key. A link naming neither a target nor an anchor, `[[ ]]` or `[[|x]]`, is
+/// no link, so a key always reads as a link with the same key.
 pub fn link_key(raw: &str) -> Option<String> {
     let [link] = parse_wikilinks_in_text(raw).try_into().ok()?;
     if link.family != LinkFamily::Wikilink || link.embed || link.raw != raw {
+        return None;
+    }
+    // An empty fragment is no fragment, as link resolution reads it.
+    let fragment = match (
+        link.anchor.as_deref().filter(|anchor| !anchor.is_empty()),
+        link.block_ref.as_deref().filter(|block| !block.is_empty()),
+    ) {
+        (Some(anchor), _) => format!("#{anchor}"),
+        (None, Some(block)) => format!("#^{block}"),
+        (None, None) => String::new(),
+    };
+    // A link naming neither a note nor a place in one names nothing, and its
+    // key would be `[[]]`, which is itself no link.
+    if link.target.is_empty() && fragment.is_empty() {
         return None;
     }
     let protocol = link
         .protocol
         .as_deref()
         .map_or_else(String::new, |scheme| format!("{scheme}://"));
-    let fragment = match (&link.anchor, &link.block_ref) {
-        (Some(anchor), _) => format!("#{anchor}"),
-        (None, Some(block)) => format!("#^{block}"),
-        (None, None) => String::new(),
-    };
     Some(format!("[[{protocol}{}{fragment}]]", link.target))
 }
 

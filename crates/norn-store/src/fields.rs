@@ -555,9 +555,6 @@ impl ContentModel {
     /// The key `raw` is compared by under the folding key `key`, or nothing
     /// where `key` does not fold or `raw` does not read as a link under a
     /// key declared `link`.
-    ///
-    /// **A tag key wins over a link declaration**: the carrier is a tag key
-    /// whatever it is declared, which is the order schema read compares in.
     pub fn fold(&self, key: &str, raw: &str) -> Option<String> {
         if self.is_tag_key(key) {
             return Some(fold_tag(raw.strip_prefix('#').unwrap_or(raw)));

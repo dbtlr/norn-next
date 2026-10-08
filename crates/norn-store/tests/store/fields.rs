@@ -141,8 +141,8 @@ fn link_key() -> LinkKey {
 
 /// **A link key's value rows hold the key each link reads into**, the alias
 /// dropped, and a text that is no link holds none, as a null holds none. Any
-/// other key's rows hold none, and the tag carrier keeps its tag fold even
-/// where it is declared a link.
+/// other key's rows hold none, and the tag carrier keeps its tag fold beside a
+/// link key.
 #[test]
 fn a_link_keys_value_rows_hold_the_key_each_link_reads_into() {
     let value = map(vec![
@@ -158,9 +158,8 @@ fn a_link_keys_value_rows_hold_the_key_each_link_reads_into() {
         ("tags", string("#Work")),
         ("title", string("[[a]]")),
     ]);
-    let declared = ContentModel::under("schema")
-        .declare_field("related", FieldDeclaration::link(link_key()))
-        .declare_field("tags", FieldDeclaration::link(link_key()));
+    let declared =
+        ContentModel::under("schema").declare_field("related", FieldDeclaration::link(link_key()));
     let folds: Vec<(String, Option<String>)> =
         FieldRows::derive(&path("docs/linked.md"), Some(&value), &declared)
             .rows()
@@ -679,6 +678,55 @@ fn a_declared_tag_keys_folds_derived_under_a_schema_the_store_does_not_pin_are_r
         stored_fields(&mut request, "docs/tagged.md"),
         *tagged.fields(),
         "the carrier's folds were refused as though a schema derived them"
+    );
+}
+
+/// **A link key's keys stand only under the schema the store pins**, as a tag
+/// key's folds do: a document whose keys under a key declared `link` were
+/// derived under another schema than the pinned one is refused in its entry,
+/// naming both fingerprints.
+#[test]
+fn a_link_keys_keys_derived_under_a_schema_the_store_does_not_pin_are_refused() {
+    let scratch = Scratch::new("field-unpinned-link-keys");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-2")
+        .expect("pinning a schema");
+    let stale = ContentModel::under("schema-1")
+        .declare_field("project", FieldDeclaration::link(link_key()));
+    let linked = fielded(
+        "docs/linked.md",
+        "hash-1",
+        map(vec![("project", string("[[a|A]]"))]),
+        &stale,
+    );
+    let pinned = pinned_declaration(&request);
+    let refused = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(linked)],
+            &[],
+            &pinned,
+        )
+        .expect_err("a link key's keys derived under a schema the store does not pin");
+    let StoreError::Entry { problem, .. } = refused else {
+        panic!("a refusal outside the entry: {refused}");
+    };
+    assert_eq!(
+        *problem,
+        StoreError::UnpinnedDeclaration {
+            what: "typed field values were derived",
+            derived_under: Some("schema-1".to_string()),
+            pinned: Some("schema-2".to_string()),
+        }
+    );
+    assert!(
+        request
+            .stored_facts(&path("docs/linked.md"))
+            .expect("reading a document")
+            .is_none(),
+        "a refused entry's document stands"
     );
 }
 
