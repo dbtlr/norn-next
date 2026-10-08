@@ -1438,9 +1438,10 @@ name, and each registration records a vault root, a schema source and a poll bac
 four grammars cross the client/host seam as well as sitting at rest in that file, so they
 are parsed once in `norn-wire` and re-exported here rather than re-spelled at each end.
 All four edges point at leaves, which reach nothing themselves. The `norn-config` edge to
-`norn-text` does widen who reaches the document syntax: `norn-client` and `norn-serve` reach
-`norn-text` transitively through `norn-config`. No invariant forbids that, and the shipped
-binary already links `norn-text` through the host.
+`norn-text` does widen who may reach the document syntax: under this allowlist `norn-client`
+and `norn-serve`, neither built yet, reach `norn-text` transitively through `norn-config`. No
+invariant forbids that, and the shipped binary carries `norn-text` anyway through the host it
+composes.
 
 ### Boundary invariants
 
@@ -2570,7 +2571,7 @@ tag key under every schema, and the standing schema pin for a declared tag or li
 whose folds the pin's own transaction clears beside the typed column for the walk to
 refill. **The pin is the key at both ends**: the
 declaration the host hands the store names the fingerprint it was read from, an increment
-refuses typed values, and a declared tag key's folds, derived under any other than the one
+refuses typed values, and a declared tag or link key's folds, derived under any other than the one
 pinned in its own transaction, and refuses a declaration read under any other
 to judge its link health by, and every read builder refuses a declaration
 its snapshot does not pin.

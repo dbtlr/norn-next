@@ -132,10 +132,11 @@ impl FieldOrder {
 ///
 /// **One reading, the schema rules' selectors'.** A tag key compares under
 /// the tag fold, a link key by the link with its alias dropped, a key with a
-/// typed order by its typed value, and any other key as written; and a value standing in a container the key's declared
-/// shape does not name — a list under a key declared single, one value under
-/// a key declared a list, a map under either — is no value of the key's, as a
-/// value failing its declared type has no typed value to compare.
+/// typed order by its typed value, and any other key as written; and a value
+/// standing in a container the key's declared shape does not name — a list
+/// under a key declared single, one value under a key declared a list, a map
+/// under either — is no value of the key's, as a value failing its declared
+/// type has no typed value to compare.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FieldMatch {
     /// The column a value is compared in.
@@ -155,9 +156,9 @@ pub enum MatchedColumn {
     Typed,
     /// What a folding key's value is compared by: the tag a tag key's value
     /// names under the tag fold, its `#` marker dropped, or the link a link
-    /// key's value is, its alias dropped. Where the key's declaration also carries a typed order — the
-    /// tag carrier declared with one — a value counts only where it reads as
-    /// that type too.
+    /// key's value is, its alias dropped. Where the key's declaration also
+    /// carries a typed order — the tag carrier declared with one — a value
+    /// counts only where it reads as that type too.
     Folded,
 }
 

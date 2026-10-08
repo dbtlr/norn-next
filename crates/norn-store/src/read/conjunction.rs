@@ -256,8 +256,8 @@ impl Snapshot {
         // How an equality, an inequality and a membership read a key's values
         // ([`FieldMatch`]): a tag key under the tag fold, a link key by its link
         // key, a key with a typed order by its typed value, any other key as
-        // written; and only the
-        // values standing in the container a declared shape holds.
+        // written; and only the values standing in the container a declared
+        // shape holds.
         let matched = |key: &str| FieldMatch {
             column: if declared.folds(key) {
                 MatchedColumn::Folded
