@@ -1032,9 +1032,9 @@ fn identities_at(
 /// did not stand under, and the refusal names exactly those findings — so a
 /// write the gate admits leaves no finding the validator did not already
 /// report, across setting, pushing and popping a list's elements, moving into
-/// a required area, removing what an area requires, creating what lacks or
-/// holds what an area requires or forbids, swapping a forbidden or conflicted
-/// field's whole value, writing beside a standing missing field, moving out
+/// a required area, removing what an area requires, creating a document that
+/// lacks a field its area requires or holds one its area forbids, swapping a
+/// forbidden, conflicted or misshaped field's whole value, writing beside a standing missing field, moving out
 /// of a rule's place, creating what two rules place in no common place, and writing
 /// a value of the wrong type or shape; a field whose closed sets share no
 /// member is refused as that conflict rather than as a value outside an
@@ -1182,6 +1182,13 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
             moved,
             moved,
             OperationKind::set_frontmatter(target(moved), "labels", text("loose")),
+            &[FindingKind::ShapeMismatch],
+        ),
+        (
+            "a swap of a misshaped field's whole value",
+            moved,
+            moved,
+            OperationKind::set_frontmatter(target(moved), "labels", text("tight")),
             &[FindingKind::ShapeMismatch],
         ),
     ];

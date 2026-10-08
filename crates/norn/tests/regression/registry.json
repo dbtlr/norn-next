@@ -839,7 +839,8 @@
           "crates/norn-config/tests/config/schema.rs::no_malformed_schema_panics",
           "crates/norn-config/tests/config/schema.rs::a_pathological_pattern_matches_in_bounded_time",
           "crates/norn-host/tests/reads.rs::counts_over_a_schema_no_recovery_can_read_answer_the_cause",
-          "crates/norn-config/tests/config/rules.rs::a_selectorless_rule_requiring_what_another_forbids_is_refused_naming_every_rule"
+          "crates/norn-config/tests/config/rules.rs::a_selectorless_rule_requiring_what_another_forbids_is_refused_naming_every_rule",
+          "crates/norn-config/tests/config/rules.rs::an_empty_one_of_intersection_refuses_only_on_a_required_field"
         ]
       }
     },
