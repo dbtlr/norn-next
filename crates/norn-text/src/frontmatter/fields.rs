@@ -37,9 +37,10 @@
 //!
 //! What a refused block keeps is its value model: it reads whole, every entry
 //! the parser folded included. What it loses is every read built on field
-//! spans — `field_texts`, and the frontmatter tags and wikilinks derived from
-//! it — because those report a field's bytes and a refused block has named
-//! none.
+//! spans — `field_texts`, the frontmatter tags derived from it, and the place
+//! of every frontmatter wikilink — because those report a field's bytes and a
+//! refused block has named none. Its wikilinks are still reported, unplaced,
+//! since they are read from the value.
 //!
 //! An entry written in YAML's explicit-key form — the `?` indicator, `? key`
 //! on one line and `: value` on the next — is that ambiguity by construction,

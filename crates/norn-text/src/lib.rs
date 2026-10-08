@@ -113,10 +113,10 @@
 //! Frontmatter string values are scanned for exactly one thing: `[[…]]`
 //! tokens. A `[title](target)` string in a property is inert text and a
 //! `#tag` inside some other value is text in a string.
-//! [`Document::frontmatter_wikilinks`] is that surface, reporting the tokens
-//! whose bytes the source names; [`parse_wikilinks_in_text`] over
-//! [`Document::field_texts`] reads the shapes that carry no span, and
-//! [`Document::frontmatter_tags`] is the tag half.
+//! [`Document::frontmatter_wikilinks`] is that surface, reporting every token
+//! any string the value holds carries, placed where the source names its
+//! bytes and with no span where it cannot, and [`Document::frontmatter_tags`]
+//! is the tag half.
 //!
 //! # Code is opaque
 //!

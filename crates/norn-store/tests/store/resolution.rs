@@ -1054,7 +1054,7 @@ const TARGETS: &[&str] = &[
 
 /// Every link the document at `at` holds, keyed by syntax, address and
 /// offset, with what the store's own find reads it as resolving to.
-fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, u64), String> {
+fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, Option<u64>), String> {
     let found = vault
         .snapshot()
         .find(
@@ -1093,7 +1093,7 @@ fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, u64), Strin
                 (
                     format!("{:?}", link.family),
                     format!("{protocol}{}", link.target),
-                    link.span.byte_offset,
+                    link.span.map(|span| span.byte_offset),
                 ),
                 resolves,
             )
@@ -1206,7 +1206,13 @@ fn trial(order: StoredPathOrder, seed: u64) -> Result<usize, String> {
         .resolution_changes(&overlay, &probed, &declared(), |change| {
             let (holder, address, before, after) = read(&change);
             if before != after {
-                moved.insert((holder, address, change.link.span.byte_offset, before, after));
+                moved.insert((
+                    holder,
+                    address,
+                    change.link.span.map(|span| span.byte_offset),
+                    before,
+                    after,
+                ));
             }
         })
         .map_err(|refusal| format!("the door refused: {refusal}"))?;

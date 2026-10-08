@@ -444,11 +444,11 @@ mod tests {
             target: target.to_string(),
             title: None,
             anchor: None,
-            span: crate::facts::Span {
+            span: Some(crate::facts::Span {
                 line: 1,
                 column: 1,
                 byte_offset: 0,
-            },
+            }),
         }
     }
 

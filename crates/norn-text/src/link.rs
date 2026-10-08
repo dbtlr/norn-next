@@ -159,14 +159,25 @@ pub struct Link {
     /// A block reference after `#^`, as written for a wikilink and
     /// percent-decoded once for a Markdown link, as [`Link::anchor`] is.
     pub block_ref: Option<String>,
-    /// Where the whole token begins.
-    pub span: SourceSpan,
+    /// Where the whole token begins in the text it was parsed from.
+    ///
+    /// Every body link and every link parsed from a text has one. A
+    /// frontmatter link has one only where its entry's source bytes carry its
+    /// value literally; one written in a flow sequence, an escaped, folded or
+    /// block scalar, or a nested value has none, because no run of the
+    /// source's bytes is its token's, and neither has one in a block whose
+    /// fields cannot be told apart. A place that is not certainly right is
+    /// absent rather than guessed. See
+    /// [`Document::frontmatter_wikilinks`](crate::Document::frontmatter_wikilinks).
+    pub span: Option<SourceSpan>,
 }
 
 impl Link {
-    /// The token's byte range in the text it was parsed from.
-    pub fn range(&self) -> Range<usize> {
-        self.span.byte_offset..self.span.byte_offset + self.raw.len()
+    /// The token's byte range in the text it was parsed from, where it has a
+    /// place there.
+    pub fn range(&self) -> Option<Range<usize>> {
+        self.span
+            .map(|span| span.byte_offset..span.byte_offset + self.raw.len())
     }
 
     /// How this link's stem is to be resolved: its protocol when it was
@@ -196,6 +207,11 @@ impl Link {
 /// crate that disagreed with the editor about whether a property holds a link
 /// would make link-graph membership an argument. Opting a property into the
 /// link graph is what writing the wikilink form does.
+///
+/// A frontmatter value's links are read through
+/// [`Document::frontmatter_wikilinks`](crate::Document::frontmatter_wikilinks),
+/// which runs this over every string the value holds and places each link
+/// it can; a link this returns is placed in `text`, not in a document.
 pub fn parse_wikilinks_in_text(text: &str) -> Vec<Link> {
     parse_tokens(text, &[])
 }
@@ -259,7 +275,7 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
                 title: title.map(str::to_string),
                 anchor: anchor.map(str::to_string),
                 block_ref: block_ref.map(str::to_string),
-                span: cursor.span_at(full_match.start()),
+                span: Some(cursor.span_at(full_match.start())),
             })
         })
         .collect()
@@ -331,7 +347,7 @@ pub(crate) fn markdown_link(
         title: Some(text.trim().to_string()),
         anchor: anchor.map(decoded),
         block_ref: block_ref.map(decoded),
-        span,
+        span: Some(span),
     }
 }
 
@@ -591,6 +607,13 @@ pub enum RewriteSkip {
     /// references, whose target is not the bytes it was written as, or one
     /// whose destination could not be located in the token at all.
     LinkNotRewritable,
+    /// The link has no place in the source, so no bytes stand for its target
+    /// to be written over: it is written in a frontmatter value whose source
+    /// bytes are not its text — a flow sequence item, an escaped, folded or
+    /// block scalar, a nested value, an alias — or in a block whose fields the
+    /// field layer could not tell apart. Where the block's fields can be
+    /// edited, rewriting it is a write of its field's whole value.
+    Unplaced,
     /// The batch names the link's address twice, with two different `to`s,
     /// and which one the link should carry is not this crate's to choose.
     ConflictingRewrites,

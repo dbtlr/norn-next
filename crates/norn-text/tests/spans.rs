@@ -103,10 +103,16 @@ fn a_document_reports_its_constructs_in_source_coordinates() {
 
     let links = document.wikilinks();
     assert_eq!(links.len(), 2);
-    assert_eq!(&source[links[0].range()], "[[Target]]");
-    assert_eq!(&source[links[1].range()], "[[Other]]");
-    assert_eq!(links[0].span.line, 8);
-    assert_eq!(links[0].span.column, 5);
+    assert_eq!(
+        &source[links[0].range().expect("a placed link")],
+        "[[Target]]"
+    );
+    assert_eq!(
+        &source[links[1].range().expect("a placed link")],
+        "[[Other]]"
+    );
+    assert_eq!(links[0].span.expect("a placed link").line, 8);
+    assert_eq!(links[0].span.expect("a placed link").column, 5);
 }
 
 /// A lone `\r` ends a line. Counting only `\n` reported line 1 for every
@@ -314,10 +320,10 @@ fn a_block_whose_spans_are_untrusted_reports_no_strings() {
     );
 }
 
-/// Frontmatter values are handed out as text plus the bytes that produced
-/// them, and this crate reads no syntax inside them. A caller that wants the
-/// links in a frontmatter value scans the text itself, through the one token
-/// parser, and maps the result back through the range.
+/// Field texts are handed out as text plus the bytes that produced them, and
+/// this crate decomposes no syntax inside them: a value holding a link is a
+/// string here. The one token parser reads a text's wikilinks, which is what
+/// `frontmatter_wikilinks` runs over every string a frontmatter value holds.
 #[test]
 fn frontmatter_values_are_text_this_crate_reads_no_syntax_in() {
     let source = "---\nsee: \"[[Target|Shown]]\"\nmd: \"[text](target.md)\"\n---\nbody\n";

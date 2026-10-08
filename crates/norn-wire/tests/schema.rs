@@ -3595,6 +3595,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "skipped_unrepresentable",
             "skipped_would_corrupt_frontmatter",
             "skipped_not_rewritable",
+            "skipped_unplaced",
             "left_broken",
             "made_ambiguous",
             "retargeted"

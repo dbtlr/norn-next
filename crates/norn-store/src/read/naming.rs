@@ -125,7 +125,7 @@ impl Snapshot {
                     link.target,
                     link.title,
                     anchor,
-                    wire_span(link.span),
+                    link.span.map(wire_span),
                     targets,
                 )
                 .map_err(|problem| StoreError::Damaged {

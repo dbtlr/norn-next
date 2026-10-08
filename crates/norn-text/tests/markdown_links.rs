@@ -290,12 +290,13 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
             .into_iter()
             .filter(|link| link.family == LinkFamily::Markdown),
     );
-    both.sort_by_key(|link| link.span.byte_offset);
+    both.sort_by_key(|link| link.span.expect("a body link names its bytes").byte_offset);
     assert_eq!(scan.links(), both, "links() is its two families");
 
     let rebase = |mut link: Link| {
-        link.span.byte_offset += offset;
-        link.span.line += source[..offset].lines().count();
+        let span = link.span.as_mut().expect("a body link names its bytes");
+        span.byte_offset += offset;
+        span.line += source[..offset].lines().count();
         link
     };
     let expected: Vec<Link> = scan.links().into_iter().map(rebase).collect();
@@ -303,27 +304,35 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
     assert_eq!(
         from_document
             .iter()
-            .map(|link| (&link.raw, link.family, link.span.byte_offset))
+            .map(|link| (
+                &link.raw,
+                link.family,
+                link.span.expect("a placed link").byte_offset
+            ))
             .collect::<Vec<_>>(),
         expected
             .iter()
-            .map(|link| (&link.raw, link.family, link.span.byte_offset))
+            .map(|link| (
+                &link.raw,
+                link.family,
+                link.span.expect("a placed link").byte_offset
+            ))
             .collect::<Vec<_>>(),
         "Document::links is BodyScan::links rebased"
     );
     for link in &from_document {
-        assert_eq!(&source[link.range()], link.raw);
+        assert_eq!(&source[link.range().expect("a placed link")], link.raw);
     }
 
     assert_eq!(
         document
             .wikilinks()
             .iter()
-            .map(|link| link.span.byte_offset)
+            .map(|link| link.span.expect("a placed link").byte_offset)
             .collect::<Vec<_>>(),
         scan.wikilinks()
             .iter()
-            .map(|link| link.span.byte_offset + offset)
+            .map(|link| link.span.expect("a placed link").byte_offset + offset)
             .collect::<Vec<_>>(),
         "Document::wikilinks is BodyScan::wikilinks rebased"
     );
@@ -345,8 +354,8 @@ fn a_document_reports_links_in_source_coordinates() {
     let links = document.links();
     assert_eq!(targets(&links), ["./a.md", "Wiki"]);
     for link in &links {
-        assert_eq!(&source[link.range()], link.raw);
-        assert_eq!(link.span.line, 5);
+        assert_eq!(&source[link.range().expect("a placed link")], link.raw);
+        assert_eq!(link.span.expect("a placed link").line, 5);
     }
 }
 
@@ -354,9 +363,9 @@ fn a_document_reports_links_in_source_coordinates() {
 fn a_token_reports_where_it_starts_and_how_far_it_runs() {
     let body = "abc [t](x.md) def\n";
     let link = only(body);
-    assert_eq!(&body[link.range()], "[t](x.md)");
-    assert_eq!(link.span.line, 1);
-    assert_eq!(link.span.column, 5);
+    assert_eq!(&body[link.range().expect("a placed link")], "[t](x.md)");
+    assert_eq!(link.span.expect("a placed link").line, 1);
+    assert_eq!(link.span.expect("a placed link").column, 5);
 }
 
 // ── Rewriting is not a wikilink substitution ────────────────────────────
@@ -394,11 +403,7 @@ fn a_markdown_link_in_a_frontmatter_value_is_not_a_link() {
         "---\nsource: \"[Title](./note.md)\"\nrelated: \"[[Note]]\"\n---\n\n[Body](./b.md)\n",
     );
 
-    let from_values: Vec<Link> = document
-        .field_texts()
-        .iter()
-        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
-        .collect();
+    let from_values = document.frontmatter_wikilinks();
     assert_eq!(targets(&from_values), ["Note"]);
     assert!(
         from_values
@@ -424,73 +429,118 @@ fn a_document_reports_the_wikilinks_its_frontmatter_values_carry() {
     let links = document.frontmatter_wikilinks();
     assert_eq!(targets(&links), ["Other", "A", "B"]);
     for link in &links {
-        assert_eq!(&source[link.range()], link.raw);
+        assert_eq!(&source[link.range().expect("a placed link")], link.raw);
         assert_eq!(link.family, LinkFamily::Wikilink);
     }
-    assert_eq!(links[0].span.line, 3);
-    assert_eq!(links[1].span.line, 5);
-    assert_eq!(links[2].span.line, 6);
+    let lines: Vec<usize> = links
+        .iter()
+        .map(|link| link.span.expect("a placed link").line)
+        .collect();
+    assert_eq!(lines, [3, 5, 6]);
 
     // The body's own links are a separate answer about a separate home.
     assert_eq!(targets(&document.links()), ["Body"]);
 }
 
-/// The stated limitation, in every shape it takes. A link is reported when the
-/// entry's source bytes carry its value literally, because that is the only
-/// case where an offset in the parsed string is an offset in the document.
-/// Everything else — a flow sequence's items and the flow value, which have no
-/// nameable bytes at all; an escaped scalar; a doubled quote; a block or folded
-/// scalar; a multi-line quoted scalar; a nested map — is reported by nothing
-/// here rather than by a span that is not certainly right. `field_texts` plus
-/// `parse_wikilinks_in_text` reads them all without one.
+/// A link is placed when the entry's source bytes carry its value literally,
+/// because that is the only case where an offset in the parsed string is an
+/// offset in the document. Every other shape — a flow sequence's items and the
+/// flow value, which have no nameable bytes at all; an escaped scalar; a
+/// doubled quote; a block or folded scalar; a multi-line quoted scalar; a
+/// nested map, a map inside a sequence, a sequence inside a sequence — is
+/// still a string the block holds, and its links are reported without a place
+/// rather than at one that is not certainly right.
 #[test]
-fn a_frontmatter_link_with_no_nameable_bytes_is_absent_rather_than_guessed() {
-    for source in [
+fn a_frontmatter_link_with_no_nameable_bytes_is_reported_without_a_place() {
+    for (source, expected) in [
         // A flow sequence, and the flow value itself.
-        "---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n",
+        ("---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n", &["A", "B"][..]),
+        ("---\nsee: {inner: \"[[A]]\"}\n---\n", &["A"]),
         // An escaped scalar: `"[[A]]"` and `[[A]]` share no offsets.
-        "---\nsee: \"[[\\u0041]] and [[B]]\"\n---\n",
-        "---\nsee: \"a\\tb [[A]]\"\n---\n",
+        ("---\nsee: \"[[\\u0041]] and [[B]]\"\n---\n", &["A", "B"]),
+        ("---\nsee: \"a\\tb [[A]]\"\n---\n", &["A"]),
         // A doubled quote is an escape too.
-        "---\nsee: 'it''s [[A]]'\n---\n",
+        ("---\nsee: 'it''s [[A]]'\n---\n", &["A"]),
         // Block and folded scalars, and a quoted scalar continued across
         // lines: no single run of bytes to name.
-        "---\nsee: |\n  [[A]]\n---\n",
-        "---\nsee: >\n  [[A]]\n---\n",
-        "---\nsee: \"one\n  two [[A]]\"\n---\n",
-        // A nested map's strings are not top-level entries.
-        "---\nsee:\n  inner: \"[[A]]\"\n---\n",
+        ("---\nsee: |\n  [[A]]\n---\n", &["A"]),
+        ("---\nsee: >\n  [[A]]\n---\n", &["A"]),
+        ("---\nsee: \"one\n  two [[A]]\"\n---\n", &["A"]),
+        // Nested values, at any depth: a map's strings are not top-level
+        // entries, and neither are a sequence item's.
+        ("---\nsee:\n  inner: \"[[A]]\"\n---\n", &["A"]),
+        (
+            "---\nsee:\n  - inner: \"[[A]]\"\n  - [\"[[B]]\"]\n---\n",
+            &["A", "B"],
+        ),
+        ("---\nsee:\n  a:\n    b:\n      - \"[[A]]\"\n---\n", &["A"]),
     ] {
-        let document = Document::parse(source);
-        assert!(document.frontmatter_wikilinks().is_empty(), "in {source:?}");
+        let links = Document::parse(source).frontmatter_wikilinks();
+        assert_eq!(targets(&links), expected, "in {source:?}");
+        assert!(
+            links
+                .iter()
+                .all(|link| link.span.is_none() && link.range().is_none()),
+            "in {source:?}"
+        );
     }
-
-    let document = Document::parse("---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n");
-    let unnamed: Vec<Link> = document
-        .field_texts()
-        .iter()
-        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
-        .collect();
-    assert_eq!(targets(&unnamed), ["A", "B"]);
 }
 
-/// Refusing the whole entry is the point rather than a side effect. Tokens were
-/// parsed from the decoded text and then searched for in the source, so an
-/// escaped token whose decoded text matched a later literal one claimed that
-/// one's bytes. An entry decoding to `[[X]] and [[X]]` whose first token was
-/// spelled with an escape held two tokens and reported one, sitting on the
-/// second, with the first gone and no diagnostic. Two links, one fact, no
-/// complaint is the failure a span-free seam exists to avoid.
+/// Placed and unplaced links are one answer in document order, as the index
+/// numbers them: each string the block holds is read where it stands, so a
+/// literal value after a flow one keeps its place, and a literal item beside
+/// an escaped one in the same sequence is placed while its neighbour is not.
+#[test]
+fn placed_and_unplaced_frontmatter_links_are_reported_in_document_order() {
+    let source = "---\na: \"[[One]]\"\nb: [\"[[Two]]\"]\nc:\n  - \"[[Three]]\"\n  \
+                  - \"\\x5B[Four]]\"\nd:\n  e: \"[[Five]]\"\nf: '[[Six]]'\n---\n";
+    let links = Document::parse(source).frontmatter_wikilinks();
+    assert_eq!(
+        targets(&links),
+        ["One", "Two", "Three", "Four", "Five", "Six"]
+    );
+    let placed: Vec<bool> = links.iter().map(|link| link.span.is_some()).collect();
+    assert_eq!(placed, [true, false, true, false, false, true]);
+    for link in links.iter().filter(|link| link.span.is_some()) {
+        assert_eq!(&source[link.range().expect("a placed link")], link.raw);
+    }
+}
+
+/// A key is not a value: writing the wikilink form in a property's value is
+/// what opts it into the link graph, and a key spelled as one names the
+/// property.
+#[test]
+fn a_wikilink_spelled_as_a_frontmatter_key_is_not_a_link() {
+    let document = Document::parse("---\n\"[[K]]\": v\nsee:\n  \"[[N]]\": \"[[A]]\"\n---\n");
+    assert_eq!(targets(&document.frontmatter_wikilinks()), ["A"]);
+}
+
+/// A block whose split the field layer refused — a non-string key — still
+/// parses to a value, and the index projects that value's fields. Its links
+/// are the value's too, so they are reported, unplaced, since no byte in the
+/// block can be attributed to a field.
+#[test]
+fn a_block_whose_split_was_refused_reports_its_links_unplaced() {
+    let document = Document::parse("---\n1: x\nsee: \"[[A]]\"\n---\n");
+    assert!(document.split_refusal().is_some());
+    let links = document.frontmatter_wikilinks();
+    assert_eq!(targets(&links), ["A"]);
+    assert!(links[0].span.is_none());
+}
+
+/// Refusing to place the whole entry is the point rather than a side effect.
+/// Tokens were once parsed from the decoded text and then searched for in the
+/// source, so an escaped token whose decoded text matched a later literal one
+/// claimed that one's bytes. An entry decoding to `[[X]] and [[X]]` whose first
+/// token was spelled with an escape held two tokens and reported one, sitting
+/// on the second, with the first gone and no diagnostic. Both are reported,
+/// neither placed.
 #[test]
 fn an_escaped_token_cannot_claim_a_later_literal_tokens_bytes() {
     let stolen = Document::parse("---\na: \"[[\\u0058]] and [[X]]\"\n---\n");
-    assert!(stolen.frontmatter_wikilinks().is_empty());
-    let from_text: Vec<Link> = stolen
-        .field_texts()
-        .iter()
-        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
-        .collect();
-    assert_eq!(targets(&from_text), ["X", "X"]);
+    let links = stolen.frontmatter_wikilinks();
+    assert_eq!(targets(&links), ["X", "X"]);
+    assert!(links.iter().all(|link| link.span.is_none()));
 
     // Two identical tokens whose bytes *are* literal are two facts at two
     // offsets, each indexing the source.
@@ -498,9 +548,9 @@ fn an_escaped_token_cannot_claim_a_later_literal_tokens_bytes() {
     let document = Document::parse(source);
     let links = document.frontmatter_wikilinks();
     assert_eq!(targets(&links), ["X", "X"]);
-    assert_ne!(links[0].span.byte_offset, links[1].span.byte_offset);
+    assert_ne!(links[0].span, links[1].span);
     for link in &links {
-        assert_eq!(&source[link.range()], "[[X]]");
+        assert_eq!(&source[link.range().expect("a placed link")], "[[X]]");
     }
 }
 
@@ -679,12 +729,12 @@ fn a_token_that_satisfies_both_grammars_reports_both_overlapping_facts() {
         links.iter().map(|link| link.family).collect::<Vec<_>>(),
         [LinkFamily::Wikilink, LinkFamily::Markdown]
     );
-    assert_eq!(links[0].range(), 0..5);
-    assert_eq!(links[1].range(), 0..8);
+    assert_eq!(links[0].range(), Some(0..5));
+    assert_eq!(links[1].range(), Some(0..8));
 
     // Nesting: a wikilink written inside a Markdown link's bracket text.
     let nested = BodyScan::new("[see [[Inner]] here](./out.md)\n").links();
     assert_eq!(targets(&nested), ["./out.md", "Inner"]);
-    assert_eq!(nested[0].range(), 0..30);
-    assert_eq!(nested[1].range(), 5..14);
+    assert_eq!(nested[0].range(), Some(0..30));
+    assert_eq!(nested[1].range(), Some(5..14));
 }

@@ -961,7 +961,7 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
                 }),
                 _ => None,
             },
-            span: span(1, 1, at as u64),
+            span: Some(span(1, 1, at as u64)),
         })
         .collect();
     paged.tags = (0..HELD)

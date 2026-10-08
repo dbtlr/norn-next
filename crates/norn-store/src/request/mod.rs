@@ -2931,7 +2931,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
     let Some(family) = LinkFamily::from_str(&written) else {
         return Ok(Err(unreadable("links.family", &written)));
     };
-    let span = match stored_span(row, 7, "links")? {
+    let span = match optional_span(row, 7, "links")? {
         Ok(span) => span,
         Err(damaged) => return Ok(Err(damaged)),
     };

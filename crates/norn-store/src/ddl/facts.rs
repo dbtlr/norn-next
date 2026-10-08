@@ -52,6 +52,13 @@
 //! two cannot disagree, and a predicate over links reads it as a column rather
 //! than re-running the selector per row.
 //!
+//! **A frontmatter link may have no span.** A wikilink written in a
+//! frontmatter value whose bytes are not its text — a flow sequence item, an
+//! escaped or folded scalar, a nested value — or in a block whose fields the
+//! text layer cannot tell apart is a link like any other, and the text layer
+//! reports it with no position, so its span columns are `NULL`. Nothing
+//! about resolving or judging a link reads its span.
+//!
 //! **A link names at most one place, and "no place" has one stored form.**
 //! `anchor` is a heading anchor as the text layer records it and `block_ref` a
 //! block reference; at most one of them is set, and neither is ever empty: a
@@ -191,8 +198,8 @@
 //! exist rather than a repair.
 
 pub(crate) fn statements() -> Vec<String> {
-    let mut all = super::fixed(STATEMENTS);
-    all.extend(nullable_span_tables());
+    let mut all = nullable_span_tables();
+    all.extend(super::fixed(STATEMENTS));
     all
 }
 
@@ -203,31 +210,6 @@ pub(crate) const WHOLE_SPAN: &str = "CHECK ((span_line IS NULL) = (span_column I
         AND (span_line IS NULL) = (span_offset IS NULL))";
 
 const STATEMENTS: &[&str] = &[
-    "CREATE TABLE links (
-    id            INTEGER PRIMARY KEY,
-    document      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    ordinal       INTEGER NOT NULL,
-    family        TEXT    NOT NULL,
-    embed         INTEGER NOT NULL,
-    protocol      TEXT,
-    target        TEXT    NOT NULL,
-    title         TEXT,
-    anchor        TEXT,
-    anchor_text   TEXT,
-    anchor_marked TEXT,
-    block_ref     TEXT,
-    address       TEXT    NOT NULL,
-    span_line     INTEGER NOT NULL,
-    span_column   INTEGER NOT NULL,
-    span_offset   INTEGER NOT NULL,
-    CHECK (anchor IS NULL OR block_ref IS NULL),
-    CHECK (anchor <> ''),
-    CHECK (block_ref <> ''),
-    CHECK ((anchor IS NULL) = (anchor_text IS NULL)),
-    CHECK (anchor_text IS NOT NULL OR anchor_marked IS NULL)
-)",
-    "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
-    "CREATE UNIQUE INDEX links_id_document ON links(id, document)",
     "CREATE TABLE link_keys (
     id         INTEGER PRIMARY KEY,
     link       INTEGER NOT NULL,
@@ -264,10 +246,39 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX headings_document_slug ON headings(document, slug)",
 ];
 
-/// The two tables whose span triple is nullable, with the `CHECK` appended so
-/// the constraint is stated once.
+/// The three tables whose span triple is nullable, with the `CHECK` appended
+/// so the constraint is stated once. `links` comes first, since `link_keys`
+/// names it.
 fn nullable_span_tables() -> Vec<String> {
     vec![
+        format!(
+            "CREATE TABLE links (
+    id            INTEGER PRIMARY KEY,
+    document      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    ordinal       INTEGER NOT NULL,
+    family        TEXT    NOT NULL,
+    embed         INTEGER NOT NULL,
+    protocol      TEXT,
+    target        TEXT    NOT NULL,
+    title         TEXT,
+    anchor        TEXT,
+    anchor_text   TEXT,
+    anchor_marked TEXT,
+    block_ref     TEXT,
+    address       TEXT    NOT NULL,
+    span_line     INTEGER,
+    span_column   INTEGER,
+    span_offset   INTEGER,
+    CHECK (anchor IS NULL OR block_ref IS NULL),
+    CHECK (anchor <> ''),
+    CHECK (block_ref <> ''),
+    CHECK ((anchor IS NULL) = (anchor_text IS NULL)),
+    CHECK (anchor_text IS NOT NULL OR anchor_marked IS NULL),
+    {WHOLE_SPAN}
+)"
+        ),
+        "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)".to_string(),
+        "CREATE UNIQUE INDEX links_id_document ON links(id, document)".to_string(),
         format!(
             "CREATE TABLE blocks (
     id          INTEGER PRIMARY KEY,

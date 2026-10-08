@@ -162,7 +162,11 @@ fn a_target_the_frontmatter_value_cannot_hold_is_skipped() {
             "{source:?} to {to:?}"
         );
         let skipped = &out.skipped[0].link;
-        assert_eq!(&source[skipped.range()], "[[Old]]", "{source:?} to {to:?}");
+        assert_eq!(
+            &source[skipped.range().expect("a placed link")],
+            "[[Old]]",
+            "{source:?} to {to:?}"
+        );
     }
 }
 
@@ -196,23 +200,77 @@ fn frontmatter_strings_that_fit_alone_but_not_together_keep_the_first() {
     let at: Vec<&str> = out
         .skipped
         .iter()
-        .map(|skip| &source[skip.link.range()])
+        .map(|skip| &source[skip.link.range().expect("a placed link")])
         .collect();
     assert_eq!(at, ["[[a]]", "[[a|x\ny]]"]);
-    assert!(source[..out.skipped[0].link.span.byte_offset].ends_with("a2: \""));
+    assert!(
+        source[..out.skipped[0].link.span.expect("a placed link").byte_offset].ends_with("a2: \"")
+    );
 }
 
-/// The index holds a frontmatter wikilink only where the value's bytes carry
-/// it literally, and a rewrite reaches exactly what the index holds: a link
-/// inside a flow sequence or an escaped scalar names no bytes, is no link the
-/// index could have keyed a rewrite by, and stays as written.
+/// The index holds every frontmatter wikilink, and places one only where the
+/// value's bytes carry it literally. A link inside a flow sequence, an escaped
+/// scalar or a nested map names no bytes to write its target over, so a
+/// rewrite reaching it leaves it as written and skips it as unplaced:
+/// rewriting it is a whole-value write of its field.
 #[test]
-fn a_frontmatter_link_with_no_span_is_not_a_rewrite_target() {
-    let source = "---\nflow: [\"[[Old]]\"]\nescaped: \"\\x5B[Old]]\"\n---\n";
+fn an_unplaced_frontmatter_link_is_skipped_as_such() {
+    let source =
+        "---\nflow: [\"[[Old]]\"]\nescaped: \"\\x5B[Old]]\"\nnested:\n  at: \"[[Old]]\"\n---\n";
     let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
     assert_eq!(out.text, source);
     assert_eq!(out.rewritten, 0);
-    assert!(out.skipped.is_empty());
+    assert_eq!(reasons(&out), [RewriteSkip::Unplaced; 3]);
+    assert!(out.skipped.iter().all(|skip| skip.link.span.is_none()));
+}
+
+/// An unplaced link beside placed ones in the same value does not stop them:
+/// the literal item of a sequence holding an escaped one is respelled where it
+/// stands, the escaped one is skipped, and the read-back proves the unplaced
+/// link reads as it did. Skips are in document order, placed or not.
+#[test]
+fn a_placed_link_beside_an_unplaced_one_is_respelled_alone() {
+    let source = "---\nsee:\n  - \"\\x5B[Old]]\"\n  - \"[[Old]]\"\n---\n[[Old|x\ny]] and [[Old]]\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
+    assert_eq!(
+        out.text,
+        "---\nsee:\n  - \"\\x5B[Old]]\"\n  - \"[[New]]\"\n---\n[[Old|x\ny]] and [[New]]\n"
+    );
+    assert_eq!(out.rewritten, 2);
+    assert_eq!(
+        reasons(&out),
+        [RewriteSkip::Unplaced, RewriteSkip::LinkNotRewritable]
+    );
+}
+
+/// The read-back proof holds unplaced links too: an anchored sequence's item
+/// is placed, and the alias that repeats it elsewhere carries an unplaced copy
+/// of the same link, so respelling the placed one would change what the
+/// alias's link reads as. The edit is refused, and both links are skipped.
+#[test]
+fn an_edit_that_would_change_an_unplaced_link_through_an_alias_is_refused() {
+    let source = "---\na:\n  &s\n  - \"[[A]]\"\nb: *s\n---\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "A", "B");
+    assert_eq!(out.text, source);
+    assert_eq!(out.rewritten, 0);
+    assert_eq!(
+        reasons(&out),
+        [RewriteSkip::WouldCorruptFrontmatter, RewriteSkip::Unplaced]
+    );
+}
+
+/// Skips are in document order whether their links are placed or not: a
+/// placed link before an unplaced one is skipped first, though the unplaced
+/// one has no offset to sort by.
+#[test]
+fn a_placed_skip_before_an_unplaced_one_is_reported_first() {
+    let source = "---\nup: \"[[a]]\"\nsee: [\"[[a]]\"]\n---\nbody\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "a", "a\"b");
+    assert_eq!(out.text, source);
+    assert_eq!(
+        reasons(&out),
+        [RewriteSkip::WouldCorruptFrontmatter, RewriteSkip::Unplaced]
+    );
 }
 
 // ── What never matches, and what is skipped ──────────────────────────────
@@ -236,7 +294,7 @@ fn a_target_no_wikilink_can_spell_skips_every_match() {
         let at: Vec<&str> = out
             .skipped
             .iter()
-            .map(|skip| &source[skip.link.range()])
+            .map(|skip| &source[skip.link.range().expect("a placed link")])
             .collect();
         assert_eq!(at, ["[[Old]]", "[[Old]]", "![[ Old | t ]]"], "to {to:?}");
     }
@@ -252,7 +310,10 @@ fn a_wikilink_spanning_a_line_break_is_skipped_whatever_the_target() {
     assert_eq!(out.text, "[[Old|Shown\nmore]] and [[New]]\n");
     assert_eq!(out.rewritten, 1);
     assert_eq!(reasons(&out), [RewriteSkip::LinkNotRewritable]);
-    assert_eq!(out.skipped[0].link.span.byte_offset, 0);
+    assert_eq!(
+        out.skipped[0].link.span.expect("a placed link").byte_offset,
+        0
+    );
 }
 
 /// A link written with a protocol other than `vault` addresses something
@@ -561,7 +622,10 @@ fn a_target_whose_bytes_read_otherwise_where_written_is_skipped_there_alone() {
     assert_eq!(out.text, "[[Old]] then `code` and [[a`b]]\n");
     assert_eq!(out.rewritten, 1);
     assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable]);
-    assert_eq!(out.skipped[0].link.span.byte_offset, 0);
+    assert_eq!(
+        out.skipped[0].link.span.expect("a placed link").byte_offset,
+        0
+    );
 }
 
 /// Two families' links may share bytes: `[[Old]](x.md)` is a wikilink inside
@@ -943,7 +1007,10 @@ fn a_frontmatter_string_refusing_one_links_target_keeps_the_others() {
     assert_eq!(out.text, "---\nup: '[[a]] [[c]]'\n---\n");
     assert_eq!(out.rewritten, 1);
     assert_eq!(reasons(&out), [RewriteSkip::WouldCorruptFrontmatter]);
-    assert_eq!(&source[out.skipped[0].link.range()], "[[a]]");
+    assert_eq!(
+        &source[out.skipped[0].link.range().expect("a placed link")],
+        "[[a]]"
+    );
 }
 
 // ── Two rewrites of one address ──────────────────────────────────────────
@@ -990,7 +1057,7 @@ fn two_rewrites_of_one_address_to_different_targets_skip_its_links() {
     let at: Vec<&str> = out
         .skipped
         .iter()
-        .map(|skip| &source[skip.link.range()])
+        .map(|skip| &source[skip.link.range().expect("a placed link")])
         .collect();
     assert_eq!(at, ["[[a]]", "[[a]]", "[[a|x\ny]]"]);
 }
@@ -1035,7 +1102,7 @@ fn links_whose_stems_nest_are_skipped_rather_than_spliced_twice() {
     let at: Vec<&str> = out
         .skipped
         .iter()
-        .map(|skip| &source[skip.link.range()])
+        .map(|skip| &source[skip.link.range().expect("a placed link")])
         .collect();
     assert_eq!(at, ["[t]([[b]])", "[[b]]"]);
 }

@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(9),
-    "643214a4906a4c2e06fa4b59ea5a499a749d2ec8c8e7ed278dc1e886ae280de1",
+    DerivationVersion::new(10),
+    "7f14cf6e26a1501853f721d14234a14a674e0ce6637148b5fae0698b5e9d162b",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -262,6 +262,22 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         // `archive/old/twin`, and its row stores that count.
         ("archive/old/twin.md", b"# The archived twin\n".to_vec()),
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
+        // Frontmatter wikilinks whose values' bytes are not their text — a
+        // flow sequence item, an escaped scalar, a nested map, a list inside
+        // a list — are links with no span, one of them broken, whose finding
+        // carries none.
+        (
+            "health/unplaced.md",
+            b"---\nsee: [\"[[Notes]]\", \"[[nowhere unplaced]]\"]\nescaped: \"\\x5B[Notes#Setext]]\"\n\
+              nested:\n  at: \"[[anchored#^held]]\"\nlists:\n  - - \"[[Glossary]]\"\n---\n# Unplaced\n"
+                .to_vec(),
+        ),
+        // A block whose field split is refused, by a key that is not a
+        // string: its value's literal wikilink is still a link, with no span.
+        (
+            "health/refused.md",
+            b"---\n1: x\nsee: \"[[Notes]]\"\n---\n# Refused\n".to_vec(),
+        ),
         // A task both `task` and `filed` select: a missing owner, a
         // forbidden list, a list holding two values outside their closed
         // sets, one of them twice, a tag outside its closed set written
@@ -985,6 +1001,44 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
                 && link.fact.title.as_deref() == Some("see here")
                 && written_anchor(&link.fact) == Some("Setext")),
         "no frontmatter wikilink carrying an alias and an anchor is exercised"
+    );
+    // Frontmatter wikilinks no bytes of their values spell are links, in
+    // document order, with no span; the broken one's finding carries none.
+    let unplaced = document("health/unplaced.md");
+    let targets: Vec<(&str, bool)> = unplaced
+        .links
+        .iter()
+        .map(|link| (link.fact.target.as_str(), link.fact.span.is_none()))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ("Notes", true),
+            ("nowhere unplaced", true),
+            ("Notes", true),
+            ("anchored", true),
+            ("Glossary", true)
+        ],
+        "no frontmatter wikilink without a span is exercised"
+    );
+    let refused: Vec<(&str, bool)> = document("health/refused.md")
+        .links
+        .iter()
+        .map(|link| (link.fact.target.as_str(), link.fact.span.is_none()))
+        .collect();
+    assert_eq!(
+        refused,
+        [("Notes", true)],
+        "no wikilink in a block whose split is refused is exercised"
+    );
+    assert!(
+        projection
+            .findings()
+            .iter()
+            .any(|finding| finding.path == "health/unplaced.md"
+                && finding.kind == FindingKind::Broken.as_str()
+                && finding.span.is_none()),
+        "no broken link without a span is exercised"
     );
     // The readings a heading and a heading anchor are matched by, and the
     // address kind a link is judged by.

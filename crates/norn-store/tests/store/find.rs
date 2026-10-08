@@ -156,11 +156,11 @@ pub(crate) fn seed(store: &mut Store) {
         target: "glossary".to_string(),
         title: None,
         anchor: None,
-        span: Span {
+        span: Some(Span {
             line: 1,
             column: 1,
             byte_offset: 0,
-        },
+        }),
     });
     let mut request = store.begin_request();
     write_documents(
@@ -1167,11 +1167,11 @@ fn judge_hydration(mut seeded: Seeded) {
             target: format!("example.com/{index}"),
             title: Some(String::new()),
             anchor: None,
-            span: Span {
+            span: Some(Span {
                 line: 1,
                 column: 1,
                 byte_offset: 0,
-            },
+            }),
         })
         .collect();
     let mut writing = seeded.store.begin_request();

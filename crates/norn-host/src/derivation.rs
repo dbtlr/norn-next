@@ -74,7 +74,7 @@ use norn_wire::{
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(9);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(10);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -1505,7 +1505,7 @@ fn map_link(link: norn_text::Link) -> LinkFact {
         target: link.target,
         title: link.title,
         anchor,
-        span: span(link.span),
+        span: link.span.map(span),
     }
 }
 

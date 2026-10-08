@@ -1225,7 +1225,7 @@ impl StoredColumns for StoredLink {
             ("block_ref", optional_text(block_ref)),
             ("address", quoted(self.address.as_str())),
         ];
-        columns.extend(span_columns(Some(link.span)));
+        columns.extend(span_columns(link.span));
         columns
     }
 }
@@ -1526,11 +1526,11 @@ mod tests {
                 anchor: Some(LinkAnchor::Block {
                     id: "para".to_string(),
                 }),
-                span: Span {
+                span: Some(Span {
                     line: 1,
                     column: 2,
                     byte_offset: 1,
-                },
+                }),
             },
             address: norn_wire::LinkAddressKind::Document,
         });

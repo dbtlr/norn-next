@@ -805,3 +805,40 @@ fn a_new_naming_a_quarantined_file_is_unresolved() {
         assert!(resolution.plan.transitions.is_empty());
     }
 }
+
+/// **A wikilink rewrite reaches an unplaced frontmatter link and leaves it
+/// with its reason**: an escaped scalar's link is in the link graph and
+/// names the old target, but no bytes of the value are its text, so it is
+/// skipped as unplaced and the holder is unchanged.
+#[test]
+fn an_unplaced_frontmatter_link_is_skipped_with_its_reason() {
+    let holder = "---\nsee: \"\\x5B[a]]\"\n---\nbody\n";
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", holder)]);
+    let resolution = fixture.resolution(vec![retargeting("a", "c")]);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_unplaced(key("h.md", "a"))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **An authored link rewrite advises a key left for several reasons by the
+/// first ranked**: the holder's unplaced copy of `[[a]]` comes first, and its
+/// body copy cannot carry `x]]y`, so the forecast names the body copy's
+/// reason, which ranks first, though the store's judgment reaches neither and
+/// the holder is left as written.
+#[test]
+fn an_authored_rewrite_advises_a_key_left_for_several_reasons_by_the_first_ranked() {
+    let holder = "---\nsee: [\"[[a]]\"]\n---\n[[a]]\n";
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", holder)]);
+    let resolution = fixture.resolution(vec![relinking("h.md", LinkFamily::Wikilink, "a", "x]]y")]);
+    assert_eq!(
+        resolution.forecast.links,
+        [LinkAdvisory::skipped_unrepresentable(key("h.md", "a"))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
+    fixture.assert_store_is_a_build_from_zero();
+}

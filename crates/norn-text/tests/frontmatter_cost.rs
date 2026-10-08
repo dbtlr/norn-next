@@ -95,7 +95,7 @@ fn subject(keys: usize, value: &str) -> String {
 ///
 /// A block's keys are all resolved against the parsed mapping in two places, and
 /// only the first is on the read this times: the field split resolves every
-/// scanned key line, and [`Document::field_texts`] — which [`derive_cost`]
+/// scanned key line, and the frontmatter value walk — which [`derive_cost`]
 /// measures — resolves every field again.
 ///
 /// The best rather than the mean: a descheduled sample measures the machine, and
@@ -131,8 +131,13 @@ fn parse_cost(source: &str, keys: usize, reads: usize) -> Duration {
         .expect("five samples")
 }
 
-/// What `walks` derives of every field text cost over one already-parsed
-/// `source`, sampled the way [`parse_cost`] samples a read.
+/// What `walks` reads of every frontmatter wikilink cost over one
+/// already-parsed `source`, sampled the way [`parse_cost`] samples a read.
+///
+/// [`Document::frontmatter_wikilinks`] is the walk derivation runs: it
+/// resolves every field as [`Document::field_texts`] does, and reads every
+/// string the value holds for links. The subject holds none, so what confirms
+/// the walk visited every field is the field texts' count, read beside it.
 ///
 /// The parse is outside the clock on purpose. It is linear in key count on both
 /// sides of the ratio and it is the larger share of an ordinary read, so timing
@@ -164,9 +169,15 @@ fn derive_cost(source: &str, keys: usize, walks: usize) -> Duration {
     (0..5)
         .map(|_| {
             let started = std::time::Instant::now();
-            let counts: Vec<usize> = (0..walks).map(|_| document.field_texts().len()).collect();
+            let links: Vec<usize> = (0..walks)
+                .map(|_| document.frontmatter_wikilinks().len())
+                .collect();
             let elapsed = started.elapsed();
-            counts.into_iter().for_each(confirm);
+            assert!(
+                links.iter().all(|links| *links == 0),
+                "the subject block holds no link"
+            );
+            confirm(document.field_texts().len());
             elapsed
         })
         .min()
@@ -253,11 +264,12 @@ fn a_block_at_the_bound_reads_inside_its_ceiling() {
 }
 
 /// **The linearity invariant over the derive walk.** The parse is one of two
-/// places a block's keys are all resolved; [`Document::field_texts`] is the
-/// other, and it is what a caller reading tags or wikilinks out of a block goes
-/// through. The arrangement is the one above — one block of `n` keys against
-/// four of `n / 4` — and the subject gives every key a string value, so the walk
-/// yields one text per field rather than skipping the fields it visits.
+/// places a block's keys are all resolved; the value walk
+/// [`Document::frontmatter_wikilinks`] runs is the other, and it is what
+/// derivation reads a block's wikilinks through. The arrangement is the one
+/// above — one block of `n` keys against four of `n / 4` — and the subject
+/// gives every key a string value, so the walk yields one text per field
+/// rather than skipping the fields it visits.
 #[test]
 #[ignore = "soak-lane case: a clock never gates a pull request"]
 fn deriving_every_field_text_stays_linear_in_field_count() {

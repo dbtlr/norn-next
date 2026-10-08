@@ -82,9 +82,9 @@ fn a_same_note_reference_has_an_empty_target() {
 fn a_token_reports_where_it_starts_and_how_far_it_runs() {
     let body = "abc [[Target]] def\n";
     let link = only(body);
-    assert_eq!(&body[link.range()], "[[Target]]");
-    assert_eq!(link.span.line, 1);
-    assert_eq!(link.span.column, 5);
+    assert_eq!(&body[link.range().expect("a placed link")], "[[Target]]");
+    assert_eq!(link.span.expect("a placed link").line, 1);
+    assert_eq!(link.span.expect("a placed link").column, 5);
 }
 
 #[test]

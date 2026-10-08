@@ -604,17 +604,25 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         })?;
     }
 
-    let skips: BTreeMap<EntryKey, RewriteSkip> = skipped
-        .iter()
-        .map(|skip| {
-            let key = (
-                skip.holder.as_str().to_string(),
-                family_name(skip.syntax),
-                skip.address.clone(),
-            );
-            (key, skip.reason)
-        })
-        .collect();
+    // A key whose links were left for several reasons is advised once, by
+    // the reason ranked first, so the advisory does not depend on where in
+    // its holder each of them stands.
+    let mut skips: BTreeMap<EntryKey, RewriteSkip> = BTreeMap::new();
+    for skip in skipped {
+        let key = (
+            skip.holder.as_str().to_string(),
+            family_name(skip.syntax),
+            skip.address.clone(),
+        );
+        skips
+            .entry(key)
+            .and_modify(|held| {
+                if skip_rank(skip.reason) < skip_rank(*held) {
+                    *held = skip.reason;
+                }
+            })
+            .or_insert(skip.reason);
+    }
     let mut set = ChangeSet {
         unkept: lineage
             .removals()
@@ -650,10 +658,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             family_name(skip.syntax),
             skip.address.clone(),
         );
+        let reason = skips[&entry];
         advised.entry(entry).or_insert_with(|| {
             skip_advisory(
                 LinkKey::new(skip.holder.clone(), skip.syntax, skip.address.clone()),
-                skip.reason,
+                reason,
             )
         });
     }
@@ -1333,6 +1342,22 @@ impl Judged {
     }
 }
 
+/// Where `reason` ranks among the reasons one key's links can be left for,
+/// the first ranked lowest: the one whose remedy reaches least is named. A
+/// new address the link's syntax cannot carry there holds whatever is done
+/// to the value around it, so it outranks a frontmatter value that cannot
+/// hold it, which outranks a token with no place for any address, which
+/// outranks a link with no place in the source, whose field's whole value
+/// can still be set.
+fn skip_rank(reason: RewriteSkip) -> u8 {
+    match reason {
+        RewriteSkip::Unrepresentable | RewriteSkip::ConflictingRewrites => 0,
+        RewriteSkip::WouldCorruptFrontmatter => 1,
+        RewriteSkip::LinkNotRewritable => 2,
+        RewriteSkip::Unplaced => 3,
+    }
+}
+
 /// The advisory on `link`, which the text layer left as written for
 /// `reason`.
 ///
@@ -1349,6 +1374,7 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
             LinkAdvisory::skipped_would_corrupt_frontmatter(link)
         }
         RewriteSkip::LinkNotRewritable => LinkAdvisory::skipped_not_rewritable(link),
+        RewriteSkip::Unplaced => LinkAdvisory::skipped_unplaced(link),
     }
 }
 
@@ -1441,11 +1467,7 @@ pub(crate) fn spelled(link: &norn_store::LinkFact, target: &str) -> norn_store::
         target: target.to_string(),
         title: None,
         anchor: None,
-        span: norn_store::Span {
-            line: 0,
-            column: 0,
-            byte_offset: 0,
-        },
+        span: None,
     }
 }
 
@@ -2331,8 +2353,8 @@ mod tests {
     /// **The index's links of a document are the links its bytes hold.** For
     /// documents holding wikilinks with heading and block anchors and an
     /// alias, Markdown links with a title, a protocol and a relative path,
-    /// embeds of both syntaxes, frontmatter wikilinks, a link-shaped span
-    /// inside code, and none at all, the planner's snapshot answers the links
+    /// embeds of both syntaxes, frontmatter wikilinks placed and unplaced, a
+    /// link-shaped span inside code, and none at all, the planner's snapshot answers the links
     /// [`document_links`] reads from the file's bytes, in its order, beside
     /// the hex of the hash a streamed read of the file answers. A file that
     /// does not decode is no document, and the index holds nothing for it.
@@ -2365,7 +2387,8 @@ mod tests {
             ),
             (
                 "notes/frontmatter.md",
-                b"---\nrelated: \"[[target]]\"\nalso:\n  - \"[[other|Other]]\"\n---\n\nBody [[body-link]].\n",
+                b"---\nrelated: \"[[target]]\"\nalso:\n  - \"[[other|Other]]\"\nflow: [\"[[flowed]]\"]\n\
+                  nested:\n  at: \"[[nested#Heading]]\"\n---\n\nBody [[body-link]].\n",
             ),
             (
                 "notes/code.md",
