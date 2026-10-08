@@ -74,7 +74,7 @@ pub(crate) fn derived(at: &str, body: &str) -> DocumentFacts {
                 (None, Some(id)) => (!id.is_empty()).then_some(LinkAnchor::Block { id }),
                 (None, None) => None,
             },
-            span: span(link.span),
+            span: link.span.map(span),
         })
         .collect();
     facts.headings = scan
@@ -391,11 +391,7 @@ fn judgment_agrees_with_the_links_column_health() {
                     continue;
                 };
                 assert_eq!(finding.severity, Severity::Warning, "{context}");
-                assert_eq!(
-                    finding.span,
-                    Some(stored.links[ordinal].fact.span),
-                    "{context}"
-                );
+                assert_eq!(finding.span, stored.links[ordinal].fact.span, "{context}");
                 match finding.kind {
                     FindingKind::Broken => {
                         assert_eq!(

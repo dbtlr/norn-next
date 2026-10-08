@@ -103,10 +103,16 @@ fn a_document_reports_its_constructs_in_source_coordinates() {
 
     let links = document.wikilinks();
     assert_eq!(links.len(), 2);
-    assert_eq!(&source[links[0].range()], "[[Target]]");
-    assert_eq!(&source[links[1].range()], "[[Other]]");
-    assert_eq!(links[0].span.line, 8);
-    assert_eq!(links[0].span.column, 5);
+    assert_eq!(
+        &source[links[0].range().expect("a placed link")],
+        "[[Target]]"
+    );
+    assert_eq!(
+        &source[links[1].range().expect("a placed link")],
+        "[[Other]]"
+    );
+    assert_eq!(links[0].span.expect("a placed link").line, 8);
+    assert_eq!(links[0].span.expect("a placed link").column, 5);
 }
 
 /// A lone `\r` ends a line. Counting only `\n` reported line 1 for every

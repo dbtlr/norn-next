@@ -68,11 +68,11 @@ fn holder(
             target: target(at),
             title: None,
             anchor: None,
-            span: Span {
+            span: Some(Span {
                 line: at as u64 + 1,
                 column: 1,
                 byte_offset: (at * 8) as u64,
-            },
+            }),
         })
         .collect();
     facts

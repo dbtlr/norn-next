@@ -805,3 +805,23 @@ fn a_new_naming_a_quarantined_file_is_unresolved() {
         assert!(resolution.plan.transitions.is_empty());
     }
 }
+
+/// **A wikilink rewrite reaches a frontmatter link not written literally and
+/// leaves it with its reason**: an escaped scalar's link is in the link
+/// graph and names the old target, but no bytes of the value are its text,
+/// so it is skipped as not written literally and the holder is unchanged.
+#[test]
+fn a_frontmatter_link_not_written_literally_is_skipped_with_its_reason() {
+    let holder = "---\nsee: \"\\x5B[a]]\"\n---\nbody\n";
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", holder)]);
+    let resolution = fixture.resolution(vec![retargeting("a", "c")]);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_not_written_literally(key(
+            "h.md", "a"
+        ))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
+    fixture.assert_store_is_a_build_from_zero();
+}

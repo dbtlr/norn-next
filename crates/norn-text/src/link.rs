@@ -159,14 +159,24 @@ pub struct Link {
     /// A block reference after `#^`, as written for a wikilink and
     /// percent-decoded once for a Markdown link, as [`Link::anchor`] is.
     pub block_ref: Option<String>,
-    /// Where the whole token begins.
-    pub span: SourceSpan,
+    /// Where the whole token begins in the text it was parsed from.
+    ///
+    /// Every body link and every link parsed from a text has one. A
+    /// frontmatter link has one only where its entry's source bytes carry its
+    /// value literally; one written in a flow sequence, an escaped, folded or
+    /// block scalar, or a nested value has none, because no run of the
+    /// source's bytes is its token's and a place that is not certainly right
+    /// is absent rather than guessed. See
+    /// [`Document::frontmatter_wikilinks`](crate::Document::frontmatter_wikilinks).
+    pub span: Option<SourceSpan>,
 }
 
 impl Link {
-    /// The token's byte range in the text it was parsed from.
-    pub fn range(&self) -> Range<usize> {
-        self.span.byte_offset..self.span.byte_offset + self.raw.len()
+    /// The token's byte range in the text it was parsed from, where it has a
+    /// place there.
+    pub fn range(&self) -> Option<Range<usize>> {
+        self.span
+            .map(|span| span.byte_offset..span.byte_offset + self.raw.len())
     }
 
     /// How this link's stem is to be resolved: its protocol when it was
@@ -259,7 +269,7 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
                 title: title.map(str::to_string),
                 anchor: anchor.map(str::to_string),
                 block_ref: block_ref.map(str::to_string),
-                span: cursor.span_at(full_match.start()),
+                span: Some(cursor.span_at(full_match.start())),
             })
         })
         .collect()
@@ -331,7 +341,7 @@ pub(crate) fn markdown_link(
         title: Some(text.trim().to_string()),
         anchor: anchor.map(decoded),
         block_ref: block_ref.map(decoded),
-        span,
+        span: Some(span),
     }
 }
 
@@ -591,6 +601,11 @@ pub enum RewriteSkip {
     /// references, whose target is not the bytes it was written as, or one
     /// whose destination could not be located in the token at all.
     LinkNotRewritable,
+    /// The link is written in a frontmatter value whose source bytes are not
+    /// its text — a flow sequence item, an escaped, folded or block scalar, a
+    /// nested value — so no bytes stand for its target to be written over.
+    /// Rewriting it is a write of its field's whole value.
+    NotWrittenLiterally,
     /// The batch names the link's address twice, with two different `to`s,
     /// and which one the link should carry is not this crate's to choose.
     ConflictingRewrites,

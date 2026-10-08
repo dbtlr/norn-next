@@ -652,9 +652,9 @@ fn upsert(
                     readings.and_then(|readings| readings.marked.as_ref()),
                     block_ref,
                     address_kind(link).as_str(),
-                    link.span.line,
-                    link.span.column,
-                    link.span.byte_offset,
+                    link.span.map(|span| span.line),
+                    link.span.map(|span| span.column),
+                    link.span.map(|span| span.byte_offset),
                 ],
                 |row| row.get(0),
             )

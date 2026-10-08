@@ -36,7 +36,7 @@ impl Held {
             target: "../other/target.md".to_string(),
             title: None,
             anchor: None,
-            span: span(5, 1, 70),
+            span: Some(span(5, 1, 70)),
         });
         linked.links.push(LinkFact {
             family: LinkFamily::Wikilink,
@@ -47,7 +47,7 @@ impl Held {
             anchor: Some(LinkAnchor::Block {
                 id: "b1".to_string(),
             }),
-            span: span(6, 1, 90),
+            span: Some(span(6, 1, 90)),
         });
         linked.links.push(LinkFact {
             family: LinkFamily::Wikilink,
@@ -56,7 +56,7 @@ impl Held {
             target: "target".to_string(),
             title: None,
             anchor: heading_anchor("Heading"),
-            span: span(7, 1, 110),
+            span: Some(span(7, 1, 110)),
         });
         let mut documents = vec![
             linked,

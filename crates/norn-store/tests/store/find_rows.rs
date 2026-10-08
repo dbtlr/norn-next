@@ -1221,11 +1221,11 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
             target: format!("example.com/{index:03}"),
             title: Some(String::new()),
             anchor: None,
-            span: Span {
+            span: Some(Span {
                 line: 1,
                 column: 1,
                 byte_offset: 0,
-            },
+            }),
         })
         .collect();
     seeded.write(&[long]);

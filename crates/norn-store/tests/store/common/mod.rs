@@ -335,7 +335,7 @@ pub fn narrowable() -> DocumentFacts {
         target: "a".to_string(),
         title: None,
         anchor: None,
-        span: span(1, 1, 0),
+        span: Some(span(1, 1, 0)),
     });
     facts
 }
@@ -435,7 +435,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             target: "glossary".to_string(),
             title: Some("The glossary".to_string()),
             anchor: heading_anchor("Glossary#Terms"),
-            span: span(1, 1, 0),
+            span: Some(span(1, 1, 0)),
         },
         LinkFact {
             family: LinkFamily::Markdown,
@@ -446,7 +446,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             anchor: Some(LinkAnchor::Block {
                 id: "blk-1".to_string(),
             }),
-            span: span(3, 5, 30),
+            span: Some(span(3, 5, 30)),
         },
     ];
     facts.headings = vec![

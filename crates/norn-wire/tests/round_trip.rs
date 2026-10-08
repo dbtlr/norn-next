@@ -750,6 +750,22 @@ fn link_rows() -> Vec<LinkRow> {
     rows
 }
 
+/// A frontmatter link written in a value whose bytes are not its text: it
+/// has no position, and its row says so with a null span.
+fn unplaced_link_row() -> LinkRow {
+    LinkRow::new(
+        LinkFamily::Wikilink,
+        false,
+        None,
+        "a",
+        None,
+        None,
+        None,
+        head([candidate("notes/a")], 1),
+    )
+    .expect("a wikilink names a document, never elsewhere")
+}
+
 /// A link row written with `protocol` and `target`, resolving to `targets`,
 /// built through the constructor that derives its health.
 fn addressed_row(protocol: Option<&str>, target: &str, targets: CandidateHead) -> LinkRow {
@@ -760,7 +776,7 @@ fn addressed_row(protocol: Option<&str>, target: &str, targets: CandidateHead) -
         target,
         Some(String::new()),
         None,
-        span(),
+        Some(span()),
         targets,
     )
     .expect("a document link, or an elsewhere link resolving to none")
@@ -776,7 +792,7 @@ fn link_row(targets: CandidateHead) -> LinkRow {
         "a",
         Some("A".to_string()),
         Some(Anchor::heading("Design")),
-        span(),
+        Some(span()),
         targets,
     )
     .expect("a wikilink names a document, never elsewhere")
@@ -3981,6 +3997,7 @@ fn every_document_shape_survives_the_round_trip() {
     for row in link_rows() {
         round_trip(&row);
     }
+    round_trip(&unplaced_link_row());
     for health in link_healths() {
         round_trip(&health);
     }
@@ -4371,7 +4388,7 @@ fn a_link_is_judged_by_resolving_it_first() {
             target,
             None,
             None,
-            span(),
+            Some(span()),
             head(candidates, total),
         )
     };
@@ -4476,7 +4493,7 @@ fn link_row_new_accepts_a_head_only_where_its_address_names_documents() {
                 target,
                 None,
                 None,
-                span(),
+                Some(span()),
                 head(candidates, total),
             );
             if elsewhere && total != 0 {
@@ -8581,6 +8598,7 @@ fn link_advisories() -> Vec<LinkAdvisory> {
         LinkAdvisory::skipped_unrepresentable(a_link_key()),
         LinkAdvisory::skipped_would_corrupt_frontmatter(a_link_key()),
         LinkAdvisory::skipped_not_rewritable(a_link_key()),
+        LinkAdvisory::skipped_not_written_literally(a_link_key()),
         LinkAdvisory::left_broken(a_link_key()),
         LinkAdvisory::made_ambiguous(a_link_key()),
         LinkAdvisory::retargeted(a_link_key()),

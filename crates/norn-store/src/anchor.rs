@@ -263,7 +263,7 @@ mod tests {
             target: target.to_string(),
             title: None,
             anchor,
-            span: span(),
+            span: Some(span()),
         }
     }
 

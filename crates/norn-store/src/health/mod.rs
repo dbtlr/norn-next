@@ -1232,7 +1232,7 @@ fn finding(
         class_keys,
         path_keys,
         target: Some(written(&held.link.fact)),
-        span: Some(held.link.fact.span),
+        span: held.link.fact.span,
         ordinal: Some(held.ordinal),
         candidates,
         candidates_total: total,

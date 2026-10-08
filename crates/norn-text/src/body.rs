@@ -371,7 +371,7 @@ impl<'a> BodyScan<'a> {
         links.extend(self.markdown_link_facts());
         // A stable sort, so the wikilinks that went in first stay in front of
         // the Markdown links they tie with.
-        links.sort_by_key(|link| link.span.byte_offset);
+        links.sort_by_key(|link| link.span.map(|span| span.byte_offset));
         links
     }
 

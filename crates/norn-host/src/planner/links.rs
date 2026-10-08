@@ -1349,6 +1349,7 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
             LinkAdvisory::skipped_would_corrupt_frontmatter(link)
         }
         RewriteSkip::LinkNotRewritable => LinkAdvisory::skipped_not_rewritable(link),
+        RewriteSkip::NotWrittenLiterally => LinkAdvisory::skipped_not_written_literally(link),
     }
 }
 
@@ -1441,11 +1442,7 @@ pub(crate) fn spelled(link: &norn_store::LinkFact, target: &str) -> norn_store::
         target: target.to_string(),
         title: None,
         anchor: None,
-        span: norn_store::Span {
-            line: 0,
-            column: 0,
-            byte_offset: 0,
-        },
+        span: None,
     }
 }
 
@@ -2331,8 +2328,8 @@ mod tests {
     /// **The index's links of a document are the links its bytes hold.** For
     /// documents holding wikilinks with heading and block anchors and an
     /// alias, Markdown links with a title, a protocol and a relative path,
-    /// embeds of both syntaxes, frontmatter wikilinks, a link-shaped span
-    /// inside code, and none at all, the planner's snapshot answers the links
+    /// embeds of both syntaxes, frontmatter wikilinks placed and unplaced, a
+    /// link-shaped span inside code, and none at all, the planner's snapshot answers the links
     /// [`document_links`] reads from the file's bytes, in its order, beside
     /// the hex of the hash a streamed read of the file answers. A file that
     /// does not decode is no document, and the index holds nothing for it.
@@ -2365,7 +2362,8 @@ mod tests {
             ),
             (
                 "notes/frontmatter.md",
-                b"---\nrelated: \"[[target]]\"\nalso:\n  - \"[[other|Other]]\"\n---\n\nBody [[body-link]].\n",
+                b"---\nrelated: \"[[target]]\"\nalso:\n  - \"[[other|Other]]\"\nflow: [\"[[flowed]]\"]\n\
+                  nested:\n  at: \"[[nested#Heading]]\"\n---\n\nBody [[body-link]].\n",
             ),
             (
                 "notes/code.md",

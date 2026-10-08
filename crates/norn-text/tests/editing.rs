@@ -986,9 +986,10 @@ fn an_explicit_merge_directive_is_never_deleted_by_a_neighbours_remove() {
 /// rule refuses. The value model reads whole — every field's value is
 /// still there to be read — while the reads that report a field's *bytes* go
 /// empty, because the refusal is exactly the statement that no bytes can be
-/// attributed to a field. A frontmatter tag and a frontmatter wikilink in such
-/// a block are therefore not reported, the same answer every other refused
-/// block already gives.
+/// attributed to a field. A frontmatter tag in such a block is therefore not
+/// reported, the same answer every other refused block already gives. A
+/// frontmatter wikilink is the value's rather than the field's: the value
+/// still holds it, so it is reported, with no place in the source.
 #[test]
 fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
     let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\ntags: [alpha]\n\
@@ -997,7 +998,12 @@ fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
 
     assert!(document.field_texts().is_empty());
     assert!(document.frontmatter_tags().is_empty());
-    assert!(document.frontmatter_wikilinks().is_empty());
+    let links = document.frontmatter_wikilinks();
+    let unplaced: Vec<(&str, bool)> = links
+        .iter()
+        .map(|link| (link.target.as_str(), link.span.is_none()))
+        .collect();
+    assert_eq!(unplaced, [("Note", true)]);
 
     let map = document
         .frontmatter()

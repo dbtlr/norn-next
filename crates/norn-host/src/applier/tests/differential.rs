@@ -368,7 +368,8 @@ fn trial(seed: u64, failures: &mut Vec<String>) -> bool {
             LinkAdvisory::SkippedAmbiguous { link, .. }
             | LinkAdvisory::SkippedUnrepresentable { link, .. }
             | LinkAdvisory::SkippedWouldCorruptFrontmatter { link, .. }
-            | LinkAdvisory::SkippedNotRewritable { link, .. } => Some(entry_key(link)),
+            | LinkAdvisory::SkippedNotRewritable { link, .. }
+            | LinkAdvisory::SkippedNotWrittenLiterally { link, .. } => Some(entry_key(link)),
             _ => None,
         })
         .collect();

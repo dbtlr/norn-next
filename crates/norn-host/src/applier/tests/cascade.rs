@@ -1087,3 +1087,67 @@ fn a_quarantined_holder_moved_respells_none_of_its_links() {
         Some(holder)
     );
 }
+
+/// **A backlink not written literally is left as written and says why**: a
+/// frontmatter wikilink in a flow sequence or a nested map is in the link
+/// graph, so a move of the document it names records its entry going from
+/// that document to none, and the forecast skips it as not written
+/// literally, because no bytes of its value are its text to respell.
+#[test]
+fn a_backlink_not_written_literally_is_left_with_its_reason() {
+    let holder = "---\nsee: [\"[[a]]\"]\nnested:\n  at: \"[[a]]\"\n---\nbody\n";
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", holder)]);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md")]);
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![PlanCondition::link_resolution(
+            link.clone(),
+            Resolves::one(path("a.md")),
+            Resolves::none(),
+        )]
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_not_written_literally(link)]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A literal backlink beside an unplaced one is respelled alone**: the
+/// holder's scalar value is rewritten where it stands, and its flow-sequence
+/// copy of the same link is left as written, so the address it shares stays
+/// in the holder, recorded going to none and skipped with its reason.
+#[test]
+fn a_literal_backlink_beside_an_unplaced_one_is_respelled_alone() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("h.md", "---\nup: \"[[a]]\"\nsee: [\"[[a]]\"]\n---\nbody\n"),
+    ]);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md")]);
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_not_written_literally(link.clone())]
+    );
+    assert!(
+        resolution
+            .plan
+            .conditions
+            .contains(&PlanCondition::link_resolution(
+                link,
+                Resolves::one(path("a.md")),
+                Resolves::none(),
+            )),
+        "{:?}",
+        resolution.plan.conditions
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("---\nup: \"[[b]]\"\nsee: [\"[[a]]\"]\n---\nbody\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}

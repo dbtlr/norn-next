@@ -147,7 +147,9 @@ pub struct LinkFact {
     /// none: a link written with no fragment, or with an empty one — `note#`,
     /// `note#^` — which names no place.
     pub anchor: Option<LinkAnchor>,
-    pub span: Span,
+    /// Where the token begins, and `None` for a frontmatter link written in a
+    /// value whose bytes are not its text, which has no position to report.
+    pub span: Option<Span>,
 }
 
 /// The place inside its target a link names.

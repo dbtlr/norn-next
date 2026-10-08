@@ -974,3 +974,39 @@ fn a_rewrite_to_naming_a_quarantined_file_is_unresolved() {
         assert!(resolution.plan.transitions.is_empty());
     }
 }
+
+/// **A frontmatter link not written literally is a backlink like any
+/// other**: a plain delete of the document a flow-sequence wikilink names is
+/// unresolved naming its holder, a delete leaving links broken advises it,
+/// and a rewriting delete leaves it as written, skipped with its reason.
+#[test]
+fn a_backlink_not_written_literally_counts_for_every_delete() {
+    let holder = "---\nsee: [\"[[a]]\"]\n---\nbody\n";
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", holder)]);
+    let resolution = fixture.planned(vec![deleting("a.md")]);
+    assert_eq!(
+        resolution.unresolved,
+        [UnresolvedOperation::new(
+            deleting("a.md"),
+            UnresolvedReason::has_backlinks(vec![path("h.md")], 1),
+        )]
+    );
+
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    let broken = fixture.resolution(vec![breaking("a.md")]);
+    assert_eq!(
+        broken.forecast.links,
+        vec![LinkAdvisory::left_broken(link.clone())]
+    );
+
+    let mut fixture = fixture;
+    let rewritten = fixture.resolution(vec![rewriting("a.md", "c")]);
+    assert_eq!(
+        rewritten.forecast.links,
+        vec![LinkAdvisory::skipped_not_written_literally(link)]
+    );
+    applied(fixture.apply(rewritten.plan));
+    assert_eq!(fixture.read("a.md"), None);
+    assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
+    fixture.assert_store_is_a_build_from_zero();
+}

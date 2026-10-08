@@ -234,7 +234,7 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
         target: target.to_string(),
         title: None,
         anchor: None,
-        span: span(1, 1, 0),
+        span: Some(span(1, 1, 0)),
     }
 }
 
@@ -467,7 +467,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
             target: format!("target-{index}"),
             title: None,
             anchor: None,
-            span: span(1, 1, 0),
+            span: Some(span(1, 1, 0)),
         })
         .collect();
 

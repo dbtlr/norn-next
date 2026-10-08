@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(9),
-    "643214a4906a4c2e06fa4b59ea5a499a749d2ec8c8e7ed278dc1e886ae280de1",
+    DerivationVersion::new(10),
+    "e1f49157cb929e01e7141fee2abde413adb092798cb6ba1bc104e43542c287d1",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -262,6 +262,15 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         // `archive/old/twin`, and its row stores that count.
         ("archive/old/twin.md", b"# The archived twin\n".to_vec()),
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
+        // Frontmatter wikilinks whose values' bytes are not their text — a
+        // flow sequence item, an escaped scalar, a nested map — are links
+        // with no span, one of them broken, whose finding carries none.
+        (
+            "health/unplaced.md",
+            b"---\nsee: [\"[[Notes]]\", \"[[nowhere unplaced]]\"]\nescaped: \"\\x5B[Notes#Setext]]\"\n\
+              nested:\n  at: \"[[anchored#^held]]\"\n---\n# Unplaced\n"
+                .to_vec(),
+        ),
         // A task both `task` and `filed` select: a missing owner, a
         // forbidden list, a list holding two values outside their closed
         // sets, one of them twice, a tag outside its closed set written
@@ -985,6 +994,33 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
                 && link.fact.title.as_deref() == Some("see here")
                 && written_anchor(&link.fact) == Some("Setext")),
         "no frontmatter wikilink carrying an alias and an anchor is exercised"
+    );
+    // Frontmatter wikilinks no bytes of their values spell are links, in
+    // document order, with no span; the broken one's finding carries none.
+    let unplaced = document("health/unplaced.md");
+    let targets: Vec<(&str, bool)> = unplaced
+        .links
+        .iter()
+        .map(|link| (link.fact.target.as_str(), link.fact.span.is_none()))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ("Notes", true),
+            ("nowhere unplaced", true),
+            ("Notes", true),
+            ("anchored", true)
+        ],
+        "no frontmatter wikilink without a span is exercised"
+    );
+    assert!(
+        projection
+            .findings()
+            .iter()
+            .any(|finding| finding.path == "health/unplaced.md"
+                && finding.kind == FindingKind::Broken.as_str()
+                && finding.span.is_none()),
+        "no broken link without a span is exercised"
     );
     // The readings a heading and a heading anchor are matched by, and the
     // address kind a link is judged by.

@@ -766,8 +766,11 @@ pub struct LinkRow {
     /// empty anchor, `note#` or `note#^`, names no place, so its link row
     /// shows no anchor.
     pub anchor: Option<Anchor>,
-    /// Where the link stands in the document body.
-    pub span: Span,
+    /// Where the link stands, and `null` for a frontmatter link whose
+    /// position cannot be named: one written in a flow sequence, an escaped,
+    /// folded or block scalar, or a nested value, whose bytes are not its
+    /// text.
+    pub span: Option<Span>,
     /// The bounded head of the documents the target resolves to, in the
     /// resolution ladder's own order, with how many there were.
     pub targets: CandidateHead,
@@ -795,7 +798,7 @@ impl LinkRow {
         target: impl Into<String>,
         title: Option<String>,
         anchor: Option<Anchor>,
-        span: Span,
+        span: Option<Span>,
         targets: CandidateHead,
     ) -> Result<Self, ElsewhereNamesDocuments> {
         let target = target.into();
@@ -831,7 +834,7 @@ struct LinkRowFields {
     target: String,
     title: Option<String>,
     anchor: Option<Anchor>,
-    span: Span,
+    span: Option<Span>,
     targets: CandidateHead,
     health: LinkHealth,
 }

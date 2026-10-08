@@ -44,13 +44,6 @@ pub struct FieldText<'a> {
     pub range: Option<Range<usize>>,
 }
 
-/// A frontmatter string written literally in the source: its text is a
-/// substring of the document, starting at `start`.
-pub(crate) struct LiteralText<'a> {
-    pub(crate) text: &'a str,
-    pub(crate) start: usize,
-}
-
 /// Why an edit was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditError {
@@ -385,22 +378,41 @@ impl<'a> Document<'a> {
     ///
     /// This is the seam a caller scans frontmatter values for syntax through;
     /// the ranges come from the field layer, so an escaped or line-continued
-    /// value reports the bytes it was written as rather than nothing.
+    /// value reports the bytes it was written as rather than nothing. A string
+    /// nested deeper — in a map, or in a map or sequence held as an item — is
+    /// not a field's text and is not reported here.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
+        self.frontmatter_texts(Depth::Fields)
+    }
+
+    /// Every string the frontmatter value holds, at any depth, in document
+    /// order: [`Document::field_texts`]'s, each where it stands among the
+    /// strings nested deeper — in a map, or in a map or sequence held as a
+    /// sequence's item — which have no range. A block whose split was refused still holds a value, and its
+    /// strings are all reported, with no range, since no byte in it is
+    /// attributable to a field.
+    ///
+    /// A key is not a string the block holds: it names a property.
+    fn frontmatter_texts(&self, depth: Depth) -> Vec<FieldText<'_>> {
         let Some(Value::Map(map)) = &self.frontmatter else {
             return Vec::new();
         };
+        let mut texts = Vec::new();
         if self.fields.is_empty() {
             // A block whose split was refused has fields nothing can attribute,
             // and there is no key here to resolve. The mapping still holds every
             // entry the block parsed, so indexing it would be work for no lookup.
-            return Vec::new();
+            if depth == Depth::Values {
+                for (field, value) in map.iter() {
+                    nested_texts(field, value, &mut texts);
+                }
+            }
+            return texts;
         }
         // One lookup per field, so the mapping is indexed once rather than
         // scanned per field: a block at the byte bound holds thousands of
         // fields, and a scan each is quadratic in how many there are.
         let parsed_keys = KeyIndex::of(map);
-        let mut texts = Vec::new();
         for field in &self.fields {
             match parsed_keys.get(&field.name) {
                 Some(Value::String(text)) => texts.push(FieldText {
@@ -411,39 +423,26 @@ impl<'a> Document<'a> {
                 Some(Value::Sequence(items)) => {
                     let ranges = self.sequence_item_ranges(field, items);
                     for (item, range) in items.iter().zip(ranges) {
-                        if let Value::String(text) = item {
-                            texts.push(FieldText {
+                        match item {
+                            Value::String(text) => texts.push(FieldText {
                                 field: &field.name,
                                 text,
                                 range,
-                            });
+                            }),
+                            nested if depth == Depth::Values => {
+                                nested_texts(&field.name, nested, &mut texts);
+                            }
+                            _ => {}
                         }
                     }
+                }
+                Some(nested) if depth == Depth::Values => {
+                    nested_texts(&field.name, nested, &mut texts);
                 }
                 _ => {}
             }
         }
         texts
-    }
-
-    /// Every frontmatter string whose source bytes carry it literally, in
-    /// document order, each with where its text begins in the source.
-    ///
-    /// These are the strings a token can be located in by offset, which is
-    /// what [`Document::frontmatter_wikilinks`] reports and what a link
-    /// rewrite writes into; see the former for which shapes are and are not.
-    pub(crate) fn literal_texts(&self) -> Vec<LiteralText<'_>> {
-        self.field_texts()
-            .into_iter()
-            .filter_map(|text| {
-                let range = text.range?;
-                let offset = literal_text_offset(&self.source[range.clone()], text.text)?;
-                Some(LiteralText {
-                    text: text.text,
-                    start: range.start + offset,
-                })
-            })
-            .collect()
     }
 
     /// The source bytes of each item of a block-style sequence field, one
@@ -569,47 +568,52 @@ impl<'a> Document<'a> {
             .collect()
     }
 
-    /// Every `[[…]]` token written in a frontmatter string value, in source
-    /// coordinates.
+    /// Every `[[…]]` token written in a frontmatter string value, placed in
+    /// source coordinates where its bytes can be named.
     ///
     /// The counterpart to [`Document::frontmatter_tags`], and the other half
     /// of what a frontmatter value is scanned for: every string the block
-    /// holds is read — scalar values and the string items of sequences, not
-    /// just one field — because writing the wikilink form is what opts a
+    /// holds is read — scalar values, the string items of sequences and the
+    /// strings of nested values, not just one field — because writing the wikilink form is what opts a
     /// property into the link graph, whichever property it is. A
     /// `[title](target)` string is inert text here; the Markdown form is body
     /// syntax.
     ///
-    /// **A link is reported when the entry's source bytes carry its value
-    /// literally** — a plain scalar, or one wrapped in a single pair of quotes
-    /// — because that is the only case where an offset in the parsed string is
-    /// an offset in the document, which is what makes the span exact and
-    /// [`Link::range`] index the source.
+    /// Every link is reported, in document order, and **a link is placed
+    /// when the entry's source bytes carry its value literally** — a plain
+    /// scalar, or one wrapped in a single pair of quotes — because that is the
+    /// only case where an offset in the parsed string is an offset in the
+    /// document, which is what makes the span exact and [`Link::range`] index
+    /// the source.
     ///
-    /// An entry whose bytes and whose parsed string are *different text*
-    /// reports nothing here. That refusal covers the flow sequence's items and
-    /// the flow value, which have no nameable bytes at all; the escaped scalar,
-    /// where `"[[X]]"` and `[[X]]` share no offsets; the doubled quote of
+    /// A link in an entry whose bytes and whose parsed string are *different
+    /// text* has no span. That covers the flow sequence's items and the flow
+    /// value, which have no nameable bytes at all; the escaped scalar, where
+    /// `"[[X]]"` and `[[X]]` share no offsets; the doubled quote of
     /// `'it''s'`; the block scalar and the folded scalar (`|`, `>`); the
-    /// multi-line quoted scalar; and the nested map, whose strings are not
-    /// top-level entries. Locating a token by searching the source for its text
-    /// instead is guessing, and guessing wrong is silent: an escaped token
-    /// whose text matches a later literal one claims that one's bytes and the
-    /// literal link disappears. Reading these shapes without a span is what
-    /// [`Document::field_texts`] and [`crate::parse_wikilinks_in_text`] are
-    /// for.
+    /// multi-line quoted scalar; and every nested value — a map, or a
+    /// sequence inside a sequence — whose strings are not top-level entries.
+    /// Locating a token by searching the source for its text instead is
+    /// guessing, and guessing wrong is silent: an escaped token whose text
+    /// matches a later literal one claims that one's bytes and the literal
+    /// link disappears. The link still stands in the value, and resolving it
+    /// needs no place, so it is reported without one.
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         let mut cursor = LineCursor::new(self.source);
         let mut links = Vec::new();
-        for literal in self.literal_texts() {
-            // Every token's offset in the entry's text is its offset in the
-            // source, one quote apart, so no token is searched for and two
+        for text in self.frontmatter_texts(Depth::Values) {
+            let start = text.range.and_then(|range| {
+                literal_text_offset(&self.source[range.clone()], text.text)
+                    .map(|offset| range.start + offset)
+            });
+            // Every token's offset in a literal entry's text is its offset in
+            // the source, one quote apart, so no token is searched for and two
             // identical links in one value are two entries at two offsets.
-            for link in parse_wikilinks_in_text(literal.text) {
-                links.push(Link {
-                    span: cursor.span_at(literal.start + link.span.byte_offset),
-                    ..link
-                });
+            for link in parse_wikilinks_in_text(text.text) {
+                let span = start
+                    .zip(link.span)
+                    .map(|(start, at)| cursor.span_at(start + at.byte_offset));
+                links.push(Link { span, ..link });
             }
         }
         links
@@ -621,7 +625,9 @@ impl<'a> Document<'a> {
         links
             .into_iter()
             .map(|link| Link {
-                span: cursor.span_at(link.span.byte_offset + self.body_start),
+                span: link
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
                 ..link
             })
             .collect()
@@ -1460,6 +1466,37 @@ impl<'a> Document<'a> {
 /// below it.
 fn heading_key(heading: &Heading) -> (u8, String) {
     (heading.level, heading.text.clone())
+}
+
+/// How deep [`Document::frontmatter_texts`] reads: the fields' own strings,
+/// or every string the value holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    Fields,
+    Values,
+}
+
+/// Every string `value`, held under the top-level `field`, holds at any depth,
+/// in order, none with a range.
+fn nested_texts<'a>(field: &'a str, value: &'a Value, texts: &mut Vec<FieldText<'a>>) {
+    match value {
+        Value::String(text) => texts.push(FieldText {
+            field,
+            text,
+            range: None,
+        }),
+        Value::Sequence(items) => {
+            for item in items {
+                nested_texts(field, item, texts);
+            }
+        }
+        Value::Map(map) => {
+            for (_, item) in map.iter() {
+                nested_texts(field, item, texts);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => {}
+    }
 }
 
 /// Where `text` begins inside the `written` bytes that produced it, when those

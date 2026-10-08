@@ -1588,7 +1588,8 @@
           "crates/norn-host/src/applier/tests/cascade.rs::a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax",
           "crates/norn-host/src/applier/tests/cascade.rs::an_ambiguous_backlink_is_skipped_ambiguous",
           "crates/norn-host/src/applier/tests/delete.rs::an_ambiguous_link_is_skipped_ambiguous_by_a_rewriting_delete",
-          "crates/norn-host/src/applier/tests/cascade.rs::a_backlink_the_text_layer_cannot_respell_is_left_with_its_reason"
+          "crates/norn-host/src/applier/tests/cascade.rs::a_backlink_the_text_layer_cannot_respell_is_left_with_its_reason",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_backlink_not_written_literally_is_left_with_its_reason"
         ]
       }
     },

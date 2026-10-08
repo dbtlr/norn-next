@@ -71,7 +71,11 @@ fn facts_by_slicing(document: &str) -> Vec<String> {
     }
     for link in scan.links() {
         let raw = link.raw.clone();
-        record("link", link.span, &raw);
+        record(
+            "link",
+            link.span.expect("a body link names its bytes"),
+            &raw,
+        );
     }
     for tag in scan.tags() {
         let name = format!("#{}", tag.name);

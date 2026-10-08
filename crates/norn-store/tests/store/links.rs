@@ -70,7 +70,7 @@ fn link(
         target: target.to_string(),
         title: None,
         anchor: anchor.and_then(heading_anchor),
-        span: span(1, 1, 0),
+        span: Some(span(1, 1, 0)),
     }
 }
 
