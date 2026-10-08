@@ -3119,6 +3119,62 @@ fields:
         );
     }
 
+    /// **A key declared `link` compares by the link with its alias dropped**,
+    /// as a rule's selector does: two aliases of one link are one value, an
+    /// anchor, a case and a target spelled another way are another, a text
+    /// that is no link equals nothing, and a value of the wrong declared
+    /// shape is no value.
+    #[test]
+    fn find_equality_on_a_link_key_reads_as_the_selectors_do() {
+        let documents: Vec<(&str, String)> = vec![
+            (
+                "bare.md",
+                "---\nproject: '[[alpha]]'\nrelated: ['[[alpha]]', plain]\n---\n".to_string(),
+            ),
+            (
+                "aliased.md",
+                "---\nproject: '[[alpha|Alpha]]'\nrelated: ['[[beta|B]]']\n---\n".to_string(),
+            ),
+            (
+                "anchored.md",
+                "---\nproject: '[[alpha#Plan|Plan]]'\nrelated: ['[[alpha#^b1]]']\n---\n"
+                    .to_string(),
+            ),
+            (
+                "cased.md",
+                "---\nproject: '[[Alpha]]'\nrelated: ['[[projects/alpha]]']\n---\n".to_string(),
+            ),
+            (
+                "plain.md",
+                "---\nproject: alpha\nrelated: alpha\n---\n".to_string(),
+            ),
+            (
+                "listed.md",
+                "---\nproject: ['[[alpha]]']\nrelated: '[[beta]]'\n---\n".to_string(),
+            ),
+            ("none.md", "# none\n".to_string()),
+        ];
+        assert_find_equality_reads_as_the_selectors_do(
+            "norn-host-link-equality",
+            "version: 1
+fields:
+  project: { type: link, shape: single }
+  related: { type: link, shape: list }
+",
+            &documents,
+            &[
+                ("project", "[[alpha]]"),
+                ("project", "[[alpha|Other]]"),
+                ("project", "[[alpha#Plan]]"),
+                ("project", "[[Alpha]]"),
+                ("related", "[[alpha]]"),
+                ("related", "[[beta|Beta]]"),
+                ("related", "[[alpha#^b1]]"),
+                ("related", "[[projects/alpha]]"),
+            ],
+        );
+    }
+
     /// **The `tags` carrier declared with a typed order compares under the
     /// tag fold, and only where its value reads as that type**, as its
     /// equality key does: under `type: number`, `5` and `5.0` are one tag and
