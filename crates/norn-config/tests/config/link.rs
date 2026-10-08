@@ -400,3 +400,33 @@ fn a_findings_identity_is_the_links_key_whatever_its_alias() {
     assert_eq!(identity("[[beta|One]]"), identity("[[beta|Two]]"));
     assert_ne!(identity("[[beta]]"), identity("[[beta#Plan]]"));
 }
+
+// ---- the key where a selector compares ----
+
+#[test]
+fn a_selector_on_a_link_field_matches_by_the_links_key() {
+    let schema = schema(
+        "version: 1
+fields:
+  project: { type: link }
+rules:
+  alpha:
+    match: { frontmatter: { project: ['[[alpha|Alpha]]'] } }
+    required: { owner: }
+",
+    );
+    let rule = schema.rules().next().expect("the one rule");
+    let selects = |value: &str| {
+        let frontmatter =
+            ValueMap::new([("project".to_string(), text(value))]).expect("one key, written once");
+        schema.selects(rule, "a.md", &frontmatter, CaseFold::Exact)
+    };
+    assert!(selects("[[alpha]]"));
+    assert!(selects("[[alpha|Other]]"));
+    assert!(!selects("[[alpha#Plan]]"));
+    assert!(!selects("[[Alpha]]"));
+    assert!(
+        !selects("alpha"),
+        "a value that is no link matches no selector"
+    );
+}

@@ -786,8 +786,11 @@ impl FieldDeclaration {
 /// stored beside the raw text, in a value row's `folded`.
 #[derive(Clone)]
 pub struct LinkKey {
-    read: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    read: Arc<KeyOf>,
 }
+
+/// The function a [`LinkKey`] applies: raw text in, comparison key out.
+type KeyOf = dyn Fn(&str) -> Option<String> + Send + Sync;
 
 impl LinkKey {
     /// The key `read` computes for each raw text that is a link.

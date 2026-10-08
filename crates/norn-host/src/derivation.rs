@@ -2029,9 +2029,9 @@ rules:
 
     /// **Every field type is declared as the wire type spelled as it is, and
     /// carries a typed order exactly where it does not order as text.** One
-    /// field of each of the five types, each reported with its own type:
-    /// `number`, `boolean` and `date` read a raw value into a typed sort key,
-    /// and `text` and `tags` are ordered by their raw text.
+    /// field of each type, each reported with its own type: `number`,
+    /// `boolean` and `date` read a raw value into a typed sort key, and
+    /// `text`, `tags` and `link` are ordered by their raw text.
     #[test]
     fn every_field_type_is_declared_as_its_own_wire_type() {
         use norn_wire::{Facet, FacetKind};
@@ -2070,6 +2070,33 @@ rules:
                 "{kind:?}"
             );
         }
+    }
+
+    /// **A field declared `link` hands the store the schema's own key for a
+    /// link**: the alias dropped and nothing else, and none for a text that is
+    /// no link. The store reads no link syntax, so the closure the declaration
+    /// carries is the one reading, and a tag key beside it still folds as a tag.
+    #[test]
+    fn a_link_field_is_declared_with_the_schemas_key_for_a_link() {
+        let declared = Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1\nfields:\n  project: { type: link }\n  labels: { type: tags }\n",
+            )
+            .expect("a schema declaring a link"),
+            "link-declared",
+        );
+        let model = declared.content_model();
+        assert_eq!(
+            model.fold("project", "[[alpha#Plan|The plan]]"),
+            Some("[[alpha#Plan]]".to_string())
+        );
+        assert_eq!(model.fold("project", "alpha"), None);
+        assert_eq!(model.fold("labels", "#Work"), Some("work".to_string()));
+        assert_eq!(model.fold("undeclared", "[[alpha]]"), None);
+        assert!(
+            model.typed_order("project").is_none(),
+            "a link orders as text"
+        );
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
