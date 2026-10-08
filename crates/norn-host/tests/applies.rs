@@ -1034,11 +1034,11 @@ fn identities_at(
 /// report, across setting, pushing and popping a list's elements, moving into
 /// a required area, removing what an area requires, creating a document that
 /// lacks a field its area requires or holds one its area forbids, swapping a
-/// forbidden, conflicted or misshaped field's whole value, writing beside a standing missing field, moving out
-/// of a rule's place, creating what two rules place in no common place, and writing
-/// a value of the wrong type or shape; a field whose closed sets share no
-/// member is refused as that conflict rather than as a value outside an
-/// empty set.
+/// forbidden, conflicted or misshaped field's whole value, writing beside a
+/// standing missing field, moving out of a rule's place, creating what two
+/// rules place in no common place, and writing a value of the wrong type or
+/// shape; a field whose closed sets share no member is refused as that
+/// conflict rather than as a value outside an empty set.
 ///
 /// A finding is keyed here by kind, field and offending value, which the
 /// validator reports. The gate's identity also holds the combined constraint
