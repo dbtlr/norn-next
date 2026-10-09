@@ -2670,7 +2670,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds twenty-three verbs, and every one of them is the flat
+/// The registry holds twenty-four verbs, and every one of them is the flat
 /// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2688,6 +2688,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "move",
         "delete",
         "rewrite_wikilink",
+        "repair",
         "init",
         "vault_register",
         "vault_unregister",
@@ -2699,7 +2700,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_migrate",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 23);
+    assert_eq!(Verb::ALL.len(), 24);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2787,7 +2788,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 23);
+    assert_eq!(Verb::ALL.len(), 24);
     assert_eq!(
         addressed(Addressing::Required),
         [
@@ -2801,6 +2802,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
             "init",
             "move",
             "new",
+            "repair",
             "rewrite_wikilink",
             "search",
             "set",
