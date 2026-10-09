@@ -3117,7 +3117,9 @@ writes or an address it replaces, saying that from the link's holder the address
 as recorded at the plan's after-state. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. Until the
 after-state check lands, the applier reports a plan carrying one as a failed condition,
-in a preview and an apply alike, rather than passing it unchecked.
+in a preview and an apply alike, rather than passing it unchecked; a refusal's fresh plan
+carries the refused plan's address resolutions as recorded, so sending it back is refused
+again rather than applied unchecked.
 The host serves `move` through `Host::move_path`, `delete` through `Host::delete` and
 `rewrite_wikilink` through `Host::rewrite_wikilink`.
 

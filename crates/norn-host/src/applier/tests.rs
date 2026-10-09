@@ -2051,6 +2051,57 @@ fn an_address_resolution_condition_refuses_until_it_can_be_checked() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
 }
 
+/// **The fresh plan of a refusal keeps the refused plan's address-resolution
+/// conditions as recorded**, in a preview and an apply alike, so sending the
+/// fresh plan back is refused again rather than applied with no check. A
+/// refused plan carrying none yields a fresh plan carrying none.
+#[test]
+fn the_fresh_plan_of_a_refusal_keeps_its_address_resolution_conditions() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let plain = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let mut carrying = plain.clone();
+    carrying.conditions.push(address_condition());
+
+    let norn_wire::ErrorDetail::PlanRefused {
+        plan: previewed, ..
+    } = fixture
+        .preview(carrying.clone())
+        .expect_err("a preview of a plan carrying an unchecked condition")
+        .detail()
+        .clone()
+    else {
+        panic!("the preview is not a plan refusal");
+    };
+    assert_eq!(previewed, carrying);
+
+    let fresh = refused(fixture.apply(carrying.clone())).plan;
+    assert_eq!(fresh, carrying);
+    assert_eq!(fresh.conditions.last(), Some(&address_condition()));
+
+    let again = refused(fixture.apply(fresh));
+    assert_eq!(
+        again.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(
+            address_condition()
+        )]
+    );
+    assert_eq!(again.plan, carrying);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+
+    // A plan carrying none, refused for drift, yields a fresh plan with none.
+    fixture.write("a.md", "draft\nmore\n");
+    let fresh = refused(fixture.apply(plain)).plan;
+    assert!(
+        fresh.conditions.iter().all(|condition| !matches!(
+            condition,
+            norn_wire::PlanCondition::AddressResolution { .. }
+        )),
+        "{:?}",
+        fresh.conditions
+    );
+}
+
 /// The entry for the wikilink of `holder` written `address`.
 fn link_entry(
     holder: &str,
