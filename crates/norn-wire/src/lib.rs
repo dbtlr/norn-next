@@ -382,9 +382,12 @@
 //! [`Forecast::with_links`], [`Forecast::with_left_behind`],
 //! [`SchemaViolation::new`], [`UnresolvedOperation::new`],
 //! [`AppliedTarget::new`], [`ApplyParams::new`], the `new` on [`SetParams`],
-//! [`EditParams`], [`NewParams`], [`MoveParams`], [`DeleteParams`] and
-//! [`RewriteWikilinkParams`], [`MoveSubject::new`], and the constructor on
-//! each [`FieldChange`], [`DocumentEdit`] and [`MoveSubject`] variant. The
+//! [`EditParams`], [`NewParams`], [`MoveParams`], [`DeleteParams`],
+//! [`RewriteWikilinkParams`] and [`RepairParams`], [`MoveSubject::new`],
+//! [`ValueCandidate::new`], [`RequiredField::new`],
+//! [`ValueCandidateHead::new`], [`RequiredFieldHead::new`], and the
+//! constructor on each [`FieldChange`], [`DocumentEdit`], [`MoveSubject`] and
+//! [`SkippedCandidates`] variant. The
 //! plan types the applier destructures, below, can be written as literals and
 //! keep their constructors all the same: [`Operation::new`], the constructor
 //! on each [`OperationKind`], [`AuthorCondition`], [`ExpectedField`],
@@ -475,8 +478,8 @@
 //! plan — a report, or a refusal's fresh plan — still drops a field it does
 //! not know at its own level, and the plan inside it still refuses one. The
 //! write requests — [`SetParams`], [`EditParams`], [`NewParams`],
-//! [`MoveParams`], [`DeleteParams`] and [`RewriteWikilinkParams`], with their
-//! changes and edits — refuse one too, since each becomes a plan and a field
+//! [`MoveParams`], [`DeleteParams`], [`RewriteWikilinkParams`] and
+//! [`RepairParams`], with their changes and edits — refuse one too, since each becomes a plan and a field
 //! dropped from it would be dropped from the plan. A [`LinkKey`] inside a
 //! forecast's [`LinkAdvisory`] refuses one as well: it is the key a plan's
 //! condition holds a link under, read as the plan reads it.
