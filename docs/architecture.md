@@ -725,7 +725,7 @@ standing under a class beside the link each was about, and the discard of such a
 finding id. Each chunked read is barred at every chunk width a read emits, taken of the
 statement that binds exactly that many ids, with no full scan and no sorter: the three detail
 chunks as an equality seek of their table's primary key on the finding id, and the rules
-chunk as a seek of each finding and of its rule set by row id. The forty-fourth name carries
+chunk as a seek of each finding and of its rule set by row id. The forty-first name carries
 the write path: a registry of the statements the write path prepares — the increment's
 document upsert, fact discards and inserts, document delete, tombstone record and row probe,
 the findings writes, the probe and insert of a rule set, a finding's rule citation, the
