@@ -36,6 +36,8 @@ use norn_wire::{
 };
 use sha2::{Digest, Sha256};
 
+mod batch;
+
 // ---- fixtures ----
 
 /// The fingerprint of the schema the fixture pins.
@@ -1317,6 +1319,10 @@ fn statement_barred_by(statement: ValidateStatement) -> &'static str {
             "a_rule_summary_aggregates_over_the_rule_kind_and_severity_index"
         }
         ValidateStatement::RuleSets => "the_rule_sets_a_page_cites_are_read_by_their_key",
+        ValidateStatement::MergedPage => "batch::a_merged_page_merges_one_seek_per_kind",
+        ValidateStatement::DocumentTail => {
+            "batch::a_documents_tail_merges_one_seek_per_kind_at_one_path"
+        }
     }
 }
 
@@ -1934,7 +1940,8 @@ fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
 
 /// **No statement a validate runs reads a document's payload.** Every
 /// statement a page of findings and a summary emit — the kind page, the
-/// summary, a rule's page and tally, the probes the conjunction's compilation
+/// summary, a rule's page and tally, the merged page and document tail a
+/// repair batch reads, the probes the conjunction's compilation
 /// runs and the reads of each finding row's head, classes and rule sets —
 /// under every narrowing the drain reads, by kind and by rule, a
 /// continuation, and a document part driving each, reads none of
@@ -1962,6 +1969,18 @@ fn no_statement_a_validate_runs_reads_a_documents_payload() {
     let mut reached: Vec<ReadStatement> = Vec::new();
     for params in &shapes {
         for emitted in validating_store.plans(params) {
+            reached.push(emitted.statement);
+            reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        }
+    }
+    // A repair batch reads the same selections merged into path order, cut
+    // inside a document by a limit of one so that its tail is read too.
+    for params in &shapes {
+        if params.summary {
+            continue;
+        }
+        let batching = batch::selecting(params).with_limit(1);
+        for emitted in validating_store.batch_plans(&batching) {
             reached.push(emitted.statement);
             reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
         }

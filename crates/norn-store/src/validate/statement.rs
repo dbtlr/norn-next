@@ -32,7 +32,9 @@ use crate::read::{
 /// kind's code, so each kind is a section whose findings stand in the answer's
 /// path order, then by position among their path's findings and then by id —
 /// `(path COLLATE NOCASE, path, position, id)`, on every root — and the page
-/// is in `(kind, path, position, id)` order.
+/// is in `(kind, path, position, id)` order. A repair batch reads the same
+/// findings with the kinds merged into that one path order instead
+/// ([`ValidateStatement::MergedPage`]).
 ///
 /// **A request selecting one rule reads the same order off the rule's own
 /// rows.** `finding_rules` holds one row per finding and rule it cites, with
@@ -88,10 +90,34 @@ pub enum ValidateStatement {
     /// accessor holds, as a validate runs the find's finding-detail
     /// statements.
     RuleSets,
+    /// The findings a repair batch selects, every kind read merged into one
+    /// path order, from a place on: one arm per kind, each the seek a
+    /// [`ValidateStatement::KindPage`] section is — of
+    /// `findings_fingerprint_kind_nocase` at `(fingerprint, kind)`, or of
+    /// `findings_fingerprint_kind_severity_nocase` where the request admits
+    /// one severity — or, where a rule is selected, the seek a
+    /// [`ValidateStatement::RulePage`] section is over the rule's rows. The
+    /// arms are joined by `UNION ALL` and ordered together in `(path COLLATE
+    /// NOCASE, path, position, id)`, which SQLite runs as a merge of the arms'
+    /// own orders, so nothing sorts and a bounded read costs the rows it hands
+    /// back. A path part bounds every arm as it bounds a section; a document
+    /// part that keeps what it seeks drives each arm instead, and those are
+    /// sorted.
+    MergedPage,
+    /// The findings of one document after a place in it, merged across the
+    /// kinds read: [`ValidateStatement::MergedPage`] bounded to exactly one
+    /// path, which a repair batch reads to take a document's remaining
+    /// findings whole. Each arm pins the path by its folded and its bytewise
+    /// equality, so it still seeks the index that holds the answer's path order,
+    /// and seeks past the finding's position and id; the arms are ordered by
+    /// position and id, which the index hands back within the one path, and
+    /// nothing sorts. A document part that keeps what it seeks drives each arm
+    /// as it does a merged page's.
+    DocumentTail,
 }
 
 /// How many statement shapes [`ValidateStatement::all`] holds.
-pub const VALIDATE_STATEMENTS: usize = 5;
+pub const VALIDATE_STATEMENTS: usize = 7;
 
 impl ValidateStatement {
     /// Every statement shape, in slot order.
@@ -102,6 +128,8 @@ impl ValidateStatement {
             Self::RulePage,
             Self::RuleSummary,
             Self::RuleSets,
+            Self::MergedPage,
+            Self::DocumentTail,
         ]
     }
 
@@ -114,6 +142,8 @@ impl ValidateStatement {
             Self::RulePage => 2,
             Self::RuleSummary => 3,
             Self::RuleSets => 4,
+            Self::MergedPage => 5,
+            Self::DocumentTail => 6,
         };
         assert!(
             slot < VALIDATE_STATEMENTS,
@@ -130,25 +160,192 @@ pub(crate) struct Findings<'a> {
     /// The fingerprint the findings stand under: the active one, and the empty
     /// text where no schema is pinned.
     pub(crate) fingerprint: &'a str,
-    /// The one rule whose findings a [`ValidateStatement::RulePage`] or a
-    /// [`ValidateStatement::RuleSummary`] reads, and `None` for the others.
+    /// The one rule whose findings a rule statement reads — a
+    /// [`ValidateStatement::RulePage`] or a [`ValidateStatement::RuleSummary`],
+    /// and a merged read that selects a rule — and `None` for every finding.
     pub(crate) rule: Option<&'a str>,
-    /// The kinds read: the one kind of a page's section, and every kind a
-    /// summary tallies.
+    /// The kinds read: the one kind of a page's section, every kind a summary
+    /// tallies, and the kind of each arm a merged read merges.
     pub(crate) kinds: &'a [&'a str],
     /// The severities admitted, as stored; `None` where every severity is.
     pub(crate) severities: Option<&'a [&'a str]>,
     /// The `(path, position, id)` a section resumes after; `None` starts at
-    /// its first finding.
+    /// its first finding. A [`ValidateStatement::DocumentTail`] names it, and
+    /// reads the path's findings after the position and id.
     pub(crate) after: Option<(&'a str, i64, i64)>,
     /// The conjunction's parts: a path part judges the finding's own path,
     /// and every other part the document row at it.
     pub(crate) filters: &'a [Filter],
+    /// The rows a page reads at most; a summary and a document's tail read
+    /// them all.
     pub(crate) rows: usize,
+}
+
+impl Findings<'_> {
+    /// Whether the statement reads the rule's own rows rather than the
+    /// findings'.
+    fn ruled(&self) -> bool {
+        match self.statement {
+            ValidateStatement::KindPage | ValidateStatement::Summary => {
+                assert!(
+                    self.rule.is_none(),
+                    "a statement over every rule names none"
+                );
+                false
+            }
+            ValidateStatement::RulePage | ValidateStatement::RuleSummary => {
+                assert!(self.rule.is_some(), "a rule's statement names its rule");
+                true
+            }
+            ValidateStatement::MergedPage | ValidateStatement::DocumentTail => self.rule.is_some(),
+            ValidateStatement::RuleSets => {
+                unreachable!("the rule sets are read by `compose_rule_sets`")
+            }
+        }
+    }
+}
+
+/// The columns a merged read's arms add after a finding row's, each arm
+/// spelling the keys its own table orders the findings by. A compound
+/// statement orders by its result columns alone, and a rule's arm orders by
+/// its rule rows' path, position and finding, which no column of the finding
+/// itself states.
+const MERGE_PATH: &str = "order_path";
+const MERGE_POSITION: &str = "order_position";
+const MERGE_ID: &str = "order_id";
+
+/// The table one arm seeks, the alias it takes, and the column that holds the
+/// finding's id there.
+struct Seeked {
+    table: &'static str,
+    alias: &'static str,
+    id: &'static str,
+}
+
+impl Seeked {
+    fn of(ruled: bool) -> Self {
+        if ruled {
+            Seeked {
+                table: "finding_rules",
+                alias: "fr",
+                id: "fr.finding",
+            }
+        } else {
+            Seeked {
+                table: "findings",
+                alias: "f",
+                id: "f.id",
+            }
+        }
+    }
+
+    fn column(&self, name: &str) -> String {
+        format!("{}.{name}", self.alias)
+    }
+}
+
+/// The conjunction's parts, sorted by what they judge.
+struct Narrowed<'a> {
+    /// The path parts' patterns, which judge the finding's own path.
+    parts: Vec<&'a PathPart>,
+    /// The parts that judge the document row at the finding's path.
+    documents: Vec<&'a Filter>,
+    /// Whether some document part keeps what it seeks, so the matched
+    /// documents drive the statement.
+    driven: bool,
+}
+
+impl<'a> Narrowed<'a> {
+    fn of(filters: &'a [Filter]) -> Self {
+        let (paths, documents): (Vec<&Filter>, Vec<&Filter>) = filters
+            .iter()
+            .partition(|filter| filter.path_part().is_some());
+        Narrowed {
+            parts: paths
+                .iter()
+                .filter_map(|filter| filter.path_part())
+                .collect(),
+            driven: documents.iter().any(|filter| !filter.shape().excludes()),
+            documents,
+        }
+    }
 }
 
 /// One validate statement and its parameters, in the numbering the text
 /// states.
+///
+/// **A statement is its arms, ordered and bounded.** [`compose_arm`] writes one
+/// arm — one kind's findings, or every kind a summary tallies — and this adds
+/// what the statement does with them: a page orders one arm and bounds it, a
+/// summary groups one, and a merged read joins an arm per kind with `UNION ALL`
+/// and orders and bounds the join. So a kind's page and the arm it contributes
+/// to a merge are one text, written once.
+pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) {
+    let mut binder = Binder::default();
+    let narrowed = Narrowed::of(findings.filters);
+    let seeked = Seeked::of(findings.ruled());
+    let limit = |binder: &mut Binder| {
+        binder.bind(Value::Integer(
+            i64::try_from(findings.rows).expect("a page's row count fits i64"),
+        ))
+    };
+    let text = match findings.statement {
+        ValidateStatement::KindPage | ValidateStatement::RulePage => {
+            let arm = compose_arm(findings, &narrowed, findings.kinds, &mut binder);
+            let ordered = format!(
+                "{}, {}, {}",
+                answer_ordering(&seeked.column("path"), ""),
+                seeked.column("position"),
+                seeked.id
+            );
+            let limit = limit(&mut binder);
+            format!(
+                "{arm}\n                     ORDER BY {ordered}\n                     LIMIT {limit}"
+            )
+        }
+        ValidateStatement::MergedPage | ValidateStatement::DocumentTail => {
+            assert!(!findings.kinds.is_empty(), "a merged read reads a kind");
+            let arms: Vec<String> = findings
+                .kinds
+                .iter()
+                .map(|kind| {
+                    compose_arm(findings, &narrowed, std::slice::from_ref(kind), &mut binder)
+                })
+                .collect();
+            let arms = arms.join("\n                     UNION ALL\n                     ");
+            if findings.statement == ValidateStatement::MergedPage {
+                let ordered = answer_ordering(MERGE_PATH, "");
+                let limit = limit(&mut binder);
+                format!(
+                    "{arms}\n                     ORDER BY {ordered}, {MERGE_POSITION}, {MERGE_ID}\n                     LIMIT {limit}"
+                )
+            } else {
+                // Every finding of a tail stands at the one path, so the
+                // arms are ordered by the keys that remain. Ordering by the
+                // path as well would sort: the index holds the path's
+                // equalities constant, and SQLite does not take the terms
+                // naming it as satisfied.
+                format!("{arms}\n                     ORDER BY {MERGE_POSITION}, {MERGE_ID}")
+            }
+        }
+        ValidateStatement::Summary | ValidateStatement::RuleSummary => {
+            let arm = compose_arm(findings, &narrowed, findings.kinds, &mut binder);
+            let (kind, severity) = (seeked.column("kind"), seeked.column("severity"));
+            format!(
+                "{arm}\n                     GROUP BY {kind}, {severity}\n                     ORDER BY {kind}, {severity}"
+            )
+        }
+        ValidateStatement::RuleSets => {
+            unreachable!("the rule sets are read by `compose_rule_sets`")
+        }
+    };
+    (text, binder.into_values())
+}
+
+/// One arm of a statement: a `SELECT` of `kinds` — the one kind of a page's
+/// section and of each arm of a merge, and every kind a summary tallies —
+/// under the fingerprint, the rule, the severities and the place the
+/// statement reads from, with its parameters numbered in `binder`.
 ///
 /// **A path part judges the finding's own path**, so it reaches a finding
 /// standing where no document row does. Its glob matches under the root's fold,
@@ -164,6 +361,10 @@ pub(crate) struct Findings<'a> {
 /// the folded range also reaches the findings at paths that spell the glob's
 /// prefix in another case, which the glob then rejects.
 ///
+/// **A document's tail pins the path instead**, by the folded and the
+/// bytewise equality together, which is what lets the seek run down an index
+/// holding the answer's path order, and resumes after a position and an id.
+///
 /// **Every other part judges the document row at the finding's path**, which
 /// a finding standing where no document row does never satisfies. Where some
 /// such part keeps what it seeks, the matched documents drive the statement:
@@ -172,34 +373,30 @@ pub(crate) struct Findings<'a> {
 /// the part matched and sorts that. Where every such part excludes, the
 /// statement seeks its kind as an unnarrowed one does and tests each
 /// finding's document row, one seek of `documents_path` at its path.
-pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) {
-    let mut binder = Binder::default();
-    let (paths, documents): (Vec<&Filter>, Vec<&Filter>) = findings
-        .filters
-        .iter()
-        .partition(|filter| filter.path_part().is_some());
-    let parts: Vec<&PathPart> = paths
-        .iter()
-        .filter_map(|filter| filter.path_part())
-        .collect();
-    let driven = documents.iter().any(|filter| !filter.shape().excludes());
+fn compose_arm(
+    findings: &Findings<'_>,
+    narrowed: &Narrowed<'_>,
+    kinds: &[&str],
+    binder: &mut Binder,
+) -> String {
+    let Narrowed {
+        parts,
+        documents,
+        driven,
+    } = narrowed;
     let on_a_document = !documents.is_empty();
-    // A rule's statements seek the rule's own rows, which carry the finding's
-    // key beside the rule; every other statement seeks the findings.
-    let paged = matches!(
-        findings.statement,
-        ValidateStatement::KindPage | ValidateStatement::RulePage
+    let statement = findings.statement;
+    let rows = matches!(
+        statement,
+        ValidateStatement::KindPage
+            | ValidateStatement::RulePage
+            | ValidateStatement::MergedPage
+            | ValidateStatement::DocumentTail
     );
-    let (table, seek, id) = match findings.statement {
-        ValidateStatement::KindPage | ValidateStatement::Summary => ("findings", "f", "f.id"),
-        ValidateStatement::RulePage | ValidateStatement::RuleSummary => {
-            ("finding_rules", "fr", "fr.finding")
-        }
-        ValidateStatement::RuleSets => {
-            unreachable!("the rule sets are read by `compose_rule_sets`")
-        }
-    };
-    let column = |name: &str| format!("{seek}.{name}");
+    let ruled = findings.ruled();
+    let seeked = Seeked::of(ruled);
+    let (table, seek, id) = (seeked.table, seeked.alias, seeked.id);
+    let column = |name: &str| seeked.column(name);
 
     let mut conditions = vec![format!(
         "{} = {}",
@@ -213,24 +410,22 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             binder.bind(Value::Text(rule.to_string()))
         ));
     }
-    match (paged, findings.kinds) {
+    match (rows, kinds) {
         (true, [kind]) => conditions.push(format!(
             "{} = {}",
             column("kind"),
             binder.bind(Value::Text((*kind).to_string()))
         )),
         (true, _) => unreachable!("a page section reads one kind"),
-        (false, kinds) => conditions.push(format!(
-            "{} IN ({})",
-            column("kind"),
-            listed(&mut binder, kinds)
-        )),
+        (false, kinds) => {
+            conditions.push(format!("{} IN ({})", column("kind"), listed(binder, kinds)))
+        }
     }
     // A summary names every severity it admits, so each `(kind, severity)`
     // cell is a seek of its own and a path part's range bounds each; a page
     // names them where it narrows by one.
     let every_severity: Vec<&str> = Severity::ALL.iter().map(Severity::as_str).collect();
-    let severities = match (paged, findings.severities) {
+    let severities = match (rows, findings.severities) {
         (_, Some(severities)) => Some(severities),
         (false, None) => Some(every_severity.as_slice()),
         (true, None) => None,
@@ -239,7 +434,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         conditions.push(format!(
             "{} IN ({})",
             column("severity"),
-            listed(&mut binder, severities)
+            listed(binder, severities)
         ));
     }
 
@@ -260,7 +455,7 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         None => (String::new(), String::new(), DOCUMENT_POSITION, 0),
     };
     let mut upper: Option<Value> = None;
-    for part in &parts {
+    for part in parts {
         let (from, to) = answer_range(&part.pattern);
         let opening = (from, String::new(), DOCUMENT_POSITION, 0);
         if opening > lower {
@@ -279,7 +474,26 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     // position and the range no column to seek, so they test what that seek
     // reaches.
     let (folded, path, position, after_id) = lower;
-    if paged {
+    if statement == ValidateStatement::DocumentTail {
+        // The tail is the one path's findings after a position and an id, so
+        // the path parts' lower bounds hold already: the path was admitted
+        // by the reading that named it.
+        let (path, position, after_id) = findings
+            .after
+            .expect("a document's tail names the place it resumes after");
+        let (folded, path) = answer_place(path);
+        let (folded, path, position, after_id) = (
+            binder.bind(Value::Text(folded)),
+            binder.bind(Value::Text(path)),
+            binder.bind(Value::Integer(position)),
+            binder.bind(Value::Integer(after_id)),
+        );
+        conditions.push(format!("{path_column} = {folded} COLLATE NOCASE"));
+        conditions.push(format!("{path_column} = {path}"));
+        conditions.push(format!(
+            "({position_column}, {id}) > ({position}, {after_id} COLLATE BINARY)"
+        ));
+    } else if rows {
         // The position and the range's lower bound are one place in the
         // answer order, which the kind's index is sought past.
         let (folded, path, position, after_id) = (
@@ -319,22 +533,22 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             binder.bind(upper)
         ));
     }
-    for part in &parts {
-        conditions.push(part.glob_test(&path_column, &mut binder));
+    for part in parts {
+        conditions.push(part.glob_test(&path_column, binder));
     }
 
     let tests: Vec<String> = documents
         .iter()
-        .map(|filter| filter.spell("dv.id", &mut binder))
+        .map(|filter| filter.spell("dv.id", binder))
         .collect();
     // A rule's page reaches each finding it pages from the rule's row, by the
     // finding's row id; its tally reads the rule's rows alone.
-    let reached = if findings.statement == ValidateStatement::RulePage {
+    let reached = if ruled && rows {
         "\n                     CROSS JOIN findings AS f ON f.id = fr.finding"
     } else {
         ""
     };
-    let from = if driven {
+    let from = if *driven {
         conditions.extend(tests);
         // The path compared folded as well as bytewise: the folded equality
         // is implied by the bytewise one, and it is what lets a seek at a
@@ -362,35 +576,25 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     };
 
     let conditions = conditions.join("\n                       AND ");
-    if paged {
-        let limit = binder.bind(Value::Integer(
-            i64::try_from(findings.rows).expect("a page's row count fits i64"),
-        ));
-        let ordered = format!(
-            "{}, {position_column}, {id}",
-            answer_ordering(&path_column, "")
-        );
-        (
-            format!(
-                "SELECT {FINDING_ROW_COLUMNS} {from}
-                     WHERE {conditions}
-                     ORDER BY {ordered}
-                     LIMIT {limit}"
-            ),
-            binder.into_values(),
-        )
-    } else {
-        let (kind, severity) = (column("kind"), column("severity"));
-        (
-            format!(
-                "SELECT {kind}, {severity}, COUNT(*) {from}
-                     WHERE {conditions}
-                     GROUP BY {kind}, {severity}
-                     ORDER BY {kind}, {severity}"
-            ),
-            binder.into_values(),
-        )
-    }
+    let selected = match statement {
+        ValidateStatement::KindPage | ValidateStatement::RulePage => {
+            FINDING_ROW_COLUMNS.to_string()
+        }
+        ValidateStatement::MergedPage | ValidateStatement::DocumentTail => format!(
+            "{FINDING_ROW_COLUMNS}, {path_column} AS {MERGE_PATH}, \
+             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}"
+        ),
+        ValidateStatement::Summary | ValidateStatement::RuleSummary => {
+            format!("{}, {}, COUNT(*)", column("kind"), column("severity"))
+        }
+        ValidateStatement::RuleSets => {
+            unreachable!("the rule sets are read by `compose_rule_sets`")
+        }
+    };
+    format!(
+        "SELECT {selected} {from}
+                     WHERE {conditions}"
+    )
 }
 
 /// The statement reading the rules of each rule set `ids` names: one seek of

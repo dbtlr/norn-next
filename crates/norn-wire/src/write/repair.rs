@@ -33,9 +33,10 @@ use crate::predicate::Predicate;
 
 // A dormant carrier: Layer 5B repair is the consuming layer, and NORN-373
 // is the step that adds `Verb::Repair`, the host handler that plans it and a
-// `plan` that builds its operations. Until then nothing in the call graph
-// reads these params. The roadmap note lives here rather than in the doc
-// comment schemars lifts into the published schema.
+// `plan` that builds its operations. Until then only `norn-store`'s repair
+// batch read takes the selection from these params, and no handler calls it.
+// The roadmap note lives here rather than in the doc comment schemars lifts
+// into the published schema.
 /// What a `repair` request carries.
 ///
 /// On the wire the selection is validate's, beside the repair's own keys:

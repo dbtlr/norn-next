@@ -201,6 +201,7 @@ pub use store::{
     SnapshotReader, Store, StoreMode, StoreReading,
 };
 pub use validate::{
-    VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation,
+    RepairBatch, RepairSelection, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement,
+    ValidateWork, Validated, Validation,
 };
 pub use write_path::{WRITE_STATEMENTS, WriteStatement};
