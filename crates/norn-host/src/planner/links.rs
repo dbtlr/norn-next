@@ -686,6 +686,9 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 /// target could be named by. A plan recording no address resolution asks
 /// `index` nothing.
 ///
+/// A condition whose syntax the store holds no link of (`probe_of` is `None`)
+/// is reported failed: no resolution could confirm it.
+///
 /// A holder a move carried is probed from where it lands: the condition names
 /// the holder at its after-state path, and only the after side of a judgment
 /// is read, so no lineage source is needed.

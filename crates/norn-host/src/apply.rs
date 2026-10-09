@@ -215,9 +215,9 @@ pub(crate) fn resolve_on(
 /// planning's change set, the applier's check of it and the fresh plan a
 /// refusal resolves, whichever of them asks first, and the applier gives it
 /// back ([`LinkIndex::release`]) before its changeset commits. A plan with no
-/// `where` target that changes no document's presence, deletes none and
-/// writes no link mints none unless the applier refuses it and the plan
-/// resolved afresh does one of those. Either way the match is the find a
+/// `where` target that changes no document's presence, deletes none, writes
+/// no link and carries no address resolution mints none unless the applier
+/// refuses it and the plan resolved afresh does one of those. Either way the match is the find a
 /// caller would have been answered at the same instant, paged to its end.
 ///
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):

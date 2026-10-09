@@ -362,12 +362,14 @@ fn a_failed_entry_and_a_failed_address_resolution_are_both_listed() {
     assert_eq!(fixture.read("c.md").as_deref(), Some("draft\n"));
 }
 
-/// **A failed address resolution answers before a delete's contradicted link
-/// choice does**, as a failed change-set entry does: the evidence the vault
-/// moved since planning is what the fresh plan answers for, and it resolves
-/// the delete afresh. Without the failing condition the same plan is invalid.
+/// **A delete's contradicted link choice is invalid whatever the plan's
+/// address resolutions.** The link choice reads the change set alone
+/// (`Removal::kept_by`): where every recorded entry matches, planning would
+/// have left the delete unresolved, so the plan is malformed and has no
+/// fresh plan to answer with. A failing address resolution beside it changes
+/// neither the verdict nor what is published.
 #[test]
-fn a_failed_address_resolution_refuses_before_a_contradicted_delete_is_invalid() {
+fn a_contradicted_delete_is_invalid_whatever_its_address_resolutions() {
     let files = [("a.md", "A\n"), ("b.md", "[[a]]\n")];
     let forbidding = |fixture: &Fixture| {
         let mut plan = fixture.plan(vec![breaking("a.md")]);
@@ -385,9 +387,53 @@ fn a_failed_address_resolution_refuses_before_a_contradicted_delete_is_invalid()
 
     // After the delete `[[a]]` resolves to none, not to `a.md`.
     let failing = a_resolving(Resolves::one(path("a.md")));
-    let plan = carrying(&forbidding(&fixture), failing.clone());
-    fixture.refuses_with(&plan, &[failed(failing)]);
+    let plan = carrying(&forbidding(&fixture), failing);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("a.md")]);
     assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+}
+
+/// **`one {path}` binds the path, not only that one document is named.** The
+/// plan moves `a.md` to `x/a.md`, so the address resolves to `x/a.md` after
+/// it: a condition recording that holds, and one recording the path it
+/// resolved to before the plan does not.
+#[test]
+fn a_recorded_path_is_judged_against_where_the_plan_moves_the_target() {
+    let moved = |fixture: &Fixture| fixture.plan(vec![moving("a.md", "x/a.md")]);
+
+    let mut fixture = Fixture::new(&FILES);
+    let holds = a_resolving(Resolves::one(path("x/a.md")));
+    let plan = carrying(&moved(&fixture), holds);
+    fixture.previews_and_applies(&plan);
+
+    let mut fixture = Fixture::new(&FILES);
+    let stale = a_resolving(Resolves::one(path("a.md")));
+    let plan = carrying(&moved(&fixture), stale.clone());
+    fixture.refuses_with(&plan, &[failed(stale)]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+}
+
+/// **A case-only respell of the target is judged at the spelling the plan
+/// leaves.** `Note.md` becomes `note.md`: a condition recording `note.md`
+/// holds, and one recording `Note.md` does not.
+#[test]
+fn a_recorded_path_is_judged_against_the_spelling_a_case_only_respell_leaves() {
+    if !super::volume_folds(
+        "a_recorded_path_is_judged_against_the_spelling_a_case_only_respell_leaves",
+    ) {
+        return;
+    }
+    let files = [("Note.md", "N\n"), ("b.md", "[[note]]\n")];
+    let respelled = |fixture: &Fixture| fixture.plan(vec![moving("Note.md", "note.md")]);
+
+    let mut fixture = Fixture::new(&files);
+    let holds = wikilink_resolving("b.md", "note", Resolves::one(path("note.md")));
+    let plan = carrying(&respelled(&fixture), holds);
+    fixture.previews_and_applies(&plan);
+
+    let mut fixture = Fixture::new(&files);
+    let stale = wikilink_resolving("b.md", "note", Resolves::one(path("Note.md")));
+    let plan = carrying(&respelled(&fixture), stale.clone());
+    fixture.refuses_with(&plan, &[failed(stale)]);
 }
 
 impl Fixture {
@@ -434,4 +480,39 @@ fn address_resolutions_cost_one_judgment_and_a_plan_without_any_judges_none() {
     let cost = fixture.judgments_of_applying(&plan);
     assert_eq!((cost.judgments, cost.links_evaluated), (1, 3));
     assert_eq!(cost.full_scan_steps, 0);
+}
+
+/// **Judging an address over a plan that removes a document reads only the
+/// probed link.** The document the plan deletes has backlinks held under the
+/// keys that name it; the conditions add exactly one judgment, of exactly as
+/// many links as there are conditions, and not those backlinks.
+#[test]
+fn address_resolutions_over_a_delete_with_backlinks_add_one_judgment_of_their_own_links() {
+    let files = [
+        ("a.md", "A\n"),
+        ("b.md", "[[a]]\n"),
+        ("d.md", "[[a]]\n"),
+        ("e.md", "[[a]]\n"),
+        ("f.md", "[[a]]\n"),
+    ];
+    let mut fixture = Fixture::new(&files);
+    let plain = fixture.plan(vec![breaking("a.md")]);
+    let without = fixture.judgments_of_applying(&plain);
+
+    let mut fixture = Fixture::new(&files);
+    let mut plan = fixture.plan(vec![breaking("a.md")]);
+    for holder in ["b.md", "d.md", "e.md"] {
+        plan.conditions
+            .push(wikilink_resolving(holder, "a", Resolves::none()));
+    }
+    let with = fixture.judgments_of_applying(&plan);
+    assert_eq!(
+        (
+            with.judgments - without.judgments,
+            with.links_evaluated - without.links_evaluated
+        ),
+        (1, 3),
+        "without {without:?} with {with:?}"
+    );
+    assert_eq!(with.full_scan_steps, without.full_scan_steps);
 }

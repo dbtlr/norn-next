@@ -245,10 +245,11 @@ pub(super) enum Written {
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
 /// one it records, and each address resolution it carries resolves as
-/// recorded at the after-state ([`failed_address_resolutions`]); and every result introduces no schema violation, or, for a
-/// forced plan, has each violation it introduces listed rather than refused,
-/// each citing its rules through `citations`, the numbering of the response
-/// this judgment answers in. A plan
+/// recorded at the after-state ([`failed_address_resolutions`]); and every
+/// result introduces no schema violation, or, for a forced plan, has each
+/// violation it introduces listed rather than refused, each citing its rules
+/// through `citations`, the numbering of the response this judgment answers
+/// in. A plan
 /// whose shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
@@ -382,24 +383,20 @@ where
     let unresolved_addresses =
         failed_address_resolutions(&targets, &plan.conditions, links).map_err(Unfit::Unread)?;
     drop(targets);
-    let mut refused_conditions = link_checks(&plan.conditions, &recomputed.entries);
-    refused_conditions.extend(
-        unresolved_addresses
-            .into_iter()
-            .map(RefusedCheck::condition_failed),
-    );
+    let refused_entries = link_checks(&plan.conditions, &recomputed.entries);
     // A delete whose link choice the set it records contradicts — one
     // forbidding the links naming its document that a recorded link names,
     // or one rewriting them to no one document a link can be respelled
     // toward — is one planning leaves unresolved by the same rule
     // (`Removal::kept_by`), so the plan is not what its operations do. Where
     // the set moved since planning, the refusal's fresh plan answers for it
-    // instead; so it does where an address resolution fails, which says the
-    // vault is not what planning saw as a failed entry does. NORN-297: a
-    // move's, a rewriting delete's or a wikilink rewrite's cascade omitting a
-    // rewrite planning would generate is not held here; the set records the
-    // link it leaves, and the plan lands as recorded.
-    if refused_conditions.is_empty() && !recomputed.unkept.is_empty() {
+    // instead. The rule reads the change set alone, so an address resolution,
+    // which is no input to it, neither causes nor hides the fault: where
+    // every recorded entry matches, the plan stays invalid and has no fresh
+    // plan. A move's, a rewriting delete's or a wikilink rewrite's cascade
+    // omitting a rewrite planning would generate is not held here; the set
+    // records the link it leaves, and the plan lands as recorded.
+    if refused_entries.is_empty() && !recomputed.unkept.is_empty() {
         return Err(Unfit::Invalid(disagreement(
             recomputed.unkept.iter().filter_map(|&position| {
                 match &plan.operations[position].kind {
@@ -409,7 +406,12 @@ where
             }),
         )));
     }
-    checks.extend(refused_conditions);
+    checks.extend(refused_entries);
+    checks.extend(
+        unresolved_addresses
+            .into_iter()
+            .map(RefusedCheck::condition_failed),
+    );
     let schema = Judging {
         plan,
         states: &states,

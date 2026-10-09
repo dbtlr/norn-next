@@ -571,7 +571,7 @@ pub(super) fn failed_conditions<V: VaultView>(
                 }
             }
             // Neither is judged against the vault as it stands: `stage::check`
-            // judges them against the plan's after-state.
+            // judges them against the plan's composed results.
             PlanCondition::LinkResolution { .. } | PlanCondition::AddressResolution { .. } => true,
         };
         if !holds {
