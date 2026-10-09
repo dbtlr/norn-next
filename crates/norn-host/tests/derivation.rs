@@ -58,7 +58,7 @@ use norn_store::{
 };
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
-use norn_wire::{FindingKind, LinkAddressKind};
+use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, VaultAddress};
 
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
@@ -645,7 +645,8 @@ rules:
     );
 }
 
-/// **A rule finding's bytes at rest grow with none of what it judged.** One
+/// **A rule finding's bytes, at rest and on the wire, grow with none of what
+/// it judged.** One
 /// document is derived by a real host under schemas varying one parameter at
 /// a time, and each `field/not-one-of` row's own bytes — kind, severity,
 /// path, target, message, detail, rule-set identity, value head and value
@@ -659,8 +660,15 @@ rules:
 /// Each finding's row holds the bytes the first variant's does. What grows
 /// with the elements is the number of findings, and with the rules the one
 /// set they share, which its findings cite by one identity.
+///
+/// **The same holds on the wire.** The host's `validate` page of the same
+/// document carries each row at the byte length of the first variant's JSON
+/// row, the width of its row identity and write generation aside, and one
+/// `rule_sets` table holding the one set the rows cite, at the length of a
+/// set naming exactly the rules cited: it grows with the rules cited and with
+/// nothing else.
 #[test]
-fn a_rule_findings_bytes_at_rest_grow_with_none_of_its_elements_expectation_or_rules() {
+fn a_rule_findings_bytes_grow_with_none_of_its_elements_expectation_or_rules() {
     let sandbox =
         Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "finding-bytes").expect("a sandbox");
     let closed = |members: usize| -> String {
@@ -690,16 +698,17 @@ fn a_rule_findings_bytes_at_rest_grow_with_none_of_its_elements_expectation_or_r
         ("many rules", 1, 1, 24),
     ];
     let mut first: Option<i64> = None;
+    let mut first_on_the_wire: Option<usize> = None;
     for (label, elements, members, cited) in variants {
         let root = sandbox.work_dir().join(label.replace(' ', "-"));
         let schema = format!("version: 1\nrules:\n{}", rules(cited, members));
-        let rows = finding_rows(&root, document(elements), &schema);
+        let found = finding_rows(&root, document(elements), &schema);
         assert_eq!(
-            rows.len(),
+            found.at_rest.len(),
             elements,
             "{label}: one finding per offending element"
         );
-        for (bytes, rule_set_rules) in &rows {
+        for (bytes, rule_set_rules) in &found.at_rest {
             assert_eq!(
                 *rule_set_rules, cited as i64,
                 "{label}: a finding cites a set of other than its {cited} rules"
@@ -711,23 +720,80 @@ fn a_rule_findings_bytes_at_rest_grow_with_none_of_its_elements_expectation_or_r
                  against one member under one rule holds {expected}"
             );
         }
+        assert_eq!(
+            found.on_the_wire.len(),
+            elements,
+            "{label}: one page row per offending element"
+        );
+        for bytes in &found.on_the_wire {
+            let expected = *first_on_the_wire.get_or_insert(*bytes);
+            assert_eq!(
+                *bytes, expected,
+                "{label}: a page row is {bytes} bytes of JSON where one judging one element \
+                 against one member under one rule is {expected}"
+            );
+        }
+        // One set, however many rows cite it, listing the rules cited and
+        // nothing about the elements or the members.
+        let names: Vec<String> = (0..cited).map(|at| format!("r{at:02}")).collect();
+        assert_eq!(
+            found.rule_sets_on_the_wire,
+            serde_json::json!([{"id": found.rule_set_id, "rules": names}]).to_string(),
+            "{label}: the table holds other than the one set of the {cited} rules cited"
+        );
     }
 }
 
+/// What `finding_rows` read off a vault's store and off the host's `validate`.
+struct FoundRows {
+    /// Each `field/not-one-of` row the store holds: the bytes of the row's
+    /// own columns, and how many rules the set it cites holds.
+    at_rest: Vec<(i64, i64)>,
+    /// The JSON byte length of each row of the `validate` page.
+    on_the_wire: Vec<usize>,
+    /// The identity of the one set the page's rows cite.
+    rule_set_id: u64,
+    /// The `rule_sets` table the `validate` response carries, as JSON.
+    rule_sets_on_the_wire: String,
+}
+
 /// Derive `document` at `tasks/a.md` under `schema` in a vault under `root`,
-/// and read each `field/not-one-of` row the store holds: the bytes of the
-/// row's own columns, and how many rules the set it cites holds.
-fn finding_rows(root: &Path, document: Vec<u8>, schema: &str) -> Vec<(i64, i64)> {
+/// read each `field/not-one-of` row the store holds, and ask the host that
+/// derived it for the `validate` page of the same findings.
+fn finding_rows(root: &Path, document: Vec<u8>, schema: &str) -> FoundRows {
     let vault = root.join("vault");
     std::fs::create_dir_all(vault.join("tasks")).expect("creating the vault");
     std::fs::write(vault.join("tasks/a.md"), document).expect("writing the document");
     std::fs::create_dir_all(vault.join(".norn")).expect("creating the schema directory");
     std::fs::write(vault.join(".norn/schema.yaml"), schema).expect("writing the vault schema");
     let vault = attach::Vault::adopt(root);
-    {
+    let answered = {
         let host = vault.host();
-        drop(attach::attach_and_wait(&host, vault.name()));
-    }
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        host.validate(
+            &ValidateParams::new(VaultAddress::name(vault.name().clone()))
+                .with_kinds([FindingKind::NotOneOf]),
+        )
+        .expect("an attached vault answers a validate")
+    };
+    let ValidateReport::Findings {
+        page, rule_sets, ..
+    } = &answered.answer.report
+    else {
+        panic!("a validate answered {:?}", answered.answer.report);
+    };
+    assert!(page.next.is_none(), "the page holds every finding");
+    // A row's own numbers, its identity and its write generation, spell wider
+    // as they count higher, which depends on how many rows stand before it and
+    // on nothing it judged, so the width they spell is left out.
+    let json_length = |row| {
+        let json = serde_json::to_value(row).expect("a row as JSON");
+        let spelled = |key: &str| json[key].to_string().len();
+        json.to_string().len() - spelled("id") - spelled("generation")
+    };
+    let [rule_set] = &rule_sets[..] else {
+        panic!("the page cites {rule_sets:?}");
+    };
     let norn_db::Attempt::Connected(connection) =
         norn_db::connect(&vault.database()).expect("connecting to the store")
     else {
@@ -745,10 +811,17 @@ fn finding_rows(root: &Path, document: Vec<u8>, schema: &str) -> Vec<(i64, i64)>
              WHERE f.kind = 'field/not-one-of' ORDER BY f.id",
         )
         .expect("measuring the finding rows");
-    read.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    let at_rest = read
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .expect("reading the finding rows")
         .collect::<Result<Vec<(i64, i64)>, _>>()
-        .expect("a finding row")
+        .expect("a finding row");
+    FoundRows {
+        at_rest,
+        on_the_wire: page.rows.iter().map(json_length).collect(),
+        rule_set_id: rule_set.id,
+        rule_sets_on_the_wire: serde_json::to_string(rule_sets).expect("rule sets as JSON"),
+    }
 }
 
 /// Write `files` and `schema` into a vault under `root`, attach a real host to
