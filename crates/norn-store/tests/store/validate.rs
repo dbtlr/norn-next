@@ -1075,8 +1075,9 @@ fn a_part_on_an_unknown_key_admits_no_finding() {
 }
 
 /// **A cursor that names no position among a validate's findings is
-/// refused**: a document's, and a document finding's, which a get's page of
-/// one document's findings mints in an order that is not a validate's.
+/// refused**: a document's, a document finding's, which a get's page of
+/// one document's findings mints in an order that is not a validate's, and a
+/// repair's document.
 #[test]
 fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
     let validating_store = Validating::new("validate-cursor");
@@ -1093,6 +1094,10 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
         (
             CursorKey::document_finding("a.md", None, FindingKind::UndeclaredTag, 1),
             PagedRows::DocumentFinding,
+        ),
+        (
+            CursorKey::repair_document("a.md"),
+            PagedRows::RepairDocument,
         ),
     ] {
         assert_eq!(
