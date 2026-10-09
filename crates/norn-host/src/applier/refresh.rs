@@ -55,6 +55,12 @@ enum Fate {
 /// reaches. Nothing is rebased: applying the fresh plan is the caller's
 /// decision.
 ///
+/// **A fresh plan carries no provenance.** A repair plan's provenance records
+/// the findings it was planned from, but a fresh plan is planned from the
+/// operations the vault still owes, never from findings, so it cites,
+/// skips and continues nothing. A caller refused a repair plan runs the repair
+/// again with the `after` it sent, which reads the findings that stand now.
+///
 /// **Cascades are stripped here, and only here.** An operation resolved again
 /// goes to planning as its caller would author it, with no cascade, since
 /// planning writes a move's cascade afresh and faults on one it is handed; an

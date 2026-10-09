@@ -3660,6 +3660,150 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
     );
 }
 
+/// The statements a first batch of a narrowed repair runs on its snapshot,
+/// the establishing statement included, at every scale: five the batch reads
+/// and accounts for, and the one that establishes the snapshot.
+const REPAIR_STATEMENTS: u64 = 6;
+
+/// **A repair narrowed to a path evaluates the documents that path admits and
+/// no others, and costs the same at both scales (NORN-373).** `Host::repair`
+/// reads its batch with one call, the store's repair batch read, which on a
+/// first batch also counts the selection; this takes a read hold on the host,
+/// makes that call over `counter-gate/fixed/**`, and sums what the batch
+/// reports it read with what the snapshot ran, as a read shape does.
+///
+/// The narrowed selection admits the two findings the planted neighborhood
+/// holds, the pointer's ambiguous link and the unclosed document, at `ambiguous` (300 documents) and at `realistic` (2000), where the
+/// vaults differ only in documents outside the path. **The control** is the
+/// same call unnarrowed: it counts every finding the crowd's broken documents
+/// stand under, so it must read more at the larger scale on the batch's steps
+/// and the snapshot's.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_narrowed_repair_costs_the_same_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let at_small = read_a_repair("counter-gate-repair-ambiguous", &small);
+    let at_large = read_a_repair("counter-gate-repair-realistic", &large);
+
+    let mut failures = Vec::new();
+    for (profile, reading) in [(&small, &at_small), (&large, &at_large)] {
+        record_the_counters(
+            &format!("a narrowed repair over `{}`", profile.name),
+            &reading.narrowed,
+        );
+        for count in [
+            "validate_statements",
+            "validate_rows_read",
+            "validate_vm_steps",
+        ]
+        .iter()
+        .chain(SNAPSHOT_WORKING)
+        {
+            if reading.narrowed.get(count) == 0 {
+                failures.push(format!(
+                    "a narrowed repair over `{}` read nothing on `{count}`, so its pair says \
+                     nothing: {:?}",
+                    profile.name, reading.narrowed
+                ));
+            }
+        }
+        let ran = reading.narrowed.get("statements_executed");
+        if ran != REPAIR_STATEMENTS {
+            failures.push(format!(
+                "a narrowed repair over `{}` ran {ran} statements on its snapshot, and its \
+                 shape runs {REPAIR_STATEMENTS}",
+                profile.name
+            ));
+        }
+    }
+    failures.extend(
+        SizeIndependencePair::new(
+            "a repair narrowed to a path",
+            ScaleObservation::new(&small, at_small.narrowed.clone()),
+            ScaleObservation::new(&large, at_large.narrowed.clone()),
+        )
+        .violations(),
+    );
+    for grows in ["validate_vm_steps", "vm_steps"] {
+        let grown = (at_small.control.get(grows), at_large.control.get(grows));
+        if grown.1 <= grown.0 {
+            failures.push(format!(
+                "the unnarrowed repair did not grow with the vault on `{grows}`, reading {} \
+                 over {} documents and {} over {}",
+                grown.0, at_small.documents, grown.1, at_large.documents
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the narrowed repair failed the lane:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// What a repair cost at one scale: the narrowed form, the control, and how
+/// many documents the vault held.
+struct RepairReading {
+    documents: usize,
+    narrowed: CounterSnapshot,
+    control: CounterSnapshot,
+}
+
+/// Attach `profile` with the planted documents beside it and make the
+/// repair's batch read over a live hold, narrowed and not.
+fn read_a_repair(label: &str, profile: &norn_fixtures::Profile) -> RepairReading {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let planted = plant(&vault, profile);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mut store = vault.store();
+    let reader = Reader {
+        host: &host,
+        name: vault.name().clone(),
+        declared: the_pinned_declaration(&mut store),
+    };
+    RepairReading {
+        documents: profile.docs + planted,
+        narrowed: repair_batch_cost(&reader, [Predicate::path(format!("{PLANTED}/fixed/**"))], 2),
+        control: repair_batch_cost(&reader, [], 0),
+    }
+}
+
+/// What the first batch of a repair of the documents `predicates` admit cost
+/// on a live hold's snapshot, which must hold `rows` findings and, narrowed,
+/// count none remaining.
+fn repair_batch_cost(
+    reader: &Reader<'_>,
+    predicates: impl IntoIterator<Item = Predicate>,
+    rows: usize,
+) -> CounterSnapshot {
+    let params = norn_wire::RepairParams::new(reader.vault(), norn_wire::ApplyMode::Preview)
+        .with_predicates(predicates);
+    let hold = reader
+        .host
+        .begin_read(&reader.name)
+        .expect("a live attachment answers a read");
+    let batch = hold
+        .snapshot()
+        .repair_batch(
+            &norn_store::RepairSelection::from(&params),
+            &reader.declared,
+        )
+        .unwrap_or_else(|refusal| panic!("a repair batch was refused: {refusal:?}"));
+    if rows > 0 {
+        assert_eq!(batch.rows.len(), rows, "the narrowed batch's findings");
+        assert_eq!(
+            batch.remaining,
+            Some(0),
+            "the narrowed batch counts none left"
+        );
+    }
+    cost(batch.work.readings(), &hold.snapshot().counters())
+}
+
 /// The directory the planted documents sit in, beside the generated tree.
 ///
 /// Every planted stem opens `cg-`, which no stem the generator draws does, so

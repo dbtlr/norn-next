@@ -476,10 +476,9 @@ pub enum PagedRows {
     Finding,
     /// One document's findings, as a get pages them.
     DocumentFinding,
-    // A dormant carrier at the host: Layer 5B repair (NORN-373) is the
-    // consuming layer. `norn-store` pages these rows in its repair batch read,
-    // and the refusals name a cursor of this row type; no handler reaches it
-    // yet.
+    // `norn-store` pages these rows in its repair batch read, which
+    // `Host::repair` (Layer 5B, NORN-373) calls, and the refusals name a
+    // cursor of this row type.
     /// Documents, as a repair batches them.
     RepairDocument,
     /// Facets, as a describe pages them.

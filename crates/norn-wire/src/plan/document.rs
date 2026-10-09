@@ -49,13 +49,13 @@
 //! shape, judged by [`AuthoredPlan::control_files_beside_documents`] and
 //! [`ResolvedPlan::control_files_beside_documents`].
 //!
-//! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
+//! **Provenance is what a repair plan was planned from.** Repair plans cite
 //! the finding generation they read, the findings each operation fixes, the
-//! findings they skipped and where the next batch continues. No Layer 4
-//! planner emits provenance — every Layer 4 plan is authored by a write verb
-//! or a caller, and neither plans from findings — so the current call graph
-//! reaches it only through a caller sending it back. It is spelled here so a
-//! repair plan is the same document every other plan is.
+//! findings they skipped and where the next batch continues. `Host::repair`
+//! is the one planner that emits it, and only on a resolved plan: an authored
+//! plan plans from no findings. It is a record, never checked when the plan is
+//! applied, and the fresh plan a refusal answers carries none. It is spelled
+//! here so a repair plan is the same document every other plan is.
 //!
 //! **Each plan carries its own tag, so a resolved plan is its own retry
 //! token.** A resolved plan crosses inside every answer an apply gives after
@@ -682,14 +682,11 @@ impl Citation {
     }
 }
 
-// A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer. A
-// repair plan cites the finding generation it read, the findings each
-// operation fixes and the findings it skipped, and carries the cursor that
-// continues a batch that leaves more; no Layer 4 planner plans from
-// findings, so nothing in the current call graph emits this, and it is
-// reached only when a caller sends a plan carrying one back. Its published
-// description stays wire-facing, so the roadmap note lives here rather than
-// in the doc comment schemars lifts.
+// `Host::repair` (Layer 5B, NORN-373) emits this: a repair plan cites the
+// finding generation it read, the findings each operation fixes and the
+// findings it skipped, and carries the cursor that continues a batch that
+// leaves more. Its published description stays wire-facing, so the note
+// lives here rather than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
 ///

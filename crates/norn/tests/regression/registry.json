@@ -1906,9 +1906,9 @@
       "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing repairs: no plan targets a finding or writes an element fix, so there is no precondition to match and no fix to compare. The query, validate and mutate clauses of element-vs-collection-semantics-are-one-rule are bound there; this case binds at Layer 5B (NORN-351) with the repair planner, pre-committed as the module crates/norn-host/src/planner.rs::repair.",
+        "reason": "nothing fixes: the repair verb reads and skips every selected finding, since no fix exists yet, so no plan writes an element fix and there is no precondition to match and no fix to compare. The query, validate and mutate clauses of element-vs-collection-semantics-are-one-rule are bound there; this case binds at NORN-374 (Layer 5B declared fixes), pre-committed as the declared-fix module crates/norn-host/src/planner/repair.rs::declared.",
         "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::declared" }
         ]
       }
     },
@@ -1920,9 +1920,9 @@
       "sources": ["NRN-494", "NRN-495", "NRN-59", "NRN-438", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing repairs: no declared fix, rule default or route is applied by a repair, so there is no repaired value to judge. The load, finding and selection clauses of unsatisfiable-config-is-rejected-at-load are bound there; this case binds at the Layer 5 exit walk with a named test over every declared fix, default and route, its carrier the repair planner pre-committed as the module crates/norn-host/src/planner.rs::repair.",
+        "reason": "nothing fixes: the repair verb reads and skips every selected finding, since no declared fix, rule default or route exists to apply, so there is no repaired value to judge. The load, finding and selection clauses of unsatisfiable-config-is-rejected-at-load are bound there; this case binds at the Layer 5 exit walk with a named test over every declared fix, default and route, its carrier the declared-fix module pre-committed as crates/norn-host/src/planner/repair.rs::declared.",
         "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::declared" }
         ]
       }
     },
@@ -1934,9 +1934,9 @@
       "sources": ["norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no repair planner exists: the repair verb and the planner that compiles findings into one resolved plan land at Layer 5B (NORN-351), pre-committed as the module crates/norn-host/src/planner.rs::repair, which is where a link fix targeting unresolvable text and repair guidance outside the validation scope can first be asserted.",
+        "reason": "no link fix exists: the repair verb skips every broken, ambiguous and missing-anchor finding, and since ADR 0038 no derived fix answers a broken link, so the similarity suggestion and the move-following that target unresolvable text, and the repair guidance outside the validation scope, land at Layer 5C (NORN-352), pre-committed as the module crates/norn-host/src/planner/repair.rs::suggested, which is where they can first be asserted.",
         "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::suggested" }
         ]
       }
     },
@@ -1947,10 +1947,10 @@
       "property": "A repair narrowed to requested paths evaluates the documents those paths admit and no others, so its work follows the requested set rather than the vault. Repair evaluating 1593 documents and then filtering to the requested paths is the shape this forbids.",
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
-        "status": "dormant",
-        "reason": "no repair planner exists: the repair verb and the planner that reads its selected findings land at Layer 5B (NORN-351), pre-committed as the module crates/norn-host/src/planner.rs::repair, which is where the documents a narrowed repair evaluates can first be counted.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/counter_gate.rs::a_narrowed_repair_costs_the_same_at_both_scales",
+          "crates/norn-store/tests/store/validate/batch.rs::a_batch_costs_the_batch_not_the_vault"
         ]
       }
     },

@@ -3034,6 +3034,34 @@ fn a_refused_forced_plan_refreshes_forced() {
     assert!(refused.plan.force);
 }
 
+/// **A refused repair plan answers a fresh plan with no provenance block.**
+/// The fresh plan is planned from the operations the vault still owes, not from
+/// findings: what a repair plan cited, skipped and continued by is not carried
+/// over, and the caller runs the repair again with the `after` it sent.
+#[test]
+fn a_refused_plan_carrying_provenance_answers_a_fresh_plan_with_none() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.provenance = Some(
+        norn_wire::Provenance::new(
+            7,
+            vec![norn_wire::SkippedFinding::new(
+                3,
+                norn_wire::SkipReason::NoDeclaredFix,
+            )],
+        )
+        .with_remaining(2),
+    );
+    fixture.foreign("a.md", "draft, edited\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.plan.operations.len(),
+        1,
+        "the operation still plans"
+    );
+    assert_eq!(refused.plan.provenance, None);
+}
+
 /// A push of the tag `stray`, which `TAG_SCHEMA` does not declare, into
 /// `a.md`.
 fn pushing_a_stray_tag() -> Operation {

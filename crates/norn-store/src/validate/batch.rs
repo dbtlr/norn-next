@@ -23,6 +23,16 @@
 //! a document was cut, one more finding read past it tells whether more
 //! remain.
 //!
+//! # A first batch counts what remains
+//!
+//! A first batch, one that resumes after no path, also reads the exact number
+//! of selected findings that remain after it: the selection's tally, as a
+//! validate's summary reads it, less the findings the batch holds. The tally
+//! is one more statement of the same read, counted into the batch's work and
+//! explained with its plans, and its cost is the findings the selection
+//! admits, so a selection narrowed to a few documents counts a few. A
+//! continuation reads no count.
+//!
 //! # The cursor names the last document, and only when more remain
 //!
 //! The cursor a batch mints names the path of the last document it covered,
@@ -95,6 +105,10 @@ pub struct RepairBatch {
     /// Where the next batch begins: the last document this batch covered. It
     /// is present only where more remain, and minted under no fingerprint.
     pub next: Option<Cursor>,
+    /// How many selected findings remain after this batch, exactly: the
+    /// selection's whole tally less the findings the batch holds. Read on a
+    /// first batch only, so `None` on a continuation, which reads no count.
+    pub remaining: Option<u64>,
     /// What moved between the cursor this batch continued and the snapshot it
     /// was answered from. Empty on a first batch.
     pub moved: Vec<Moved>,
@@ -111,9 +125,8 @@ pub struct RepairBatch {
 }
 
 impl Snapshot {
-    // A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer.
-    // The host's repair handler pages a repair through this read; nothing
-    // calls it outside this crate's tests until that handler lands.
+    // `Host::repair` (Layer 5B, NORN-373) calls this read: it pages a repair
+    // through it, one batch per request.
     /// The selected findings of the next documents in path order, a batch of
     /// about `selection.limit` findings that never splits a document.
     ///
@@ -199,6 +212,16 @@ impl Snapshot {
             )),
             _ => None,
         };
+        let remaining = match selection.after {
+            Some(_) => None,
+            None => {
+                let held = bases.len() as u64;
+                Some(
+                    self.selected_findings(&narrowing, lookups, &mut work)?
+                        .saturating_sub(held),
+                )
+            }
+        };
         let rows = self.finding_rows(&mut lookups.ran, bases)?;
         let rule_sets = self.rule_sets(&mut lookups.ran, &rows)?;
         let advisories =
@@ -209,12 +232,28 @@ impl Snapshot {
             rows,
             rule_sets,
             next,
+            remaining,
             moved,
             unsatisfied,
             advisories,
             snapshot,
             work,
         })
+    }
+
+    /// How many findings the selection admits in all: the tally a validate's
+    /// summary reads, summed, with the rows it handed back and the steps it
+    /// took counted into `work`.
+    fn selected_findings(
+        &self,
+        narrowing: &Narrowing,
+        lookups: &mut Lookups,
+        work: &mut ValidateWork,
+    ) -> Result<u64, StoreError> {
+        let mut tallied = ValidateWork::default();
+        let by_kind = self.summarize(narrowing, lookups, &mut tallied)?;
+        work.absorb(tallied);
+        Ok(by_kind.iter().map(|tally| tally.count).sum())
     }
 
     /// The findings of one batch, and whether more remain after them: the

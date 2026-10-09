@@ -58,14 +58,14 @@ use std::sync::Arc;
 
 use norn_fs::WatchError;
 use norn_store::{
-    ContentModel, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink, Snapshot,
-    TargetNaming,
+    ContentModel, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink,
+    RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, DocumentPath, EditParams,
     ErrorDetail, ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate,
-    RewriteWikilinkParams, RootIdentity, SetParams, TrustState, UntrustedReason, VaultAddress,
-    VaultAnswer, VaultName,
+    Provenance, RepairParams, ResolvedPlan, RewriteWikilinkParams, RootIdentity, SetParams,
+    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -73,14 +73,15 @@ use crate::applier;
 use crate::derivation::Declared;
 use crate::evidence::{LinkJudgmentCost, SnapshotWork};
 use crate::lifecycle::{
-    ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadRefusal, ReadSource,
-    ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
+    ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadHold, ReadRefusal,
+    ReadSource, ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
 };
 use crate::planner::control::SchemaPlace;
 use crate::planner::expand::{
     ExpandingFailure, Matched, MatchedDocument, Matcher, listed, resolve_expanding,
 };
 use crate::planner::links::LinkIndex;
+use crate::planner::repair;
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::rule::Rules;
 use crate::planner::view::TreeView;
@@ -593,6 +594,32 @@ fn preview_resolved(
     }
 }
 
+/// The ground a read hold plans against, with its root asked of the
+/// filesystem.
+///
+/// Production ops record a ground with every declaration, under the gate hold
+/// that publishes the coverage this read holds, so only ops that report none
+/// — test ops — reach the refusal: a host defect, answered as the read seam
+/// it is, never as a cause the vault met.
+fn planning_ground<'h, O>(
+    hold: &'h ReadHold<O>,
+    name: &VaultName,
+) -> Result<&'h PlanGround, ErrorEnvelope>
+where
+    O: EntryOps,
+{
+    let ground = hold.plan_ground().ok_or_else(|| {
+        ErrorEnvelope::new(
+            "the entry records no ground to plan against, so the plan was not made",
+            ErrorDetail::reader_unavailable(
+                "the entry's ops record no plan ground over its coverage",
+            ),
+        )
+    })?;
+    ground.standing(name)?;
+    Ok(ground)
+}
+
 impl<O> Host<O>
 where
     O: EntryOps,
@@ -684,6 +711,72 @@ where
         self.apply_operations(mode, params.plan())
     }
 
+    /// Answer a `repair`: the next batch of the findings `params` selects,
+    /// planned as one resolved plan and previewed or applied through
+    /// [`Host::apply`].
+    ///
+    /// The batch is whole documents in path order ([`Snapshot::repair_batch`]),
+    /// read under one hold with the plan resolved on that hold's snapshot.
+    /// The plan carries its [`Provenance`]: the findings it left alone, the
+    /// findings each operation fixes, the generation it read, the cursor that
+    /// continues the batch, and, on a first batch, how many selected findings
+    /// remain after it. The hold is given back before the plan enters
+    /// [`Host::apply`], so the applier judges and writes the resolved plan as
+    /// it judges any, and the provenance it carries decides nothing there.
+    ///
+    /// A request a read would refuse is refused as the read refuses it,
+    /// including a cursor no repair minted.
+    pub fn repair(&self, params: RepairParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        let plan = self.repair_plan(&params)?;
+        self.apply(ApplyParams::new(mode, PlanDocument::resolved(plan)))
+    }
+
+    /// The resolved plan of the batch `params` selects, planned on one read
+    /// hold that is given back when this returns.
+    fn repair_plan(&self, params: &RepairParams) -> Result<ResolvedPlan, ErrorEnvelope> {
+        let name = registered_name(&params.vault)?;
+        let hold = self
+            .begin_read(name)
+            .map_err(|refusal| refusal.answer(name))?;
+        hold.reading().answer_reading(name)?;
+        let ground = planning_ground(&hold, name)?;
+        let snapshot =
+            PlanSnapshot::held(params.vault.clone(), hold.snapshot(), hold.content_model());
+        let refused = |refused| match refused {
+            PageRefused::Answered(refused) => refused,
+            PageRefused::Damaged(detail) => {
+                self.withdraw_for_read_damage(&hold, detail).answer(name)
+            }
+        };
+        let batch = hold
+            .snapshot()
+            .repair_batch(&RepairSelection::from(params), hold.content_model())
+            .map_err(|refusal| refused(page_refusal(refusal)))?;
+        // The batch's `moved` is not carried: a repair cursor names a path and
+        // the batch reads the state that stands now, so nothing in it is the
+        // caller's to act on. Its advisories are dropped as a `where` target's
+        // are (`PlanSnapshot::matching` reads only the find's rows). Its
+        // `unsatisfied` parts name a selection that matched nothing as asked;
+        // refusing them waits on an error detail that can carry them.
+        let planned = repair::plan(&batch.rows);
+        let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
+        let resolution = resolve_on(authored, ground, name, &snapshot).map_err(refused);
+        // Repair plans under a read hold as a preview does, so what its link
+        // judgments cost is the same read account's, however it ended.
+        self.count_preview_link_judgments(snapshot.link_judgment_cost());
+        let plan = fully_resolved(resolution?)?.plan;
+        let mut provenance = Provenance::new(batch.snapshot.generation, planned.skipped)
+            .with_citations(planned.citations);
+        if let Some(remaining) = batch.remaining {
+            provenance = provenance.with_remaining(remaining);
+        }
+        if let Some(next) = batch.next {
+            provenance = provenance.continued_by(next);
+        }
+        Ok(plan.with_provenance(provenance))
+    }
+
     /// A write verb's compiled `plan`, entering the one `apply` path.
     fn apply_operations(
         &self,
@@ -709,19 +802,7 @@ where
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
-        // Production ops record a ground with every declaration, under the
-        // gate hold that publishes the coverage this read holds, so only ops
-        // that report none — test ops — reach the refusal: a host defect,
-        // answered as the read seam it is, never as a cause the vault met.
-        let ground = hold.plan_ground().ok_or_else(|| {
-            ErrorEnvelope::new(
-                "the entry records no ground to plan against, so the preview was not planned",
-                ErrorDetail::reader_unavailable(
-                    "the entry's ops record no plan ground over its coverage",
-                ),
-            )
-        })?;
-        ground.standing(name)?;
+        let ground = planning_ground(&hold, name)?;
         let snapshot =
             PlanSnapshot::held(plan.vault().clone(), hold.snapshot(), hold.content_model());
         let answered = |refused| match refused {

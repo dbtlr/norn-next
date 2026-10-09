@@ -240,6 +240,16 @@ impl ValidateWork {
         .into_iter()
     }
 
+    /// Count `read`, a statement's reading, into this one: its rows and its
+    /// steps. The statements are counted once, from the snapshot, by the
+    /// validate that ran them all.
+    fn absorb(&mut self, read: ValidateWork) {
+        self.rows_read += read.rows_read;
+        self.full_scan_steps += read.full_scan_steps;
+        self.sorts += read.sorts;
+        self.vm_steps += read.vm_steps;
+    }
+
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;
         self.sorts += stepped.sorts;
