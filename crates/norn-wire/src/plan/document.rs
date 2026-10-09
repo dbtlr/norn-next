@@ -89,7 +89,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::cursor::Cursor;
-use crate::document::{DocumentPath, LinkFamily};
+use crate::document::{DocumentPath, LinkFamily, written_protocol};
 use crate::finding_row::{
     CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead, plan_candidate_head,
     plan_candidate_head_schema, plan_optional_value_head, plan_optional_value_head_schema,
@@ -227,8 +227,10 @@ impl Transition {
 /// **A key names a link as it stands at the plan's after-state.** A link a
 /// cascade rewrites is keyed by its new address, not the one it is written
 /// with before the plan. A link the after-state no longer holds — an old
-/// address a rewrite replaced, a link in a removed document — has no key: its
-/// disappearance is the plan's own transition, guarded by that file's hashes.
+/// address a rewrite replaced, a link in a removed document — is no entry of
+/// the change set: its disappearance is the plan's own transition, guarded by
+/// that file's hashes. A key can still name such an address, as an address
+/// resolution about an address a repair replaces does.
 ///
 /// On the wire a key is one object:
 /// `{"holder":"notes/c.md","syntax":"wikilink","address":"vault://notes/a"}`.
@@ -255,6 +257,20 @@ impl LinkKey {
             holder,
             syntax,
             address: address.into(),
+        }
+    }
+
+    /// The protocol the address is written with, and the stem after it:
+    /// `vault://notes/a` is `(Some("vault"), "notes/a")`, and `notes/a` is
+    /// `(None, "notes/a")`. A protocol is recognized as the text layer
+    /// recognizes one, so `HTTPS://x` and `note:draft` are stems with none.
+    pub fn protocol_and_stem(&self) -> (Option<&str>, &str) {
+        match written_protocol(&self.address) {
+            Some(protocol) => (
+                Some(protocol),
+                &self.address[protocol.len() + "://".len()..],
+            ),
+            None => (None, &self.address),
         }
     }
 }
@@ -324,7 +340,9 @@ impl Resolves {
 /// comparison ignores it.
 ///
 /// **An address resolution is checked at the after-state.** From this holder,
-/// this address must resolve to `after` once the plan has been applied.
+/// this address must resolve to `after` once the plan has been applied, in a
+/// preview and an apply alike; the address need not stand in the holder after
+/// the plan, since a repair records one it replaces.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,

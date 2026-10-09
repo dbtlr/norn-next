@@ -11677,6 +11677,24 @@ fn an_address_resolution_is_a_link_and_where_its_address_lands() {
     );
 }
 
+/// A link key splits its address into the protocol it is written with and
+/// the stem after it, recognizing a protocol as the text layer does.
+#[test]
+fn a_link_key_splits_its_address_into_protocol_and_stem() {
+    let split = |address: &str| {
+        let key = LinkKey::new(path("notes/c.md"), LinkFamily::Wikilink, address);
+        let (protocol, stem) = key.protocol_and_stem();
+        (protocol.map(str::to_owned), stem.to_owned())
+    };
+    assert_eq!(
+        split("vault://notes/a"),
+        (Some("vault".to_owned()), "notes/a".to_owned())
+    );
+    for unprotocoled in ["notes/a", "", "HTTPS://x", "note:draft", "vault://"] {
+        assert_eq!(split(unprotocoled), (None, unprotocoled.to_owned()));
+    }
+}
+
 /// The value head and the required-field head are bounded as the candidate
 /// head is: the constructor truncates to the bound, the read refuses a head
 /// over it and a total below the head.

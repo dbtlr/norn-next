@@ -670,6 +670,93 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     Ok(set)
 }
 
+/// Every address resolution among `conditions` that does not hold at the
+/// plan's after-state, in the order they are recorded: from the condition's
+/// holder, its address resolves to something other than what it records.
+///
+/// **The address is probed, not looked up.** An address resolution names the
+/// link by holder, syntax and address, and the link need not stand in the
+/// holder after the plan: an address a rewrite replaced is judged as well as
+/// one it writes. Each is handed to `index` as a link the plan writes, so it
+/// is judged and handed back whatever it resolves to, from its holder's
+/// after-state path, over an overlay that draws every target of the plan at
+/// its after-state alone. The overlay changes no target's presence, so the
+/// judgment reads only the keys the probes name, in the one call every
+/// condition shares, and none of the links the store holds under the keys a
+/// target could be named by. A plan recording no address resolution asks
+/// `index` nothing.
+///
+/// A condition whose syntax the store holds no link of (`probe_of` is `None`)
+/// is reported failed: no resolution could confirm it.
+///
+/// A holder a move carried is probed from where it lands: the condition names
+/// the holder at its after-state path, and only the after side of a judgment
+/// is read, so no lineage source is needed.
+pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
+    targets: &[Target<'_>],
+    conditions: &[PlanCondition],
+    index: &I,
+) -> Result<Vec<PlanCondition>, I::Error> {
+    let recorded: Vec<(&PlanCondition, &LinkKey, &Resolves)> = conditions
+        .iter()
+        .filter_map(|condition| match condition {
+            PlanCondition::AddressResolution { link, after } => Some((condition, link, after)),
+            PlanCondition::ContentHash { .. } | PlanCondition::LinkResolution { .. } => None,
+        })
+        .collect();
+    if recorded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let overlay = targets.iter().fold(PathOverlay::new(), |overlay, target| {
+        let standing = target.after.is_some();
+        overlay.with(stored_path(target.path), standing, standing)
+    });
+    let probed: Vec<ProbedLink> = recorded
+        .iter()
+        .filter_map(|(_, link, _)| probe_of(link))
+        .collect();
+    let mut resolved: BTreeMap<EntryKey, Resolves> = BTreeMap::new();
+    index.changes(&overlay, &probed, &mut |change| {
+        let key = LinkKey::new(
+            wire_path(&change.holder),
+            wire_family(change.link.family),
+            address(&change.link),
+        );
+        resolved.insert(entry_key(&key), change.after);
+    })?;
+    Ok(recorded
+        .into_iter()
+        .filter(|(_, link, after)| resolved.get(&entry_key(link)) != Some(*after))
+        .map(|(condition, _, _)| condition.clone())
+        .collect())
+}
+
+/// `link` as a link its holder's after-state writes, to be judged wherever it
+/// resolves; `None` for a syntax the store holds no link of.
+fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
+    let family = match link.syntax {
+        LinkFamily::Wikilink => norn_store::LinkFamily::Wikilink,
+        LinkFamily::Markdown => norn_store::LinkFamily::Markdown,
+        _ => return None,
+    };
+    let (protocol, stem) = link.protocol_and_stem();
+    let holder = stored_path(&link.holder);
+    Some(ProbedLink {
+        before_holder: holder.clone(),
+        after_holder: holder,
+        link: norn_store::LinkFact {
+            family,
+            embed: false,
+            protocol: protocol.map(str::to_string),
+            target: stem.to_string(),
+            title: None,
+            anchor: None,
+            span: None,
+        },
+        written: true,
+    })
+}
+
 /// Each key holding a link a plan's rewrites left as written, matched or
 /// not: a link a rewrite matched and the text layer left (`skipped`), and a
 /// link no rewrite matched under an address one writes (`kept`). Every link

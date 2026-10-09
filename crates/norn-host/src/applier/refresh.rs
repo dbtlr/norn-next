@@ -45,8 +45,8 @@ enum Fate {
 /// never resolved again or dropped. Every drifted target is marked in the
 /// forecast, because a hash cannot tell whether it already carries this
 /// plan's change. Every fresh plan carries the refused plan's footnote, its
-/// address-resolution conditions as recorded (nothing yet checks them, so a
-/// fresh plan sent back is refused again), and its force, an empty one whose
+/// address-resolution conditions as recorded (a fresh plan sent back is
+/// checked against them again), and its force, an empty one whose
 /// operations no longer plan included, and a forced fresh plan's forecast
 /// lists the schema violations its force lets through, judged under
 /// `declared` by the applier's one judgment, so it is what a preview of the
@@ -200,8 +200,10 @@ pub(super) fn refuse_and_refresh(
     };
     unresolved.sort_by_key(|(position, _)| *position);
     let forced = forced_through(&fresh, view, declared, links, &mut citations);
-    // Carried after the forced judgment above, which the carried conditions
-    // would refuse, since nothing yet checks them.
+    // Carried after the forced judgment above, which would list nothing
+    // where a carried condition failed: that judgment answers what the
+    // force lets through for the operations alone, so it does not depend on
+    // whether the recorded evidence still holds, which the checks report.
     fresh
         .conditions
         .extend(address_resolutions(&plan.conditions));
@@ -222,8 +224,14 @@ pub(super) fn refuse_and_refresh(
 /// The address-resolution conditions among `conditions`, as recorded.
 ///
 /// A fresh plan is resolved from operations, which never record these, so the
-/// refused plan's are carried over unchanged: where the evidence they record
-/// has changed, the fresh plan refuses again rather than applying unchecked.
+/// refused plan's are carried over unchanged, and the applier checks them at
+/// the fresh plan's after-state like any plan's: a fresh plan sent back where
+/// the evidence they record has changed is refused again.
+///
+/// **Known limit.** A condition names no operation, so the fresh plan carries
+/// the conditions of operations it dropped or left unresolved too, and may
+/// refuse on evidence for an operation it no longer holds; the caller re-runs
+/// repair.
 fn address_resolutions(conditions: &[PlanCondition]) -> Vec<PlanCondition> {
     conditions
         .iter()

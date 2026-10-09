@@ -28,7 +28,8 @@ use crate::planner::compose::{After, Composition};
 use crate::planner::control::role_at;
 use crate::planner::lineage::Lineage;
 use crate::planner::links::{
-    Holding, LinkIndex, Target, change_set, entry_key, vouched, vouched_block,
+    Holding, LinkIndex, Target, change_set, entry_key, failed_address_resolutions, vouched,
+    vouched_block,
 };
 use crate::planner::view::{Body, Entry, TreeView, VaultView, wire_hash};
 use crate::refusal::PageRefused;
@@ -243,10 +244,12 @@ pub(super) enum Written {
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
-/// one it records; and every result introduces no schema violation, or, for a
-/// forced plan, has each violation it introduces listed rather than refused,
-/// each citing its rules through `citations`, the numbering of the response
-/// this judgment answers in. A plan
+/// one it records, and each address resolution it carries resolves as
+/// recorded at the after-state ([`failed_address_resolutions`]); and every
+/// result introduces no schema violation, or, for a forced plan, has each
+/// violation it introduces listed rather than refused, each citing its rules
+/// through `citations`, the numbering of the response this judgment answers
+/// in. A plan
 /// whose shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
@@ -374,19 +377,26 @@ where
         links,
     )
     .map_err(Unfit::Unread)?;
+    // An address resolution is judged here, not in `failed_conditions`: it is
+    // a fact about the plan's after-state, which only the composed targets
+    // draw.
+    let unresolved_addresses =
+        failed_address_resolutions(&targets, &plan.conditions, links).map_err(Unfit::Unread)?;
     drop(targets);
-    let refused_links = link_checks(&plan.conditions, &recomputed.entries);
+    let refused_entries = link_checks(&plan.conditions, &recomputed.entries);
     // A delete whose link choice the set it records contradicts — one
     // forbidding the links naming its document that a recorded link names,
     // or one rewriting them to no one document a link can be respelled
     // toward — is one planning leaves unresolved by the same rule
     // (`Removal::kept_by`), so the plan is not what its operations do. Where
     // the set moved since planning, the refusal's fresh plan answers for it
-    // instead. NORN-297: a move's, a rewriting delete's or a wikilink
-    // rewrite's cascade omitting a rewrite planning would generate is not
-    // held here; the set records the link it leaves, and the plan lands as
-    // recorded.
-    if refused_links.is_empty() && !recomputed.unkept.is_empty() {
+    // instead. The rule reads the change set alone, so an address resolution,
+    // which is no input to it, neither causes nor hides the fault: where
+    // every recorded entry matches, the plan stays invalid and has no fresh
+    // plan. A move's, a rewriting delete's or a wikilink rewrite's cascade
+    // omitting a rewrite planning would generate is not held here; the set
+    // records the link it leaves, and the plan lands as recorded.
+    if refused_entries.is_empty() && !recomputed.unkept.is_empty() {
         return Err(Unfit::Invalid(disagreement(
             recomputed.unkept.iter().filter_map(|&position| {
                 match &plan.operations[position].kind {
@@ -396,7 +406,12 @@ where
             }),
         )));
     }
-    checks.extend(refused_links);
+    checks.extend(refused_entries);
+    checks.extend(
+        unresolved_addresses
+            .into_iter()
+            .map(RefusedCheck::condition_failed),
+    );
     let schema = Judging {
         plan,
         states: &states,
@@ -540,7 +555,7 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// that the set does not hold with the same values fails, and each entry the
 /// set holds that it does not record is unrecorded. A content condition is
 /// not an entry, and is judged on its own; nor is an address resolution, which
-/// the comparison ignores.
+/// the comparison ignores and [`failed_address_resolutions`] judges.
 ///
 /// **The set is exact** (ADR 0037): a link whose resolution the vault outside
 /// the plan moved since planning — a document created or removed there that
@@ -557,8 +572,8 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
                 }
                 // An address resolution is no entry of the change set: it is
                 // never computed again from the operations, so the
-                // comparison ignores it (NORN-371 checks it at the
-                // after-state).
+                // comparison ignores it, and `failed_address_resolutions`
+                // judges it at the after-state.
                 PlanCondition::ContentHash { .. } | PlanCondition::AddressResolution { .. } => None,
             })
             .collect()
