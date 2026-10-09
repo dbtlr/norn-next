@@ -90,7 +90,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use crate::address::VaultAddress;
 use crate::cursor::Cursor;
 use crate::document::{DocumentPath, LinkFamily};
-use crate::finding_row::{CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead};
+use crate::finding_row::{
+    CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead, plan_candidate_head,
+    plan_candidate_head_schema, plan_optional_value_head, plan_optional_value_head_schema,
+};
 use crate::plan::hash::ContentHash;
 use crate::plan::operation::{Operation, OperationId, OperationKind, written};
 use crate::plan::outcome::PlanFault;
@@ -473,6 +476,8 @@ pub enum SkippedCandidates {
     #[non_exhaustive]
     Documents {
         /// The head of the documents.
+        #[serde(deserialize_with = "plan_candidate_head")]
+        #[schemars(schema_with = "plan_candidate_head_schema")]
         head: CandidateHead,
     },
     /// The values a field could have been given.
@@ -508,7 +513,12 @@ pub struct SkippedFinding {
     pub reason: SkipReason,
     /// The finding's actual value, as its bounded head, and absent where the
     /// finding is about none: a missing required field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "plan_optional_value_head"
+    )]
+    #[schemars(schema_with = "plan_optional_value_head_schema")]
     pub value: Option<ValueHead>,
     /// What the plan had to choose between, where the reason is a choice it
     /// would not make.
@@ -589,7 +599,12 @@ pub struct CitedFinding {
     pub finding: u64,
     /// The finding's actual (offending) value, as its bounded head, and
     /// absent where the finding is about none: a missing required field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "plan_optional_value_head"
+    )]
+    #[schemars(schema_with = "plan_optional_value_head_schema")]
     pub value: Option<ValueHead>,
     /// How sure the repair is of the fix.
     pub confidence: Confidence,

@@ -8214,6 +8214,12 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         "/provenance",
         "/provenance/citations/0",
         "/provenance/citations/0/findings/1",
+        "/provenance/citations/0/findings/1/value",
+        "/provenance/skipped/0/candidates/head",
+        "/provenance/skipped/0/candidates/head/candidates/0",
+        "/provenance/skipped/1/value",
+        "/provenance/skipped/1/candidates/head/candidates/0/value",
+        "/provenance/skipped/3/required_fields/fields/0/default",
         "/provenance/skipped/0",
         "/provenance/skipped/0/candidates",
         "/provenance/skipped/1/candidates",
@@ -11594,6 +11600,12 @@ fn every_repair_plan_type_round_trips_and_refuses_an_unknown_field() {
         "",
         "/citations/0",
         "/citations/0/findings/0",
+        "/citations/0/findings/1/value",
+        "/skipped/0/candidates/head",
+        "/skipped/0/candidates/head/candidates/0",
+        "/skipped/1/value",
+        "/skipped/1/candidates/head/candidates/0/value",
+        "/skipped/3/required_fields/fields/0/default",
         "/skipped/0",
         "/skipped/0/candidates",
         "/skipped/1/candidates",
@@ -11816,4 +11828,32 @@ fn a_repair_request_names_its_mode_and_takes_no_force_or_conditions() {
         )
         .is_err()
     );
+}
+
+/// **The answer types a provenance embeds still drop an unknown key in an
+/// answer.** A plan reads a value head, a candidate and a candidate head
+/// strictly; a finding row, which holds the same types, reads them as every
+/// answer does, and so do the types read alone.
+#[test]
+fn the_heads_a_provenance_embeds_still_drop_an_unknown_key_in_an_answer() {
+    let row = finding_row().with_value(a_value("someday"));
+    let json = serde_json::to_value(&row).expect("a finding row as JSON");
+    for pointer in ["", "/head", "/head/candidates/0", "/value"] {
+        let read = serde_json::from_str::<FindingRow>(&with_surprise(&json, pointer))
+            .unwrap_or_else(|error| panic!("an answer refused a key at `{pointer}`: {error}"));
+        assert_eq!(read, row, "the row read with a key at `{pointer}` changed");
+    }
+    let value = serde_json::to_value(a_value("someday")).expect("a value head as JSON");
+    assert_eq!(
+        serde_json::from_str::<ValueHead>(&with_surprise(&value, "")).expect("a value head"),
+        a_value("someday")
+    );
+    let documents = serde_json::to_value(row.head.clone()).expect("a head as JSON");
+    for pointer in ["", "/candidates/0"] {
+        assert_eq!(
+            serde_json::from_str::<CandidateHead>(&with_surprise(&documents, pointer))
+                .expect("a candidate head"),
+            row.head
+        );
+    }
 }

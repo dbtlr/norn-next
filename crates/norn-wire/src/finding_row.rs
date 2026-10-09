@@ -204,17 +204,24 @@ impl<'de> Deserialize<'de> for CandidateHead {
         D: Deserializer<'de>,
     {
         let fields = CandidateHeadFields::deserialize(deserializer)?;
-        if fields.candidates.len() > CANDIDATE_HEAD {
-            return Err(D::Error::custom(format!(
+        CandidateHead::read(fields.candidates, fields.total).map_err(D::Error::custom)
+    }
+}
+
+impl CandidateHead {
+    /// The head as it arrives, `candidates` out of `total`: the one read
+    /// check, shared by the answer read and the plan read. A head longer than
+    /// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total below the
+    /// candidates beside it heads nothing.
+    fn read(candidates: Vec<Candidate>, total: u64) -> Result<Self, String> {
+        if candidates.len() > CANDIDATE_HEAD {
+            return Err(format!(
                 "a candidate head holds at most {CANDIDATE_HEAD} candidates, and this one holds {}",
-                fields.candidates.len()
-            )));
+                candidates.len()
+            ));
         }
-        TotalBelowHead::check(fields.candidates.len(), fields.total).map_err(D::Error::custom)?;
-        Ok(CandidateHead {
-            candidates: fields.candidates,
-            total: fields.total,
-        })
+        TotalBelowHead::check(candidates.len(), total).map_err(|refusal| refusal.to_string())?;
+        Ok(CandidateHead { candidates, total })
     }
 }
 
@@ -362,6 +369,8 @@ macro_rules! bounded_head {
 #[non_exhaustive]
 pub struct ValueCandidate {
     /// The value the rule proposes, as its bounded head.
+    #[serde(deserialize_with = "plan_value_head")]
+    #[schemars(schema_with = "plan_value_head_schema")]
     pub value: ValueHead,
     /// The name of the schema rule that proposed it, and absent where no
     /// named rule did.
@@ -404,7 +413,12 @@ pub struct RequiredField {
     pub field: String,
     /// The default the rules declare for it as its bounded head, and absent
     /// where they declare none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "plan_optional_value_head"
+    )]
+    #[schemars(schema_with = "plan_optional_value_head_schema")]
     pub default: Option<ValueHead>,
 }
 
@@ -432,6 +446,119 @@ bounded_head!(
     list_doc: "The fields the repair would bring in, each with the default the rules declare for it.",
     total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
 );
+
+// The plan-side read of the answer types a repair plan's provenance embeds.
+//
+// An answer drops a field it does not know and a plan refuses one, at every
+// depth (the crate documentation states the divergence). `ValueHead`,
+// `Candidate` and `CandidateHead` are answer types, so they keep dropping in
+// finding rows, and a plan reads them through the functions below instead:
+// each reads a mirror that refuses an unknown key and builds the type through
+// the constructor or check the answer read uses, so the bounds are not
+// stated twice. The schema functions advertise the same refusal by closing
+// the type's object schema, written inline because a closed `$ref` target
+// would close it for the answers too.
+
+/// A value head as a plan writes it: its three keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanValueHead {
+    text: String,
+    byte_length: u64,
+    hash: ContentHash,
+}
+
+impl PlanValueHead {
+    fn build<E: serde::de::Error>(self) -> Result<ValueHead, E> {
+        ValueHead::new(self.text, self.byte_length, self.hash).map_err(E::custom)
+    }
+}
+
+/// A candidate as a plan writes it: its two keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanCandidate {
+    path: DocumentPath,
+    suffix: String,
+}
+
+/// A candidate head as a plan writes it: its two keys and no other, each
+/// candidate read strictly.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanCandidateHead {
+    candidates: Vec<PlanCandidate>,
+    total: u64,
+}
+
+/// A value head read as a plan reads one: an unknown key is refused.
+pub(crate) fn plan_value_head<'de, D>(deserializer: D) -> Result<ValueHead, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PlanValueHead::deserialize(deserializer)?.build()
+}
+
+/// An optional value head read as a plan reads one: an unknown key is
+/// refused, and `null` is none.
+pub(crate) fn plan_optional_value_head<'de, D>(
+    deserializer: D,
+) -> Result<Option<ValueHead>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<PlanValueHead>::deserialize(deserializer)?
+        .map(PlanValueHead::build)
+        .transpose()
+}
+
+/// A candidate head read as a plan reads one: an unknown key is refused at
+/// the head and at each candidate, and the bound and the total are checked as
+/// an answer's are.
+pub(crate) fn plan_candidate_head<'de, D>(deserializer: D) -> Result<CandidateHead, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let head = PlanCandidateHead::deserialize(deserializer)?;
+    let candidates = head
+        .candidates
+        .into_iter()
+        .map(|candidate| Candidate::new(candidate.path, candidate.suffix))
+        .collect();
+    CandidateHead::read(candidates, head.total).map_err(D::Error::custom)
+}
+
+/// `schema` as an object that refuses a key it does not name.
+fn closed(mut schema: Schema) -> Schema {
+    schema.insert("additionalProperties".to_string(), false.into());
+    schema
+}
+
+/// The schema of a value head a plan carries: the answer's, closed.
+pub(crate) fn plan_value_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    closed(ValueHead::json_schema(generator))
+}
+
+/// The schema of an optional value head a plan carries: absent, or the closed
+/// head, or `null`.
+pub(crate) fn plan_optional_value_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [plan_value_head_schema(generator), { "type": "null" }] })
+}
+
+/// The schema of a candidate head a plan carries: the answer's, closed, over
+/// candidates that are closed.
+pub(crate) fn plan_candidate_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut head = closed(CandidateHead::json_schema(generator));
+    let candidate = closed(Candidate::json_schema(generator));
+    if let Some(list) = head
+        .get_mut("properties")
+        .and_then(|properties| properties.get_mut("candidates"))
+        .and_then(|list| list.as_object_mut())
+    {
+        list.insert("items".to_string(), candidate.into());
+    }
+    head
+}
 
 /// How many bytes of an offending value a finding carries.
 ///

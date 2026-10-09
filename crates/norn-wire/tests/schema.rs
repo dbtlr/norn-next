@@ -4300,14 +4300,23 @@ fn a_skipped_finding_and_a_provenance_advertise_what_they_require() {
         sorted(tag_constants(&candidates, "of")),
         sorted(["documents", "values"])
     );
-    for (of, head) in [
-        ("documents", "#/$defs/CandidateHead"),
-        ("values", "#/$defs/ValueCandidateHead"),
-    ] {
-        let branch = branch(&candidates, "of", of);
-        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
-        assert_eq!(branch["properties"]["head"]["$ref"].as_str(), Some(head));
-    }
+    // The values head is a plan-only type, referred to; the documents head is
+    // the answer's head read strictly, so it is advertised inline and closed.
+    let values = branch(&candidates, "of", "values");
+    assert!(refuses_unknown_keys(values), "{values} admits any key");
+    assert_eq!(
+        values["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/ValueCandidateHead")
+    );
+    let documents = branch(&candidates, "of", "documents");
+    assert!(
+        refuses_unknown_keys(documents),
+        "{documents} admits any key"
+    );
+    assert!(
+        refuses_unknown_keys(&documents["properties"]["head"]),
+        "the documents head admits any key: {documents}"
+    );
     assert_eq!(
         required_names(&schema_of::<SkippedFinding>()),
         ["finding", "reason"].into_iter().collect()
@@ -4331,4 +4340,65 @@ fn a_skipped_finding_and_a_provenance_advertise_what_they_require() {
         schema_of::<Citation>()["properties"]["operation"]["$ref"].as_str(),
         Some("#/$defs/OperationId")
     );
+}
+
+/// **A plan advertises the answer types its provenance embeds as closed**,
+/// where a finding row advertises the same types as the open answer types they
+/// are: the plan path refuses an unknown key and the answer path drops one.
+#[test]
+fn a_provenance_advertises_the_heads_it_embeds_as_closed() {
+    let closed = |schema: &Value, what: &str| {
+        assert!(
+            refuses_unknown_keys(schema),
+            "{what} admits any key: {schema}"
+        );
+    };
+    let skipped = schema_of::<SkippedFinding>();
+    let value = &skipped["properties"]["value"]["anyOf"][0];
+    closed(value, "a skipped finding's value head");
+    assert_eq!(
+        property_names(value),
+        ["text", "byte_length", "hash"].into_iter().collect()
+    );
+    let cited = schema_of::<CitedFinding>();
+    closed(
+        &cited["properties"]["value"]["anyOf"][0],
+        "a cited value head",
+    );
+    closed(
+        &schema_of::<RequiredField>()["properties"]["default"]["anyOf"][0],
+        "a required field's default",
+    );
+    closed(
+        &schema_of::<ValueCandidate>()["properties"]["value"],
+        "a value candidate's value head",
+    );
+    let documents = schema_of::<SkippedCandidates>();
+    let head = &branch(&documents, "of", "documents")["properties"]["head"];
+    closed(head, "a skipped finding's document head");
+    assert_eq!(
+        head["properties"]["candidates"]["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64)
+    );
+    let candidate = &head["properties"]["candidates"]["items"];
+    closed(candidate, "a skipped finding's candidate");
+    assert_eq!(
+        property_names(candidate),
+        ["path", "suffix"].into_iter().collect()
+    );
+
+    // The answer types themselves are unchanged, and a finding row refers to
+    // them rather than closing them.
+    let row = schema_of::<FindingRow>();
+    assert_eq!(
+        row["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead")
+    );
+    for open in [
+        schema_of::<ValueHead>(),
+        schema_of::<CandidateHead>(),
+        schema_of::<Candidate>(),
+    ] {
+        assert!(!refuses_unknown_keys(&open), "{open} is closed");
+    }
 }

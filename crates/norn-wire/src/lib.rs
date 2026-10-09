@@ -461,7 +461,11 @@
 //! documents, their operations, each kind's fields, their cascades, their
 //! conditions and the link keys and resolutions inside them, their
 //! transitions and file states, and a plan's provenance all refuse an unknown
-//! key, where every answer drops one. The divergence follows the direction a
+//! key, where every answer drops one. A provenance embeds [`ValueHead`],
+//! [`Candidate`] and [`CandidateHead`], which are answer types and keep
+//! dropping an unknown key in a finding row: a plan reads them through a
+//! strict mirror that builds them through the same constructor and bound
+//! checks, and advertises them closed, so the bound is stated once. The divergence follows the direction a
 //! plan flows: an answer flows out to a caller, where a dropped field loses a
 //! fact the caller could not use, but a plan flows into the host, where a
 //! dropped field — a newer caller's condition — would weaken a check without a
