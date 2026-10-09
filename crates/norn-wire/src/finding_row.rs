@@ -218,6 +218,221 @@ impl<'de> Deserialize<'de> for CandidateHead {
     }
 }
 
+/// The bounded head of a list of repair decision data, with how many there
+/// were: the one spelling every such list shares, so the bound
+/// [`CANDIDATE_HEAD`] holds wherever a repair plan carries one.
+///
+/// Each head has a private constructor-and-read pair shaped as
+/// [`CandidateHead`] is: the constructor truncates to the bound and refuses a
+/// total below the head, the read refuses a longer head and a total below it,
+/// and the hand-written schema advertises the bound as `maxItems`. A head
+/// inside a plan refuses a key it does not know, as the rest of the plan
+/// does.
+macro_rules! bounded_head {
+    (
+        $head:ident of $item:ty, $field:ident,
+        what: $what:literal,
+        head_doc: $head_doc:literal,
+        list_doc: $list_doc:literal,
+        total_doc: $total_doc:literal $(,)?
+    ) => {
+        #[doc = $head_doc]
+        #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+        #[non_exhaustive]
+        pub struct $head {
+            #[doc = $list_doc]
+            $field: Vec<$item>,
+            #[doc = $total_doc]
+            total: u64,
+        }
+
+        impl $head {
+            /// The first [`CANDIDATE_HEAD`] of the list, out of `total`
+            /// there were, or the reason `total` heads nothing.
+            ///
+            /// The list is truncated to the bound here, so a producer
+            /// handing over more does not widen the head it is building. The
+            /// read path refuses a longer one instead.
+            pub fn new(
+                $field: impl IntoIterator<Item = $item>,
+                total: u64,
+            ) -> Result<Self, TotalBelowHead> {
+                let $field: Vec<$item> = $field.into_iter().take(CANDIDATE_HEAD).collect();
+                TotalBelowHead::check($field.len(), total)?;
+                Ok($head { $field, total })
+            }
+
+            /// The members the head carries.
+            pub fn $field(&self) -> &[$item] {
+                &self.$field
+            }
+
+            /// How many there were.
+            pub const fn total(&self) -> u64 {
+                self.total
+            }
+
+            /// Whether there were more than this head carries.
+            pub fn is_truncated(&self) -> bool {
+                (self.$field.len() as u64) < self.total
+            }
+        }
+
+        impl JsonSchema for $head {
+            fn schema_name() -> Cow<'static, str> {
+                Cow::Borrowed(stringify!($head))
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                Cow::Borrowed(concat!("norn_wire::", stringify!($head)))
+            }
+
+            /// The object a derive would describe, with the ceiling the
+            /// reader keeps advertised as `maxItems`.
+            fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+                let item = generator.subschema_for::<$item>();
+                json_schema!({
+                    "type": "object",
+                    "description": $head_doc,
+                    "properties": {
+                        stringify!($field): {
+                            "type": "array",
+                            "description": $list_doc,
+                            "items": item,
+                            "maxItems": CANDIDATE_HEAD,
+                        },
+                        "total": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0,
+                            "description": $total_doc,
+                        },
+                    },
+                    "required": [stringify!($field), "total"],
+                    "additionalProperties": false,
+                })
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $head {
+            /// A head arrives as its members and its total and is read back
+            /// through the bound the constructor holds: a head longer than
+            /// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total
+            /// below the members beside it heads nothing, so either refuses
+            /// the read.
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    $field: Vec<$item>,
+                    total: u64,
+                }
+                let fields = Fields::deserialize(deserializer)?;
+                if fields.$field.len() > CANDIDATE_HEAD {
+                    return Err(D::Error::custom(format!(
+                        concat!(
+                            "a ",
+                            $what,
+                            " head holds at most {} members, and this one holds {}"
+                        ),
+                        CANDIDATE_HEAD,
+                        fields.$field.len()
+                    )));
+                }
+                TotalBelowHead::check(fields.$field.len(), fields.total)
+                    .map_err(D::Error::custom)?;
+                Ok($head {
+                    $field: fields.$field,
+                    total: fields.total,
+                })
+            }
+        }
+    };
+}
+
+/// One value a repair could have written, and the rule that proposed it.
+///
+/// On the wire a candidate is a plain object:
+/// `{"value":{"text":"done","byte_length":4,"hash":"sha256:…"},"rule":"status-default"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ValueCandidate {
+    /// The value the rule proposes, as its bounded head.
+    pub value: ValueHead,
+    /// The name of the schema rule that proposed it, and absent where no
+    /// named rule did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+impl ValueCandidate {
+    /// The candidate `value`, proposed by no named rule.
+    pub const fn new(value: ValueHead) -> Self {
+        ValueCandidate { value, rule: None }
+    }
+
+    /// The candidate proposed by the rule `rule`.
+    #[must_use]
+    pub fn by_rule(mut self, rule: impl Into<String>) -> Self {
+        self.rule = Some(rule.into());
+        self
+    }
+}
+
+bounded_head!(
+    ValueCandidateHead of ValueCandidate, candidates,
+    what: "value candidate",
+    head_doc: "The bounded head of the values a repair could have written, with how many there were: differing declared fixes, conflicting defaults, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
+    list_doc: "The values a repair could have written, each with the rule that proposed it.",
+    total_doc: "How many values a repair could have written, which is what makes the candidates a head.",
+);
+
+/// One field a repair would bring into a document, and the default the rules
+/// declare for it.
+///
+/// On the wire a field is a plain object:
+/// `{"field":"owner","default":{"text":"unassigned","byte_length":10,"hash":"sha256:…"}}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct RequiredField {
+    /// The frontmatter key the repair would bring in.
+    pub field: String,
+    /// The default the rules declare for it as its bounded head, and absent
+    /// where they declare none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<ValueHead>,
+}
+
+impl RequiredField {
+    /// The field `field`, with no default declared.
+    pub fn new(field: impl Into<String>) -> Self {
+        RequiredField {
+            field: field.into(),
+            default: None,
+        }
+    }
+
+    /// The field declaring the default `default`.
+    #[must_use]
+    pub fn with_default(mut self, default: ValueHead) -> Self {
+        self.default = Some(default);
+        self
+    }
+}
+
+bounded_head!(
+    RequiredFieldHead of RequiredField, fields,
+    what: "required field",
+    head_doc: "The bounded head of the required fields a repair would bring into a document, with how many there were. The fields stop at the ceiling this schema advertises, and the total beside them is never below the fields carried: a smaller total heads nothing, and the read refuses it.",
+    list_doc: "The fields the repair would bring in, each with the default the rules declare for it.",
+    total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
+);
+
 /// How many bytes of an offending value a finding carries.
 ///
 /// The head is the value's text cut at the last character boundary at or

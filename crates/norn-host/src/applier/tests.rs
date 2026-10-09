@@ -2005,6 +2005,52 @@ fn an_entry_the_set_computed_again_does_not_hold_refuses() {
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 
+/// The address-resolution condition for the wikilink `[[a]]` in `b.md`
+/// resolving to `a.md` at the after-state.
+fn address_condition() -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+        norn_wire::Resolves::one(path("a.md")),
+    )
+}
+
+/// **A plan carrying an address-resolution condition is refused, in a preview
+/// and in an apply alike, until the after-state check lands (NORN-371).**
+/// Nothing checks the condition yet, so it must refuse the plan rather than
+/// pass unchecked, and it is not an entry of the change set, so it is the
+/// only check that refuses. A plan without one previews and applies as it did.
+#[test]
+fn an_address_resolution_condition_refuses_until_it_can_be_checked() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let plain = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let mut carrying = plain.clone();
+    carrying.conditions.push(address_condition());
+
+    let previewed = fixture
+        .preview(carrying.clone())
+        .expect_err("a preview of a plan carrying an unchecked condition");
+    assert_eq!(previewed.code(), &norn_wire::ReasonCode::VaultPlanRefused);
+    let norn_wire::ErrorDetail::PlanRefused { checks, .. } = previewed.detail() else {
+        panic!("the preview is not a plan refusal: {previewed:?}");
+    };
+    let expected = vec![norn_wire::RefusedCheck::condition_failed(
+        address_condition(),
+    )];
+    assert_eq!(checks, &expected);
+
+    let refused = refused(fixture.apply(carrying));
+    assert_eq!(refused.checks, expected);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+
+    assert_eq!(
+        fixture.preview(plain.clone()).map(|(plan, _)| plan),
+        Ok(plain.clone())
+    );
+    applied(fixture.apply(plain));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
+}
+
 /// The entry for the wikilink of `holder` written `address`.
 fn link_entry(
     holder: &str,

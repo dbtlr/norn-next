@@ -10,8 +10,9 @@
 //!
 //! **Three kinds of fact, three places.** An author's condition sits on an
 //! operation; the conditions a resolved plan carries are [`PlanCondition`]s —
-//! a file's content, or one entry of the plan's resolution change set —
-//! checked when it is applied; and [`Provenance`] records what a plan was
+//! a file's content, one entry of the plan's resolution change set, or a
+//! link's address resolving as recorded at the after-state — checked when it
+//! is applied; and [`Provenance`] records what a plan was
 //! planned from and is never checked. Keeping them three types means a
 //! condition cannot be mistaken for provenance, and an author's condition
 //! that became a before-state is not carried twice.
@@ -49,7 +50,8 @@
 //! [`ResolvedPlan::control_files_beside_documents`].
 //!
 //! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
-//! the finding generation they read and the findings they skipped. No Layer 4
+//! the finding generation they read, the findings each operation fixes, the
+//! findings they skipped and where the next batch continues. No Layer 4
 //! planner emits provenance — every Layer 4 plan is authored by a write verb
 //! or a caller, and neither plans from findings — so the current call graph
 //! reaches it only through a caller sending it back. It is spelled here so a
@@ -86,9 +88,11 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
+use crate::cursor::Cursor;
 use crate::document::{DocumentPath, LinkFamily};
+use crate::finding_row::{CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead};
 use crate::plan::hash::ContentHash;
-use crate::plan::operation::{Operation, OperationKind, written};
+use crate::plan::operation::{Operation, OperationId, OperationKind, written};
 use crate::plan::outcome::PlanFault;
 use crate::plan::root::RootIdentity;
 use crate::plan::write_target::WriteTarget;
@@ -291,13 +295,15 @@ impl Resolves {
 /// A fact a resolved plan depends on, which must still hold when it is
 /// applied.
 ///
-/// **Two kinds of fact.** A content hash is a fact about a file the plan does
+/// **Three kinds of fact.** A content hash is a fact about a file the plan does
 /// not write. A link resolution is one entry of the plan's resolution change
 /// set: how one link resolves with every target of the plan at its
 /// before-state, and with every target at its after-state, so a plan's own
 /// progress never changes it. Its link may sit in a file the plan writes — a
 /// link a cascade rewrites has an entry — so it is not a fact about a file
-/// the plan leaves alone.
+/// the plan leaves alone. An address resolution is the third kind: a fact a
+/// repair's planner records about a link it writes or an address it replaces,
+/// checked at the after-state and outside the change set.
 ///
 /// **An entry is keyed at the after-state.** Its key names the link
 /// as the plan leaves it: a rewritten link by its new address, its `before`
@@ -310,11 +316,17 @@ impl Resolves {
 /// resolution the plan changes, and no other, so the applier computes it
 /// again and refuses on any difference: an entry the plan records that the
 /// set computed again does not hold, and an entry the set computed again
-/// holds that the plan does not record.
+/// holds that the plan does not record. An address resolution is not an
+/// entry of the set: it is never computed again from the operations, and the
+/// comparison ignores it.
+///
+/// **An address resolution is checked at the after-state.** From this holder,
+/// this address must resolve to `after` once the plan has been applied.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
-/// `{"condition":"link_resolution","link":{…},"before":{"resolves":"one","path":"a.md"},"after":{"resolves":"none"}}`.
+/// `{"condition":"link_resolution","link":{…},"before":{"resolves":"one","path":"a.md"},"after":{"resolves":"none"}}`,
+/// `{"condition":"address_resolution","link":{…},"after":{"resolves":"one","path":"a.md"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanCondition {
@@ -337,6 +349,17 @@ pub enum PlanCondition {
         /// What it resolves to with every target at its after-state.
         after: Resolves,
     },
+    /// From the link's holder, the link's address resolves as recorded at the
+    /// plan's after-state: a fact outside the resolution change set, which is
+    /// never computed again from the operations.
+    AddressResolution {
+        /// The link whose address is checked, keyed by its holder, syntax and
+        /// address.
+        link: LinkKey,
+        /// What the address resolves to from the holder with every target of
+        /// the plan at its after-state.
+        after: Resolves,
+    },
 }
 
 impl PlanCondition {
@@ -353,53 +376,354 @@ impl PlanCondition {
             after,
         }
     }
+
+    /// From the holder of `link`, its address resolves to `after` at the
+    /// plan's after-state.
+    pub const fn address_resolution(link: LinkKey, after: Resolves) -> Self {
+        PlanCondition::AddressResolution { link, after }
+    }
+}
+
+/// How sure a repair is of the value it writes. The levels run strongest
+/// first, so a smaller level is a stronger one.
+///
+/// On the wire a confidence is the flat string itself: `"declared"`,
+/// `"derived"`, `"suggested"`.
+///
+/// **A threshold admits its own level and every stronger one.** A request
+/// naming a threshold of `derived` admits `declared` and `derived` and not
+/// `suggested`; `suggested` admits all three; `declared` admits only itself.
+/// A request naming none is read at `derived`.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Confidence {
+    /// The vault's schema names this value as the fix.
+    Declared,
+    /// The value follows from the document and the vault's rules by one
+    /// determined step.
+    Derived,
+    /// The value is a guess a person should look at.
+    Suggested,
+}
+
+impl Confidence {
+    /// The threshold a request that names none is read at.
+    pub const DEFAULT_THRESHOLD: Confidence = Confidence::Derived;
+
+    /// Whether this threshold admits `level`: its own level and every
+    /// stronger one.
+    pub fn admits(self, level: Confidence) -> bool {
+        level <= self
+    }
+}
+
+/// Why a repair plan left a finding alone. The reasons are closed: each is a
+/// decision the repair made, and a reason a build does not know is a read
+/// refused.
+///
+/// On the wire a reason is the flat string itself: `"no_declared_fix"`,
+/// `"below_threshold"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// No rule declares a fix for the finding.
+    NoDeclaredFix,
+    /// Candidate values tie at the level that decides between them.
+    Tie,
+    /// The fix is below the request's confidence threshold.
+    BelowThreshold,
+    /// The document cannot be read.
+    Unreadable,
+    /// The rules declare conflicting defaults for the field.
+    ConflictingDefaults,
+    /// The fix would bring in required fields the document does not hold.
+    BringsInRequiredFields,
+    /// A capture in the fix's rule matches more than one way.
+    AmbiguousCapture,
+    /// The rules selecting the document conflict over where it may stand.
+    RulesConflict,
+    /// The fix would rename a field onto one the document already holds.
+    RenameOntoOccupiedField,
+    /// The link's address resolves to more than one document.
+    AmbiguousLink,
+    /// The document belongs to a class a repair does not touch.
+    ExcludedClass,
+    /// The write would be refused when the plan is applied.
+    JudgeWouldRefuse,
+    /// Something already stands where the fix would write.
+    DestinationTaken,
+}
+
+/// The candidates a skipped finding had to choose between: documents, or
+/// values.
+///
+/// On the wire the candidates are an object tagged `of`:
+/// `{"of":"documents","head":{"candidates":[…],"total":9}}`,
+/// `{"of":"values","head":{"candidates":[…],"total":2}}`. Either head is
+/// bounded, and carries how many there were.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "of", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum SkippedCandidates {
+    /// The documents a link's address could have named.
+    #[non_exhaustive]
+    Documents {
+        /// The head of the documents.
+        head: CandidateHead,
+    },
+    /// The values a field could have been given.
+    #[non_exhaustive]
+    Values {
+        /// The head of the values, each with the rule that proposed it.
+        head: ValueCandidateHead,
+    },
+}
+
+impl SkippedCandidates {
+    /// The documents `head` carries.
+    pub const fn documents(head: CandidateHead) -> Self {
+        SkippedCandidates::Documents { head }
+    }
+
+    /// The values `head` carries.
+    pub const fn values(head: ValueCandidateHead) -> Self {
+        SkippedCandidates::Values { head }
+    }
 }
 
 /// A finding a repair plan left alone, and why.
+///
+/// On the wire the parts that are absent are left out:
+/// `{"finding":42,"reason":"below_threshold","value":{…},"proposed":{…}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkippedFinding {
     /// The finding's identity in the vault's findings.
     pub finding: u64,
-    /// Why the plan left it alone, in words, for a person reading the plan.
-    pub reason: String,
+    /// Why the plan left it alone.
+    pub reason: SkipReason,
+    /// The finding's actual value, as its bounded head, and absent where the
+    /// finding is about none: a missing required field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<ValueHead>,
+    /// What the plan had to choose between, where the reason is a choice it
+    /// would not make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<SkippedCandidates>,
+    /// The fields the fix would bring in, where the reason is that it brings
+    /// in required fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_fields: Option<RequiredFieldHead>,
+    /// The operation the plan would have held had the proposal cleared its
+    /// threshold, where the reason is that it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<Operation>,
+    /// Words about the skip, for a person reading the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl SkippedFinding {
-    /// The finding `finding`, left alone for `reason`.
-    pub fn new(finding: u64, reason: impl Into<String>) -> Self {
+    /// The finding `finding`, left alone for `reason`, with no further
+    /// detail.
+    pub const fn new(finding: u64, reason: SkipReason) -> Self {
         SkippedFinding {
             finding,
-            reason: reason.into(),
+            reason,
+            value: None,
+            candidates: None,
+            required_fields: None,
+            proposed: None,
+            note: None,
+        }
+    }
+
+    /// The skip over the finding's actual value `value`.
+    #[must_use]
+    pub fn with_value(mut self, value: ValueHead) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    /// The skip choosing between `candidates`.
+    #[must_use]
+    pub fn with_candidates(mut self, candidates: SkippedCandidates) -> Self {
+        self.candidates = Some(candidates);
+        self
+    }
+
+    /// The skip whose fix would bring in the fields `required_fields`.
+    #[must_use]
+    pub fn with_required_fields(mut self, required_fields: RequiredFieldHead) -> Self {
+        self.required_fields = Some(required_fields);
+        self
+    }
+
+    /// The skip of a proposal that would have been the operation `proposed`.
+    #[must_use]
+    pub fn with_proposed(mut self, proposed: Operation) -> Self {
+        self.proposed = Some(proposed);
+        self
+    }
+
+    /// The skip noting `note`.
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+}
+
+/// One finding an operation fixes, and how sure the repair is of the fix.
+///
+/// On the wire: `{"finding":42,"value":{…},"confidence":"derived","notes":[…]}`;
+/// `value` is left out where the finding is about none.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CitedFinding {
+    /// The finding's identity in the vault's findings.
+    pub finding: u64,
+    /// The finding's actual (offending) value, as its bounded head, and
+    /// absent where the finding is about none: a missing required field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<ValueHead>,
+    /// How sure the repair is of the fix.
+    pub confidence: Confidence,
+    /// Words about the fix, for a person reading the plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+impl CitedFinding {
+    /// The finding `finding`, fixed with `confidence`, about no value and
+    /// with no note.
+    pub const fn new(finding: u64, confidence: Confidence) -> Self {
+        CitedFinding {
+            finding,
+            value: None,
+            confidence,
+            notes: Vec::new(),
+        }
+    }
+
+    /// The citation over the finding's actual value `value`.
+    #[must_use]
+    pub fn with_value(mut self, value: ValueHead) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    /// The citation carrying `notes`.
+    #[must_use]
+    pub fn with_notes(mut self, notes: Vec<String>) -> Self {
+        self.notes = notes;
+        self
+    }
+}
+
+/// The findings one operation of a repair plan fixes.
+///
+/// On the wire: `{"operation":"repair-1","findings":[…]}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Citation {
+    /// The operation, by the identifier it carries in the plan. A repair plan
+    /// numbers its operations `repair-1`, `repair-2`, and so on, in plan
+    /// order.
+    pub operation: OperationId,
+    /// The findings the operation fixes: one operation can fix several.
+    pub findings: Vec<CitedFinding>,
+}
+
+impl Citation {
+    /// The operation `operation`, fixing `findings`.
+    pub const fn new(operation: OperationId, findings: Vec<CitedFinding>) -> Self {
+        Citation {
+            operation,
+            findings,
         }
     }
 }
 
-// A dormant carrier: Layer 5 repair is the consuming layer. Repair plans cite
-// the finding generation they read and the findings they skipped; no Layer 4
-// planner plans from findings, so nothing in the current call graph emits
-// this, and it is reached only when a caller sends a plan carrying one back.
-// Its published description stays wire-facing, so the roadmap note lives here
-// rather than in the doc comment schemars lifts.
+// A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer. A
+// repair plan cites the finding generation it read, the findings each
+// operation fixes and the findings it skipped, and says whether more
+// remain; no Layer 4 planner plans from findings, so nothing in the current
+// call graph emits this, and it is reached only when a caller sends a plan
+// carrying one back. Its published description stays wire-facing, so the
+// roadmap note lives here rather than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
+///
+/// **A repair plans a batch.** It plans the findings of a run of documents,
+/// in path order; `limit` is a soft target in selected findings, and a batch
+/// extends through the last findings of its last document. The first batch
+/// says how many selected findings remain after it; a batch that leaves more
+/// says so and carries the cursor that continues from the last document it
+/// covered.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
     /// The write generation of the findings the plan was planned from.
     pub finding_generation: u64,
+    /// The findings each operation fixes, one entry for each operation that
+    /// fixes any.
+    pub citations: Vec<Citation>,
     /// The findings the plan left alone.
     pub skipped: Vec<SkippedFinding>,
+    /// How many selected findings remain after this batch, exactly. Present
+    /// on the first batch only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u64>,
+    /// Whether more selected findings remain after this batch.
+    pub more: bool,
+    /// Where the next batch continues: the cursor that follows the last
+    /// document this batch covered. Present when more findings remain.
+    // Boxed so a resolved plan, which every answer to an apply carries, stays
+    // small; the bytes are the cursor's either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Box<Cursor>>,
 }
 
 impl Provenance {
     /// A plan planned from the findings at `finding_generation`, leaving
-    /// `skipped` alone.
+    /// `skipped` alone, citing no finding and leaving no more.
     pub const fn new(finding_generation: u64, skipped: Vec<SkippedFinding>) -> Self {
         Provenance {
             finding_generation,
+            citations: Vec::new(),
             skipped,
+            remaining: None,
+            more: false,
+            cursor: None,
         }
+    }
+
+    /// The provenance citing `citations`.
+    #[must_use]
+    pub fn with_citations(mut self, citations: Vec<Citation>) -> Self {
+        self.citations = citations;
+        self
+    }
+
+    /// The provenance of a first batch, with `remaining` selected findings
+    /// left after it.
+    #[must_use]
+    pub const fn with_remaining(mut self, remaining: u64) -> Self {
+        self.remaining = Some(remaining);
+        self
+    }
+
+    /// The provenance of a batch that leaves more, continued by `cursor`.
+    #[must_use]
+    pub fn continued_by(mut self, cursor: Cursor) -> Self {
+        self.more = true;
+        self.cursor = Some(Box::new(cursor));
+        self
     }
 }
 

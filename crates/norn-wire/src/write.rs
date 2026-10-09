@@ -37,6 +37,7 @@ pub(crate) mod edit;
 pub(crate) mod init;
 pub(crate) mod moves;
 pub(crate) mod new;
+pub(crate) mod repair;
 pub(crate) mod rewrite_wikilink;
 pub(crate) mod set;
 

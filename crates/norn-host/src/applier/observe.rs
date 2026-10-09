@@ -550,6 +550,10 @@ pub(super) fn content_dependencies(
 /// **A link-resolution entry is not judged here.** The entries are one
 /// resolution change set, judged whole against the set computed again from
 /// the plan's composed results, once those are known (`stage::check`).
+///
+/// **An address-resolution condition always fails here.** It is a fact about
+/// the plan's after-state outside the change set, and nothing yet checks it,
+/// so a plan carrying one is refused rather than passed unchecked.
 pub(super) fn failed_conditions<V: VaultView>(
     plan: &ResolvedPlan,
     view: &V,
@@ -567,6 +571,11 @@ pub(super) fn failed_conditions<V: VaultView>(
                 }
             }
             PlanCondition::LinkResolution { .. } => true,
+            // NORN-371 lands the after-state check of an address resolution.
+            // Until it does, no code here can say the address resolves as
+            // recorded, and a condition nothing checks must refuse the plan
+            // rather than let it through as though it held.
+            PlanCondition::AddressResolution { .. } => false,
         };
         if !holds {
             failed.push(condition.clone());

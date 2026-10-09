@@ -102,10 +102,14 @@
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
 //! between two [`FileState`]s, each absent or a [`ContentHash`] with a flag
 //! saying whether its bytes decode as a document, the
-//! [`PlanCondition`]s its planning read — a file's content, or what one link,
-//! named by its [`LinkKey`], [`Resolves`] to before the plan and after it —
-//! and the [`Provenance`] a repair plan cites, with the [`SkippedFinding`]s
-//! it left alone. In a resolved plan an operation that moves, removes or
+//! [`PlanCondition`]s its planning read — a file's content, what one link,
+//! named by its [`LinkKey`], [`Resolves`] to before the plan and after it, or
+//! what a link's address resolves to at the after-state alone — and the
+//! [`Provenance`] a repair plan cites: the [`Citation`]s of the findings each
+//! operation fixes, each a [`CitedFinding`] at a [`Confidence`], and the
+//! [`SkippedFinding`]s it left alone, each for a [`SkipReason`] with the
+//! [`SkippedCandidates`] or [`RequiredFieldHead`] it chose between, and where
+//! the next batch continues. A repair is asked for by [`RepairParams`]. In a resolved plan an operation that moves, removes or
 //! retargets documents carries its link cascade, one [`LinkRewrite`] per
 //! document, syntax and address among the links it changes, and a delete
 //! says what becomes of the links naming its document as its [`Backlinks`].
@@ -177,7 +181,8 @@
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
-//!   read. [`Operation`]'s read path, and [`OperationKind`]'s alone, are
+//!   read. [`ValueCandidateHead`] and [`RequiredFieldHead`] are bounded heads
+//!   of the same bound, read by the same rules. [`Operation`]'s read path, and [`OperationKind`]'s alone, are
 //!   written by hand because the derive
 //!   cannot refuse what it must: the derive reads it into a private shape
 //!   that refuses any key it does not name and holds every field any kind
@@ -234,15 +239,16 @@
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
 //!   `uniqueItems` for the distinctness it is measured against as well;
-//!   [`CandidateHead`] carries the
-//!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
+//!   [`CandidateHead`], [`ValueCandidateHead`] and [`RequiredFieldHead`] carry
+//!   the `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
 //!   the bound has one spelling; [`LadderDeclaration`] advertises that its
 //!   rungs contain a retrieval rung; and [`RungSubtraction`] advertises its
 //!   rungs each once and never every retrieval rung.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!   [`FiniteFloat`] holds it by construction, since the one value that breaks
 //!   a float's equality cannot be built, so a plan carrying a written float is
-//!   `Eq` like every other plan.
+//!   `Eq` like every other plan; [`Score`] holds it for the same reason, so a
+//!   [`Cursor`] and the provenance carrying one are `Eq` too.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
 //! tagged.** An externally tagged enum makes the variant name a JSON key, so a
@@ -386,8 +392,8 @@
 //! [`PlanDocument`] variant, [`AuthoredValue::string`],
 //! [`AuthoredValue::float`], [`AuthoredValue::list`], [`AuthoredValue::map`],
 //! [`LinkRewrite::new`], [`LinkKey::new`], [`Transition::new`],
-//! [`SkippedFinding::new`], [`Provenance::new`], [`AuthoredPlan::new`] and
-//! [`ResolvedPlan::new`].
+//! [`SkippedFinding::new`], [`Provenance::new`], [`Citation::new`],
+//! [`CitedFinding::new`], [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -422,7 +428,7 @@
 //! [`AuthoredValue`], [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
 //! and [`Resolves`], and the structs [`Operation`], [`LinkRewrite`],
 //! [`LinkKey`], [`Transition`], [`ResolvedPlan`], [`AuthoredPlan`],
-//! [`Provenance`] and [`SkippedFinding`],
+//! [`Provenance`], [`Citation`], [`CitedFinding`] and [`SkippedFinding`],
 //! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
 //! tag is a public zero-sized marker, [`OperationsTag`] or [`ResolvedTag`]. The
 //! one applier decides what every field of a plan means, so a field added to
@@ -598,15 +604,16 @@ pub use error::{
 };
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{
-    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, VALUE_HEAD_BYTES,
-    ValueHead,
+    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, RequiredField,
+    RequiredFieldHead, VALUE_HEAD_BYTES, ValueCandidate, ValueCandidateHead, ValueHead,
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::backlinks::Backlinks;
 pub use plan::document::{
-    AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
-    ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,
+    AuthoredPlan, Citation, CitedFinding, Confidence, FileState, LinkKey, OperationsTag,
+    PlanCondition, PlanDocument, Provenance, ResolvedPlan, ResolvedTag, Resolves, SkipReason,
+    SkippedCandidates, SkippedFinding, Transition,
 };
 pub use plan::forecast::{FilePath, FolderPath, Forecast, LinkAdvisory};
 pub use plan::hash::{ContentHash, IllegalContentHash};
@@ -667,5 +674,6 @@ pub use write::edit::{DocumentEdit, EditParams};
 pub use write::init::{InitParams, InitReport};
 pub use write::moves::{IllegalMove, MoveParams, MoveSubject};
 pub use write::new::{NewParams, NewSubject};
+pub use write::repair::RepairParams;
 pub use write::rewrite_wikilink::RewriteWikilinkParams;
 pub use write::set::{FieldChange, SetParams};

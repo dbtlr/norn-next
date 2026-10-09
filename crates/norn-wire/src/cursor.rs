@@ -189,6 +189,10 @@ impl std::error::Error for NonFiniteScore {}
 #[serde(transparent)]
 pub struct Score(f64);
 
+// A score is finite by construction, so equality is reflexive and a score
+// is as comparable as any value a plan can carry inside a cursor.
+impl Eq for Score {}
+
 impl Score {
     /// `score` as a relevance score, if it is finite.
     ///
@@ -233,7 +237,7 @@ impl<'de> Deserialize<'de> for Score {
 /// On the wire a key is an object tagged `row`:
 /// `{"row":"document","order":{"key":{"by":"field","key":"due"},"direction":"ascending"},"sort":"2026-01-01","path":"notes/a.md"}`,
 /// `{"row":"hit","ladder":["lexical"],"score":0.5,"path":"notes/a.md"}`.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "row", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CursorKey {
@@ -311,6 +315,15 @@ pub enum CursorKey {
         /// The finding's identifier, which orders the findings that share
         /// everything before it.
         id: u64,
+    },
+    /// A repair's batch boundary: the path of the last document a batch
+    /// covered. The next batch starts at the first document after it in path
+    /// order. It is its own row type, so a finding cursor cannot continue a
+    /// repair and a repair cursor cannot continue a validate.
+    #[non_exhaustive]
+    RepairDocument {
+        /// The path of the last document the batch covered.
+        path: String,
     },
     /// A facet row: the kind, in the byte order of its code, then the key in
     /// byte order.
@@ -395,6 +408,11 @@ impl CursorKey {
         }
     }
 
+    /// A repair batch whose last document was the one at `path`.
+    pub fn repair_document(path: impl Into<String>) -> Self {
+        CursorKey::RepairDocument { path: path.into() }
+    }
+
     /// A facet row stopped at `key`, under `kind`.
     pub fn facet(kind: FacetKind, key: impl Into<String>) -> Self {
         CursorKey::Facet {
@@ -416,6 +434,7 @@ impl CursorKey {
             CursorKey::Tally { .. } => PagedRows::Tally,
             CursorKey::Finding { .. } => PagedRows::Finding,
             CursorKey::DocumentFinding { .. } => PagedRows::DocumentFinding,
+            CursorKey::RepairDocument { .. } => PagedRows::RepairDocument,
             CursorKey::Facet { .. } => PagedRows::Facet,
             CursorKey::Ordinal { of, .. } => PagedRows::Collection { of: *of },
         }
@@ -444,6 +463,8 @@ pub enum PagedRows {
     Finding,
     /// One document's findings, as a get pages them.
     DocumentFinding,
+    /// Documents, as a repair batches them.
+    RepairDocument,
     /// Facets, as a describe pages them.
     Facet,
     /// One nested collection of a document, by position in it, as a get
@@ -671,7 +692,7 @@ pub struct HitResume<'a> {
 /// Where a page stopped.
 ///
 /// On the wire a cursor is one opaque string a client passes back unchanged.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cursor {
     snapshot: Snapshot,
     key: CursorKey,

@@ -17,34 +17,36 @@ use norn_wire::{
     Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
     AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
-    CandidateHead, ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column,
-    ComparedBy, ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure,
-    CountParams, Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
-    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
-    IllegalRuleSet, IllegalValueHead, InitParams, InitReport, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite,
-    LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder, MigrateParams,
-    MigrateReport, MigrationRefusal, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
-    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
-    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
-    RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch,
-    RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap,
+    CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection, CollectionPage,
+    CollectionSelector, Column, ComparedBy, Confidence, ConflictingDefault, ContainerKind,
+    ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
+    CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams, Direction, Directory,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
+    EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
+    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
+    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
+    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
+    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RepairParams,
+    RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget,
+    ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams,
+    RollUp, RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix,
+    RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaRule,
+    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity,
+    SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
+    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
+    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES,
+    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, ValueHead, ValueMap,
     Variables, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
     VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
     is_refused_character, is_refused_segment, leaf_stem,
@@ -493,6 +495,7 @@ fn cursor_keys() -> Vec<CursorKey> {
         CursorKey::finding(FindingKind::Broken, "notes/a.md", Some(3), 7),
         CursorKey::document_finding("notes/a.md", None, FindingKind::UndeclaredTag, 7),
         CursorKey::document_finding("notes/a.md", Some(3), FindingKind::Broken, 7),
+        CursorKey::repair_document("notes/a.md"),
     ];
     keys.extend(
         [
@@ -2019,6 +2022,10 @@ fn a_cursor_key_names_the_rows_it_is_a_position_among() {
         (
             CursorKey::facet(FacetKind::PathRule, "notes/**"),
             PagedRows::Facet,
+        ),
+        (
+            CursorKey::repair_document("notes/a.md"),
+            PagedRows::RepairDocument,
         ),
         (
             CursorKey::ordinal(CollectionSelector::Links, 3),
@@ -7482,6 +7489,11 @@ fn plan_conditions() -> Vec<PlanCondition> {
             Resolves::several(),
             Resolves::one(path("archive/a.md")),
         ),
+        PlanCondition::address_resolution(a_link_key(), Resolves::one(path("archive/a.md"))),
+        PlanCondition::address_resolution(
+            LinkKey::new(path("notes/d.md"), LinkFamily::Markdown, "missing.md"),
+            Resolves::none(),
+        ),
     ]
 }
 
@@ -7542,6 +7554,80 @@ fn a_transition() -> Transition {
     )
 }
 
+/// The cursor a repair batch continues by.
+fn a_repair_cursor() -> Cursor {
+    Cursor::new(
+        Snapshot::new("epoch-1", 7, None, None),
+        CursorKey::repair_document("notes/z.md"),
+    )
+}
+
+/// A value head of `text`, as a fixture's finding holds it.
+fn a_value(text: &str) -> ValueHead {
+    ValueHead::of(text, value_hash())
+}
+
+/// A repair's provenance carrying one of everything it can carry: a citation
+/// of two findings, one skip for each detail a skip can hold, and the facts of
+/// a first batch that leaves more.
+fn a_provenance() -> Provenance {
+    let two_documents = head([candidate("notes/a"), candidate("notes/b")], 2);
+    let two_values = ValueCandidateHead::new(
+        [
+            ValueCandidate::new(a_value("done")).by_rule("closed-status"),
+            ValueCandidate::new(a_value("closed")),
+        ],
+        2,
+    )
+    .expect("a head no larger than its total");
+    let two_fields = RequiredFieldHead::new(
+        [
+            RequiredField::new("owner").with_default(a_value("unassigned")),
+            RequiredField::new("due"),
+        ],
+        3,
+    )
+    .expect("a head no larger than its total");
+    Provenance::new(
+        7,
+        vec![
+            SkippedFinding::new(42, SkipReason::AmbiguousLink)
+                .with_candidates(SkippedCandidates::documents(two_documents))
+                .with_note("the target names two documents"),
+            SkippedFinding::new(43, SkipReason::Tie)
+                .with_value(a_value("someday"))
+                .with_candidates(SkippedCandidates::values(two_values)),
+            SkippedFinding::new(44, SkipReason::BelowThreshold)
+                .with_proposed(Operation::new(OperationKind::str_replace(
+                    path("notes/a.md"),
+                    "draft",
+                    "final",
+                )))
+                .with_note("a guess"),
+            SkippedFinding::new(45, SkipReason::BringsInRequiredFields)
+                .with_required_fields(two_fields),
+            SkippedFinding::new(46, SkipReason::NoDeclaredFix),
+        ],
+    )
+    .with_citations(vec![
+        Citation::new(
+            operation_id("repair-1"),
+            vec![
+                CitedFinding::new(40, Confidence::Declared),
+                CitedFinding::new(41, Confidence::Suggested)
+                    .with_value(a_value("someday"))
+                    .with_notes(vec!["closest closed-set member".to_string()]),
+            ],
+        ),
+        Citation::new(
+            operation_id("repair-2"),
+            vec![CitedFinding::new(39, Confidence::Derived)],
+        ),
+    ])
+    .with_remaining(12)
+    .continued_by(a_repair_cursor())
+}
+
 /// A resolved plan carrying one of everything it can carry.
 fn a_resolved_plan() -> ResolvedPlan {
     ResolvedPlan::new(
@@ -7555,10 +7641,7 @@ fn a_resolved_plan() -> ResolvedPlan {
         vec![a_transition()],
         plan_conditions(),
     )
-    .with_provenance(Provenance::new(
-        7,
-        vec![SkippedFinding::new(42, "the target names two documents")],
-    ))
+    .with_provenance(a_provenance())
     .with_footnote("finish the draft")
 }
 
@@ -7605,13 +7688,29 @@ fn resolved_plan_json() -> String {
             r#"{{"condition":"link_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","address":"a"}},"#,
             r#""before":{{"resolves":"one","path":"notes/a.md"}},"after":{{"resolves":"none"}}}},"#,
             r#"{{"condition":"link_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","address":"vault://notes/a"}},"#,
-            r#""before":{{"resolves":"several"}},"after":{{"resolves":"one","path":"archive/a.md"}}}}],"#,
-            r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
+            r#""before":{{"resolves":"several"}},"after":{{"resolves":"one","path":"archive/a.md"}}}},"#,
+            r#"{{"condition":"address_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","address":"a"}},"#,
+            r#""after":{{"resolves":"one","path":"archive/a.md"}}}},"#,
+            r#"{{"condition":"address_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","address":"missing.md"}},"#,
+            r#""after":{{"resolves":"none"}}}}],"#,
+            r#""provenance":{{"finding_generation":7,"citations":["#,
+            r#"{{"operation":"repair-1","findings":[{{"finding":40,"confidence":"declared"}},"#,
+            r#"{{"finding":41,"value":{{"text":"someday","byte_length":7,"hash":"{seven}"}},"confidence":"suggested","notes":["closest closed-set member"]}}]}},"#,
+            r#"{{"operation":"repair-2","findings":[{{"finding":39,"confidence":"derived"}}]}}],"#,
+            r#""skipped":[{{"finding":42,"reason":"ambiguous_link","candidates":{{"of":"documents","head":{{"candidates":[{{"path":"notes/a.md","suffix":"notes/a"}},{{"path":"notes/b.md","suffix":"notes/b"}}],"total":2}}}},"note":"the target names two documents"}},"#,
+            r#"{{"finding":43,"reason":"tie","value":{{"text":"someday","byte_length":7,"hash":"{seven}"}},"candidates":{{"of":"values","head":{{"candidates":[{{"value":{{"text":"done","byte_length":4,"hash":"{seven}"}},"rule":"closed-status"}},{{"value":{{"text":"closed","byte_length":6,"hash":"{seven}"}}}}],"total":2}}}}}},"#,
+            r#"{{"finding":44,"reason":"below_threshold","proposed":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"note":"a guess"}},"#,
+            r#"{{"finding":45,"reason":"brings_in_required_fields","required_fields":{{"fields":[{{"field":"owner","default":{{"text":"unassigned","byte_length":10,"hash":"{seven}"}}}},{{"field":"due"}}],"total":3}}}},"#,
+            r#"{{"finding":46,"reason":"no_declared_fix"}}],"#,
+            r#""remaining":12,"more":true,"cursor":"{cursor}"}},"#,
             r#""footnote":"finish the draft"}}"#
         ),
         ab = hash_text(0xab),
         one = hash_text(0x01),
         cd = hash_text(0xcd),
+        seven = hash_text(0x07),
+        cursor = serde_json::from_str::<String>(&wire(&a_repair_cursor()))
+            .expect("a cursor is a string"),
     )
 }
 
@@ -8109,8 +8208,20 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         "/conditions/1/link",
         "/conditions/1/before",
         "/conditions/1/after",
+        "/conditions/3",
+        "/conditions/3/link",
+        "/conditions/3/after",
         "/provenance",
+        "/provenance/citations/0",
+        "/provenance/citations/0/findings/1",
         "/provenance/skipped/0",
+        "/provenance/skipped/0/candidates",
+        "/provenance/skipped/1/candidates",
+        "/provenance/skipped/1/candidates/head",
+        "/provenance/skipped/1/candidates/head/candidates/0",
+        "/provenance/skipped/2/proposed",
+        "/provenance/skipped/3/required_fields",
+        "/provenance/skipped/3/required_fields/fields/0",
     ] {
         let json = with_surprise(&resolved, pointer);
         let refusal = serde_json::from_str::<PlanDocument>(&json)
@@ -9613,6 +9724,18 @@ fn plan_check(condition: &PlanCondition) -> String {
             resolution_check(before),
             resolution_check(after)
         ),
+        PlanCondition::AddressResolution {
+            link:
+                LinkKey {
+                    holder,
+                    syntax,
+                    address,
+                },
+            after,
+        } => format!(
+            "{syntax:?} {address} in {holder}: at the after-state {}",
+            resolution_check(after)
+        ),
     }
 }
 
@@ -9683,13 +9806,56 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
             read.extend(conditions.iter().map(plan_check));
             if let Some(Provenance {
                 finding_generation,
+                citations,
                 skipped,
+                remaining,
+                more,
+                cursor,
             }) = provenance
             {
-                read.push(format!("planned from generation {finding_generation}"));
-                read.extend(skipped.iter().map(|SkippedFinding { finding, reason }| {
-                    format!("skipped {finding}: {reason}")
-                }));
+                read.push(format!(
+                    "planned from generation {finding_generation}, {remaining:?} remaining, more {more}, continuing {}",
+                    cursor.is_some()
+                ));
+                for Citation {
+                    operation,
+                    findings,
+                } in citations
+                {
+                    read.extend(findings.iter().map(
+                        |CitedFinding {
+                             finding,
+                             value,
+                             confidence,
+                             notes,
+                         }| {
+                            format!(
+                                "{operation} fixes {finding} at {confidence:?}, over {}, noting {}",
+                                value.is_some(),
+                                notes.len()
+                            )
+                        },
+                    ));
+                }
+                read.extend(skipped.iter().map(
+                    |SkippedFinding {
+                         finding,
+                         reason,
+                         value,
+                         candidates,
+                         required_fields,
+                         proposed,
+                         note,
+                     }| {
+                        format!(
+                            "skipped {finding}: {reason:?}, value {}, candidates {}, fields {}, proposed {}, {note:?}",
+                            value.is_some(),
+                            candidates.is_some(),
+                            required_fields.is_some(),
+                            proposed.is_some()
+                        )
+                    },
+                ));
             }
             read
         }
@@ -9741,6 +9907,8 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
             format!("notes/c.md at {}", hash_text(0xcd)),
             "Wikilink a in notes/c.md: one notes/a.md to none".to_string(),
             "Markdown vault://notes/a in notes/d.md: several to one archive/a.md".to_string(),
+            "Wikilink a in notes/c.md: at the after-state one archive/a.md".to_string(),
+            "Markdown missing.md in notes/d.md: at the after-state none".to_string(),
         ]
     );
     assert_eq!(
@@ -9760,7 +9928,9 @@ fn the_applier_reads_every_field_of_a_plan() {
     let read = applier_reading(&PlanDocument::resolved(a_resolved_plan()));
     assert_eq!(
         read.last().map(String::as_str),
-        Some("skipped 42: the target names two documents")
+        Some(
+            "skipped 46: NoDeclaredFix, value false, candidates false, fields false, proposed false, None"
+        )
     );
     assert_eq!(
         applier_reading(&PlanDocument::operations(an_authored_plan())).len(),
@@ -11325,4 +11495,325 @@ fn a_rewrite_wikilink_request_compiles_to_one_rewrite() {
             "{refused} read as a rewrite request"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 5B repair: the wire vocabulary of a repair plan and its request.
+// ---------------------------------------------------------------------------
+
+/// A threshold admits its own level and every stronger one, and the default
+/// threshold is `derived`.
+#[test]
+fn a_confidence_threshold_admits_its_own_level_and_every_stronger_one() {
+    use Confidence::{Declared, Derived, Suggested};
+    let admits = |threshold: Confidence| {
+        [Declared, Derived, Suggested]
+            .into_iter()
+            .filter(|level| threshold.admits(*level))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(admits(Declared), [Declared]);
+    assert_eq!(admits(Derived), [Declared, Derived]);
+    assert_eq!(admits(Suggested), [Declared, Derived, Suggested]);
+    assert_eq!(Confidence::DEFAULT_THRESHOLD, Derived);
+    assert!(Declared < Derived && Derived < Suggested);
+    for (level, text) in [
+        (Declared, r#""declared""#),
+        (Derived, r#""derived""#),
+        (Suggested, r#""suggested""#),
+    ] {
+        assert_eq!(wire(&level), text);
+        round_trip(&level);
+    }
+    assert!(serde_json::from_str::<Confidence>(r#""certain""#).is_err());
+}
+
+/// Every reason a repair leaves a finding alone is a closed snake_case string,
+/// and a reason nobody minted refuses the read; the 5C reasons are not here.
+#[test]
+fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
+    let reasons = [
+        (SkipReason::NoDeclaredFix, "no_declared_fix"),
+        (SkipReason::Tie, "tie"),
+        (SkipReason::BelowThreshold, "below_threshold"),
+        (SkipReason::Unreadable, "unreadable"),
+        (SkipReason::ConflictingDefaults, "conflicting_defaults"),
+        (
+            SkipReason::BringsInRequiredFields,
+            "brings_in_required_fields",
+        ),
+        (SkipReason::AmbiguousCapture, "ambiguous_capture"),
+        (SkipReason::RulesConflict, "rules_conflict"),
+        (
+            SkipReason::RenameOntoOccupiedField,
+            "rename_onto_occupied_field",
+        ),
+        (SkipReason::AmbiguousLink, "ambiguous_link"),
+        (SkipReason::ExcludedClass, "excluded_class"),
+        (SkipReason::JudgeWouldRefuse, "judge_would_refuse"),
+        (SkipReason::DestinationTaken, "destination_taken"),
+    ];
+    for (reason, text) in reasons {
+        assert_eq!(wire(&reason), format!("\"{text}\""));
+        round_trip(&reason);
+    }
+    for foreign in ["too_common", "too_short", "move_following", "Tie", ""] {
+        assert!(
+            serde_json::from_str::<SkipReason>(&format!("\"{foreign}\"")).is_err(),
+            "`{foreign}` read as a skip reason"
+        );
+    }
+}
+
+/// Every new repair type survives the round trip, and refuses a key it does
+/// not know.
+#[test]
+fn every_repair_plan_type_round_trips_and_refuses_an_unknown_field() {
+    let provenance = a_provenance();
+    round_trip(&provenance);
+    round_trip(&Provenance::new(3, Vec::new()));
+    for citation in &provenance.citations {
+        round_trip(citation);
+    }
+    for finding in &provenance.citations[0].findings {
+        round_trip(finding);
+    }
+    for skipped in &provenance.skipped {
+        round_trip(skipped);
+        round_trip(&skipped.candidates);
+    }
+    round_trip(&ValueCandidate::new(a_value("done")).by_rule("closed-status"));
+    round_trip(&RequiredField::new("owner").with_default(a_value("someone")));
+    round_trip(&PlanCondition::address_resolution(
+        a_link_key(),
+        Resolves::several(),
+    ));
+
+    let json = serde_json::to_value(&provenance).expect("provenance as JSON");
+    for pointer in [
+        "",
+        "/citations/0",
+        "/citations/0/findings/0",
+        "/skipped/0",
+        "/skipped/0/candidates",
+        "/skipped/1/candidates",
+        "/skipped/1/candidates/head",
+        "/skipped/1/candidates/head/candidates/0",
+        "/skipped/3/required_fields",
+        "/skipped/3/required_fields/fields/0",
+    ] {
+        assert!(
+            serde_json::from_str::<Provenance>(&with_surprise(&json, pointer)).is_err(),
+            "provenance carrying an unknown field at `{pointer}` read back"
+        );
+    }
+    let condition = serde_json::to_value(PlanCondition::address_resolution(
+        a_link_key(),
+        Resolves::none(),
+    ))
+    .expect("a condition as JSON");
+    for pointer in ["", "/link", "/after"] {
+        assert!(
+            serde_json::from_str::<PlanCondition>(&with_surprise(&condition, pointer)).is_err(),
+            "an address resolution carrying an unknown field at `{pointer}` read back"
+        );
+    }
+}
+
+/// An address resolution is the pinned bytes the planner will write.
+#[test]
+fn an_address_resolution_is_a_link_and_where_its_address_lands() {
+    assert_eq!(
+        wire(&PlanCondition::address_resolution(
+            a_link_key(),
+            Resolves::one(path("notes/a.md"))
+        )),
+        r#"{"condition":"address_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"},"after":{"resolves":"one","path":"notes/a.md"}}"#
+    );
+    assert!(
+        serde_json::from_str::<PlanCondition>(
+            r#"{"condition":"address_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"}}"#
+        )
+        .is_err(),
+        "an address resolution read without where it lands"
+    );
+}
+
+/// The value head and the required-field head are bounded as the candidate
+/// head is: the constructor truncates to the bound, the read refuses a head
+/// over it and a total below the head.
+#[test]
+fn the_repair_heads_refuse_what_the_candidate_head_refuses() {
+    let value_candidate = |index: usize| ValueCandidate::new(a_value(&format!("value-{index}")));
+    let field = |index: usize| RequiredField::new(format!("field-{index}"));
+
+    let heads = ValueCandidateHead::new((0..9).map(value_candidate), 9).expect("a truncated head");
+    assert_eq!(heads.candidates().len(), CANDIDATE_HEAD);
+    assert_eq!(heads.total(), 9);
+    assert!(heads.is_truncated());
+    let fields = RequiredFieldHead::new((0..9).map(field), 9).expect("a truncated head");
+    assert_eq!(fields.fields().len(), CANDIDATE_HEAD);
+    assert!(fields.is_truncated());
+
+    let refusal = ValueCandidateHead::new((0..3).map(value_candidate), 2)
+        .expect_err("a total below its head");
+    assert_eq!((refusal.head(), refusal.total()), (3, 2));
+    assert!(RequiredFieldHead::new((0..3).map(field), 2).is_err());
+
+    let value_json = |count: usize, total: u64| {
+        let candidates: Vec<_> = (0..count).map(value_candidate).collect();
+        serde_json::json!({ "candidates": candidates, "total": total }).to_string()
+    };
+    let field_json = |count: usize, total: u64| {
+        let fields: Vec<_> = (0..count).map(field).collect();
+        serde_json::json!({ "fields": fields, "total": total }).to_string()
+    };
+    for count in 0..=CANDIDATE_HEAD {
+        let total = count as u64;
+        assert!(
+            serde_json::from_str::<ValueCandidateHead>(&value_json(count, total)).is_ok(),
+            "a value head of {count} was refused"
+        );
+        assert!(
+            serde_json::from_str::<RequiredFieldHead>(&field_json(count, total + 4)).is_ok(),
+            "a required-field head of {count} was refused"
+        );
+    }
+    let over = CANDIDATE_HEAD + 1;
+    let refusal = serde_json::from_str::<ValueCandidateHead>(&value_json(over, 20))
+        .expect_err("a value head over the bound")
+        .to_string();
+    assert!(refusal.contains("at most 5"), "{refusal}");
+    let refusal = serde_json::from_str::<RequiredFieldHead>(&field_json(over, 20))
+        .expect_err("a required-field head over the bound")
+        .to_string();
+    assert!(refusal.contains("at most 5"), "{refusal}");
+    assert!(serde_json::from_str::<ValueCandidateHead>(&value_json(3, 2)).is_err());
+    assert!(serde_json::from_str::<RequiredFieldHead>(&field_json(3, 2)).is_err());
+    assert!(
+        serde_json::from_str::<ValueCandidateHead>(&spliced(
+            &value_json(1, 1),
+            r#""total":1"#,
+            r#""total":1,"surprise":true"#
+        ))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<RequiredFieldHead>(&spliced(
+            &field_json(1, 1),
+            r#""total":1"#,
+            r#""total":1,"surprise":true"#
+        ))
+        .is_err()
+    );
+
+    // The same bound holds where a head rides in a skipped finding.
+    let skipped = |candidates: &str| {
+        format!(
+            r#"{{"finding":1,"reason":"tie","candidates":{{"of":"values","head":{candidates}}}}}"#
+        )
+    };
+    assert!(serde_json::from_str::<SkippedFinding>(&skipped(&value_json(5, 5))).is_ok());
+    assert!(serde_json::from_str::<SkippedFinding>(&skipped(&value_json(6, 6))).is_err());
+    assert!(serde_json::from_str::<SkippedFinding>(&skipped(&value_json(2, 1))).is_err());
+    let brings_in = |head: &str| {
+        format!(r#"{{"finding":1,"reason":"brings_in_required_fields","required_fields":{head}}}"#)
+    };
+    assert!(serde_json::from_str::<SkippedFinding>(&brings_in(&field_json(5, 5))).is_ok());
+    assert!(serde_json::from_str::<SkippedFinding>(&brings_in(&field_json(6, 6))).is_err());
+    assert!(serde_json::from_str::<SkippedFinding>(&brings_in(&field_json(2, 1))).is_err());
+    // A document head is the candidate head as it is.
+    let documents = |head: &str| {
+        format!(
+            r#"{{"finding":1,"reason":"ambiguous_link","candidates":{{"of":"documents","head":{head}}}}}"#
+        )
+    };
+    let candidates = |count: usize| -> Vec<_> {
+        (0..count)
+            .map(|index| candidate(&format!("notes/{index}")))
+            .collect()
+    };
+    for (count, total, accepted) in [(5, 5, true), (6, 6, false), (2, 1, false)] {
+        let head = serde_json::json!({ "candidates": candidates(count), "total": total });
+        assert_eq!(
+            serde_json::from_str::<SkippedFinding>(&documents(&head.to_string())).is_ok(),
+            accepted,
+            "a document head of {count} out of {total}"
+        );
+    }
+}
+
+/// An operations plan still refuses a provenance block, however full.
+#[test]
+fn an_operations_plan_refuses_a_full_provenance_block() {
+    let authored = wire(&an_authored_plan());
+    let provenance = wire(&a_provenance());
+    let json = spliced(
+        &authored,
+        r#"{"plan":"operations","#,
+        &format!(r#"{{"plan":"operations","provenance":{provenance},"#),
+    );
+    assert!(serde_json::from_str::<AuthoredPlan>(&json).is_err());
+    let refusal = serde_json::from_str::<PlanDocument>(&json)
+        .expect_err("an operations plan carrying provenance")
+        .to_string();
+    assert!(refusal.contains("provenance"), "{refusal}");
+}
+
+/// A repair request is the vault, the mode and validate's selection beside its
+/// own keys, and takes neither `force` nor `conditions`.
+#[test]
+fn a_repair_request_names_its_mode_and_takes_no_force_or_conditions() {
+    let vault = VaultAddress::name(name("notes"));
+    let bare = RepairParams::new(vault.clone(), ApplyMode::Preview);
+    assert_eq!(
+        wire(&bare),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"preview"}"#
+    );
+    assert_eq!(bare.threshold(), Confidence::Derived);
+    round_trip(&bare);
+    let full = RepairParams::new(vault, ApplyMode::Apply)
+        .with_predicates(predicates())
+        .with_kinds(finding_kinds())
+        .with_severity(Severity::Error)
+        .with_rule("closed-status")
+        .with_limit(20)
+        .with_after(Cursor::new(
+            Snapshot::new("epoch-1", 7, None, None),
+            CursorKey::repair_document("notes/m.md"),
+        ))
+        .with_threshold(Confidence::Suggested);
+    round_trip(&full);
+    assert_eq!(full.threshold(), Confidence::Suggested);
+    assert_eq!(
+        RepairParams::new(VaultAddress::name(name("notes")), ApplyMode::Apply)
+            .with_threshold(Confidence::Declared)
+            .threshold(),
+        Confidence::Declared
+    );
+
+    // The mode has no default.
+    assert!(
+        serde_json::from_str::<RepairParams>(r#"{"vault":{"by":"name","name":"notes"}}"#).is_err()
+    );
+    for foreign in [
+        r#""force":true"#,
+        r#""conditions":[]"#,
+        r#""summary":false"#,
+        r#""surprise":1"#,
+    ] {
+        let json =
+            format!(r#"{{"vault":{{"by":"name","name":"notes"}},"mode":"apply",{foreign}}}"#);
+        assert!(
+            serde_json::from_str::<RepairParams>(&json).is_err(),
+            "a repair request carrying {foreign} read back"
+        );
+    }
+    // A cursor is one opaque string; a position nobody minted is refused.
+    assert!(
+        serde_json::from_str::<RepairParams>(
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","after":"not a cursor"}"#
+        )
+        .is_err()
+    );
 }

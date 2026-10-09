@@ -539,7 +539,8 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// `recomputed`, the set computed again from the plan: each entry it records
 /// that the set does not hold with the same values fails, and each entry the
 /// set holds that it does not record is unrecorded. A content condition is
-/// not an entry, and is judged on its own.
+/// not an entry, and is judged on its own; nor is an address resolution, which
+/// the comparison ignores.
 ///
 /// **The set is exact** (ADR 0037): a link whose resolution the vault outside
 /// the plan moved since planning — a document created or removed there that
@@ -554,7 +555,11 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
                 PlanCondition::LinkResolution { link, .. } => {
                     Some((entry_key(link), condition.clone()))
                 }
-                PlanCondition::ContentHash { .. } => None,
+                // An address resolution is no entry of the change set: it is
+                // never computed again from the operations, so the
+                // comparison ignores it (NORN-371 checks it at the
+                // after-state).
+                PlanCondition::ContentHash { .. } | PlanCondition::AddressResolution { .. } => None,
             })
             .collect()
     };
@@ -566,7 +571,7 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
             PlanCondition::LinkResolution { link, .. } => {
                 computed.get(&entry_key(link)) != Some(*condition)
             }
-            PlanCondition::ContentHash { .. } => false,
+            PlanCondition::ContentHash { .. } | PlanCondition::AddressResolution { .. } => false,
         })
         .cloned()
         .map(RefusedCheck::condition_failed)
