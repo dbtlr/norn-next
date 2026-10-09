@@ -111,6 +111,9 @@ pub struct RepairBatch {
 }
 
 impl Snapshot {
+    // A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer.
+    // The host's repair handler pages a repair through this read; nothing
+    // calls it outside this crate's tests until that handler lands.
     /// The selected findings of the next documents in path order, a batch of
     /// about `selection.limit` findings that never splits a document.
     ///
@@ -124,7 +127,6 @@ impl Snapshot {
     /// fingerprint, names no position among a repair's documents
     /// ([`PageRefusal::CursorNotTaken`]).
     ///
-    /// The Layer 5B repair handler pages a repair through this read (NORN-373).
     pub fn repair_batch(
         &self,
         selection: &RepairSelection<'_>,

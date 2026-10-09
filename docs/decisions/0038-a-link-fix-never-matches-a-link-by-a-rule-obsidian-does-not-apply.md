@@ -9,9 +9,9 @@ Supersedes [ADR 0036](0036-a-repair-fix-is-declared-on-the-constraint-it-serves.
 contract this decision restates whole with one change: ADR 0036 counted among the derived
 fixes a broken link that resolves uniquely after case and separator normalization, and this
 decision withdraws it. A wikilink is Obsidian's construct, and a vault norn maintains is one
-Obsidian also reads, so how a link resolves is Obsidian's to decide. Obsidian resolves a
-wikilink ignoring case and folds nothing else, so a fold a derived fix applies by default
-would resolve links as Obsidian does not.
+Obsidian also reads, so a repair never gives a link a meaning Obsidian does not. Obsidian
+resolves a wikilink ignoring case and folds nothing else, so a fold a derived fix applies by
+default would rewrite links to targets Obsidian does not resolve them to.
 
 Repair compiles findings into one resolved plan. For each finding it needs an answer — the
 value a field should hold, the path a document belongs at — or a reason it has none. Some
@@ -59,13 +59,13 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   carries its score. Ambiguous links, date reformatting and coercion of yes/no or numeric
   spellings have no built-in fix.
 - **A link fix never matches a link by a rule Obsidian does not apply.** A wikilink carries
-  Obsidian's semantics, and norn is stricter than Obsidian only where that never resolves a
-  link differently. No derived fix answers a broken link by normalizing its spelling — by
-  case, separators or any other fold — because a derived fix applies at the default
-  threshold and claims the only answer, which makes the fold a second resolution rule
-  beside Obsidian's. A suggested fix may still propose a broken link's most similar target,
-  since it carries its score, enters a plan only where the caller admits suggestions, and
-  leaves the link broken in norn and in Obsidian alike until a caller chooses it.
+  Obsidian's semantics, and a repair writes no link by a matching rule beyond Obsidian's own.
+  No derived fix answers a broken link by normalizing its spelling — by case, separators or
+  any other fold — because a derived fix applies at the default threshold and claims the only
+  answer: a separator fold would be a second resolution rule beside Obsidian's, and a case
+  fold answers no break Obsidian sees. A suggested fix may still propose a broken link's most
+  similar target, since it carries its score, enters a plan only where the caller admits
+  suggestions, and leaves the link as it stands until a caller chooses it.
 - **Three confidence levels, one threshold.** Every proposed change carries its level:
   **declared** for a fix the schema's author wrote, **derived** and **suggested** as above.
   A threshold admits its own level and every stronger one, declared before derived before
@@ -131,3 +131,8 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
 - A broken link differing from a document's name only in case or separators gets no
   derived fix; at the suggested level its most similar target may be proposed with its
   score, and otherwise it is skipped with its decision data.
+- This decision governs which fixes repair writes, not how norn resolves links. On a root that
+  tells spellings apart, norn resolves a wikilink by its exact case (`docs/architecture.md`
+  § the link index), so a link differing from its target only in case is reported broken
+  there although Obsidian reaches the target. That difference is accepted, not closed: such a
+  link has no derived fix, and its similarity suggestion is the only built-in answer.

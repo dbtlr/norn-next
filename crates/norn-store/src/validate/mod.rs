@@ -53,7 +53,9 @@
 //! `UNION ALL` and ordered together ([`ValidateStatement::MergedPage`]). Each
 //! arm already hands its findings back in that order, so SQLite merges the
 //! arms' orders instead of sorting them, and a bounded read costs the rows it
-//! hands back. No index is added for it: the indexes a page seeks are the ones
+//! hands back — save where a document part that keeps what it seeks drives
+//! each arm, which then sorts what that part matched, as a page's section
+//! does. No index is added for it: the indexes a page seeks are the ones
 //! behind the merge. A batch holds about `limit` findings and **never splits a
 //! document's selected findings**: a limit falling inside a document reads the
 //! document's remaining findings on ([`ValidateStatement::DocumentTail`]), so a
