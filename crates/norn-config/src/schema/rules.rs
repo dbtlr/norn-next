@@ -65,7 +65,7 @@
 //! read no capture, so `<name>` there is the literal text it spells. No rule
 //! glob holds an empty segment, which no document path holds either.
 //!
-//! **Constraints and their fixes** ([ADR 0036]). `required` maps a field to
+//! **Constraints and their fixes** ([ADR 0038]). `required` maps a field to
 //! its default, or to nothing; a field is missing where it is absent or null,
 //! and an empty string or list meets it. `forbidden` maps a field to
 //! `remove`, `{rename_to: <field>}`, or nothing, which is no fix. `one_of`
@@ -164,7 +164,7 @@
 //! frontmatter.
 //!
 //! [ADR 0035]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md
-//! [ADR 0036]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0036-a-repair-fix-is-declared-on-the-constraint-it-serves.md
+//! [ADR 0038]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0038-a-link-fix-never-matches-a-link-by-a-rule-obsidian-does-not-apply.md
 
 mod checks;
 mod combined;
