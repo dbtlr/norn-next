@@ -214,15 +214,23 @@ impl CandidateHead {
     /// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total below the
     /// candidates beside it heads nothing.
     fn read(candidates: Vec<Candidate>, total: u64) -> Result<Self, String> {
-        if candidates.len() > CANDIDATE_HEAD {
-            return Err(format!(
-                "a candidate head holds at most {CANDIDATE_HEAD} candidates, and this one holds {}",
-                candidates.len()
-            ));
-        }
-        TotalBelowHead::check(candidates.len(), total).map_err(|refusal| refusal.to_string())?;
+        check_head_read("candidate", "candidates", candidates.len(), total)?;
         Ok(CandidateHead { candidates, total })
     }
+}
+
+/// The one read check of every bounded head here, the finding row's candidate
+/// head and each head of a repair plan alike: `len` members of a `what` head,
+/// spelled `noun` in the refusal, out of `total`. A head longer than
+/// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total below the
+/// members beside it heads nothing.
+fn check_head_read(what: &str, noun: &str, len: usize, total: u64) -> Result<(), String> {
+    if len > CANDIDATE_HEAD {
+        return Err(format!(
+            "a {what} head holds at most {CANDIDATE_HEAD} {noun}, and this one holds {len}"
+        ));
+    }
+    TotalBelowHead::check(len, total).map_err(|refusal| refusal.to_string())
 }
 
 /// The bounded head of a list of repair decision data, with how many there
@@ -338,18 +346,7 @@ macro_rules! bounded_head {
                     total: u64,
                 }
                 let fields = Fields::deserialize(deserializer)?;
-                if fields.$field.len() > CANDIDATE_HEAD {
-                    return Err(D::Error::custom(format!(
-                        concat!(
-                            "a ",
-                            $what,
-                            " head holds at most {} members, and this one holds {}"
-                        ),
-                        CANDIDATE_HEAD,
-                        fields.$field.len()
-                    )));
-                }
-                TotalBelowHead::check(fields.$field.len(), fields.total)
+                check_head_read($what, "members", fields.$field.len(), fields.total)
                     .map_err(D::Error::custom)?;
                 Ok($head {
                     $field: fields.$field,
