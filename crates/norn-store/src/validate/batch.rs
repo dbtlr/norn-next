@@ -126,7 +126,6 @@ impl Snapshot {
     /// key's declared type. A cursor that is no repair's, or that carries a
     /// fingerprint, names no position among a repair's documents
     /// ([`PageRefusal::CursorNotTaken`]).
-    ///
     pub fn repair_batch(
         &self,
         selection: &RepairSelection<'_>,

@@ -989,17 +989,17 @@ and the batch is one merged read: a compound statement with one arm per kind, ea
 seek a kind's page is (over the rule's own rows where a rule is selected), joined by `UNION
 ALL` and ordered together, which SQLite runs as a merge of the arms' own orders with no sort
 and no index added — save where a document part that keeps what it seeks drives each arm, as
-it drives a page's section, and the arm sorts what that part matched. A batch holds about its limit in findings and never splits a document's
-selected findings: where the limit falls inside a document, a second statement reads that
-document's remaining findings, pinning its path by the folded and the bytewise equality
-together so that it still seeks, and a third probe of one finding tells whether documents
-remain. Two paths that differ only in case are two documents, compared bytewise. The cursor a
-batch mints names the last document it covered, under no fingerprint, only where more remain,
-and is its own row type, so a validate's cursor does not continue a repair nor a repair's a
-validate. Both reads carry a plan bar with a negative control, and a work bar over two
-vault sizes holds that a batch no document part drives costs the findings it reads and steps
-through no full scan or sort. No verb pages through it yet: the host's repair verb (NORN-373)
-is the consuming layer.
+it drives a page's section, and the arm sorts what that part matched. A batch holds about
+its limit in findings and never splits a document's selected findings: where the limit falls
+inside a document, a second statement reads that document's remaining findings, pinning its
+path by the folded and the bytewise equality together so that it still seeks, and a third
+probe of one finding tells whether documents remain. Two paths that differ only in case are
+two documents, compared bytewise. The cursor a batch mints names the last document it
+covered, under no fingerprint, only where more remain, and is its own row type, so a
+validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
+plan bar with a negative control, and a work bar over two vault sizes holds that a batch no
+document part drives costs the findings it reads and steps through no full scan or sort. No
+verb pages through it yet: the host's repair verb (NORN-373) is the consuming layer.
 
 **The field universe has a builder** as well: the describe builder answers the vault's content
 model, declared and observed, as a page of facets in `(kind, key)` order — the kinds in the

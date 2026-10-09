@@ -10,8 +10,9 @@ contract this decision restates whole with one change: ADR 0036 counted among th
 fixes a broken link that resolves uniquely after case and separator normalization, and this
 decision withdraws it. A wikilink is Obsidian's construct, and a vault norn maintains is one
 Obsidian also reads, so a repair never gives a link a meaning Obsidian does not. Obsidian
-resolves a wikilink ignoring case and folds nothing else, so a fold a derived fix applies by
-default would rewrite links to targets Obsidian does not resolve them to.
+resolves a wikilink ignoring case and folds nothing else: a separator fold a derived fix
+applies by default would rewrite links to targets Obsidian does not resolve them to, and a
+case fold would answer a break Obsidian does not see.
 
 Repair compiles findings into one resolved plan. For each finding it needs an answer — the
 value a field should hold, the path a document belongs at — or a reason it has none. Some
@@ -52,12 +53,12 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   is provably the only one: wrapping a single value as a one-item list or unwrapping a
   one-item list, a bare value made a link where it resolves uniquely, a closed-set value
   differing from exactly one member only by case or whitespace, boolean case, or a broken
-  link followed to the single live document holding the content a removed target last held. A **suggested** fix
-  is a deterministic heuristic's single best answer, without proof: a broken link's most
-  similar target above a fixed cutoff, a missing anchor's closest heading, a closed-set
-  value's closest member, or an undeclared tag one edit from exactly one declared tag; each
-  carries its score. Ambiguous links, date reformatting and coercion of yes/no or numeric
-  spellings have no built-in fix.
+  link followed to the single live document holding the content a removed target last held.
+  A **suggested** fix is a deterministic heuristic's single best answer, without proof: a
+  broken link's most similar target above a fixed cutoff, a missing anchor's closest
+  heading, a closed-set value's closest member, or an undeclared tag one edit from exactly
+  one declared tag; each carries its score. Ambiguous links, date reformatting and coercion
+  of yes/no or numeric spellings have no built-in fix.
 - **A link fix never matches a link by a rule Obsidian does not apply.** A wikilink carries
   Obsidian's semantics, and a repair writes no link by a matching rule beyond Obsidian's own.
   No derived fix answers a broken link by normalizing its spelling — by case, separators or
@@ -116,7 +117,8 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   case and never folds separators, so `[[my-note]]` is an unresolved link in Obsidian, and
   rewriting it to `my note.md` by default would give the link a meaning Obsidian does not.
   A link differing from its target only in case already reaches that target in Obsidian, so
-  it is not broken by Obsidian's semantics, and making link spellings match file names is a
+  under Obsidian's semantics it is not broken, though norn may report it broken on a root
+  that tells spellings apart (§ Consequences); making link spellings match file names is a
   question about file naming rather than a repair of a broken link.
 
 ## Consequences
