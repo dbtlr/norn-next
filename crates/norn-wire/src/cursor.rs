@@ -71,6 +71,11 @@
 //! and a collection's ordinals are in no schema's order and no page of them
 //! mints a fingerprint, so an answer paging them refuses a cursor carrying one
 //! as naming no position among its rows rather than as an order that changed.
+//! A repair's documents stand with them: a batch walks them in path order, a
+//! raw order of the paths that no schema changes, so a repair cursor is to be
+//! minted under no fingerprint. These rules do not enforce that, since the
+//! key carries none; what keeps a repair cursor from continuing another
+//! answer is its own row type ([`PagedRows::RepairDocument`]).
 //!
 //! **Two asymmetries follow from those rules.** A cursor minted without a
 //! sidecar revision and continued where a sidecar now answers reports nothing
@@ -316,6 +321,9 @@ pub enum CursorKey {
         /// everything before it.
         id: u64,
     },
+    // A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+    // handler that batch a repair, is the consuming layer. Nothing mints or
+    // reads this key yet because no repair verb exists until that step.
     /// A repair's batch boundary: the path of the last document a batch
     /// covered. The next batch starts at the first document after it in path
     /// order. It is its own row type, so a finding cursor cannot continue a
@@ -408,6 +416,8 @@ impl CursorKey {
         }
     }
 
+    // A dormant carrier: Layer 5B repair (NORN-373) mints this key when its
+    // handler ends a batch; no caller does until that step lands.
     /// A repair batch whose last document was the one at `path`.
     pub fn repair_document(path: impl Into<String>) -> Self {
         CursorKey::RepairDocument { path: path.into() }
@@ -463,6 +473,8 @@ pub enum PagedRows {
     Finding,
     /// One document's findings, as a get pages them.
     DocumentFinding,
+    // A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer;
+    // only the refusals' naming of a cursor of this row type reaches it yet.
     /// Documents, as a repair batches them.
     RepairDocument,
     /// Facets, as a describe pages them.

@@ -357,6 +357,12 @@ macro_rules! bounded_head {
     };
 }
 
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
 /// One value a repair could have written, and the rule that proposed it.
 ///
 /// On the wire a candidate is a plain object:
@@ -389,6 +395,12 @@ impl ValueCandidate {
     }
 }
 
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
 bounded_head!(
     ValueCandidateHead of ValueCandidate, candidates,
     what: "value candidate",
@@ -397,6 +409,12 @@ bounded_head!(
     total_doc: "How many values a repair could have written, which is what makes the candidates a head.",
 );
 
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
 /// One field a repair would bring into a document, and the default the rules
 /// declare for it.
 ///
@@ -436,6 +454,12 @@ impl RequiredField {
     }
 }
 
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
 bounded_head!(
     RequiredFieldHead of RequiredField, fields,
     what: "required field",
