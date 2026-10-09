@@ -1122,6 +1122,14 @@ fn a_cursor_that_is_no_position_among_the_findings_is_refused() {
         .to_string(),
         "the cursor names a position among documents, and the request pages findings"
     );
+    assert_eq!(
+        PageRefusal::CursorNotTaken {
+            cursor: PagedRows::RepairDocument,
+            paged: PagedRows::Finding,
+        }
+        .to_string(),
+        "the cursor names a position among a repair's documents, and the request pages findings"
+    );
 }
 
 /// **A finding's cursor whose id or ordinal is past what the store counts is
