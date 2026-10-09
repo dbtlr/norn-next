@@ -611,3 +611,108 @@ fn an_undeclared_tag_respelled_in_another_case_introduces_nothing() {
         Some("---\ntags: [STRAY]\n---\n")
     );
 }
+
+/// A schema closing a single link, a list of links, a number and a list of
+/// tags, each to a set a standing document's value lies outside.
+const RESPELLED: &str = "version: 1
+fields:
+  project: { type: link, shape: single }
+  related: { type: link, shape: list }
+  rank: { type: number, shape: single }
+  topics: { type: tags, shape: list }
+rules:
+  closed:
+    one_of:
+      project: { values: ['[[alpha]]'] }
+      related: { values: ['[[alpha]]'] }
+      rank: { values: [1] }
+      topics: { values: [project] }
+";
+
+/// **A standing violation respelled under its equality key introduces
+/// nothing, and one under another key does**: the gate tells a rule's
+/// finding apart by the key a closed set compares the offending value by, so
+/// a link keeps its identity under another alias and not under another
+/// anchor, a number under another spelling, and a tag under another case,
+/// while a second offending link, number or tag is a violation it
+/// introduces.
+#[test]
+fn a_standing_violation_respelled_under_its_equality_key_introduces_nothing() {
+    let float = |number: f64| AuthoredValue::float(number).expect("a finite number");
+    let cases: [(&str, &str, &str, AuthoredValue, Option<&str>); 8] = [
+        (
+            "a link under another alias",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta|Two]]"),
+            None,
+        ),
+        (
+            "a link under another anchor",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta#Plan]]"),
+            Some("[[beta#Plan]]"),
+        ),
+        (
+            "a list of links under other aliases",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta]]", "[[beta|Three]]"]),
+            None,
+        ),
+        (
+            "a list of links with another link pushed",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta|One]]", "[[gamma|G]]"]),
+            Some("[[gamma|G]]"),
+        ),
+        (
+            "a number under another spelling",
+            "rank: 2",
+            "rank",
+            float(2.0),
+            None,
+        ),
+        (
+            "a number under another value",
+            "rank: 2",
+            "rank",
+            float(3.0),
+            Some("3.0"),
+        ),
+        (
+            "a tag under another case",
+            "topics: [Stray]",
+            "topics",
+            list(&["stray"]),
+            None,
+        ),
+        (
+            "a tag with another tag pushed",
+            "topics: [Stray]",
+            "topics",
+            list(&["stray", "other"]),
+            Some("other"),
+        ),
+    ];
+    for (name, held, field, value, introduced) in cases {
+        let content = format!("---\n{held}\n---\n");
+        let mut fixture = Fixture::with_schema(RESPELLED, &[("a.md", content.as_str())]);
+        let outcome = fixture.apply(fixture.plan(vec![setting("a.md", field, value)]));
+        match introduced {
+            None => assert!(applied(outcome).forced.is_empty(), "{name}"),
+            Some(offending) => assert_eq!(
+                violations(&refused_for(outcome)),
+                [violation(
+                    "a.md",
+                    FindingKind::NotOneOf,
+                    field,
+                    Some(offending)
+                )],
+                "{name}"
+            ),
+        }
+    }
+}

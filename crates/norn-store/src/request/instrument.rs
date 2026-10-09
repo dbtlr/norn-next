@@ -214,7 +214,7 @@ impl<'a> Request<'a> {
                     params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
                 )
             }
-            // Each of the four enumerations is explained with its cursor
+            // Each of the five enumerations is explained with its cursor
             // bound, for the reason [`explained_page_cursor`] states: the
             // statement text does not branch on the cursor, so the plan is the
             // same either way today, and an edit that ever gave the cursor its

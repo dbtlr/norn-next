@@ -1066,9 +1066,32 @@ mod tests {
         );
     }
 
+    /// Runs `work` on its own thread and returns its answer, failing where
+    /// none comes within `budget`: an answer that enumerates the matches does
+    /// not finish, and the test must say so rather than hang. The thread of an
+    /// answer that never comes is left to end with the test process.
+    fn answered_within<T: Send + 'static>(
+        budget: std::time::Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver
+            .recv_timeout(budget)
+            .expect("the binding answers within its budget")
+    }
+
     /// **Binding keeps the matching bound.** Captures between runs of `**`
     /// against a long subject are decided at once, stopping at the second
-    /// binding.
+    /// binding, and so are three captures set among eight `**` against a
+    /// subject of twenty thousand segments, all of one text and all of
+    /// different texts.
+    ///
+    /// The second pattern tells a pattern-times-subject answer from an
+    /// enumerating one: it matches the subject in more than 10^25 ways, so a
+    /// walk over the matches does not answer in the budget.
     #[test]
     fn binding_keeps_the_matching_bound() {
         let pattern = capturing("**/<a>/<last>/**");
@@ -1084,6 +1107,23 @@ mod tests {
             Binding::Several(_)
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        let around = capturing("**/**/<a>/**/**/<b>/**/**/<c>/**/**");
+        let budget = std::time::Duration::from_secs(5);
+        let uniform = vec!["s"; 20_000].join("/");
+        let varied = (0..20_000)
+            .map(|at| format!("s{at}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let (pattern, again) = (around.clone(), around);
+        assert!(matches!(
+            answered_within(budget, move || pattern.bind(&uniform, CaseFold::Exact)),
+            Binding::Unique(_)
+        ));
+        assert!(matches!(
+            answered_within(budget, move || again.bind(&varied, CaseFold::Exact)),
+            Binding::Several(_)
+        ));
     }
 
     fn share(sets: &[&[&str]], case: CaseFold) -> bool {

@@ -1512,7 +1512,7 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
         page.assert_no_temp_btree();
     }
 
-    // The three pages over ordinary tables name the index the seek runs through,
+    // The four pages over ordinary tables name the index the seek runs through,
     // which a plan over a virtual table cannot: a module reports which index it
     // chose by number and never by name.
     plan(
@@ -4359,7 +4359,7 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
 /// values than its text names is an error here.
 ///
 /// Controls: the index each keyed statement seeks is dropped, and the same bar
-/// fails — for the three statements that seek a primary key or a row id, whose
+/// fails — for the four statements that seek a primary key or a row id, whose
 /// index cannot be dropped, a plan that scans the table is handed to the same
 /// judgment. The
 /// no-scan half has its own control: with the index a foreign-key action seeks
