@@ -694,22 +694,23 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, forty-one named statements carry a plan bar through it:
+the read builders below name, forty-four named statements carry a plan bar through it:
 suffix candidates, findings in a class, the path- and subject-scoped findings
 discards — the path discard an equality seek of the path-key index, and the subject discard
-in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values, the page
+in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values and the clear
+it runs over the folds of the keys a schema declares `tags` or `link`, the page
 a walk reads its scope's unaccounted finding subjects through, the ordered document page a
-heal merges its walk against, the four enumerations a caller drains a whole pillar through —
+heal merges its walk against, the five enumerations a caller drains a whole pillar through —
 the findings table, the tombstones, every row's stored suffix keys, raw and folded, beside
-the path that has to produce them, and the vocabulary the full-text index holds — and the
-two drains a lane-2 consumer
+the path that has to produce them, the vocabulary the full-text index holds, and the rule
+sets the findings cite — and the two drains a lane-2 consumer
 ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)) reads change through:
 the live document rows, and the recorded deaths — and the twelve keyed point reads: the
 document row a path stands at, the row a facts snapshot opens on and the six fact reads
 keyed by the row id it found, the death recorded for a path, the findings recorded about
 one, the pinned vault-schema projection, and the store's last committed write generation —
-and the three chunked reads every findings read collects each finding's candidate head,
-class memberships and path keys through, a chunk of finding ids at a time — and the twelve
+and the four chunked reads every findings read collects each finding's candidate head,
+class memberships, path keys and cited rules through, a chunk of finding ids at a time — and the twelve
 statements the link-health judgment runs, eleven of them inside every changeset's
 re-decision: the links it judges beside their keys, selected five ways — by the documents
 holding them (the read door's selection, which no changeset runs), by the write that
@@ -721,22 +722,25 @@ of each head that filled, the suffixes naming the candidates its findings carry,
 the one document a link names holds the place its anchor names, which of a chunk of the
 changed classes and path keys a link or a finding is held under, a page of the findings
 standing under a class beside the link each was about, and the discard of such a page by
-finding id. Each chunked read is barred at every chunk width a read emits, as an equality
-seek of its table's primary key on the finding id, with no full scan and no sorter, taken of
-the statement that binds exactly that many ids. The forty-first name carries the write path:
-a registry of the statements the write path prepares — the increment's document upsert, fact
-discards and inserts, document delete, tombstone record and row probe, the findings writes,
-the write generation's increment, the pinned-scalar upsert and the discard a schema pin runs
-over findings stamped under another fingerprint — which is the one place those statements'
-text is spelled, so a bar over one is a plan of the SQL the increment executes, and the census
+finding id. Each chunked read is barred at every chunk width a read emits, taken of the
+statement that binds exactly that many ids, with no full scan and no sorter: the three detail
+chunks as an equality seek of their table's primary key on the finding id, and the rules
+chunk as a seek of each finding and of its rule set by row id. The forty-fourth name carries
+the write path: a registry of the statements the write path prepares — the increment's
+document upsert, fact discards and inserts, document delete, tombstone record and row probe,
+the findings writes, the probe and insert of a rule set, a finding's rule citation, the
+collection of a rule set no finding cites any longer, the write generation's increment, the
+pinned-scalar upsert and the discard a schema pin runs over findings stamped under another
+fingerprint — which is the one place those statements' text is spelled, so a bar over one is a plan of the SQL the increment executes, and the census
 a bar walks is declared with the enum, so a variant cannot be left out of it. The registry holds
 the write statements no other explained statement names; the increment's remaining statements
 (the findings discards, the pinned-scalar read, the link-health re-decision statements) are
 explained through their own variants, and the increment prepares its findings discards from a
 closed set rather than from text. Each is barred to scan no table, and each keyed one (the fact
-discards, the document delete and probe, the generation increment, the stale-finding discard
-as two open ranges over the fingerprint) to seek its table by the constraint it binds, with a
-negative control for each half. The first-level foreign-key actions a plan reports are searches
+discards, the document delete and probe, the rule-set probe, the citation's read of its
+finding's key by row id, the rule-set collection, the generation increment, the stale-finding
+discard as two open ranges over the fingerprint) to seek its table by the constraint it binds,
+with a negative control for each half. The first-level foreign-key actions a plan reports are searches
 of the child tables and sit under the no-scan bar, so a cascade that falls to reading a child
 table end to end fails it; their seeks are not asserted positively. Most inserts report no
 search, so for them the bar is the universal one and cannot fail. A plan does not report
@@ -772,13 +776,13 @@ stores it narrows that pass to a seek of the scope's own range; a vault that fol
 case bounds the scope under the folding while that index orders bytewise, so the fold reads
 as a filter over the one pass the cursor seeks into.
 
-The four enumerations carry the bar their shapes admit. Each reaches its first row without
+The five enumerations carry the bar their shapes admit. Each reaches its first row without
 a full scan and without a sorter, over a column whose order is total, so a drain of a whole
-pillar is a walk of an index rather than a re-read of the table per page. The three over
+pillar is a walk of an index rather than a re-read of the table per page. The four over
 ordinary tables also name what they seek: the findings page searches `findings` by the row
-key its cursor is, the tombstone page seeks the unique path index that orders that pillar,
-and the suffix-key page seeks the unique path index over `documents` and reads the key
-column off the row it reached. The vocabulary page reads a virtual table, where a module
+key its cursor is, the rule-set page searches `rule_sets` by its row id, the tombstone page
+seeks the unique path index that orders that pillar, and the suffix-key page seeks the unique
+path index over `documents` and reads the key column off the row it reached. The vocabulary page reads a virtual table, where a module
 reports the index it chose by number and never by name, so what is barred there is that a
 bound reached the module at all — an unconstrained module reports the pair `0:` and is a
 read of everything.
