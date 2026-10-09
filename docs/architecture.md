@@ -3117,14 +3117,15 @@ writes or an address it replaces, saying that from the link's holder the address
 as recorded at the plan's after-state. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
-judgment of the link index holding one probe per address resolution the plan carries, each read
-from the holder's after-state path with every target of the plan at its after-state; a plan
-carrying none reads nothing for it. An address that no longer resolves as recorded is a failed condition, listed
-beside any failed change-set entry. A refusal's fresh plan carries the refused plan's address
-resolutions as recorded, so a re-send where the evidence changed is refused again and one
-where it holds applies. A condition names no operation, so the fresh plan also carries the
-conditions of operations it dropped or left unresolved, and may refuse on evidence for an
-operation it no longer holds; the caller re-runs repair.
+judgment of the link index holding one probe per address resolution the plan carries,
+each read from the holder's after-state path with every target of the plan at its
+after-state; a plan carrying none reads nothing for it. An address that no longer
+resolves as recorded is a failed condition, listed beside any failed change-set entry. A
+refusal's fresh plan carries the refused plan's address resolutions as recorded, so a
+re-send where the evidence changed is refused again and one where it holds applies. A
+condition names no operation, so the fresh plan also carries the conditions of
+operations it dropped or left unresolved, and may refuse on evidence for an operation it
+no longer holds; the caller re-runs repair.
 The host serves `move` through `Host::move_path`, `delete` through `Host::delete` and
 `rewrite_wikilink` through `Host::rewrite_wikilink`.
 

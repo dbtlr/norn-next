@@ -516,3 +516,38 @@ fn address_resolutions_over_a_delete_with_backlinks_add_one_judgment_of_their_ow
     );
     assert_eq!(with.full_scan_steps, without.full_scan_steps);
 }
+
+/// **Judging an address over a plan that creates a document reads only the
+/// probed link.** Links naming the document the plan creates are held under
+/// the keys that name it; the condition adds exactly one judgment, of its own
+/// link, and not those links.
+#[test]
+fn address_resolutions_over_a_create_with_links_naming_it_add_one_judgment_of_their_own_links() {
+    let files = [
+        ("b.md", "[[new]]\n"),
+        ("d.md", "[[new]]\n"),
+        ("e.md", "[[new]]\n"),
+        ("f.md", "[[new]]\n"),
+    ];
+    let mut fixture = Fixture::new(&files);
+    let plain = fixture.plan(vec![creating("new.md", "N\n")]);
+    let without = fixture.judgments_of_applying(&plain);
+
+    let mut fixture = Fixture::new(&files);
+    let mut plan = fixture.plan(vec![creating("new.md", "N\n")]);
+    plan.conditions.push(wikilink_resolving(
+        "b.md",
+        "new",
+        Resolves::one(path("new.md")),
+    ));
+    let with = fixture.judgments_of_applying(&plan);
+    assert_eq!(
+        (
+            with.judgments - without.judgments,
+            with.links_evaluated - without.links_evaluated
+        ),
+        (1, 1),
+        "without {without:?} with {with:?}"
+    );
+    assert_eq!(with.full_scan_steps, without.full_scan_steps);
+}
