@@ -939,7 +939,9 @@ pub struct ResolvedPlan {
     pub operations: Vec<Operation>,
     /// One per file the operations touch. Folders are not transitions.
     pub transitions: Vec<Transition>,
-    /// What must still hold of the files the plan does not write.
+    /// What must still hold: the content of a file the plan does not write,
+    /// an entry of the plan's resolution change set, and how an address
+    /// resolves at the plan's after-state.
     pub conditions: Vec<PlanCondition>,
     /// What a repair plan was planned from. Absent from every other plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
