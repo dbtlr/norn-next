@@ -315,6 +315,16 @@ fn a_batch_does_not_take_the_next_spelling_for_the_same_document() {
         batch.next.as_ref().map(Cursor::key),
         Some(&CursorKey::repair_document("A.md"))
     );
+    // The finding past the limit is `a.md`'s, another document, so nothing
+    // of `A.md` is left to read and no tail runs.
+    let tails = store
+        .batch_plans(&repairing().with_limit(2))
+        .iter()
+        .filter(|ran| {
+            ran.statement == norn_store::ReadStatement::Validate(ValidateStatement::DocumentTail)
+        })
+        .count();
+    assert_eq!(tails, 0, "a limit ending `A.md` read a tail of it");
 }
 
 /// **A drain of batches answers exactly the findings an unpaged validate
