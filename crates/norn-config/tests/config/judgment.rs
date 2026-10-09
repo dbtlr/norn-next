@@ -332,7 +332,8 @@ rules:
 }
 
 /// **Closed sets sharing no member on a field no rule requires conflict only
-/// where the field holds a value.**
+/// where the field holds a value.** An empty list holds no element, so it
+/// mints no conflict, as an absent field and a null do not.
 #[test]
 fn an_empty_closed_set_on_an_unrequired_field_is_a_conflict_only_where_a_value_stands() {
     let schema = schema(
@@ -348,6 +349,14 @@ rules:
             &schema,
             "notes/a.md",
             &[("kind", text("x")), ("status", AuthoredValue::Null)]
+        )
+        .is_empty()
+    );
+    assert!(
+        judged(
+            &schema,
+            "notes/a.md",
+            &[("kind", text("x")), ("status", list(&[]))]
         )
         .is_empty()
     );
