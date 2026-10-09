@@ -7702,7 +7702,7 @@ fn resolved_plan_json() -> String {
             r#"{{"finding":44,"reason":"below_threshold","proposed":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"note":"a guess"}},"#,
             r#"{{"finding":45,"reason":"brings_in_required_fields","required_fields":{{"fields":[{{"field":"owner","default":{{"text":"unassigned","byte_length":10,"hash":"{seven}"}}}},{{"field":"due"}}],"total":3}}}},"#,
             r#"{{"finding":46,"reason":"no_declared_fix"}}],"#,
-            r#""remaining":12,"more":true,"cursor":"{cursor}"}},"#,
+            r#""remaining":12,"cursor":"{cursor}"}},"#,
             r#""footnote":"finish the draft"}}"#
         ),
         ab = hash_text(0xab),
@@ -9815,12 +9815,11 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
                 citations,
                 skipped,
                 remaining,
-                more,
                 cursor,
             }) = provenance
             {
                 read.push(format!(
-                    "planned from generation {finding_generation}, {remaining:?} remaining, more {more}, continuing {}",
+                    "planned from generation {finding_generation}, {remaining:?} remaining, continuing {}",
                     cursor.is_some()
                 ));
                 for Citation {
@@ -11629,6 +11628,33 @@ fn every_repair_plan_type_round_trips_and_refuses_an_unknown_field() {
             serde_json::from_str::<PlanCondition>(&with_surprise(&condition, pointer)).is_err(),
             "an address resolution carrying an unknown field at `{pointer}` read back"
         );
+    }
+}
+
+/// **`remaining` and `cursor` are left out of the bytes when absent**, so a
+/// last batch carries no cursor and a later batch no count, and the cursor
+/// alone says whether more remain.
+#[test]
+fn a_provenance_leaves_out_the_remaining_count_and_cursor_it_does_not_carry() {
+    let bare = Provenance::new(3, Vec::new());
+    assert_eq!(
+        wire(&bare),
+        r#"{"finding_generation":3,"citations":[],"skipped":[]}"#
+    );
+    let counted = wire(&bare.clone().with_remaining(0));
+    assert_eq!(
+        counted,
+        r#"{"finding_generation":3,"citations":[],"skipped":[],"remaining":0}"#
+    );
+    let continued = wire(&bare.clone().continued_by(a_repair_cursor()));
+    let cursor = serde_json::from_str::<String>(&wire(&a_repair_cursor())).expect("a string");
+    assert_eq!(
+        continued,
+        format!(r#"{{"finding_generation":3,"citations":[],"skipped":[],"cursor":"{cursor}"}}"#)
+    );
+    for json in [&counted, &continued] {
+        let read: Provenance = serde_json::from_str(json).expect("a provenance reads back");
+        assert_eq!(&wire(&read), json);
     }
 }
 

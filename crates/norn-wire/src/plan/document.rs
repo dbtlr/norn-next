@@ -666,11 +666,12 @@ impl Citation {
 
 // A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer. A
 // repair plan cites the finding generation it read, the findings each
-// operation fixes and the findings it skipped, and says whether more
-// remain; no Layer 4 planner plans from findings, so nothing in the current
-// call graph emits this, and it is reached only when a caller sends a plan
-// carrying one back. Its published description stays wire-facing, so the
-// roadmap note lives here rather than in the doc comment schemars lifts.
+// operation fixes and the findings it skipped, and carries the cursor that
+// continues a batch that leaves more; no Layer 4 planner plans from
+// findings, so nothing in the current call graph emits this, and it is
+// reached only when a caller sends a plan carrying one back. Its published
+// description stays wire-facing, so the roadmap note lives here rather than
+// in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
 ///
@@ -678,8 +679,8 @@ impl Citation {
 /// in path order; `limit` is a soft target in selected findings, and a batch
 /// extends through the last findings of its last document. The first batch
 /// says how many selected findings remain after it; a batch that leaves more
-/// says so and carries the cursor that continues from the last document it
-/// covered.
+/// carries the cursor that continues from the last document it covered, and
+/// one that leaves none carries no cursor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
@@ -694,10 +695,9 @@ pub struct Provenance {
     /// on the first batch only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u64>,
-    /// Whether more selected findings remain after this batch.
-    pub more: bool,
     /// Where the next batch continues: the cursor that follows the last
-    /// document this batch covered. Present when more findings remain.
+    /// document this batch covered. Present exactly when more findings
+    /// remain.
     // Boxed so a resolved plan, which every answer to an apply carries, stays
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -706,14 +706,13 @@ pub struct Provenance {
 
 impl Provenance {
     /// A plan planned from the findings at `finding_generation`, leaving
-    /// `skipped` alone, citing no finding and leaving no more.
+    /// `skipped` alone, citing no finding and leaving no more: no cursor.
     pub const fn new(finding_generation: u64, skipped: Vec<SkippedFinding>) -> Self {
         Provenance {
             finding_generation,
             citations: Vec::new(),
             skipped,
             remaining: None,
-            more: false,
             cursor: None,
         }
     }
@@ -736,7 +735,6 @@ impl Provenance {
     /// The provenance of a batch that leaves more, continued by `cursor`.
     #[must_use]
     pub fn continued_by(mut self, cursor: Cursor) -> Self {
-        self.more = true;
         self.cursor = Some(Box::new(cursor));
         self
     }

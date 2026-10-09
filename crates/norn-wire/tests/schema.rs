@@ -3338,7 +3338,6 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
                 "citations",
                 "skipped",
                 "remaining",
-                "more",
                 "cursor",
             ],
         ),
@@ -4323,7 +4322,7 @@ fn a_skipped_finding_and_a_provenance_advertise_what_they_require() {
     );
     assert_eq!(
         required_names(&schema_of::<Provenance>()),
-        ["finding_generation", "citations", "skipped", "more"]
+        ["finding_generation", "citations", "skipped"]
             .into_iter()
             .collect()
     );
