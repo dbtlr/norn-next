@@ -14,29 +14,31 @@ use norn_wire::{
     Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
     AuthoredPlan, AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead,
-    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
-    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
-    DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady,
-    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport, RungSelection,
-    RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport,
-    SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
-    TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
-    Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead,
-    ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
-    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    ChangesetOutcome, Citation, CitedFinding, Collection, CollectionPage, CollectionSelector,
+    Column, ComparedBy, Confidence, ContainerKind, ContentHash, ControlFileFailure, CountParams,
+    CountReport, Cursor, CursorKey, DeleteParams, DescribeParams, DescribeReport, Direction,
+    Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow,
+    Drift, EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
+    ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath,
+    FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints,
+    FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
+    LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity, MoveParams, Moved, NameSet,
+    NewParams, NotReady, Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    RepairParams, RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead,
+    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueCandidate,
+    ValueCandidateHead, ValueHead, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName,
+    VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase,
+    WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -255,6 +257,15 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<FileState>(),
         schema_of::<Transition>(),
         schema_of::<PlanCondition>(),
+        schema_of::<Confidence>(),
+        schema_of::<SkipReason>(),
+        schema_of::<SkippedCandidates>(),
+        schema_of::<ValueCandidate>(),
+        schema_of::<ValueCandidateHead>(),
+        schema_of::<RequiredField>(),
+        schema_of::<RequiredFieldHead>(),
+        schema_of::<CitedFinding>(),
+        schema_of::<Citation>(),
         schema_of::<SkippedFinding>(),
         schema_of::<Provenance>(),
         schema_of::<AuthoredPlan>(),
@@ -288,6 +299,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<MoveParams>(),
         schema_of::<DeleteParams>(),
         schema_of::<RewriteWikilinkParams>(),
+        schema_of::<RepairParams>(),
         schema_of::<norn_wire::InitParams>(),
         schema_of::<norn_wire::InitReport>(),
         schema_of::<norn_wire::MigrateParams>(),
@@ -1213,6 +1225,7 @@ fn a_cursor_key_advertises_its_row_tag() {
             "tally",
             "finding",
             "document_finding",
+            "repair_document",
             "facet",
             "ordinal"
         ])
@@ -1757,6 +1770,7 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
             "tally",
             "finding",
             "document_finding",
+            "repair_document",
             "facet",
             "collection"
         ])
@@ -3319,9 +3333,31 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         (schema_of::<Transition>(), vec!["path", "before", "after"]),
         (
             schema_of::<Provenance>(),
-            vec!["finding_generation", "skipped"],
+            vec![
+                "finding_generation",
+                "citations",
+                "skipped",
+                "remaining",
+                "cursor",
+            ],
         ),
-        (schema_of::<SkippedFinding>(), vec!["finding", "reason"]),
+        (
+            schema_of::<SkippedFinding>(),
+            vec![
+                "finding",
+                "reason",
+                "value",
+                "candidates",
+                "required_fields",
+                "proposed",
+                "note",
+            ],
+        ),
+        (schema_of::<Citation>(), vec!["operation", "findings"]),
+        (
+            schema_of::<CitedFinding>(),
+            vec!["finding", "value", "confidence", "notes"],
+        ),
     ] {
         assert_eq!(property_names(&schema), fields.into_iter().collect());
         assert!(refuses_unknown_keys(&schema), "{schema} admits any key");
@@ -3345,9 +3381,19 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<PlanCondition>(), "condition")),
-        sorted(["content_hash", "link_resolution"])
+        sorted(["content_hash", "link_resolution", "address_resolution"])
     );
     let conditions = schema_of::<PlanCondition>();
+    let address = branch(&conditions, "condition", "address_resolution");
+    assert_eq!(
+        required_names(address),
+        ["condition", "link", "after"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(address),
+        ["condition", "link", "after"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(address), "{address} admits any key");
     let entry = branch(&conditions, "condition", "link_resolution");
     assert_eq!(
         required_names(entry),
@@ -3919,6 +3965,21 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             vec!["vault", "mode", "old", "new", "conditions", "force"],
             vec!["vault", "mode", "old", "new"],
         ),
+        (
+            schema_of::<RepairParams>(),
+            vec![
+                "vault",
+                "mode",
+                "predicates",
+                "kinds",
+                "severity",
+                "rule",
+                "limit",
+                "after",
+                "threshold",
+            ],
+            vec!["vault", "mode"],
+        ),
     ] {
         assert_eq!(property_names(&schema), fields.into_iter().collect());
         assert_eq!(required_names(&schema), required.into_iter().collect());
@@ -4133,4 +4194,210 @@ fn a_new_request_schema_admits_exactly_its_three_forms() {
         required_names(&schema),
         ["vault", "mode"].into_iter().collect()
     );
+}
+
+// ── Layer 5B repair ──────────────────────────────────────────────────────
+
+/// The confidence levels and the skip reasons are closed flat-string
+/// vocabularies, and the reasons are the thirteen 5B emits: the 5C reasons are
+/// not advertised.
+#[test]
+fn the_repair_vocabularies_are_closed_strings() {
+    let constants = |schema: &Value| -> Vec<String> {
+        branches(schema)
+            .iter()
+            .map(|branch| {
+                string_constant(branch)
+                    .unwrap_or_else(|| panic!("a branch is not a pinned string: {branch}"))
+                    .to_string()
+            })
+            .collect()
+    };
+    assert_eq!(
+        constants(&schema_of::<Confidence>()),
+        ["declared", "derived", "suggested"],
+        "the levels are listed strongest first"
+    );
+    let mut reasons = constants(&schema_of::<SkipReason>());
+    reasons.sort_unstable();
+    let mut expected = [
+        "no_declared_fix",
+        "tie",
+        "below_threshold",
+        "unreadable",
+        "conflicting_defaults",
+        "brings_in_required_fields",
+        "ambiguous_capture",
+        "rules_conflict",
+        "rename_onto_occupied_field",
+        "ambiguous_link",
+        "excluded_class",
+        "judge_would_refuse",
+        "destination_taken",
+    ];
+    expected.sort_unstable();
+    assert_eq!(reasons, expected);
+}
+
+/// **Every list of candidates in a skipped entry advertises the bound it is
+/// read through**, read off the one constant: the value head and the
+/// required-field head as the document head already does.
+#[test]
+fn the_repair_heads_advertise_the_ceiling_they_are_read_through() {
+    for (schema, list, item) in [
+        (
+            schema_of::<ValueCandidateHead>(),
+            "candidates",
+            "#/$defs/ValueCandidate",
+        ),
+        (
+            schema_of::<RequiredFieldHead>(),
+            "fields",
+            "#/$defs/RequiredField",
+        ),
+    ] {
+        assert_eq!(
+            property_names(&schema),
+            [list, "total"].into_iter().collect()
+        );
+        assert_eq!(
+            required_names(&schema),
+            [list, "total"].into_iter().collect()
+        );
+        assert!(refuses_unknown_keys(&schema), "{schema} admits any key");
+        assert_eq!(
+            schema["properties"][list]["maxItems"].as_u64(),
+            Some(CANDIDATE_HEAD as u64),
+            "the head does not advertise the ceiling it is read through: {schema}"
+        );
+        assert_eq!(
+            schema["properties"][list]["items"]["$ref"].as_str(),
+            Some(item)
+        );
+    }
+    assert_eq!(
+        property_names(&schema_of::<ValueCandidate>()),
+        ["value", "rule"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(&schema_of::<ValueCandidate>()),
+        ["value"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(&schema_of::<RequiredField>()),
+        ["field"].into_iter().collect()
+    );
+}
+
+/// A skipped finding's candidates are one of two heads under an `of` tag, and
+/// a provenance block requires its record and leaves its batch facts to the
+/// batch that has them.
+#[test]
+fn a_skipped_finding_and_a_provenance_advertise_what_they_require() {
+    let candidates = schema_of::<SkippedCandidates>();
+    assert_eq!(
+        sorted(tag_constants(&candidates, "of")),
+        sorted(["documents", "values"])
+    );
+    // The values head is a plan-only type, referred to; the documents head is
+    // the answer's head read strictly, so it is advertised inline and closed.
+    let values = branch(&candidates, "of", "values");
+    assert!(refuses_unknown_keys(values), "{values} admits any key");
+    assert_eq!(
+        values["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/ValueCandidateHead")
+    );
+    let documents = branch(&candidates, "of", "documents");
+    assert!(
+        refuses_unknown_keys(documents),
+        "{documents} admits any key"
+    );
+    assert!(
+        refuses_unknown_keys(&documents["properties"]["head"]),
+        "the documents head admits any key: {documents}"
+    );
+    assert_eq!(
+        required_names(&schema_of::<SkippedFinding>()),
+        ["finding", "reason"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(&schema_of::<Provenance>()),
+        ["finding_generation", "citations", "skipped"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        required_names(&schema_of::<CitedFinding>()),
+        ["finding", "confidence"].into_iter().collect()
+    );
+    let provenance = schema_of::<Provenance>();
+    assert_eq!(
+        provenance["properties"]["cursor"]["anyOf"][0]["$ref"].as_str(),
+        Some("#/$defs/Cursor")
+    );
+    assert_eq!(
+        schema_of::<Citation>()["properties"]["operation"]["$ref"].as_str(),
+        Some("#/$defs/OperationId")
+    );
+}
+
+/// **A plan advertises the answer types its provenance embeds as closed**,
+/// where a finding row advertises the same types as the open answer types they
+/// are: the plan path refuses an unknown key and the answer path drops one.
+#[test]
+fn a_provenance_advertises_the_heads_it_embeds_as_closed() {
+    let closed = |schema: &Value, what: &str| {
+        assert!(
+            refuses_unknown_keys(schema),
+            "{what} admits any key: {schema}"
+        );
+    };
+    let skipped = schema_of::<SkippedFinding>();
+    let value = &skipped["properties"]["value"]["anyOf"][0];
+    closed(value, "a skipped finding's value head");
+    assert_eq!(
+        property_names(value),
+        ["text", "byte_length", "hash"].into_iter().collect()
+    );
+    let cited = schema_of::<CitedFinding>();
+    closed(
+        &cited["properties"]["value"]["anyOf"][0],
+        "a cited value head",
+    );
+    closed(
+        &schema_of::<RequiredField>()["properties"]["default"]["anyOf"][0],
+        "a required field's default",
+    );
+    closed(
+        &schema_of::<ValueCandidate>()["properties"]["value"],
+        "a value candidate's value head",
+    );
+    let documents = schema_of::<SkippedCandidates>();
+    let head = &branch(&documents, "of", "documents")["properties"]["head"];
+    closed(head, "a skipped finding's document head");
+    assert_eq!(
+        head["properties"]["candidates"]["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64)
+    );
+    let candidate = &head["properties"]["candidates"]["items"];
+    closed(candidate, "a skipped finding's candidate");
+    assert_eq!(
+        property_names(candidate),
+        ["path", "suffix"].into_iter().collect()
+    );
+
+    // The answer types themselves are unchanged, and a finding row refers to
+    // them rather than closing them.
+    let row = schema_of::<FindingRow>();
+    assert_eq!(
+        row["properties"]["head"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead")
+    );
+    for open in [
+        schema_of::<ValueHead>(),
+        schema_of::<CandidateHead>(),
+        schema_of::<Candidate>(),
+    ] {
+        assert!(!refuses_unknown_keys(&open), "{open} is closed");
+    }
 }

@@ -102,17 +102,21 @@
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
 //! between two [`FileState`]s, each absent or a [`ContentHash`] with a flag
 //! saying whether its bytes decode as a document, the
-//! [`PlanCondition`]s its planning read — a file's content, or what one link,
-//! named by its [`LinkKey`], [`Resolves`] to before the plan and after it —
-//! and the [`Provenance`] a repair plan cites, with the [`SkippedFinding`]s
-//! it left alone. In a resolved plan an operation that moves, removes or
-//! retargets documents carries its link cascade, one [`LinkRewrite`] per
-//! document, syntax and address among the links it changes, and a delete
-//! says what becomes of the links naming its document as its [`Backlinks`].
-//! Either plan carries whether it is
-//! forced past the schema check. A frontmatter kind names its documents by a
-//! [`WriteTarget`] and writes an [`AuthoredValue`] — a [`FiniteFloat`] or a
-//! [`ValueMap`] among its shapes. The other write verbs each compile to an
+//! [`PlanCondition`]s its planning read — a file's content, what one link,
+//! named by its [`LinkKey`], [`Resolves`] to before the plan and after it, or
+//! what a link's address resolves to at the after-state alone — and the
+//! [`Provenance`] a repair plan cites: the [`Citation`]s of the findings each
+//! operation fixes, each a [`CitedFinding`] at a [`Confidence`], and the
+//! [`SkippedFinding`]s it left alone, each for a [`SkipReason`] with the
+//! [`SkippedCandidates`] or [`RequiredFieldHead`] it chose between, and where
+//! the next batch continues. A repair is asked for by [`RepairParams`]. In a
+//! resolved plan an operation that moves, removes or retargets documents
+//! carries its link cascade, one [`LinkRewrite`] per document, syntax and
+//! address among the links it changes, and a delete says what becomes of the
+//! links naming its document as its [`Backlinks`]. Either plan carries whether
+//! it is forced past the schema check. A frontmatter kind names its documents
+//! by a [`WriteTarget`] and writes an [`AuthoredValue`] — a [`FiniteFloat`] or
+//! a [`ValueMap`] among its shapes. The other write verbs each compile to an
 //! authored plan: `set` from [`SetParams`] of [`FieldChange`]s, `edit` from
 //! [`EditParams`] of [`DocumentEdit`]s, `new` from [`NewParams`], `move` from
 //! [`MoveParams`] of a [`MoveSubject`] — a document or a folder, read from
@@ -177,15 +181,16 @@
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
-//!   read. [`Operation`]'s read path, and [`OperationKind`]'s alone, are
-//!   written by hand because the derive
-//!   cannot refuse what it must: the derive reads it into a private shape
-//!   that refuses any key it does not name and holds every field any kind
-//!   names, and the kind then takes the fields it names, refusing one it lacks
-//!   and one it does not take. A frontmatter kind's [`WriteTarget`] is two
-//!   keys among those fields, exactly one of them written, so the target is
-//!   written by hand on both sides too, and [`SetParams`], which holds a
-//!   target among its own keys, is read the way an operation is.
+//!   read. [`ValueCandidateHead`] and [`RequiredFieldHead`] are bounded heads
+//!   of the same bound, read by the same rules. [`Operation`]'s read path, and
+//!   [`OperationKind`]'s alone, are written by hand because the derive cannot
+//!   refuse what it must: the derive reads it into a private shape that refuses
+//!   any key it does not name and holds every field any kind names, and the
+//!   kind then takes the fields it names, refusing one it lacks and one it does
+//!   not take. A frontmatter kind's [`WriteTarget`] is two keys among those
+//!   fields, exactly one of them written, so the target is written by hand on
+//!   both sides too, and [`SetParams`], which holds a target among its own
+//!   keys, is read the way an operation is.
 //!   A delete's [`Backlinks`] is likewise at most one of two keys among the
 //!   fields that name the delete, so it is written by hand, and
 //!   [`DeleteParams`] reads its two keys the way an operation does.
@@ -234,15 +239,16 @@
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
 //!   `uniqueItems` for the distinctness it is measured against as well;
-//!   [`CandidateHead`] carries the
-//!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
+//!   [`CandidateHead`], [`ValueCandidateHead`] and [`RequiredFieldHead`] carry
+//!   the `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
 //!   the bound has one spelling; [`LadderDeclaration`] advertises that its
 //!   rungs contain a retrieval rung; and [`RungSubtraction`] advertises its
 //!   rungs each once and never every retrieval rung.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!   [`FiniteFloat`] holds it by construction, since the one value that breaks
 //!   a float's equality cannot be built, so a plan carrying a written float is
-//!   `Eq` like every other plan.
+//!   `Eq` like every other plan; [`Score`] holds it for the same reason, so a
+//!   [`Cursor`] and the provenance carrying one are `Eq` too.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
 //! tagged.** An externally tagged enum makes the variant name a JSON key, so a
@@ -376,9 +382,13 @@
 //! [`Forecast::with_links`], [`Forecast::with_left_behind`],
 //! [`SchemaViolation::new`], [`UnresolvedOperation::new`],
 //! [`AppliedTarget::new`], [`ApplyParams::new`], the `new` on [`SetParams`],
-//! [`EditParams`], [`NewParams`], [`MoveParams`], [`DeleteParams`] and
-//! [`RewriteWikilinkParams`], [`MoveSubject::new`], and the constructor on
-//! each [`FieldChange`], [`DocumentEdit`] and [`MoveSubject`] variant. The
+//! [`EditParams`], [`NewParams`], [`MoveParams`], [`DeleteParams`],
+//! [`RewriteWikilinkParams`] and [`RepairParams`], [`MoveSubject::new`],
+//! [`ValueCandidate::new`], [`ValueCandidate::by_rule`],
+//! [`RequiredField::new`], [`RequiredField::with_default`],
+//! [`ValueCandidateHead::new`], [`RequiredFieldHead::new`], and the
+//! constructor on each [`FieldChange`], [`DocumentEdit`], [`MoveSubject`] and
+//! [`SkippedCandidates`] variant. The
 //! plan types the applier destructures, below, can be written as literals and
 //! keep their constructors all the same: [`Operation::new`], the constructor
 //! on each [`OperationKind`], [`AuthorCondition`], [`ExpectedField`],
@@ -386,8 +396,8 @@
 //! [`PlanDocument`] variant, [`AuthoredValue::string`],
 //! [`AuthoredValue::float`], [`AuthoredValue::list`], [`AuthoredValue::map`],
 //! [`LinkRewrite::new`], [`LinkKey::new`], [`Transition::new`],
-//! [`SkippedFinding::new`], [`Provenance::new`], [`AuthoredPlan::new`] and
-//! [`ResolvedPlan::new`].
+//! [`SkippedFinding::new`], [`Provenance::new`], [`Citation::new`],
+//! [`CitedFinding::new`], [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -422,7 +432,7 @@
 //! [`AuthoredValue`], [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
 //! and [`Resolves`], and the structs [`Operation`], [`LinkRewrite`],
 //! [`LinkKey`], [`Transition`], [`ResolvedPlan`], [`AuthoredPlan`],
-//! [`Provenance`] and [`SkippedFinding`],
+//! [`Provenance`], [`Citation`], [`CitedFinding`] and [`SkippedFinding`],
 //! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
 //! tag is a public zero-sized marker, [`OperationsTag`] or [`ResolvedTag`]. The
 //! one applier decides what every field of a plan means, so a field added to
@@ -455,21 +465,25 @@
 //! documents, their operations, each kind's fields, their cascades, their
 //! conditions and the link keys and resolutions inside them, their
 //! transitions and file states, and a plan's provenance all refuse an unknown
-//! key, where every answer drops one. The divergence follows the direction a
-//! plan flows: an answer flows out to a caller, where a dropped field loses a
-//! fact the caller could not use, but a plan flows into the host, where a
-//! dropped field — a newer caller's condition — would weaken a check without a
-//! word. The refusal is the version-mismatch signal, and a plan carries no
-//! version field because it is short-lived: a caller whose plan is refused
-//! previews again under the build it is talking to. An answer that carries a
-//! plan — a report, or a refusal's fresh plan — still drops a field it does
-//! not know at its own level, and the plan inside it still refuses one. The
-//! write requests — [`SetParams`], [`EditParams`], [`NewParams`],
-//! [`MoveParams`], [`DeleteParams`] and [`RewriteWikilinkParams`], with their
-//! changes and edits — refuse one too, since each becomes a plan and a field
-//! dropped from it would be dropped from the plan. A [`LinkKey`] inside a
-//! forecast's [`LinkAdvisory`] refuses one as well: it is the key a plan's
-//! condition holds a link under, read as the plan reads it.
+//! key, where every answer drops one. A provenance embeds [`ValueHead`],
+//! [`Candidate`] and [`CandidateHead`], which are answer types and keep
+//! dropping an unknown key in a finding row: a plan reads them through a strict
+//! mirror that builds them through the same constructor and bound checks, and
+//! advertises them closed, so the bound is stated once. The divergence follows
+//! the direction a plan flows: an answer flows out to a caller, where a dropped
+//! field loses a fact the caller could not use, but a plan flows into the host,
+//! where a dropped field — a newer caller's condition — would weaken a check
+//! without a word. The refusal is the version-mismatch signal, and a plan
+//! carries no version field because it is short-lived: a caller whose plan is
+//! refused previews again under the build it is talking to. An answer that
+//! carries a plan — a report, or a refusal's fresh plan — still drops a field
+//! it does not know at its own level, and the plan inside it still refuses one.
+//! The write requests — [`SetParams`], [`EditParams`], [`NewParams`],
+//! [`MoveParams`], [`DeleteParams`], [`RewriteWikilinkParams`] and
+//! [`RepairParams`], with their changes and edits — refuse one too, since each
+//! becomes a plan and a field dropped from it would be dropped from the plan. A
+//! [`LinkKey`] inside a forecast's [`LinkAdvisory`] refuses one as well: it is
+//! the key a plan's condition holds a link under, read as the plan reads it.
 //!
 //! # The code grammar, and what is not a code
 //!
@@ -598,15 +612,16 @@ pub use error::{
 };
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{
-    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, VALUE_HEAD_BYTES,
-    ValueHead,
+    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, RequiredField,
+    RequiredFieldHead, VALUE_HEAD_BYTES, ValueCandidate, ValueCandidateHead, ValueHead,
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::backlinks::Backlinks;
 pub use plan::document::{
-    AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
-    ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,
+    AuthoredPlan, Citation, CitedFinding, Confidence, FileState, LinkKey, OperationsTag,
+    PlanCondition, PlanDocument, Provenance, ResolvedPlan, ResolvedTag, Resolves, SkipReason,
+    SkippedCandidates, SkippedFinding, Transition,
 };
 pub use plan::forecast::{FilePath, FolderPath, Forecast, LinkAdvisory};
 pub use plan::hash::{ContentHash, IllegalContentHash};
@@ -667,5 +682,6 @@ pub use write::edit::{DocumentEdit, EditParams};
 pub use write::init::{InitParams, InitReport};
 pub use write::moves::{IllegalMove, MoveParams, MoveSubject};
 pub use write::new::{NewParams, NewSubject};
+pub use write::repair::RepairParams;
 pub use write::rewrite_wikilink::RewriteWikilinkParams;
 pub use write::set::{FieldChange, SetParams};

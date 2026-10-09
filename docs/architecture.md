@@ -2693,7 +2693,8 @@ migration plans over an attached vault.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they
-were planned against, and repair reads the live ambiguity class rather than a finding's
+were planned against, the findings each operation fixes and the findings it skipped, in a
+provenance block that is a record and never checked at apply, and repair reads the live ambiguity class rather than a finding's
 snapshot. A request states whether it previews or applies; the wire has no default mode.
 
 A plan is a self-contained value naming its vault by address and carrying the vault's root
@@ -3110,6 +3111,15 @@ that comes to resolve to no document is recorded and not advised broken. The app
 snapshot after its intake, and refuses on any difference: an entry the plan records that
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
+A resolved plan may carry a third kind of condition beside a file's content and a
+change-set entry: an `address_resolution`, which repair's planner records for a link it
+writes or an address it replaces, saying that from the link's holder the address resolves
+as recorded at the plan's after-state. It is not an entry of the change set: the applier
+never computes it again from the operations, and the comparison ignores it. Until the
+after-state check lands, the applier reports a plan carrying one as a failed condition,
+in a preview and an apply alike, rather than passing it unchecked; a refusal's fresh plan
+carries the refused plan's address resolutions as recorded, so sending it back is refused
+again rather than applied unchecked.
 The host serves `move` through `Host::move_path`, `delete` through `Host::delete` and
 `rewrite_wikilink` through `Host::rewrite_wikilink`.
 

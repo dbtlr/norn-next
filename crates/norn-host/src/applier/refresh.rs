@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{
-    AuthoredPlan, DocumentPath, Forecast, Operation, OperationId, RefusedCheck, ResolvedPlan,
-    UnresolvedOperation, UnresolvedReason,
+    AuthoredPlan, DocumentPath, Forecast, Operation, OperationId, PlanCondition, RefusedCheck,
+    ResolvedPlan, UnresolvedOperation, UnresolvedReason,
 };
 
 use super::observe::{TargetState, identity, observe, units};
@@ -44,14 +44,16 @@ enum Fate {
 /// operations on one file stand or fall together — are listed as unresolved,
 /// never resolved again or dropped. Every drifted target is marked in the
 /// forecast, because a hash cannot tell whether it already carries this
-/// plan's change. Every fresh plan carries the refused plan's footnote and
-/// its force, an empty one whose operations no longer plan included, and a
-/// forced fresh plan's forecast lists the schema violations its force lets
-/// through, judged under `declared` by the applier's one judgment, so it is
-/// what a preview of the fresh plan lists. The fresh plan records its own
-/// resolution change set, judged through `links`, and its forecast advises on
-/// the links that set reaches. Nothing is rebased: applying the fresh plan is
-/// the caller's decision.
+/// plan's change. Every fresh plan carries the refused plan's footnote, its
+/// address-resolution conditions as recorded (nothing yet checks them, so a
+/// fresh plan sent back is refused again), and its force, an empty one whose
+/// operations no longer plan included, and a forced fresh plan's forecast
+/// lists the schema violations its force lets through, judged under
+/// `declared` by the applier's one judgment, so it is what a preview of the
+/// fresh plan lists. The fresh plan records its own resolution change set,
+/// judged through `links`, and its forecast advises on the links that set
+/// reaches. Nothing is rebased: applying the fresh plan is the caller's
+/// decision.
 ///
 /// **Cascades are stripped here, and only here.** An operation resolved again
 /// goes to planning as its caller would author it, with no cascade, since
@@ -143,7 +145,7 @@ pub(super) fn refuse_and_refresh(
             ));
         }
     }
-    let (fresh, forecast) = match resolve(authored, plan.root.clone(), &met, view, links) {
+    let (mut fresh, forecast) = match resolve(authored, plan.root.clone(), &met, view, links) {
         Ok(resolution) => {
             for left in resolution.unresolved {
                 let position = again
@@ -198,6 +200,11 @@ pub(super) fn refuse_and_refresh(
     };
     unresolved.sort_by_key(|(position, _)| *position);
     let forced = forced_through(&fresh, view, declared, links, &mut citations);
+    // Carried after the forced judgment above, which the carried conditions
+    // would refuse, since nothing yet checks them.
+    fresh
+        .conditions
+        .extend(address_resolutions(&plan.conditions));
     let cited = citations.cited_by(&forced);
     ApplyOutcome::Refused(Box::new(Refused {
         plan: fresh,
@@ -210,6 +217,19 @@ pub(super) fn refuse_and_refresh(
         landed,
         healing: Vec::new(),
     }))
+}
+
+/// The address-resolution conditions among `conditions`, as recorded.
+///
+/// A fresh plan is resolved from operations, which never record these, so the
+/// refused plan's are carried over unchanged: where the evidence they record
+/// has changed, the fresh plan refuses again rather than applying unchecked.
+fn address_resolutions(conditions: &[PlanCondition]) -> Vec<PlanCondition> {
+    conditions
+        .iter()
+        .filter(|condition| matches!(condition, PlanCondition::AddressResolution { .. }))
+        .cloned()
+        .collect()
 }
 
 /// `operation` as its caller authored it: the same operation carrying no

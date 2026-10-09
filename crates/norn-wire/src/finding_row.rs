@@ -204,18 +204,381 @@ impl<'de> Deserialize<'de> for CandidateHead {
         D: Deserializer<'de>,
     {
         let fields = CandidateHeadFields::deserialize(deserializer)?;
-        if fields.candidates.len() > CANDIDATE_HEAD {
-            return Err(D::Error::custom(format!(
-                "a candidate head holds at most {CANDIDATE_HEAD} candidates, and this one holds {}",
-                fields.candidates.len()
-            )));
-        }
-        TotalBelowHead::check(fields.candidates.len(), fields.total).map_err(D::Error::custom)?;
-        Ok(CandidateHead {
-            candidates: fields.candidates,
-            total: fields.total,
-        })
+        CandidateHead::read(fields.candidates, fields.total).map_err(D::Error::custom)
     }
+}
+
+impl CandidateHead {
+    /// The head as it arrives, `candidates` out of `total`: the one read
+    /// check, shared by the answer read and the plan read. A head longer than
+    /// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total below the
+    /// candidates beside it heads nothing.
+    fn read(candidates: Vec<Candidate>, total: u64) -> Result<Self, String> {
+        check_head_read("candidate", "candidates", candidates.len(), total)?;
+        Ok(CandidateHead { candidates, total })
+    }
+}
+
+/// The one read check of every bounded head here, the finding row's candidate
+/// head and each head of a repair plan alike: `len` members of a `what` head,
+/// spelled `noun` in the refusal, out of `total`. A head longer than
+/// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total below the
+/// members beside it heads nothing.
+fn check_head_read(what: &str, noun: &str, len: usize, total: u64) -> Result<(), String> {
+    if len > CANDIDATE_HEAD {
+        return Err(format!(
+            "a {what} head holds at most {CANDIDATE_HEAD} {noun}, and this one holds {len}"
+        ));
+    }
+    TotalBelowHead::check(len, total).map_err(|refusal| refusal.to_string())
+}
+
+/// The bounded head of a list of repair decision data, with how many there
+/// were: the one spelling every such list shares, so the bound
+/// [`CANDIDATE_HEAD`] holds wherever a repair plan carries one.
+///
+/// Each head has a private constructor-and-read pair shaped as
+/// [`CandidateHead`] is: the constructor truncates to the bound and refuses a
+/// total below the head, the read refuses a longer head and a total below it,
+/// and the hand-written schema advertises the bound as `maxItems`. A head
+/// inside a plan refuses a key it does not know, as the rest of the plan
+/// does.
+macro_rules! bounded_head {
+    (
+        $head:ident of $item:ty, $field:ident,
+        what: $what:literal,
+        head_doc: $head_doc:literal,
+        list_doc: $list_doc:literal,
+        total_doc: $total_doc:literal $(,)?
+    ) => {
+        #[doc = $head_doc]
+        #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+        #[non_exhaustive]
+        pub struct $head {
+            #[doc = $list_doc]
+            $field: Vec<$item>,
+            #[doc = $total_doc]
+            total: u64,
+        }
+
+        impl $head {
+            /// The first [`CANDIDATE_HEAD`] of the list, out of `total`
+            /// there were, or the reason `total` heads nothing.
+            ///
+            /// The list is truncated to the bound here, so a producer
+            /// handing over more does not widen the head it is building. The
+            /// read path refuses a longer one instead.
+            pub fn new(
+                $field: impl IntoIterator<Item = $item>,
+                total: u64,
+            ) -> Result<Self, TotalBelowHead> {
+                let $field: Vec<$item> = $field.into_iter().take(CANDIDATE_HEAD).collect();
+                TotalBelowHead::check($field.len(), total)?;
+                Ok($head { $field, total })
+            }
+
+            /// The members the head carries.
+            pub fn $field(&self) -> &[$item] {
+                &self.$field
+            }
+
+            /// How many there were.
+            pub const fn total(&self) -> u64 {
+                self.total
+            }
+
+            /// Whether there were more than this head carries.
+            pub fn is_truncated(&self) -> bool {
+                (self.$field.len() as u64) < self.total
+            }
+        }
+
+        impl JsonSchema for $head {
+            fn schema_name() -> Cow<'static, str> {
+                Cow::Borrowed(stringify!($head))
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                Cow::Borrowed(concat!("norn_wire::", stringify!($head)))
+            }
+
+            /// The object a derive would describe, with the ceiling the
+            /// reader keeps advertised as `maxItems`.
+            fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+                let item = generator.subschema_for::<$item>();
+                json_schema!({
+                    "type": "object",
+                    "description": $head_doc,
+                    "properties": {
+                        stringify!($field): {
+                            "type": "array",
+                            "description": $list_doc,
+                            "items": item,
+                            "maxItems": CANDIDATE_HEAD,
+                        },
+                        "total": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0,
+                            "description": $total_doc,
+                        },
+                    },
+                    "required": [stringify!($field), "total"],
+                    "additionalProperties": false,
+                })
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $head {
+            /// A head arrives as its members and its total and is read back
+            /// through the bound the constructor holds: a head longer than
+            /// [`CANDIDATE_HEAD`] is a head nothing here mints, and a total
+            /// below the members beside it heads nothing, so either refuses
+            /// the read.
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    $field: Vec<$item>,
+                    total: u64,
+                }
+                let fields = Fields::deserialize(deserializer)?;
+                check_head_read($what, "members", fields.$field.len(), fields.total)
+                    .map_err(D::Error::custom)?;
+                Ok($head {
+                    $field: fields.$field,
+                    total: fields.total,
+                })
+            }
+        }
+    };
+}
+
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
+/// One value a repair could have written, and the rule that proposed it.
+///
+/// On the wire a candidate is a plain object:
+/// `{"value":{"text":"done","byte_length":4,"hash":"sha256:…"},"rule":"status-default"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ValueCandidate {
+    /// The value the rule proposes, as its bounded head.
+    #[serde(deserialize_with = "plan_value_head")]
+    #[schemars(schema_with = "plan_value_head_schema")]
+    pub value: ValueHead,
+    /// The name of the schema rule that proposed it, and absent where no
+    /// named rule did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+impl ValueCandidate {
+    /// The candidate `value`, proposed by no named rule.
+    pub const fn new(value: ValueHead) -> Self {
+        ValueCandidate { value, rule: None }
+    }
+
+    /// The candidate proposed by the rule `rule`.
+    #[must_use]
+    pub fn by_rule(mut self, rule: impl Into<String>) -> Self {
+        self.rule = Some(rule.into());
+        self
+    }
+}
+
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
+bounded_head!(
+    ValueCandidateHead of ValueCandidate, candidates,
+    what: "value candidate",
+    head_doc: "The bounded head of the values a repair could have written, with how many there were: differing declared fixes, conflicting defaults, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
+    list_doc: "The values a repair could have written, each with the rule that proposed it.",
+    total_doc: "How many values a repair could have written, which is what makes the candidates a head.",
+);
+
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
+/// One field a repair would bring into a document, and the default the rules
+/// declare for it.
+///
+/// On the wire a field is a plain object:
+/// `{"field":"owner","default":{"text":"unassigned","byte_length":10,"hash":"sha256:…"}}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct RequiredField {
+    /// The frontmatter key the repair would bring in.
+    pub field: String,
+    /// The default the rules declare for it as its bounded head, and absent
+    /// where they declare none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "plan_optional_value_head"
+    )]
+    #[schemars(schema_with = "plan_optional_value_head_schema")]
+    pub default: Option<ValueHead>,
+}
+
+impl RequiredField {
+    /// The field `field`, with no default declared.
+    pub fn new(field: impl Into<String>) -> Self {
+        RequiredField {
+            field: field.into(),
+            default: None,
+        }
+    }
+
+    /// The field declaring the default `default`.
+    #[must_use]
+    pub fn with_default(mut self, default: ValueHead) -> Self {
+        self.default = Some(default);
+        self
+    }
+}
+
+// A dormant carrier: Layer 5B repair (NORN-373), the planner and host
+// handler, is the consuming layer. Nothing in the current call graph builds
+// one, since no planner emits a skipped finding until that step, and it is
+// reached only when a caller sends a plan carrying one back. The roadmap note
+// lives here rather than in the doc comment schemars lifts into the published
+// schema.
+bounded_head!(
+    RequiredFieldHead of RequiredField, fields,
+    what: "required field",
+    head_doc: "The bounded head of the required fields a repair would bring into a document, with how many there were. The fields stop at the ceiling this schema advertises, and the total beside them is never below the fields carried: a smaller total heads nothing, and the read refuses it.",
+    list_doc: "The fields the repair would bring in, each with the default the rules declare for it.",
+    total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
+);
+
+// The plan-side read of the answer types a repair plan's provenance embeds.
+//
+// An answer drops a field it does not know and a plan refuses one, at every
+// depth (the crate documentation states the divergence). `ValueHead`,
+// `Candidate` and `CandidateHead` are answer types, so they keep dropping in
+// finding rows, and a plan reads them through the functions below instead:
+// each reads a mirror that refuses an unknown key and builds the type through
+// the constructor or check the answer read uses, so the bounds are not
+// stated twice. The schema functions advertise the same refusal by closing
+// the type's object schema, written inline because a closed `$ref` target
+// would close it for the answers too.
+
+/// A value head as a plan writes it: its three keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanValueHead {
+    text: String,
+    byte_length: u64,
+    hash: ContentHash,
+}
+
+impl PlanValueHead {
+    fn build<E: serde::de::Error>(self) -> Result<ValueHead, E> {
+        ValueHead::new(self.text, self.byte_length, self.hash).map_err(E::custom)
+    }
+}
+
+/// A candidate as a plan writes it: its two keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanCandidate {
+    path: DocumentPath,
+    suffix: String,
+}
+
+/// A candidate head as a plan writes it: its two keys and no other, each
+/// candidate read strictly.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanCandidateHead {
+    candidates: Vec<PlanCandidate>,
+    total: u64,
+}
+
+/// A value head read as a plan reads one: an unknown key is refused.
+pub(crate) fn plan_value_head<'de, D>(deserializer: D) -> Result<ValueHead, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    PlanValueHead::deserialize(deserializer)?.build()
+}
+
+/// An optional value head read as a plan reads one: an unknown key is
+/// refused, and `null` is none.
+pub(crate) fn plan_optional_value_head<'de, D>(
+    deserializer: D,
+) -> Result<Option<ValueHead>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<PlanValueHead>::deserialize(deserializer)?
+        .map(PlanValueHead::build)
+        .transpose()
+}
+
+/// A candidate head read as a plan reads one: an unknown key is refused at
+/// the head and at each candidate, and the bound and the total are checked as
+/// an answer's are.
+pub(crate) fn plan_candidate_head<'de, D>(deserializer: D) -> Result<CandidateHead, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let head = PlanCandidateHead::deserialize(deserializer)?;
+    let candidates = head
+        .candidates
+        .into_iter()
+        .map(|candidate| Candidate::new(candidate.path, candidate.suffix))
+        .collect();
+    CandidateHead::read(candidates, head.total).map_err(D::Error::custom)
+}
+
+/// `schema` as an object that refuses a key it does not name.
+fn closed(mut schema: Schema) -> Schema {
+    schema.insert("additionalProperties".to_string(), false.into());
+    schema
+}
+
+/// The schema of a value head a plan carries: the answer's, closed.
+pub(crate) fn plan_value_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    closed(ValueHead::json_schema(generator))
+}
+
+/// The schema of an optional value head a plan carries: absent, or the closed
+/// head, or `null`.
+pub(crate) fn plan_optional_value_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "anyOf": [plan_value_head_schema(generator), { "type": "null" }] })
+}
+
+/// The schema of a candidate head a plan carries: the answer's, closed, over
+/// candidates that are closed.
+pub(crate) fn plan_candidate_head_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut head = closed(CandidateHead::json_schema(generator));
+    let candidate = closed(Candidate::json_schema(generator));
+    if let Some(list) = head
+        .get_mut("properties")
+        .and_then(|properties| properties.get_mut("candidates"))
+        .and_then(|list| list.as_object_mut())
+    {
+        list.insert("items".to_string(), candidate.into());
+    }
+    head
 }
 
 /// How many bytes of an offending value a finding carries.

@@ -267,9 +267,10 @@ fn conditions_differ<V: VaultView>(
             PlanCondition::ContentHash { path, hash } => {
                 Some((identity(normalizer, path.as_str())?, hash))
             }
-            // A link entry says how a link resolves, not what a file holds,
-            // so no author condition is carried by one.
-            PlanCondition::LinkResolution { .. } => None,
+            // A link entry, and an address resolution, say how a link
+            // resolves, not what a file holds, so no author condition is
+            // carried by either.
+            PlanCondition::LinkResolution { .. } | PlanCondition::AddressResolution { .. } => None,
         })
         .collect();
     let carries = |file: &NormalizedPath, hash: Option<&norn_wire::ContentHash>| {

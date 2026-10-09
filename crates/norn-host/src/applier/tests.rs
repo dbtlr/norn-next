@@ -2005,6 +2005,135 @@ fn an_entry_the_set_computed_again_does_not_hold_refuses() {
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 
+/// The address-resolution condition for the wikilink `[[a]]` in `b.md`
+/// resolving to `a.md` at the after-state.
+fn address_condition() -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+        norn_wire::Resolves::one(path("a.md")),
+    )
+}
+
+/// **A plan carrying an address-resolution condition is refused, in a preview
+/// and in an apply alike, until the after-state check lands (NORN-371).**
+/// Nothing checks the condition yet, so it must refuse the plan rather than
+/// pass unchecked, and it is not an entry of the change set, so it is the
+/// only check that refuses. A plan without one previews and applies as it did.
+#[test]
+fn an_address_resolution_condition_refuses_until_it_can_be_checked() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let plain = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let mut carrying = plain.clone();
+    carrying.conditions.push(address_condition());
+
+    let previewed = fixture
+        .preview(carrying.clone())
+        .expect_err("a preview of a plan carrying an unchecked condition");
+    assert_eq!(previewed.code(), &norn_wire::ReasonCode::VaultPlanRefused);
+    let norn_wire::ErrorDetail::PlanRefused { checks, .. } = previewed.detail() else {
+        panic!("the preview is not a plan refusal: {previewed:?}");
+    };
+    let expected = vec![norn_wire::RefusedCheck::condition_failed(
+        address_condition(),
+    )];
+    assert_eq!(checks, &expected);
+
+    let refused = refused(fixture.apply(carrying));
+    assert_eq!(refused.checks, expected);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+
+    assert_eq!(
+        fixture.preview(plain.clone()).map(|(plan, _)| plan),
+        Ok(plain.clone())
+    );
+    applied(fixture.apply(plain));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
+}
+
+/// **The fresh plan of a refusal keeps the refused plan's address-resolution
+/// conditions as recorded**, in a preview and an apply alike, so sending the
+/// fresh plan back is refused again rather than applied with no check. A
+/// refused plan carrying none yields a fresh plan carrying none.
+#[test]
+fn the_fresh_plan_of_a_refusal_keeps_its_address_resolution_conditions() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let plain = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let mut carrying = plain.clone();
+    carrying.conditions.push(address_condition());
+
+    let norn_wire::ErrorDetail::PlanRefused {
+        plan: previewed, ..
+    } = fixture
+        .preview(carrying.clone())
+        .expect_err("a preview of a plan carrying an unchecked condition")
+        .detail()
+        .clone()
+    else {
+        panic!("the preview is not a plan refusal");
+    };
+    assert_eq!(previewed, carrying);
+
+    let fresh = refused(fixture.apply(carrying.clone())).plan;
+    assert_eq!(fresh, carrying);
+    assert_eq!(fresh.conditions.last(), Some(&address_condition()));
+
+    let again = refused(fixture.apply(fresh));
+    assert_eq!(
+        again.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(
+            address_condition()
+        )]
+    );
+    assert_eq!(again.plan, carrying);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+
+    // A plan carrying none, refused for drift, yields a fresh plan with none.
+    fixture.write("a.md", "draft\nmore\n");
+    let fresh = refused(fixture.apply(plain)).plan;
+    assert!(
+        fresh.conditions.iter().all(|condition| !matches!(
+            condition,
+            norn_wire::PlanCondition::AddressResolution { .. }
+        )),
+        "{:?}",
+        fresh.conditions
+    );
+}
+
+/// **A forced plan carrying an address-resolution condition is refused with
+/// the violations its force lets through still listed**, in an apply and in
+/// a preview of its fresh plan alike: the carried condition fails the plan's
+/// own checks, and the fresh plan's forecast is judged before it is carried.
+#[test]
+fn a_refused_forced_plan_carrying_an_address_resolution_still_forecasts_its_violations() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[("a.md", "---\ntags: [project]\n---\n"), ("b.md", "[[a]]\n")],
+    );
+    let plan = fixture.plan(vec![pushing_a_stray_tag()]);
+    let unforced = refused_for(fixture.apply(plan.clone()));
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = unforced.as_slice() else {
+        panic!("the unforced plan refuses on the schema: {unforced:?}");
+    };
+    let mut carrying = plan;
+    carrying.force = true;
+    carrying.conditions.push(address_condition());
+
+    let refusal = refused(fixture.apply(carrying));
+    assert_eq!(refusal.forecast.forced, vec![violation.clone()]);
+    assert_eq!(refusal.plan.conditions.last(), Some(&address_condition()));
+
+    let previewed = fixture
+        .preview(refusal.plan)
+        .expect_err("a preview of the fresh plan");
+    let norn_wire::ErrorDetail::PlanRefused { forecast, .. } = previewed.detail() else {
+        panic!("the preview is not a plan refusal: {previewed:?}");
+    };
+    assert_eq!(forecast.forced, vec![violation.clone()]);
+}
+
 /// The entry for the wikilink of `holder` written `address`.
 fn link_entry(
     holder: &str,
