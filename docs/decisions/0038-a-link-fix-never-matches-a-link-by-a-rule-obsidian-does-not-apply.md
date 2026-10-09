@@ -1,10 +1,18 @@
 ---
-status: superseded
-superseded-by: 0038-a-link-fix-never-matches-a-link-by-a-rule-obsidian-does-not-apply.md
-date: 2026-10-05
+status: accepted
+date: 2026-10-09
 ---
 
-# 0036 — a repair fix is declared on the constraint it serves, a built-in fix exists only where its answer is unique or a deterministic heuristic's single best, and every proposed change carries one of three confidence levels
+# 0038 — a repair fix is declared on the constraint it serves, a built-in fix exists only where its answer is unique or a deterministic heuristic's single best, no link fix matches a link by a rule Obsidian does not apply, and every proposed change carries one of three confidence levels
+
+Supersedes [ADR 0036](0036-a-repair-fix-is-declared-on-the-constraint-it-serves.md), whose
+contract this decision restates whole with one change: ADR 0036 counted among the derived
+fixes a broken link that resolves uniquely after case and separator normalization, and this
+decision withdraws it. A wikilink is Obsidian's construct, and a vault norn maintains is one
+Obsidian also reads, so a repair never gives a link a meaning Obsidian does not. Obsidian
+resolves a wikilink ignoring case and folds nothing else: a separator fold a derived fix
+applies by default would rewrite links to targets Obsidian does not resolve them to, and a
+case fold would answer a break Obsidian does not see.
 
 Repair compiles findings into one resolved plan. For each finding it needs an answer — the
 value a field should hold, the path a document belongs at — or a reason it has none. Some
@@ -13,10 +21,10 @@ defaults to, where a kind of document is filed. Some follow from the vault alone
 exactly one answer. Some are a best guess. The question is where each kind of answer comes
 from and how a caller tells them apart. **A fix is declared on the constraint it serves,
 never in a separate repair section. A built-in fix exists only where its answer is provably
-unique, or is a deterministic heuristic's single best answer. Every proposed change carries
-how it was reached — declared, derived or suggested — and a threshold, derived by default,
-decides which a plan admits, identically in preview and apply. Ties never pick, and no model
-answers any fix.**
+unique, or is a deterministic heuristic's single best answer. No link fix matches a link by
+a rule Obsidian does not apply. Every proposed change carries how it was reached —
+declared, derived or suggested — and a threshold, derived by default, decides which a plan
+admits, identically in preview and apply. Ties never pick, and no model answers any fix.**
 
 ## The contract
 
@@ -44,14 +52,21 @@ answers any fix.**
 - **Built-in fixes are bounded by what can be shown.** A **derived** fix is one whose answer
   is provably the only one: wrapping a single value as a one-item list or unwrapping a
   one-item list, a bare value made a link where it resolves uniquely, a closed-set value
-  differing from exactly one member only by case or whitespace, boolean case, a broken link
-  that resolves uniquely after case and separator normalization, or one followed to the
-  single live document holding the content a removed target last held. A **suggested** fix
-  is a deterministic heuristic's single best answer, without proof: a broken link's most
-  similar target above a fixed cutoff, a missing anchor's closest heading, a closed-set
-  value's closest member, or an undeclared tag one edit from exactly one declared tag; each
-  carries its score. Ambiguous links, date reformatting and coercion of yes/no or numeric
-  spellings have no built-in fix.
+  differing from exactly one member only by case or whitespace, boolean case, or a broken
+  link followed to the single live document holding the content a removed target last held.
+  A **suggested** fix is a deterministic heuristic's single best answer, without proof: a
+  broken link's most similar target above a fixed cutoff, a missing anchor's closest
+  heading, a closed-set value's closest member, or an undeclared tag one edit from exactly
+  one declared tag; each carries its score. Ambiguous links, date reformatting and coercion
+  of yes/no or numeric spellings have no built-in fix.
+- **A link fix never matches a link by a rule Obsidian does not apply.** A wikilink carries
+  Obsidian's semantics, and a repair writes no link by a matching rule beyond Obsidian's own.
+  No derived fix answers a broken link by normalizing its spelling — by case, separators or
+  any other fold — because a derived fix applies at the default threshold and claims the only
+  answer: a separator fold would be a second resolution rule beside Obsidian's, and a case
+  fold answers no break Obsidian sees. A suggested fix may still propose a broken link's most
+  similar target, since it carries its score, enters a plan only where the caller admits
+  suggestions, and leaves the link as it stands until a caller chooses it.
 - **Three confidence levels, one threshold.** Every proposed change carries its level:
   **declared** for a fix the schema's author wrote, **derived** and **suggested** as above.
   A threshold admits its own level and every stronger one, declared before derived before
@@ -97,6 +112,15 @@ answers any fix.**
   normalized equality and by similarity. Rejected: it cannot tell an author's answer from an
   inferred one, and an agent validates the two differently.
 
+- **A derived fix for a broken link that resolves uniquely after case and separator
+  normalization.** ADR 0036 admitted it. Rejected: Obsidian resolves a wikilink ignoring
+  case and never folds separators, so `[[my-note]]` is an unresolved link in Obsidian, and
+  rewriting it to `my note.md` by default would give the link a meaning Obsidian does not.
+  A link differing from its target only in case already reaches that target in Obsidian, so
+  under Obsidian's semantics it is not broken, though norn may report it broken on a root
+  that tells spellings apart (§ Consequences); making link spellings match file names is a
+  question about file naming rather than a repair of a broken link.
+
 ## Consequences
 
 - Every operation a repair plan holds names its confidence level, so a caller knows which
@@ -106,3 +130,11 @@ answers any fix.**
 - Following an out-of-band move reads the content a removed document last held from its
   tombstone, so it answers only where a tombstone recording that content is retained, and a
   derivation from zero, which records no removals, need not reproduce it.
+- A broken link differing from a document's name only in case or separators gets no
+  derived fix; at the suggested level its most similar target may be proposed with its
+  score, and otherwise it is skipped with its decision data.
+- This decision governs which fixes repair writes, not how norn resolves links. On a root that
+  tells spellings apart, norn resolves a wikilink by its exact case (`docs/architecture.md`
+  § the link index), so a link differing from its target only in case is reported broken
+  there although Obsidian reaches the target. That difference is accepted, not closed: such a
+  link has no derived fix, and its similarity suggestion is the only built-in answer.

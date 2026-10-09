@@ -1,6 +1,7 @@
 //! The validate builder: the findings standing over a vault, read back from
 //! the findings pillar on a read snapshot, as a page of finding rows or as one
-//! tally per kind.
+//! tally per kind, and as a batch of whole documents' findings in path order
+//! for a repair.
 //!
 //! The builder is inherent methods on [`Snapshot`], as the find and count
 //! builders are, so every statement it runs reads the one instant the snapshot
@@ -9,6 +10,14 @@
 //! documents are derived, and a validate reads what stands. What stands is
 //! every finding recorded under the active fingerprint — the fingerprint of
 //! the schema the snapshot pins, and the empty text where none is pinned.
+//!
+//! # A validate pages kind-first, and a repair batch pages path-first
+//!
+//! A validate page and a repair batch select the same findings the same way,
+//! and read them in two orders. A page reads one kind's section after another;
+//! a batch ([`Snapshot::repair_batch`]) merges those sections into one path
+//! order, so it can hand a repair whole documents. The next section describes
+//! the validate's order, and the one after it the batch's.
 //!
 //! # A page is the findings in `(kind, path, position, id)` order
 //!
@@ -33,6 +42,27 @@
 //! total it heads, and the hint that names the `find` enumerating its class,
 //! all read off what the pillar stores.
 //!
+//! # A repair batch is the findings merged into one path order
+//!
+//! A batch reads the same selection a page does — the same compilation, the
+//! same refusals, the same kinds, severity floor, rule and conjunction — but
+//! in `(path COLLATE NOCASE, path, position, id)` order across every kind
+//! read, and it resumes strictly after a path rather than after a finding.
+//! **The merge is one statement**: a compound `SELECT` with one arm per kind,
+//! each arm exactly the seek a page's section for that kind is, joined by
+//! `UNION ALL` and ordered together ([`ValidateStatement::MergedPage`]). Each
+//! arm already hands its findings back in that order, so SQLite merges the
+//! arms' orders instead of sorting them, and a bounded read costs the rows it
+//! hands back — save where a document part that keeps what it seeks drives
+//! each arm, which then sorts what that part matched, as a page's section
+//! does. No index is added for it: the indexes a page seeks are the ones
+//! behind the merge. A batch holds about `limit` findings and **never splits a
+//! document's selected findings**: a limit falling inside a document reads the
+//! document's remaining findings on ([`ValidateStatement::DocumentTail`]), so a
+//! batch runs past its limit only by its last document. The `batch` module
+//! describes the cut and the cursor, which names the last document covered and
+//! is minted only where more remain.
+//!
 //! # A rule selects the findings citing it, off the rule's own rows
 //!
 //! A request naming a rule answers only the findings whose rule set holds
@@ -40,7 +70,8 @@
 //! the finding's key beside the rule and indexed in the findings' own order
 //! one column further in, so a rule's page is the same seek a kind page is
 //! and its tally the same covered aggregate a summary is, each led by the
-//! rule. Every other part composes with it as it does without one. **A rule
+//! rule, and a batch's arm for a kind the same seek over the rule's rows.
+//! Every other part composes with it as it does without one. **A rule
 //! the pinned declaration does not declare is refused by name**
 //! ([`PageRefusal::UnknownRule`]), never answered with an empty page, which
 //! would say the rule holds everywhere.
@@ -82,12 +113,13 @@
 //! the groups are sorted. It answers every tally at once, so it takes no page
 //! bound and continues no cursor.
 
+mod batch;
 mod statement;
 
 use norn_db::EmittedPlan;
 use norn_wire::{
     AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, PagedRows,
-    RuleSet, Severity, Unsatisfied, ValidateParams, ValidateReport,
+    Predicate, RuleSet, Severity, Unsatisfied, ValidateParams, ValidateReport,
 };
 
 use crate::error::{self, StoreError};
@@ -99,6 +131,7 @@ use crate::read::{
 use crate::request::unreadable;
 use crate::store::Snapshot;
 
+pub use batch::{RepairBatch, RepairSelection};
 pub(crate) use statement::compose_rule_sets;
 use statement::{Findings, compose_findings};
 pub use statement::{VALIDATE_STATEMENTS, ValidateStatement};
@@ -237,6 +270,26 @@ struct Narrowing {
     conjunction: Conjunction,
 }
 
+impl Narrowing {
+    /// The shapes of the filters the statements read under, in the request's
+    /// order.
+    fn shapes(&self) -> Vec<ReadFilter> {
+        self.conjunction
+            .filters
+            .iter()
+            .map(|filter| filter.shape())
+            .collect()
+    }
+}
+
+/// What a request selects findings by, before it is compiled.
+struct Selected<'a> {
+    predicates: &'a [Predicate],
+    kinds: &'a [FindingKind],
+    severity: Option<Severity>,
+    rule: Option<&'a str>,
+}
+
 impl Snapshot {
     /// The findings `params` asks for, as a page in `(kind, path, position,
     /// id)` order with the path in the answer's path order, continuing its
@@ -306,34 +359,16 @@ impl Snapshot {
         } else {
             page_limit(params.limit)?
         };
-        self.declaration_pinned(declared, lookups)?;
-        if let Some(rule) = params.rule.as_ref()
-            && !declared.declares_rule(rule)
-        {
-            return Err(PageRefusal::UnknownRule { rule: rule.clone() });
-        }
-        let conjunction = self.compile_conjunction(
-            &params.predicates,
-            ResolvesPart::NotApplicable,
+        let narrowing = self.narrow(
+            &Selected {
+                predicates: &params.predicates,
+                kinds: &params.kinds,
+                severity: params.severity,
+                rule: params.rule.as_deref(),
+            },
             declared,
             lookups,
         )?;
-        let narrowing = Narrowing {
-            fingerprint: self.fingerprint(lookups)?.unwrap_or_default(),
-            rule: params.rule.clone(),
-            kinds: kinds_read(&params.kinds),
-            severities: params
-                .severity
-                .map(|floor| {
-                    Severity::ALL
-                        .into_iter()
-                        .filter(|severity| severity.is_at_least(floor))
-                        .map(|severity| severity.as_str())
-                        .collect()
-                })
-                .filter(|admitted: &Vec<&'static str>| admitted.len() < Severity::ALL.len()),
-            conjunction,
-        };
 
         let snapshot = self.reading_facts(None, lookups)?;
         let mut work = ValidateWork::default();
@@ -390,6 +425,49 @@ impl Snapshot {
         })
     }
 
+    /// The selection compiled: refused where `declared` is not the schema the
+    /// snapshot pins or declares no rule `selected` names, and otherwise
+    /// the conjunction, the kinds and the severities it narrows the findings
+    /// by. A validate and a repair batch compile their selections here, so the
+    /// two refuse and narrow alike.
+    fn narrow(
+        &self,
+        selected: &Selected<'_>,
+        declared: &ContentModel,
+        lookups: &mut Lookups,
+    ) -> Result<Narrowing, PageRefusal> {
+        self.declaration_pinned(declared, lookups)?;
+        if let Some(rule) = selected.rule
+            && !declared.declares_rule(rule)
+        {
+            return Err(PageRefusal::UnknownRule {
+                rule: rule.to_string(),
+            });
+        }
+        let conjunction = self.compile_conjunction(
+            selected.predicates,
+            ResolvesPart::NotApplicable,
+            declared,
+            lookups,
+        )?;
+        Ok(Narrowing {
+            fingerprint: self.fingerprint(lookups)?.unwrap_or_default(),
+            rule: selected.rule.map(str::to_string),
+            kinds: kinds_read(selected.kinds),
+            severities: selected
+                .severity
+                .map(|floor| {
+                    Severity::ALL
+                        .into_iter()
+                        .filter(|severity| severity.is_at_least(floor))
+                        .map(|severity| severity.as_str())
+                        .collect()
+                })
+                .filter(|admitted: &Vec<&'static str>| admitted.len() < Severity::ALL.len()),
+            conjunction,
+        })
+    }
+
     /// One page of findings: at most `limit`, and the finding the next page
     /// continues after.
     fn page_findings(
@@ -406,12 +484,7 @@ impl Snapshot {
             } else {
                 sections(&narrowing.kinds, at)
             };
-        let shapes: Vec<ReadFilter> = narrowing
-            .conjunction
-            .filters
-            .iter()
-            .map(|filter| filter.shape())
-            .collect();
+        let shapes = narrowing.shapes();
         let statement = match narrowing.rule {
             Some(_) => ValidateStatement::RulePage,
             None => ValidateStatement::KindPage,
@@ -467,14 +540,7 @@ impl Snapshot {
             filters: &narrowing.conjunction.filters,
             rows: 0,
         });
-        let summary = Ran::new(statement, composed).narrowed_by(
-            narrowing
-                .conjunction
-                .filters
-                .iter()
-                .map(|filter| filter.shape())
-                .collect(),
-        );
+        let summary = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let read = self
             .run_statement(&mut lookups.ran, summary, |row| {
                 Ok((

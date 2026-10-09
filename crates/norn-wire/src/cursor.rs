@@ -321,9 +321,10 @@ pub enum CursorKey {
         /// everything before it.
         id: u64,
     },
-    // A dormant carrier: Layer 5B repair (NORN-373), the planner and host
-    // handler that batch a repair, is the consuming layer. Nothing mints or
-    // reads this key yet because no repair verb exists until that step.
+    // A dormant carrier at the host: Layer 5B repair (NORN-373), the planner
+    // and host handler that batch a repair, is the consuming layer. `norn-store`
+    // reads and mints this key in its repair batch read, but no repair verb
+    // calls that read until the handler lands.
     /// A repair's batch boundary: the path of the last document a batch
     /// covered. The next batch starts at the first document after it in path
     /// order. It is its own row type, so a finding cursor cannot continue a
@@ -416,8 +417,10 @@ impl CursorKey {
         }
     }
 
-    // A dormant carrier: Layer 5B repair (NORN-373) mints this key when its
-    // handler ends a batch; no caller does until that step lands.
+    // A dormant carrier at the host: `norn-store`'s repair batch read mints
+    // this key when a batch ends with documents remaining, and the Layer 5B
+    // repair handler (NORN-373) is the consumer; no handler calls that read
+    // until that step lands.
     /// A repair batch whose last document was the one at `path`.
     pub fn repair_document(path: impl Into<String>) -> Self {
         CursorKey::RepairDocument { path: path.into() }
@@ -473,8 +476,10 @@ pub enum PagedRows {
     Finding,
     /// One document's findings, as a get pages them.
     DocumentFinding,
-    // A dormant carrier: Layer 5B repair (NORN-373) is the consuming layer;
-    // only the refusals' naming of a cursor of this row type reaches it yet.
+    // A dormant carrier at the host: Layer 5B repair (NORN-373) is the
+    // consuming layer. `norn-store` pages these rows in its repair batch read,
+    // and the refusals name a cursor of this row type; no handler reaches it
+    // yet.
     /// Documents, as a repair batches them.
     RepairDocument,
     /// Facets, as a describe pages them.
