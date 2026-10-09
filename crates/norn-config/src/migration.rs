@@ -30,12 +30,14 @@
 //! **The shipped ladders are empty.** The schema has had one grammar version,
 //! [`SCHEMA_VERSION`], and the config one shape, so neither holds a step: a
 //! file either is current or is refused. The machinery is whole so that the
-//! first grammar change is one step added to its ladder. **The ladders are a
-//! dormant carrier** in that sense: the layer that consumes a step is the
-//! first change to either grammar, and no call graph reaches a step until a
-//! version is added. That first step carries one more obligation the empty
-//! ladder does not: a vault whose schema is behind attaches only where
-//! [`crate::schema::VaultSchema::parse`] reads the older version, since
+//! first versioned change is one step added to its ladder. A change made in
+//! place at the version a file already states, as the schema rules were at
+//! schema version 1, adds no step and leaves the ladder empty. **The ladders
+//! are a dormant carrier** in that sense: the layer that consumes a step is
+//! the first versioned change to either grammar, and no call graph reaches a
+//! step until a version is added. That first step carries one more obligation
+//! the empty ladder does not: a vault whose schema is behind attaches only
+//! where [`crate::schema::VaultSchema::parse`] reads the older version, since
 //! `vault migrate` plans over an attached vault.
 //!
 //! Pure, as the rest of this crate is: a ladder reads the bytes a caller
