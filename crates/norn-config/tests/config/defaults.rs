@@ -368,7 +368,8 @@ fn an_unreadable_clock_refuses_a_clock_default_it_must_compare_naming_the_clock(
 }
 
 /// **Every default fills from the one clock reading handed in**, and each
-/// capture from its own rule's binding of the created path.
+/// capture from its own rule's binding of the created path. The clock is
+/// asked exactly once, however many defaults read it.
 #[test]
 fn every_default_fills_from_the_one_clock_reading() {
     let schema = b"version: 1
@@ -382,8 +383,22 @@ rules:
       project: { default: '[[{{path.project}}]]' }
       log: { default: ['{{date}}', fixed, 3] }
 ";
+    let mut readings = 0;
+    let fills = VaultSchema::parse(schema)
+        .expect("a schema with rule defaults")
+        .fill_rule_defaults(
+            &frontmatter(&[]),
+            "projects/norn/a.md",
+            &mut || {
+                readings += 1;
+                Ok(at())
+            },
+            CaseFold::Exact,
+            &mut RuleWork::default(),
+        );
+    assert_eq!(readings, 1);
     assert_eq!(
-        fill(schema, "projects/norn/a.md", &[]),
+        fills,
         Ok(filled(&[
             ("clock", text("09:30")),
             ("created", text("2026-10-06T09:30:15+02:00")),
