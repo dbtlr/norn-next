@@ -1837,7 +1837,8 @@ rules:
     }
 
     /// **A default read from a capture its rule's `match.path` binds several
-    /// ways refuses**, naming the rule, the field and two of the bindings.
+    /// ways refuses**, naming the rule, the field and two of the bindings,
+    /// which bind `area` to the first and to the second segment of the path.
     #[test]
     fn a_default_read_from_a_capture_bound_several_ways_refuses() {
         let resolution = planned_reading(
@@ -1865,7 +1866,10 @@ rules:
             panic!("an ambiguous capture: {:?}", left.reason);
         };
         assert_eq!((rule.as_str(), field.as_str()), ("areas", "area"));
-        assert_ne!(bindings[0], bindings[1]);
+        // The walk stops at the second binding it finds: the capture taking
+        // the first segment, then the one taking the second.
+        let area = |segment: &str| BTreeMap::from([("area".to_string(), segment.to_string())]);
+        assert_eq!(bindings, &[area("a"), area("b")]);
     }
 
     /// **Every default of a plan fills from one clock reading**: two
