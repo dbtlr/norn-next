@@ -758,6 +758,80 @@ fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
     assert_eq!(few.0, 2 * MOVED as u64, "each stem's targets, read once");
 }
 
+/// **A link held under several keys reads each key's places once per key,
+/// never once per link**: a plan moving every `t.v.md` and every `t.md` of
+/// `a/NNNN/` to `b/NNNN/` gives `[[t.v]]` both of its reductions' targets,
+/// and `[[t.md]]` the stem's, so each holder's link could name a moved
+/// document under two keys; ten times the holders read no more places, and
+/// every link still names each moved document its keys could name.
+#[test]
+fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_them() {
+    const MOVED: usize = 40;
+    let work = |holders: usize| {
+        let mut vault = Vault::new(&format!("resolution-reductions-{holders}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED)
+            .map(|at| format!("a/{at:04}/{}.md", if at % 2 == 0 { "t.v" } else { "t" }))
+            .collect();
+        let held: Vec<String> = (0..holders).map(|at| format!("h/{at:04}.md")).collect();
+        let mut documents: Vec<(&str, &str)> =
+            moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().enumerate().map(|(at, holder)| {
+            let body = if at % 2 == 0 {
+                "[[t.v]]\n"
+            } else {
+                "[[t.md]]\n"
+            };
+            (holder.as_str(), body)
+        }));
+        vault.write(&documents);
+        let plan = moved.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let snapshot = vault.snapshot();
+        let mut named: BTreeMap<String, BTreeSet<Vec<String>>> = BTreeMap::new();
+        let work = snapshot
+            .resolution_changes(&plan, &[], &declared(), |change| {
+                let mut places: Vec<String> = change
+                    .before_targets
+                    .iter()
+                    .map(|place| place.as_str().to_string())
+                    .collect();
+                places.sort();
+                named
+                    .entry(change.link.target.clone())
+                    .or_default()
+                    .insert(places);
+            })
+            .expect("a judgment");
+        assert_eq!(work.links_evaluated, holders as u64);
+        let mut stems = moved.clone();
+        stems.sort();
+        let stem: Vec<String> = stems
+            .iter()
+            .filter(|at| at.ends_with("/t.md"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            named,
+            BTreeMap::from([
+                ("t.md".to_string(), BTreeSet::from([stem])),
+                ("t.v".to_string(), BTreeSet::from([stems])),
+            ]),
+            "each link names every moved document its keys could name"
+        );
+        work.targets_read
+    };
+
+    let few = work(10);
+    let many = work(100);
+
+    assert_eq!(few, many);
+}
+
 /// **An overlay holds each path once, as it was listed last**: listing a
 /// file again replaces what the overlay said of it rather than adding it, so
 /// building an overlay costs a keyed lookup per file listed.

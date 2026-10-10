@@ -314,16 +314,53 @@ pub struct LinkChange {
     /// holds.
     pub members_moved: bool,
     /// Each of the plan's targets standing before it that the link's keys
-    /// name from its before-holder, then each place the plan reaches
+    /// name from its before-holder, and each place the plan reaches
     /// ([`PathOverlay::reaching`]) they could name, whether or not a document
-    /// stands there, the ambiguity-ignore set letting each in, once each in
-    /// key order: which of the documents the plan writes or reaches the link
-    /// could name before the plan. A link resolving to several documents
-    /// names one of these only where it is among them, which is how a caller
-    /// tells whether an ambiguous link could name a document the plan moves
-    /// or a wikilink rewrite reaches; and a link resolving to none names a
+    /// stands there, the ambiguity-ignore set letting each in, once each:
+    /// which of the documents the plan writes or reaches the link could name
+    /// before the plan. A link resolving to several documents names one of
+    /// these only where it is among them, which is how a caller tells
+    /// whether an ambiguous link could name a document the plan moves or a
+    /// wikilink rewrite reaches; and a link resolving to none names a
     /// reached place where it would resolve to a document standing there.
-    pub before_targets: Arc<[DocumentPath]>,
+    pub before_targets: BeforeTargets,
+}
+
+/// The places a link could name before the plan
+/// ([`LinkChange::before_targets`]), **one list per key the link is held
+/// under that could name any**, each list shared by every link held under
+/// its key: the targets standing before the plan, then the places the plan
+/// reaches, each once.
+///
+/// A link's keys name disjoint classes, so no place is listed under two of
+/// them, and a link handed back holds its keys' lists rather than a merge of
+/// them: what a link costs is its keys, however many places a key could
+/// name — a stem every routed document shares names every one of them. A
+/// caller reading the places once per list rather than once per link
+/// ([`Self::lists`]) reads each key's once.
+#[derive(Clone, Debug, Default)]
+pub struct BeforeTargets {
+    lists: Vec<Arc<[DocumentPath]>>,
+}
+
+impl BeforeTargets {
+    /// Every place, each key's list in key order.
+    pub fn iter(&self) -> impl Iterator<Item = &DocumentPath> {
+        self.lists.iter().flat_map(|list| list.iter())
+    }
+
+    /// Each key's list, in key order; a key that could name no place lists
+    /// none. A list is the same allocation for every link held under its key
+    /// in one judgment, so a caller may remember what it read of one by its
+    /// identity ([`Arc::ptr_eq`]).
+    pub fn lists(&self) -> &[Arc<[DocumentPath]>] {
+        &self.lists
+    }
+
+    /// Whether the link could name no place the plan writes or reaches.
+    pub fn is_empty(&self) -> bool {
+        self.lists.is_empty()
+    }
 }
 
 /// What one judgment of a plan's links cost, beside the statements its
@@ -507,14 +544,11 @@ struct Members {
     after: Present,
     /// Whether the plan changes what stands at any of them.
     changes: bool,
-    /// The places a link held under this key alone could name before the
-    /// plan ([`LinkChange::before_targets`]): the targets standing before
-    /// it, then the places the plan reaches, each once.
+    /// The places a link held under this key could name before the plan
+    /// ([`LinkChange::before_targets`]): the targets standing before it,
+    /// then the places the plan reaches, each once; shared by every link
+    /// held under the key.
     before_targets: Arc<[DocumentPath]>,
-    /// The targets standing before the plan, and the places the plan
-    /// reaches, each once: what a link held under several keys merges.
-    standing: Vec<DocumentPath>,
-    reaching: Vec<DocumentPath>,
 }
 
 /// How many of a key's targets stand on one side of the plan, and the first.
@@ -988,12 +1022,13 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// reaches it could name, the ambiguity-ignore set letting each in.
     fn members_of(&self, key: &Key) -> Members {
         let mut members = Members::default();
-        let mut standing: BTreeSet<&DocumentPath> = BTreeSet::new();
+        let mut seen: BTreeSet<&DocumentPath> = BTreeSet::new();
+        let mut places: Vec<DocumentPath> = Vec::new();
         for target in self.members(key) {
             if target.before {
                 members.before.add(&target.path);
-                if standing.insert(&target.path) {
-                    members.standing.push(target.path.clone());
+                if seen.insert(&target.path) {
+                    places.push(target.path.clone());
                 }
             }
             if target.after {
@@ -1001,46 +1036,28 @@ impl<'a, R: Runner> Judging<'a, R> {
             }
             members.changes |= target.changes();
         }
-        let mut reaching: BTreeSet<&DocumentPath> = BTreeSet::new();
         for document in self.reached(key) {
-            if reaching.insert(document) {
-                members.reaching.push(document.clone());
+            if seen.insert(document) {
+                places.push(document.clone());
             }
         }
-        members.before_targets = members
-            .standing
-            .iter()
-            .chain(
-                members
-                    .reaching
-                    .iter()
-                    .filter(|document| !standing.contains(document)),
-            )
-            .cloned()
-            .collect();
+        members.before_targets = places.into();
         members
     }
 
     /// The places a link held under `keys` could name before the plan
-    /// ([`LinkChange::before_targets`]): every key's targets standing before
-    /// it, in key order, then every place the plan reaches, each once. A
-    /// link held under one key shares that key's list.
-    fn before_targets(&self, keys: &[Key]) -> Arc<[DocumentPath]> {
-        if let [key] = keys {
-            return Arc::clone(&self.resolved[key].members.before_targets);
+    /// ([`LinkChange::before_targets`]): each key's shared list, in key
+    /// order, a key that could name none listing none. Nothing is merged,
+    /// so a link's places cost its keys, however many each key could name.
+    fn before_targets(&self, keys: &[Key]) -> BeforeTargets {
+        BeforeTargets {
+            lists: keys
+                .iter()
+                .map(|key| &self.resolved[key].members.before_targets)
+                .filter(|list| !list.is_empty())
+                .cloned()
+                .collect(),
         }
-        let mut seen: BTreeSet<&DocumentPath> = BTreeSet::new();
-        let mut targets: Vec<DocumentPath> = Vec::new();
-        let held = || keys.iter().map(|key| &self.resolved[key].members);
-        for document in held()
-            .flat_map(|members| &members.standing)
-            .chain(held().flat_map(|members| &members.reaching))
-        {
-            if seen.insert(document) {
-                targets.push(document.clone());
-            }
-        }
-        targets.into()
     }
 
     /// Resolve every key of `keys` not yet resolved: the head of what the
