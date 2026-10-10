@@ -2698,30 +2698,64 @@ rule — as whole documents in path order (the builder's repair batch), under on
 batch's findings into operations and resolves them on its snapshot as a preview does; the
 hold is then given back, and the resolved plan enters `Host::apply` as a resolved plan, so
 the applier judges and writes a repair as it does any plan and is not told it is one. A
-selected `field/required-missing` finding is fixed from the default the rules requiring the
-field declare: one `set_frontmatter`, numbered `repair-1`, `repair-2` and on in plan order and
-cited at the `declared` confidence with the finding it fixes, filled from the rule's own
-captures and the plan's one clock reading, an operation writing a clock-filled value noting
-that it is the repair's time. Candidates agree only as one written value, and a repair fills
-that one field and cascades no default. A document's fixes compose in finding order — kind,
-field, offending value — onto the bytes the planning's view reads once, the same reading its
-operations then resolve from, each judged against the document's before-state by the
-applier's own schema check, so a fix the applier would refuse is skipped and the next
-composes without it; a selected finding the composed document no longer holds is dropped,
-neither fixed nor skipped. Such a fix is skipped as `no_declared_fix` where no rule declares
-a default, `conflicting_defaults` with every candidate and its rule where they disagree,
-`ambiguous_capture` where a default reads a capture its rule's `match.path` binds several
-ways, `brings_in_required_fields` naming each field and its declared default where the fill
-brings in a rule requiring a field the document lacks, and `judge_would_refuse` with its
-candidates where it introduces any other violation. A finding the rules conflict over is
-`rules_conflict`. Any other
+selected finding has a declared fix where a rule the composed document's judgment cites
+declares one for it. A `field/required-missing` finding fills from the default the rules
+requiring the field declare, filled from the rule's own captures and the plan's one clock
+reading: one `set_frontmatter`. Candidates agree only as one written value, and a repair fills
+that one field and cascades no default. A `field/not-one-of` finding is replaced by the member
+a rule's synonym maps its offending value to, compared by the field's typed equality; a list
+field's offending elements are fixed one by one into one `set_frontmatter` of the whole list,
+each replacing every occurrence of its value, and an element whose fix is skipped stands. A
+`field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter`
+of the new field to the old one's whole value, then a `remove_frontmatter` of the old field
+requiring it) as a rule declares. A `document/misplaced` finding is moved into the folder its
+placement rules' `allowed_paths` route names, filled from the rule's own captures and the
+plan's one clock reading, the document keeping its file name: one `move_document`, whose link
+cascade the one planner generates as any move's, so the move rewrites every link the text
+layer can respell and a preview's forecast advises on every other with the reason a `move`
+of the document gives it (the applier's preview computes them from the plan's change set; an
+applied report carries none, as an applied move's does not). Each operation is numbered
+`repair-1`, `repair-2` and on in plan order and cited at the `declared` confidence with the
+findings it fixes, and one writing a clock-filled value or destination notes that it is the
+repair's time. A document's fixes compose in finding order — its route first, then kind,
+field, offending value — onto the bytes and the place the earlier ones left, each judged
+there against the document's before-state, judged once, by the applier's own schema check,
+the one judge, so a fix the applier would refuse is skipped and the next composes without it.
+The route comes first so every other fix is judged, and names the document, where it will
+stand, after the move in plan order: a selected finding the composed document no longer holds
+is dropped, neither fixed nor skipped, so a route out of a rule's area drops that rule's
+selected findings. **A route's destination is judged against the vault the planning view
+reads, as the root reads its case, and against the batch's earlier routes**: a destination
+anything stands at, or another route of the batch already moves a document to, is
+`destination_taken`, so of two routes to one place the first in batch order moves and the
+later skips; a place another operation of the batch vacates is judged as it stands, taken.
+A route to a place where the document would still be misplaced is `judge_would_refuse`. A fix
+is skipped with its decision data, and every skip of a finding that judged a value carries
+that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
+defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
+candidate and its rule, `ambiguous_capture` where a default or route reads a capture its
+rule's `match.path` binds several ways, `rename_onto_occupied_field` where a rename's field
+is already held, `destination_taken` as above, `brings_in_required_fields` naming each field
+and its declared default where the fix brings in a rule requiring a field the document lacks,
+and `judge_would_refuse` with its candidates where it introduces any other violation. A
+finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
-does not decode, or a frontmatter block nothing read — is `unreadable`; an ambiguous link
+does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a
+fix would answer of a document the planning view finds no bytes for; an ambiguous link
 is `ambiguous_link`, with the candidate head its finding is filed with, which is the class
 at the snapshot the repair reads because link health is re-decided in every changeset;
 and a finding no rule declares a fix for is `no_declared_fix`,
-with the value it judged where it has one. The plan carries a provenance block recording
+with the value it judged where it has one. **Judging on bytes is a declared cost of repair
+planning.** One view of the vault, remembering each name it reads, serves the fixes and the
+resolution: each document holding a finding a declared fix may answer is read whole once,
+beside resolution and never a second time — a document only a route moves included, which a
+`move` would carry streamed, never holding its bytes — and each route's destination is read
+once, streamed, resolution's own read of it answered from what that read found; a document
+holding no such finding is not read. Those bytes stay held for the batch's planning, so the
+planning heap grows with the bytes of the batch's fixed documents. A route moving a document
+past the batch's cursor may report its skipped findings again in a later batch: declared,
+and no loop, since the cursor only advances. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request
@@ -2862,8 +2896,10 @@ needs it — any creation by rule, whose target and templates may read it, and a
 reading `{{now}}`, `{{date}}` or `{{time}}` that is proposed for a field or compared with a
 filled value, even where the field then conflicts — and every template and default of the plan
 fills from that reading; a creation needing no reading never fails on an unreadable clock.
-A repair plan's rule defaults and the planning its operations resolve through share one
-reading, taken the first time a default it fills reads a clock token. Every reading goes
+A repair plan's rule defaults and routes and the planning its operations resolve through
+share one reading, taken the first time a default or route it fills reads a clock token; a
+clock that gives no reading leaves each such fix's operation unresolved, and the repair is
+refused as a creation is. Every reading goes
 through one counted seam, tallied as `clock_reads` on the account the planning thread works
 for: the read account for a preview's or a repair's planning hold, the job account for an
 apply's planning.
