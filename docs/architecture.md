@@ -2741,6 +2741,30 @@ A `field/type-mismatch` finding that no derived fix answers on a `date`, `number
 `boolean` field is `excluded_class`, its note naming the class: date reformatting and number
 or yes/no coercion are fixes a repair never makes. Any other unfixed type mismatch is
 `no_declared_fix`.
+**A bare value is made a link where it resolves to one document at the plan's
+after-state.** A `field/type-mismatch` finding on a field declared `link`, for an element
+that is a string such that `[[value]]` reads back as exactly one plain wikilink (non-empty,
+no surrounding white space, no `#` fragment, `|` alias, bracket or line break), is written
+as `[[value]]` where that link resolves to exactly one document; any other value is
+`no_declared_fix`, and a repair never respells a value to make it qualify. The answer rests
+on the batch's settled routes (a route moves its target, and a path-qualified address can
+break or gain a competitor), so it is the one exception to finding order: a document's link
+fixes compose last, after its other fixes and at its route's destination, once every route
+of the batch is settled (after the respell check and the destination claims). Each is
+resolved over the plan the settled routes make, as the moves of that plan, through the one
+index probe the applier makes again of an address resolution, so what the planner records
+is by construction what the applier computes. One document: the link is written, a derived
+fix, and the plan records an address resolution condition — the holder at its after-state
+path, the wikilink, the address written, and the one document's after-state path — which
+rides the resolved plan in preview and apply alike and is checked at the after-state, so a
+target deleted, or a competitor of the same stem created, between preview and apply refuses
+the plan, and a refused plan's fresh plan carries the condition as recorded. It is the only
+fix that records one: a fix that re-shapes or re-cases a value already a link rests on no
+resolution, and no fix of this layer replaces a link address. Several documents:
+`ambiguous_link` with the head of the candidates; none: `no_declared_fix`, the note saying
+the link would resolve to no document. The cost is one index probe per distinct bare value,
+and one more read of the candidates' head where it names several, plus nothing for a batch
+with no link fix.
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
 rule's own captures where the document stands and the plan's one clock reading — with the
@@ -3332,8 +3356,10 @@ the set does not hold as recorded is a failed condition, and an entry the set ho
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
 A resolved plan may carry a third kind of condition beside a file's content and a
 change-set entry: an `address_resolution`, which repair's planner records for a link it
-writes or an address it replaces, saying that from the link's holder the address resolves
-as recorded at the plan's after-state. It is not an entry of the change set: the applier
+writes whose answer rests on the link's resolution (a bare value made a link), saying that
+from the link's holder the address resolves as recorded at the plan's after-state; an
+address a fix replaces is recorded the same way by the move-following and similarity fixes
+of a later layer, and no fix of today replaces one. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
 judgment of the link index holding one probe per address resolution the plan carries,

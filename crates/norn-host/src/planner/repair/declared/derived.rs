@@ -28,7 +28,9 @@
 //! **A type mismatch no derived fix answers is an excluded class** where the
 //! field is declared `date`, `number` or `boolean`: a fix would reformat a
 //! date or coerce a number or a yes/no spelling, which a repair never makes
-//! ([`excluded`]). Any other is left with no declared fix.
+//! ([`excluded`]). On a `link` field a bare value is made a link where it
+//! resolves to one document ([`super::bare_link`]); any other is left with no
+//! declared fix.
 
 use std::collections::{BTreeSet, HashMap};
 

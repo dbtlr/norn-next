@@ -1,7 +1,7 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **Four kinds of finding have a declared fix, three a derived one; every
+//! **Four kinds of finding have a declared fix, four a derived one; every
 //! other is skipped.** A
 //! selected `field/required-missing` finding fills from the default the rules
 //! requiring the field declare; a `field/not-one-of` finding is replaced by
@@ -14,8 +14,10 @@
 //! wrapped or unwrapped, a boolean field's string spelling a boolean but for
 //! its case is written as the boolean, and a value outside a closed set that
 //! differs from exactly one member only by case and white space is replaced
-//! by that member: derived fixes, which a declared fix for the same finding
-//! outranks. All are filled and judged by [`declared`], one operation per fix
+//! by that member; and a bare value in a link field is written as the link
+//! where it resolves to one document at the plan's after-state, the plan
+//! recording the address resolution it rests on: derived fixes, which a
+//! declared fix for the same finding outranks. All are filled and judged by [`declared`], one operation per fix
 //! (a rename is two), numbered `repair-1`, `repair-2` and on in plan order,
 //! each cited at the [`Confidence`] of its fix with the findings it fixes. A
 //! fix below the request's threshold is skipped as
@@ -73,8 +75,9 @@
 //! declaration, the case its globs compare under, what the vault holds as
 //! [`Reading`] answers it — the bytes each document with a fix to make held,
 //! read once, what stands at each route's destination, the links naming each
-//! routed document, and the bytes of each document holding such a link a
-//! cascade may respell — and the plan's one clock reading
+//! routed document, the bytes of each document holding such a link a
+//! cascade may respell, and what each bare value a link fix writes resolves
+//! to once the batch's routes have landed — and the plan's one clock reading
 //! ([`OneReading`]), taken only where a default or a route reads the clock.
 //! **A clock that gives no reading refuses the repair as it refuses a
 //! creation**: the operation of each default or route that reads the clock
@@ -371,8 +374,8 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// under `repairing`, reading through `vault` the bytes of each document a
 /// fix may be made to, once, and no other document's; what stands at each
 /// destination a route names; the links naming each document a route moves;
-/// and the bytes of each document holding such a link a cascade may
-/// respell.
+/// the bytes of each document holding such a link a cascade may respell;
+/// and what each bare value a link fix writes resolves to, one probe each.
 ///
 /// **Each document is drafted alone, then the routes are judged together.**
 /// A document's draft is every fix composed where it stands, and, where a
@@ -382,7 +385,8 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// may end in, so the answer depends on no other route's ([`declared`]'s
 /// respell check); and where its destination collides with an earlier route
 /// of the batch the plan makes, in batch order. Each document then takes the
-/// composition its route's fate decides.
+/// composition its route's fate decides, and its link fixes compose onto it
+/// last, resolved over the routes so settled.
 pub(crate) fn plan<R: Reading>(
     rows: &[FindingRow],
     repairing: &Repairing<'_>,

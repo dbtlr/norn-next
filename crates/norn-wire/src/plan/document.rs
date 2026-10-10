@@ -321,8 +321,9 @@ impl Resolves {
 /// progress never changes it. Its link may sit in a file the plan writes — a
 /// link a cascade rewrites has an entry — so it is not a fact about a file
 /// the plan leaves alone. An address resolution is the third kind: a fact a
-/// repair's planner records about a link it writes or an address it replaces,
-/// checked at the after-state and outside the change set.
+/// repair's planner records about a link it writes whose answer rests on the
+/// link's resolution, or an address a later layer's fix replaces, checked at
+/// the after-state and outside the change set.
 ///
 /// **An entry is keyed at the after-state.** Its key names the link
 /// as the plan leaves it: a rewritten link by its new address, its `before`
@@ -342,7 +343,10 @@ impl Resolves {
 /// **An address resolution is checked at the after-state.** From this holder,
 /// this address must resolve to `after` once the plan has been applied, in a
 /// preview and an apply alike; the address need not stand in the holder after
-/// the plan, since a repair records one it replaces.
+/// the plan. Repair records one today for a link it writes whose answer rests
+/// on the link's resolution, a bare value made a link; the move-following and
+/// similarity fixes of a later layer record one for an address they replace,
+/// which is why the address need not stand in the holder after the plan.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,

@@ -29,11 +29,15 @@
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
 //!
-//! **Three kinds have a derived fix, made at [`Confidence::Derived`]**
+//! **Four kinds have a derived fix, made at [`Confidence::Derived`]**
 //! ([`derived`]): a shape mismatch is wrapped or unwrapped, a boolean field's
-//! string spelling a boolean but for its case is written as the boolean, and
-//! a value outside a closed set that differs from exactly one member only by
-//! case and white space is replaced by that member ([`closed_set`]). A type
+//! string spelling a boolean but for its case is written as the boolean, a
+//! value outside a closed set that differs from exactly one member only by
+//! case and white space is replaced by that member ([`closed_set`]), and a
+//! bare value in a link field is written as the link it resolves to
+//! ([`bare_link`]). A link fix is the exception to finding order: its answer
+//! rests on the batch's settled routes, so a document's link fixes compose
+//! last, after the routes of the batch are settled ([`Draft::emit`]). A type
 //! mismatch on a `date`, `number` or `boolean` field no derived fix answers
 //! is an excluded class.
 //!
@@ -173,7 +177,7 @@ use crate::planner::edit::edited;
 
 /// Whether `row` is a finding a fix may answer, so its document's bytes are
 /// read: a missing required field, a value outside a closed set, a forbidden
-/// field, a shape mismatch, a type mismatch on a boolean field, or a
+/// field, a shape mismatch, a type mismatch on a boolean or link field, or a
 /// misplaced document a rule its row cites declares a route for. A document
 /// holding only findings without a fix is not read.
 pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
