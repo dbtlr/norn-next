@@ -214,29 +214,35 @@ pub(crate) struct Held {
     pub(crate) rules: BTreeSet<String>,
 }
 
-/// Judge `after`, the document composed at `after_path`, against `before`,
-/// the bytes at `before_path` it was composed from, under `declared`, its
-/// rules' path globs comparing letters as `case` says: exactly the judgment
-/// the applier's schema check runs on a target edited in place
-/// ([`judge`] and [`introduced`]), so a planner deciding what it may add to a
-/// plan reads the one judge the applier refuses by, and no second reading of
-/// the schema.
+/// What the derivation concludes of the bytes a plan composes a document
+/// from, judged once: the before-state a [`verdict`] compares a result to.
 ///
-/// **A repair's composition reads it** (`crate::planner::repair`): each fix
-/// it adds to a document is judged here on the running composed bytes
-/// against the document's own before-state, and the findings the result
-/// holds say which of the selected findings still stand to be fixed.
-pub(crate) fn verdict(
-    before_path: &DocumentPath,
-    before: &[u8],
-    after_path: &DocumentPath,
-    after: &[u8],
+/// **A planner composing several results from one before-state judges it
+/// once** and judges each result against it ([`verdict`]).
+pub(crate) struct Standing(Judged);
+
+impl Standing {
+    /// Every finding a schema rule or a field declaration concludes of the
+    /// before-state, in the judge's order.
+    pub(crate) fn holds(&self) -> Vec<Held> {
+        held(&self.0)
+    }
+}
+
+/// Judge `bytes`, the document at `path` as a plan composes it from, under
+/// `declared`, its rules' path globs comparing letters as `case` says.
+pub(crate) fn standing(
+    path: &DocumentPath,
+    bytes: &[u8],
     declared: &Declared,
     case: CaseFold,
-) -> Verdict {
-    let before = judge(before_path, before, declared, case);
-    let after = judge(after_path, after, declared, case);
-    let holds = after
+) -> Standing {
+    Standing(judge(path, bytes, declared, case))
+}
+
+/// Every rule finding `judged` concludes, as a finding row names it.
+fn held(judged: &Judged) -> Vec<Held> {
+    judged
         .violations
         .iter()
         .filter(|violation| matches!(violation.identity, Identity::Rule(_)))
@@ -246,8 +252,37 @@ pub(crate) fn verdict(
             value: violation.value.clone(),
             rules: violation.rules.clone(),
         })
-        .collect();
-    let introduced = introduced(after_path, after, &[before], &mut Citations::default());
+        .collect()
+}
+
+/// Judge `after`, the document composed at `after_path`, against `before`,
+/// the document it was composed from, judged by [`standing`], under
+/// `declared`, its rules' path globs comparing letters as `case` says:
+/// exactly the judgment the applier's schema check runs on a target edited
+/// in place ([`judge`] and [`introduced`]), so a planner deciding what it may
+/// add to a plan reads the one judge the applier refuses by, and no second
+/// reading of the schema.
+///
+/// **A repair's composition reads it** (`crate::planner::repair`): each fix
+/// it adds to a document is judged on the running composed bytes against the
+/// document's own before-state, judged once however many fixes are made, and
+/// the findings the result holds say which of the selected findings still
+/// stand to be fixed.
+pub(crate) fn verdict(
+    before: &Standing,
+    after_path: &DocumentPath,
+    after: &[u8],
+    declared: &Declared,
+    case: CaseFold,
+) -> Verdict {
+    let after = judge(after_path, after, declared, case);
+    let holds = held(&after);
+    let introduced = introduced(
+        after_path,
+        after,
+        std::slice::from_ref(&before.0),
+        &mut Citations::default(),
+    );
     Verdict { introduced, holds }
 }
 

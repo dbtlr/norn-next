@@ -51,7 +51,7 @@ use norn_wire::{
 };
 
 use super::{Planned, Repairing};
-use crate::applier::{Held, Verdict, verdict};
+use crate::applier::{Held, Standing, Verdict, standing, verdict};
 use crate::derivation::stored_spelling;
 use crate::planner::edit::edited;
 
@@ -74,7 +74,9 @@ pub(super) fn compose(
 ) -> Vec<Option<SkippedFinding>> {
     let path = &document[0].path;
     let mut composed = Arc::clone(before);
-    let mut holds = judged(path, before, before, repairing).holds;
+    // The before-state is judged once, however many fixes are made to it.
+    let before = standing(path, before, repairing.declared, repairing.case);
+    let mut holds = before.holds();
     let mut decided = vec![None; document.len()];
     for at in finding_order(document) {
         let row = &document[at];
@@ -94,7 +96,7 @@ pub(super) fn compose(
             row,
             field,
             path,
-            before,
+            before: &before,
             composed: &composed,
             repairing,
         }
@@ -157,16 +159,15 @@ fn holding<'h>(row: &FindingRow, holds: &'h [Held]) -> Option<&'h Held> {
     })
 }
 
-/// What the applier concludes of `after`, composed at `path` from `before`.
-fn judged(path: &DocumentPath, before: &[u8], after: &[u8], repairing: &Repairing<'_>) -> Verdict {
-    verdict(
-        path,
-        before,
-        path,
-        after,
-        repairing.declared,
-        repairing.case,
-    )
+/// What the applier concludes of `after`, composed at `path` from the
+/// document `before` judges.
+fn judged(
+    path: &DocumentPath,
+    before: &Standing,
+    after: &[u8],
+    repairing: &Repairing<'_>,
+) -> Verdict {
+    verdict(before, path, after, repairing.declared, repairing.case)
 }
 
 /// The citation of the finding `row` fixed by setting `field`, noting where
@@ -193,7 +194,7 @@ struct Composing<'c> {
     row: &'c FindingRow,
     field: &'c str,
     path: &'c DocumentPath,
-    before: &'c [u8],
+    before: &'c Standing,
     composed: &'c Arc<[u8]>,
     repairing: &'c Repairing<'c>,
 }
@@ -840,6 +841,51 @@ mod tests {
         assert_eq!(planned.operations.len(), 1);
         assert_eq!(reads.get(), 0);
         assert!(planned.citations[0].findings[0].notes.is_empty());
+    }
+
+    /// **A document's before-state is judged once, however many fixes are made
+    /// to it**: the rule work a plan pays is the judgment of the before-state
+    /// and of each composed after-state, and no more.
+    #[test]
+    fn a_documents_before_state_is_judged_once_however_many_fixes_are_made() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      priority: {default: normal}\n      status: {default: todo}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\n---\n")]);
+        let judged = |bytes: &[u8]| {
+            let hash = norn_fs::ContentHash::of(bytes).to_string();
+            crate::derivation::plan_document(
+                std::path::Path::new("a.md"),
+                "a.md",
+                bytes,
+                hash,
+                None,
+                &vault.declared,
+                norn_wire::CaseFold::Exact,
+            )
+            .rule_work
+        };
+        let path = DocumentPath::new("a.md").expect("a path");
+        let mut states = vec![Arc::<[u8]>::from("---\ntype: task\n---\n".as_bytes())];
+        for (field, value) in [("priority", "normal"), ("status", "todo")] {
+            let set = OperationKind::set_frontmatter(
+                WriteTarget::path(path.clone()),
+                field,
+                AuthoredValue::string(value),
+            );
+            let next = edited(&set, states.last().expect("a state")).expect("an edit");
+            states.push(next);
+        }
+        let expected = states
+            .iter()
+            .fold(norn_config::schema::RuleWork::NONE, |work, bytes| {
+                work.plus(judged(bytes))
+            });
+
+        let (planned, paid) = crate::evidence::rule_work_of(|| {
+            vault.plan(&[missing(1, "a.md", "priority"), missing(2, "a.md", "status")])
+        });
+
+        assert_eq!(planned.operations.len(), 2);
+        assert_eq!(paid, expected);
     }
 
     /// **Operations are numbered `repair-1`, `repair-2` and on in plan order

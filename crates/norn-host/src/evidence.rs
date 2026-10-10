@@ -761,6 +761,16 @@ fn take_rule_work() -> RuleWork {
     RULE_WORK.with(|cell| cell.replace(RuleWork::NONE))
 }
 
+/// What `run` returns, and the rule work it tallied on this thread. A tally
+/// standing on the thread before `run` stands again after it, untouched.
+#[cfg(test)]
+pub(crate) fn rule_work_of<T>(run: impl FnOnce() -> T) -> (T, RuleWork) {
+    let standing = take_rule_work();
+    let ran = run();
+    let tallied = RULE_WORK.with(|cell| cell.replace(standing));
+    (ran, tallied)
+}
+
 thread_local! {
     static CLOCK_READS: Cell<u64> = const { Cell::new(0) };
 }
