@@ -2719,17 +2719,35 @@ applied report carries none, as an applied move's does not). Each operation is n
 findings it fixes, and one writing a clock-filled value or destination notes that it is the
 repair's time. A document's fixes compose in finding order — its route first, then kind,
 field, offending value — onto the bytes and the place the earlier ones left, each judged
-there against the document's before-state, judged once, by the applier's own schema check,
-the one judge, so a fix the applier would refuse is skipped and the next composes without it.
-The route comes first so every other fix is judged, and names the document, where it will
-stand, after the move in plan order: a selected finding the composed document no longer holds
-is dropped, neither fixed nor skipped, so a route out of a rule's area drops that rule's
-selected findings. **A route's destination is judged against the vault the planning view
-reads, as the root reads its case, and against the batch's earlier routes**: a destination
-anything stands at, or another route of the batch already moves a document to, is
-`destination_taken`, so of two routes to one place the first in batch order moves and the
-later skips; a place another operation of the batch vacates is judged as it stands, taken.
-A route to a place where the document would still be misplaced is `judge_would_refuse`. A fix
+there by the applier's own schema check, the one judge, against the document's before-state,
+judged once, and against the state it composes onto, whose judgment is the previous fix's
+own: a fix the applier would refuse, or one bringing back a violation an earlier fix took
+away, is skipped and the next composes without it, and a fix after which the document still
+holds its finding is no fix. The route comes first so every other fix is judged, and names
+the document, where it will stand, after the move in plan order. Every selected finding the
+judgment of a document's bytes concludes — a rule's, an undeclared tag, one about the
+document whole — is decided against the composed document at the end: one it no longer
+holds is dropped, neither fixed nor skipped, so a route out of a rule's area drops that
+rule's selected findings and a removal taking a tag with it drops the tag's. **A route's
+destination is judged against the vault the planning view reads, as the root reads its
+case, and against the batch's earlier routes**: a destination anything stands at or beneath
+a document that stands, or one another route of the batch already moves a document to,
+above or beneath, is `destination_taken`, so of two routes to one place, or to places one
+inside the other, the first in batch order moves and the later skips; a place another
+operation of the batch vacates is judged as it stands, taken. A route filling to no folder a
+document can be moved into — a capture holding `:`, which a route's own text never holds,
+or one slugging to nothing — and a route to a place where the document would still be
+misplaced, are `judge_would_refuse`. **A plan holding a route is judged whole.** A route's
+link cascade rewrites links in other documents and in the moved document itself, which no
+judgment of one document's fixes sees, so the resolved plan is judged by the applier's own
+check, read-only, on the same view and clock reading; each violation it introduces is laid
+to the last route in plan order whose cascade rewrites the document it stands on, that route
+is skipped as `judge_would_refuse`, noting the document and the violation, and the batch is
+planned again without it, its document's other fixes judged where it stands. That costs one
+resolution and one judgment of the plan per round, at most one round more than the batch has
+routes; a plan holding no route is resolved once and not judged in planning. A violation no
+route's cascade explains is a defect of the repair's own judgment and is answered as
+`vault/plan-refused` naming it, not planned again. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
 defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
