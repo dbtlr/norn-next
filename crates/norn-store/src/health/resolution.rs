@@ -72,7 +72,13 @@
 //! could name are read off the overlay once, when the key is resolved**, and
 //! kept as counts beside the head, so a link adds them in constant time
 //! however many targets the key could name: a stem every document of a plan
-//! shares names every one of them, and its links do not read them each.
+//! shares names every one of them, and its links do not read them each. **A
+//! key that could name a target, or a place the plan reaches, is resolved
+//! once per judgment**, however its links interleave with other keys' — two
+//! stems' links taken in turn read each stem's targets once — and kept until
+//! the judgment ends; there are no more such keys than the overlay names. Any
+//! other key's head is two rows at most, and is kept while consecutive chunks
+//! hold it, so what a judgment holds is the overlay's keys and two chunks'.
 //!
 //! **The members a class keeps out are never read.** The head seeks the
 //! members the ambiguity-ignore set admits by the admitting count each
@@ -332,8 +338,9 @@ pub struct ResolutionWork {
     pub ran: Vec<ResolutionStatement>,
     /// Links judged, each once however many ways the plan reached it.
     pub links_evaluated: u64,
-    /// Key resolutions: once per distinct key across a run of consecutive
-    /// chunks holding it.
+    /// Key resolutions: once per judgment for a key that could name a target
+    /// or a reached place, and once per run of consecutive chunks holding it
+    /// for any other key.
     pub keys_resolved: u64,
     /// Rows the key resolutions read, each a document a key names, at most
     /// two more than the targets the key could name.
@@ -897,10 +904,17 @@ impl<'a, R: Runner> Judging<'a, R> {
                 before_targets,
             });
         }
-        // What the next chunk may reuse is what this one held, so what is
-        // kept is two chunks' keys at most, however many links the plan
-        // reaches.
-        self.resolved.retain(|key, _| held.contains(key));
+        // A key that could name a target or a reached place is kept for the
+        // whole judgment, so its targets and its head are read once however
+        // its links interleave with another key's; there are no more such
+        // keys than the overlay names, which the judgment holds already.
+        // Any other key's head is two rows at most, so what the next chunk
+        // may reuse of those is what this one held: two chunks' keys at
+        // most, however many links the plan reaches.
+        let (naming, reaching) = (&self.naming, &self.reaching);
+        self.resolved.retain(|key, _| {
+            held.contains(key) || naming.contains_key(&key.0) || reaching.contains_key(&key.0)
+        });
         Ok(())
     }
 

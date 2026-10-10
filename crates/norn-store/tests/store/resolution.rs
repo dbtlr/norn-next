@@ -703,6 +703,61 @@ fn a_stems_targets_are_read_once_however_many_links_its_key_holds() {
     assert_eq!(few, 2 * MOVED as u64, "the stem's targets, each read once");
 }
 
+/// **A key's targets are read once per judgment however its links
+/// interleave with another key's**: a plan moving every document of two
+/// stems, `t` and `u`, gives each stem's key its targets, and links naming
+/// one stem then the other, a chunk of each in turn, read each stem's
+/// targets and its head once, so four times the links read no more.
+#[test]
+fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
+    const MOVED: usize = 40;
+    // A chunk of the judgment's links, so each block is a chunk of its own.
+    const BLOCK: usize = 256;
+    let work = |blocks: usize| {
+        let mut vault = Vault::new(&format!("resolution-turns-{blocks}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED)
+            .map(|at| format!("a/{at:04}/{}.md", if at % 2 == 0 { "t" } else { "u" }))
+            .collect();
+        vault.write(
+            &moved
+                .iter()
+                .map(|at| (at.as_str(), "a task\n"))
+                .collect::<Vec<_>>(),
+        );
+        let plan = moved.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let probes: Vec<ProbedLink> = (0..blocks)
+            .flat_map(|block| {
+                let stem = if block % 2 == 0 { "t" } else { "u" };
+                let holder = format!("h/{block:04}.md");
+                std::iter::repeat_n(
+                    probed(&holder, &holder, &format!("[[{stem}]]\n"), true),
+                    BLOCK,
+                )
+            })
+            .collect();
+        let (judged_links, work) = vault.judge(&plan, &probes);
+        assert_eq!(judged_links.len(), blocks * BLOCK);
+        assert!(
+            judged_links
+                .iter()
+                .all(|(_, _, before, after)| before == "several" && after == "several")
+        );
+        (work.targets_read, work.head_rows, work.keys_resolved)
+    };
+
+    let few = work(2);
+    let many = work(8);
+
+    assert_eq!(few, many, "(targets read, head rows, keys resolved)");
+    assert_eq!(few.0, 2 * MOVED as u64, "each stem's targets, read once");
+}
+
 /// **An overlay holds each path once, as it was listed last**: listing a
 /// file again replaces what the overlay said of it rather than adding it, so
 /// building an overlay costs a keyed lookup per file listed.
