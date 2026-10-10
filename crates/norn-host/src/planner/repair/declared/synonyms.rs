@@ -22,12 +22,11 @@
 //! on the state the earlier elements' fixes left. An element whose fix is
 //! skipped stands where it is.
 
-use std::sync::Arc;
-
 use norn_config::schema::{FieldType, VaultSchema};
 use norn_wire::{AuthoredValue, FindingRow, SkipReason, SkippedFinding};
 
-use super::{Document, Fix, Proposal, State, candidates, cited, field_of, holding, skip};
+use super::{Document, Fix, Fixing, Proposal, State, candidates, cited, field_of, skip};
+use crate::applier::Held;
 use crate::planner::edit::edited;
 
 /// What the synonyms of one field's selected findings come to: the one fix
@@ -38,25 +37,33 @@ pub(super) struct Mapped {
     pub(super) skipped: Vec<(usize, SkippedFinding)>,
 }
 
-/// Fix the `field` of the document from `state`, for the findings `rows` — the
-/// selected `field/not-one-of` findings of that field, each with its position
-/// among the document's rows, in finding order.
+/// One selected `field/not-one-of` finding of a field: its position among
+/// the document's rows, the row, and the finding it names as the
+/// before-state holds it.
+pub(super) struct Element<'e> {
+    pub(super) at: usize,
+    pub(super) row: &'e FindingRow,
+    pub(super) finding: &'e Held,
+}
+
+/// Fix the `field` of the document from `state`, for `elements` — the
+/// selected `field/not-one-of` findings of that field, in finding order.
 pub(super) fn fix_field(
     document: &Document<'_>,
     state: &State,
     field: &str,
-    rows: &[(usize, &FindingRow)],
+    elements: &[Element<'_>],
 ) -> Mapped {
     let schema = document.schema();
     let mut skipped = Vec::new();
     let Some(Some(mut working)) = field_of(&state.bytes, field) else {
         // The document no longer holds the field, or its fields cannot be
         // read: no element of it is there to replace.
-        for &(at, row) in rows {
-            if holding(row, &state.holds).is_some() {
+        for element in elements {
+            if state.holding(element.finding).is_some() {
                 skipped.push((
-                    at,
-                    skip(row, SkipReason::JudgeWouldRefuse).with_note(format!(
+                    element.at,
+                    skip(element.row, SkipReason::JudgeWouldRefuse).with_note(format!(
                         "the document's `{field}` cannot be read to replace an element of"
                     )),
                 ));
@@ -65,11 +72,10 @@ pub(super) fn fix_field(
         return Mapped { fix: None, skipped };
     };
     let kind = schema.declared_type(field);
-    let mut bytes = Arc::clone(&state.bytes);
-    let mut holds = state.holds.clone();
+    let mut current = state.clone();
     let mut cites = Vec::new();
-    for &(at, row) in rows {
-        let Some(held) = holding(row, &holds) else {
+    for &Element { at, row, finding } in elements {
+        let Some(held) = current.holding(finding) else {
             continue;
         };
         let Some(offending) = held.value.clone() else {
@@ -108,16 +114,17 @@ pub(super) fn fix_field(
         };
         let set = document.set(&state.at, field, replaced.clone());
         match document.admit(
-            &state.at,
-            &bytes,
+            &current,
             std::slice::from_ref(&set),
-            row,
-            &candidates(&proposals),
+            Fixing {
+                row,
+                finding,
+                candidates: &candidates(&proposals),
+            },
         ) {
             Ok(next) => {
                 working = replaced;
-                bytes = next.bytes;
-                holds = next.holds;
+                current = next;
                 cites.push(cited(row, field, false));
             }
             Err(skip) => skipped.push((at, *skip)),
@@ -131,17 +138,15 @@ pub(super) fn fix_field(
         // Each element was composed onto the one before it; the operation
         // the plan carries is one set of the field, so the state is what that
         // one set composes to.
-        bytes = edited(&set, &state.bytes).unwrap_or(bytes);
+        if let Ok(bytes) = edited(&set, &state.bytes) {
+            current.bytes = bytes;
+        }
     }
     Mapped {
         fix: Some(Fix {
             operations: vec![set],
             cited: cites,
-            state: State {
-                at: state.at.clone(),
-                bytes,
-                holds,
-            },
+            state: current,
         }),
         skipped,
     }

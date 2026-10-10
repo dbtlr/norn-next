@@ -52,6 +52,7 @@
 //! stands and cannot be read.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,9 +66,9 @@ use norn_store::{
 use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
     DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, MoveParams,
-    NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
-    RewriteWikilinkParams, RootIdentity, SetParams, SkippedFinding, TrustState, UntrustedReason,
-    VaultAddress, VaultAnswer, VaultName,
+    NewParams, OperationKind, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
+    RewriteWikilinkParams, RootIdentity, SchemaViolation, SetParams, SkippedFinding, TrustState,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -230,7 +231,22 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
             Err(error) => return Ok(repair::Destination::Closed(error.to_string())),
         };
         Ok(match self.0.streamed_entry(&at)? {
-            Entry::Absent { .. } => repair::Destination::Free(at),
+            Entry::Absent { .. } => {
+                // Every folder above the place, by the same identity rule, so
+                // the batch's routes are judged against one another's places
+                // above and beneath theirs.
+                let spelled = path.as_str();
+                let folders = spelled
+                    .match_indices('/')
+                    .filter_map(|(end, _)| {
+                        self.0
+                            .normalizer()
+                            .normalize(std::path::Path::new(&spelled[..end]))
+                            .ok()
+                    })
+                    .collect();
+                repair::Destination::Free { at, folders }
+            }
             Entry::Blocked {
                 detail,
                 barrier: Barrier::Closed,
@@ -250,6 +266,24 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
 /// **A repair whose clock gives no reading is refused as a creation is**: the
 /// operation of each default that reads the clock is left unresolved, naming
 /// the clock, and `vault/plan-refused` answers it in both modes.
+///
+/// **A plan holding a route is judged whole before it is answered.** A route's
+/// move carries the link cascade the one planner generates, which rewrites
+/// links in other documents and in the moved document itself, and no
+/// judgment of one document's own fixes sees those rewrites. So the resolved
+/// plan is judged by the applier's own check ([`applier::introduced_violations`]),
+/// on the same view and the same clock reading, nothing written; each
+/// violation it introduces is laid to the last route in plan order whose
+/// cascade rewrites the document it stands on, that route is skipped as one
+/// the judge would refuse, noting the document and the violation, and the
+/// batch is planned again without it — its document's other fixes then
+/// judged where it stands. **The cost is one resolution and one judgment of
+/// the plan per round, and a round per refused route, at most one more round
+/// than the batch has routes**: each round refuses at least one route, and a
+/// plan holding none is not judged again. A plan holding no route is
+/// resolved once and not judged here, as before. A violation no route's
+/// cascade explains is a defect of the repair's own judgment, answered as a
+/// refusal naming it rather than planned again.
 fn repaired<V: VaultView>(
     rows: &[FindingRow],
     ground: &PlanGround,
@@ -262,19 +296,145 @@ fn repaired<V: VaultView>(
 where
     V::Error: std::fmt::Display,
 {
-    let repairing = repair::Repairing {
-        declared: &ground.declared,
-        case: crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case(),
-        clock,
-    };
-    let planned = repair::plan(rows, &repairing, &RepairReading(view))
-        .map_err(|error| unreadable(name, error))?;
-    let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
-    let mut resolution = resolve_through(authored, ground, name, snapshot, view, &|| clock.get())
-        .map_err(refused)?;
-    resolution.unresolved.extend(planned.unresolved);
-    let plan = fully_resolved(resolution)?.plan;
-    Ok((plan, planned.skipped, planned.citations))
+    let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
+    let mut refused_routes = BTreeMap::new();
+    loop {
+        let repairing = repair::Repairing {
+            declared: &ground.declared,
+            case,
+            clock,
+            refused: &refused_routes,
+        };
+        let planned = repair::plan(rows, &repairing, &RepairReading(view))
+            .map_err(|error| unreadable(name, error))?;
+        let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
+        // The resolution reads the clock through the plan's one reading: no
+        // repair plan reaches a clock read in expansion today, and the shared
+        // reading keeps the plan at one should a repair ever create by rule.
+        let mut resolution =
+            resolve_through(authored, ground, name, snapshot, view, &|| clock.get())
+                .map_err(refused)?;
+        resolution.unresolved.extend(planned.unresolved);
+        let Resolution { plan, forecast, .. } = fully_resolved(resolution)?;
+        let routes = routes_of(&plan, &planned.citations);
+        if routes.is_empty() {
+            return Ok((plan, planned.skipped, planned.citations));
+        }
+        let violations = applier::introduced_violations(&plan, view, &ground.declared, snapshot);
+        if violations.is_empty() {
+            return Ok((plan, planned.skipped, planned.citations));
+        }
+        let mut laid = BTreeMap::new();
+        for violation in &violations {
+            let Some(route) = routes
+                .iter()
+                .rev()
+                .find(|route| route.rewrites.contains(&violation.path))
+            else {
+                return Err(unexplained(plan, forecast, violation));
+            };
+            laid.entry(route.finding)
+                .or_insert_with(|| refused_note(route, violation));
+        }
+        refused_routes.extend(laid);
+    }
+}
+
+/// One route of a repair plan: the move, the misplaced finding it fixes,
+/// and every document its cascade rewrites, where each stands once the
+/// plan's moves land.
+struct PlannedRoute {
+    to: DocumentPath,
+    finding: u64,
+    rewrites: BTreeSet<DocumentPath>,
+}
+
+/// The routes of `plan`, in plan order, each with the finding `citations`
+/// cite it for.
+fn routes_of(plan: &ResolvedPlan, citations: &[Citation]) -> Vec<PlannedRoute> {
+    let moved: BTreeMap<&DocumentPath, &DocumentPath> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::MoveDocument { from, to } => Some((from, to)),
+            _ => None,
+        })
+        .collect();
+    plan.operations
+        .iter()
+        .filter_map(|operation| {
+            let OperationKind::MoveDocument { to, .. } = &operation.kind else {
+                return None;
+            };
+            let id = operation.id.as_ref()?;
+            let finding = citations
+                .iter()
+                .find(|citation| citation.operation == *id)?
+                .findings
+                .first()?
+                .finding;
+            let rewrites = operation
+                .cascade
+                .iter()
+                .flat_map(|rewrite| {
+                    let landed = moved.get(&rewrite.path).map(|to| (*to).clone());
+                    std::iter::once(rewrite.path.clone()).chain(landed)
+                })
+                .collect();
+            Some(PlannedRoute {
+                to: to.clone(),
+                finding,
+                rewrites,
+            })
+        })
+        .collect()
+}
+
+/// The note the skip of `route` carries where its cascade leaves `violation`.
+fn refused_note(route: &PlannedRoute, violation: &SchemaViolation) -> String {
+    let on = violation
+        .target
+        .as_deref()
+        .map(|target| format!(" on `{target}`"))
+        .unwrap_or_default();
+    let value = violation
+        .value
+        .as_ref()
+        .map(|value| format!(" for `{}`", value.text()))
+        .unwrap_or_default();
+    format!(
+        "moving the document to `{}` rewrites links in `{}`, which would then break its \
+         schema: `{}`{on}{value}",
+        route.to,
+        violation.path,
+        violation.kind.as_str(),
+    )
+}
+
+/// The refusal of a repair whose plan introduces `violation` where no route's
+/// cascade rewrites: a defect of the repair's own judgment of each document,
+/// answered with the plan rather than planned again.
+fn unexplained(
+    plan: ResolvedPlan,
+    forecast: norn_wire::Forecast,
+    violation: &SchemaViolation,
+) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        format!(
+            "the repair planned a `{}` on `{}` that no route's link cascade explains, which \
+             its judgment of each document should have refused; nothing was written",
+            violation.kind.as_str(),
+            violation.path,
+        ),
+        ErrorDetail::plan_refused(
+            plan,
+            forecast,
+            vec![norn_wire::RefusedCheck::violation(violation.clone())],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )
 }
 
 /// Plan `authored` as [`resolve_on`] does, reading the vault through `view`

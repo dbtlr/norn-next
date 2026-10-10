@@ -273,6 +273,24 @@ pub(super) fn check<V: VaultView>(
 where
     V::Error: std::fmt::Display,
 {
+    check_forcing(plan, plan.force, view, declared, links, citations)
+}
+
+/// [`check`] `plan`, its schema violations let through and listed where
+/// `force` is true, whatever the plan itself says: the one judgment, asked
+/// for the violations a plan introduces without refusing on them
+/// ([`super::introduced_violations`]).
+pub(super) fn check_forcing<V: VaultView>(
+    plan: &ResolvedPlan,
+    force: bool,
+    view: &V,
+    declared: &Declared,
+    links: Links<'_>,
+    citations: &mut Citations,
+) -> Result<Checked, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
     // before it could pass unread; so is a creation by rule, which names no
@@ -420,7 +438,7 @@ where
         declared,
     };
     let violations = schema.violations(&units, &contents, &carried, citations);
-    let forced = if plan.force {
+    let forced = if force {
         violations
     } else {
         checks.extend(violations.into_iter().map(RefusedCheck::violation));

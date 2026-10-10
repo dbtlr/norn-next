@@ -17,9 +17,14 @@
 //! generates as it generates any move's: every link the text layer can
 //! respell is rewritten, and every other is advised on in the forecast with
 //! the reason a Layer 4 move gives it. A destination something stands at in
-//! the vault, as the root reads its case, or that an earlier route of the
-//! batch moves a document to, is [`SkipReason::DestinationTaken`]; one where
-//! no document can be made is [`SkipReason::JudgeWouldRefuse`]. **The move is
+//! the vault, as the root reads its case, or beneath a document that stands,
+//! or that an earlier route of the batch moves a document to, above or
+//! beneath, is [`SkipReason::DestinationTaken`]; one where no document can be
+//! made, and a route filling to no folder — a capture holding `:` or slugging
+//! to nothing ([`Route::fill`](norn_config::schema::Route::fill)) — is
+//! [`SkipReason::JudgeWouldRefuse`], noting why. A route the judgment of the
+//! whole plan refused for its link cascade ([`Repairing::refused`]) skips the
+//! same way, with that judgment's note. **The move is
 //! judged at its destination**: the document's bytes there against its
 //! before-state, since `match.path`, `exclude.path` and `allowed_paths` can
 //! each judge the same bytes differently in another place — a destination
@@ -30,13 +35,16 @@
 use std::collections::BTreeSet;
 
 use norn_wire::{
-    CitedFinding, Confidence, DocumentPath, FindingKind, FindingRow, Operation, OperationId,
-    OperationKind, SkipReason, UnresolvedOperation, UnresolvedReason,
+    CitedFinding, Confidence, DocumentPath, FindingRow, Operation, OperationId, OperationKind,
+    SkipReason, UnresolvedOperation, UnresolvedReason,
 };
 
 use super::{
-    Document, Fix, Routing, State, Unmade, captures_of, skip, spelled, spelled_candidates,
+    Document, Fix, Fixing, Routing, State, Unmade, captures_of, skip, spelled, spelled_candidates,
 };
+use crate::applier::Held;
+#[cfg(doc)]
+use crate::planner::repair::Repairing;
 use crate::planner::repair::{Destination, Reading};
 
 /// One destination a rule's route proposes.
@@ -46,14 +54,16 @@ struct Proposal {
     clocked: bool,
 }
 
-/// The fix of the misplaced document `row` names, standing as `state`
-/// composes it, that `rules`, the placement rules its finding cites, route it
-/// by, judged against what `routing` reads; or why it is not made. `id` is
-/// the operation's id, which an operation left unresolved takes.
+/// The fix of the misplaced document `row` names — `finding`, as the
+/// before-state holds it — standing as `state` composes it, that `rules`,
+/// the placement rules its finding cites, route it by, judged against what
+/// `routing` reads; or why it is not made. `id` is the operation's id, which
+/// an operation left unresolved takes.
 pub(super) fn fix<R: Reading>(
     document: &Document<'_>,
     state: &State,
     row: &FindingRow,
+    finding: &Held,
     rules: &BTreeSet<String>,
     id: OperationId,
     routing: &mut Routing<'_, R>,
@@ -87,45 +97,50 @@ pub(super) fn fix<R: Reading>(
         return skipped(skip(row, SkipReason::Tie).with_candidates(candidates));
     }
     let to = &first.to;
+    let refused = |note: String| {
+        skip(row, SkipReason::JudgeWouldRefuse)
+            .with_candidates(candidates.clone())
+            .with_note(note)
+    };
+    if let Some(note) = document.repairing.refused.get(&row.id) {
+        return skipped(refused(note.clone()));
+    }
     let taken = |note: String| {
         skip(row, SkipReason::DestinationTaken)
             .with_candidates(candidates.clone())
             .with_note(note)
     };
-    let identity = match routing.vault.destination(to)? {
-        Destination::Free(identity) => identity,
-        Destination::Taken => return skipped(taken(format!("something stands at `{to}`"))),
+    let (identity, folders) = match routing.vault.destination(to)? {
+        Destination::Free { at, folders } => (at, folders),
+        Destination::Taken => {
+            return skipped(taken(format!(
+                "something stands at `{to}`, or a document above it"
+            )));
+        }
         Destination::Closed(detail) => {
-            return skipped(
-                skip(row, SkipReason::JudgeWouldRefuse)
-                    .with_candidates(candidates.clone())
-                    .with_note(format!("no document can be moved to `{to}`: {detail}")),
-            );
+            return skipped(refused(format!(
+                "no document can be moved to `{to}`: {detail}"
+            )));
         }
     };
-    if routing.claimed.contains(&identity) {
-        return skipped(taken(format!(
-            "an earlier route of the batch moves a document to `{to}`"
-        )));
+    if let Some(collision) = routing.claimed.collides(&identity, &folders) {
+        return skipped(taken(format!("{collision} `{to}`")));
     }
-    let moved = match document.judged(to, std::sync::Arc::clone(&state.bytes), row, &candidates) {
+    let moved = match document.judged(
+        state,
+        to,
+        std::sync::Arc::clone(&state.bytes),
+        Fixing {
+            row,
+            finding,
+            candidates: &candidates,
+        },
+        &format!("at `{to}` the document still stands where its rules do not allow"),
+    ) {
         Ok(moved) => moved,
         Err(skip) => return Ok(Err(Unmade::Skipped(skip))),
     };
-    if moved
-        .holds
-        .iter()
-        .any(|held| held.kind == FindingKind::Misplaced)
-    {
-        return skipped(
-            skip(row, SkipReason::JudgeWouldRefuse)
-                .with_candidates(candidates.clone())
-                .with_note(format!(
-                    "at `{to}` the document still stands where its rules do not allow"
-                )),
-        );
-    }
-    routing.claimed.insert(identity);
+    routing.claimed.claim(identity, folders);
     let clocked = proposals.iter().any(|proposal| proposal.clocked);
     Ok(Ok(Fix {
         operations: vec![OperationKind::move_document(state.at.clone(), to.clone())],
@@ -188,18 +203,34 @@ fn proposed(
                 Ok(at) => Some(at),
                 Err(_) => {
                     return Err(Unproposed::NoClockReading {
-                        written: in_folder(route.as_str(), name),
+                        written: in_folder(route.as_str(), name).expect(
+                            "schema read refuses a route whose text, each token standing as \
+                             plain text, is no folder path",
+                        ),
                     });
                 }
             }
         } else {
             None
         };
+        let unfillable = |why: String| {
+            Unproposed::Skipped(Box::new(skip(row, SkipReason::JudgeWouldRefuse).with_note(
+                format!(
+                    "the rule `{rule_name}` routes `{}` by `{}` to no folder a document can \
+                     be moved into: {why}",
+                    state.at,
+                    route.as_str(),
+                ),
+            )))
+        };
         let folder = route
             .fill(at, captures)
-            .expect("a route's tokens are the clock's and its own rule's captures, judged at read");
+            .map_err(|error| unfillable(error.to_string()))?;
+        let to = in_folder(&folder, name).map_err(|problem| {
+            unfillable(format!("`{folder}{name}` is no document path: {problem}"))
+        })?;
         proposals.push(Proposal {
-            to: in_folder(&folder, name),
+            to,
             rule: rule_name.clone(),
             clocked: route.reads_clock(),
         });
@@ -207,14 +238,20 @@ fn proposed(
     Ok(proposals)
 }
 
-/// The document named `name` in `folder`, a route's folder ending in `/`.
+/// The document named `name` in `folder`, a route's folder ending in `/`;
+/// or why that is no document path.
 ///
 /// Schema read refuses a route whose text, each token standing as plain
-/// text, is no folder path; a capture fills one segment of a document path
-/// and a clock token a date, so a route filled or as written, with a
-/// document's file name after it, names a document path.
-fn in_folder(folder: &str, name: &str) -> DocumentPath {
-    DocumentPath::new(format!("{folder}{name}")).expect("a route names a folder of documents")
+/// text, is no folder path, and a route's fill refuses a value that would
+/// break its segment ([`Route::fill`](norn_config::schema::Route::fill)); the
+/// whole path is judged here as well, since a value stands beside literal
+/// text.
+fn in_folder(folder: &str, name: &str) -> Result<DocumentPath, norn_wire::PathProblem> {
+    let path = format!("{folder}{name}");
+    match norn_wire::PathProblem::of_document(&path) {
+        Some(problem) => Err(problem),
+        None => Ok(DocumentPath::new(path).expect("a path the document grammar admits")),
+    }
 }
 
 /// The citation of the misplaced finding `row` fixed by moving it to `to`,

@@ -57,6 +57,7 @@ pub(super) struct Judged {
 }
 
 /// One violation a judgment concluded.
+#[derive(Clone)]
 struct Violation {
     identity: Identity,
     kind: FindingKind,
@@ -70,7 +71,7 @@ struct Violation {
 }
 
 /// What tells one violation from another. See the [module](self).
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Identity {
     /// A schema rule's or a field declaration's finding.
     Rule(FindingIdentity),
@@ -156,17 +157,22 @@ pub(super) fn introduced(
     before: &[Judged],
     citations: &mut Citations,
 ) -> Vec<SchemaViolation> {
-    after
-        .violations
+    unstood(path, after.violations, citations, |identity| {
+        before.iter().any(|judged| judged.concludes(identity))
+    })
+}
+
+/// Each of `violations`, of the result at `path`, for which `stood` is false,
+/// as the wire states it, its rules cited through `citations`.
+fn unstood(
+    path: &DocumentPath,
+    violations: Vec<Violation>,
+    citations: &mut Citations,
+    stood: impl Fn(&Identity) -> bool,
+) -> Vec<SchemaViolation> {
+    violations
         .into_iter()
-        .filter(|violation| {
-            !before.iter().any(|judged| {
-                judged
-                    .violations
-                    .iter()
-                    .any(|stood| stood.identity == violation.identity)
-            })
-        })
+        .filter(|violation| !stood(&violation.identity))
         .map(|violation| {
             let mut wire = SchemaViolation::new(
                 path.clone(),
@@ -185,47 +191,81 @@ pub(super) fn introduced(
         .collect()
 }
 
-/// What the write gate concludes of one document a plan composes: the
-/// violations the composed result introduces against what stood before it,
-/// and every rule finding the result holds.
-pub(crate) struct Verdict {
-    /// The violations `after` introduces against `before`, each of which
-    /// refuses an unforced plan ([`introduced`]); their rule-set identities
-    /// are this verdict's own numbering, which no response carries.
-    pub(crate) introduced: Vec<SchemaViolation>,
-    /// Every finding a schema rule or a field declaration concludes of the
-    /// result, in the judge's order.
-    pub(crate) holds: Vec<Held>,
+impl Judged {
+    /// Whether the judgment concludes a violation of `identity`.
+    fn concludes(&self, identity: &Identity) -> bool {
+        self.violations
+            .iter()
+            .any(|violation| violation.identity == *identity)
+    }
 }
 
-/// One finding a schema rule or a field declaration concludes of a composed
-/// result, as a finding row names it.
+/// What the write gate concludes of one document a plan composes: the
+/// violations the composed result introduces, and every finding the result
+/// holds.
+pub(crate) struct Verdict {
+    /// The violations the result introduces against the before-state, or
+    /// against the state the composition stood at before this addition
+    /// ([`verdict`]); their rule-set identities are this verdict's own
+    /// numbering, which no response carries.
+    pub(crate) introduced: Vec<SchemaViolation>,
+    /// The result, judged: what the next addition composed onto it is judged
+    /// against.
+    pub(crate) standing: Standing,
+}
+
+/// One finding the judge concludes of a document's bytes, as a finding row
+/// names it, with the identity that tells it from another (see the
+/// [module](self)).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Held {
     /// The kind it is filed under.
     pub(crate) kind: FindingKind,
-    /// The field it stands on; `None` for one about where the document
-    /// stands.
+    /// The field it stands on, or the tag it names; `None` for one about the
+    /// document as a whole or where it stands.
     pub(crate) field: Option<String>,
     /// The offending value whole, spelled as the store keeps a field value,
     /// whose head a finding row carries; `None` where it names none.
     pub(crate) value: Option<String>,
     /// The rules it cites, by name; empty where it cites none.
     pub(crate) rules: BTreeSet<String>,
+    identity: Identity,
 }
 
-/// What the derivation concludes of the bytes a plan composes a document
-/// from, judged once: the before-state a [`verdict`] compares a result to.
+impl Held {
+    /// Whether `other` is this finding: one identity, whatever rules state
+    /// it and however its tag is spelled.
+    pub(crate) fn is(&self, other: &Held) -> bool {
+        self.identity == other.identity
+    }
+}
+
+/// What the derivation concludes of a document's bytes, judged once: the
+/// before-state a [`verdict`] compares a result to, or the result itself.
 ///
 /// **A planner composing several results from one before-state judges it
-/// once** and judges each result against it ([`verdict`]).
-pub(crate) struct Standing(Judged);
+/// once** and judges each result against it ([`verdict`]); each result's
+/// judgment is the standing the next result is judged against, so no state
+/// is judged twice. A standing is shared, not copied.
+#[derive(Clone)]
+pub(crate) struct Standing(std::sync::Arc<Judged>);
 
 impl Standing {
-    /// Every finding a schema rule or a field declaration concludes of the
-    /// before-state, in the judge's order.
+    /// Every finding the judge concludes of the bytes, in the judge's order:
+    /// a schema rule's or a field declaration's, an undeclared tag, and one
+    /// about the document as a whole.
     pub(crate) fn holds(&self) -> Vec<Held> {
-        held(&self.0)
+        self.0
+            .violations
+            .iter()
+            .map(|violation| Held {
+                kind: violation.kind,
+                field: violation.target.clone(),
+                value: violation.value.clone(),
+                rules: violation.rules.clone(),
+                identity: violation.identity.clone(),
+            })
+            .collect()
     }
 }
 
@@ -237,53 +277,50 @@ pub(crate) fn standing(
     declared: &Declared,
     case: CaseFold,
 ) -> Standing {
-    Standing(judge(path, bytes, declared, case))
-}
-
-/// Every rule finding `judged` concludes, as a finding row names it.
-fn held(judged: &Judged) -> Vec<Held> {
-    judged
-        .violations
-        .iter()
-        .filter(|violation| matches!(violation.identity, Identity::Rule(_)))
-        .map(|violation| Held {
-            kind: violation.kind,
-            field: violation.target.clone(),
-            value: violation.value.clone(),
-            rules: violation.rules.clone(),
-        })
-        .collect()
+    Standing(std::sync::Arc::new(judge(path, bytes, declared, case)))
 }
 
 /// Judge `after`, the document composed at `after_path`, against `before`,
-/// the document it was composed from, judged by [`standing`], under
-/// `declared`, its rules' path globs comparing letters as `case` says:
-/// exactly the judgment the applier's schema check runs on a target edited
-/// in place ([`judge`] and [`introduced`]), so a planner deciding what it may
-/// add to a plan reads the one judge the applier refuses by, and no second
-/// reading of the schema.
+/// the document it was composed from, and against `composed`, the state the
+/// composition stood at before this addition, each judged by [`standing`] or
+/// by an earlier verdict, under `declared`, its rules' path globs comparing
+/// letters as `case` says. Against `before` it is exactly the judgment the
+/// applier's schema check runs on a target edited in place ([`judge`] and
+/// [`introduced`]), so a planner deciding what it may add to a plan reads the
+/// one judge the applier refuses by, and no second reading of the schema.
+///
+/// **A violation is introduced where it stood in either state.** Against the
+/// before-state, a result the applier would refuse is refused; against the
+/// composed state, an addition that brings back what an earlier addition
+/// took away is refused, so a finding an earlier fix dropped is never made
+/// to hold again. Where every earlier addition passed this verdict, the
+/// composed state holds nothing the before-state does not, and the second
+/// comparison is the stricter.
 ///
 /// **A repair's composition reads it** (`crate::planner::repair`): each fix
-/// it adds to a document is judged on the running composed bytes against the
-/// document's own before-state, judged once however many fixes are made, and
-/// the findings the result holds say which of the selected findings still
-/// stand to be fixed.
+/// it adds to a document is judged on the running composed bytes, the
+/// before-state judged once however many fixes are made and each result
+/// judged once, and the findings the result holds say which of the selected
+/// findings still stand to be fixed.
 pub(crate) fn verdict(
     before: &Standing,
+    composed: &Standing,
     after_path: &DocumentPath,
     after: &[u8],
     declared: &Declared,
     case: CaseFold,
 ) -> Verdict {
     let after = judge(after_path, after, declared, case);
-    let holds = held(&after);
-    let introduced = introduced(
+    let introduced = unstood(
         after_path,
-        after,
-        std::slice::from_ref(&before.0),
+        after.violations.clone(),
         &mut Citations::default(),
+        |identity| before.0.concludes(identity) && composed.0.concludes(identity),
     );
-    Verdict { introduced, holds }
+    Verdict {
+        introduced,
+        standing: Standing(std::sync::Arc::new(after)),
+    }
 }
 
 /// The rule sets one response's violations cite, each numbered once, from 1,

@@ -2276,3 +2276,496 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
         written(&vault, "work/tasks/a.md")
     );
 }
+
+/// Apply the repair of every document beneath [`FOLDER`], and hold it to
+/// what a configured repair guarantees: it answers a preview and an apply
+/// alike, its apply commits, every finding standing after it is one it
+/// skipped, standing where the plan's moves left it, and every finding it
+/// fixed or dropped no longer stands. The applied plan.
+fn applied_leaving_only_its_skips(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+) -> ResolvedPlan {
+    let before: BTreeMap<u64, norn_wire::FindingRow> = findings_beneath(host, vault)
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+    let preview = previewed(host.repair(repairing_beneath(vault, ApplyMode::Preview)));
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.repair(repairing_beneath(vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        preview.operations, plan.operations,
+        "preview and apply differ"
+    );
+    let moved: BTreeMap<String, String> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::MoveDocument { from, to } => {
+                Some((from.as_str().to_string(), to.as_str().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let standing_at = |row: &norn_wire::FindingRow| {
+        let path = moved
+            .get(row.path.as_str())
+            .cloned()
+            .unwrap_or_else(|| row.path.as_str().to_string());
+        reported(row, &path)
+    };
+    let skipped: BTreeSet<Reported> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| standing_at(&before[&skipped.finding]))
+        .collect();
+    let after: BTreeSet<Reported> = findings_beneath(host, vault)
+        .iter()
+        .map(|row| reported(row, row.path.as_str()))
+        .collect();
+    for finding in &after {
+        assert!(
+            skipped.contains(finding),
+            "the validator flags {finding:?}, which the repair did not skip: {plan:?}"
+        );
+    }
+    let skipped_ids: BTreeSet<u64> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| skipped.finding)
+        .collect();
+    for (id, row) in &before {
+        if !skipped_ids.contains(id) {
+            assert!(
+                !after.contains(&standing_at(row)),
+                "finding {id}, fixed or dropped, still stands: {row:?}"
+            );
+        }
+    }
+    plan
+}
+
+/// The one skip of `plan`, its note taken off so the rest compares whole,
+/// and the note.
+fn the_one_skip(plan: &ResolvedPlan) -> (SkippedFinding, String) {
+    let [skipped] = provenance(plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(plan).skipped);
+    };
+    let mut skipped = skipped.clone();
+    let note = skipped.note.take().expect("the skip carries a note");
+    (skipped, note)
+}
+
+/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
+/// link field over the link to `loose/a.md` as it is written now.
+const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+
+/// **A route whose link cascade would break another document's closed link
+/// field skips as one the judge would refuse**, with its destination, noting
+/// the document and the violation, and the plan stays applicable: moving
+/// `loose/a.md` respells the hub's `up` to a link its `one_of` does not
+/// hold, so nothing moves and the hub stands as written.
+#[test]
+fn a_route_whose_cascade_breaks_another_documents_closed_link_field_skips_as_judge_would_refuse() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-cascade-refused",
+        CLOSED_UP,
+        &[
+            ("loose/a.md", b"---\ntype: task\nstatus: todo\n---\n# A\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(misplaced, SkipReason::JudgeWouldRefuse)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("field/not-one-of"),
+        "{note}"
+    );
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n"
+    );
+}
+
+/// **A route whose link cascade would respell the moved document's own
+/// closed link field skips as one the judge would refuse**, noting the
+/// document at its destination and the field.
+#[test]
+fn a_route_whose_cascade_respells_the_moved_documents_own_closed_link_skips_as_judge_would_refuse()
+{
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    one_of:\n      me: {values: ['[[zz-repair/loose/a]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-self-cascade-refused",
+        schema,
+        &[(
+            "loose/a.md",
+            b"---\ntype: task\nme: \"[[zz-repair/loose/a]]\"\n---\n# A\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(misplaced, SkipReason::JudgeWouldRefuse)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/tasks/a.md") && note.contains("`me`"),
+        "{note}"
+    );
+    assert!(stands(&vault, "loose/a.md"));
+}
+
+/// **A route its cascade refuses leaves the batch's other fixes applied**:
+/// the routed document's own default is filled where it stands, since it no
+/// longer moves, and another document's default is filled as before; only
+/// the route's finding stands after.
+#[test]
+fn a_route_its_cascade_refuses_leaves_the_batchs_other_fixes_applied() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-cascade-refused-others-stand",
+        CLOSED_UP,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("tasks/c.md", b"---\ntype: task\n---\n# C\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "loose/a.md", "status", "todo"),
+            setting(2, "tasks/c.md", "status", "todo"),
+        ]
+    );
+    let (skipped, _) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (misplaced, SkipReason::JudgeWouldRefuse)
+    );
+    assert_eq!(
+        written(&vault, "loose/a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+}
+
+/// A rule routing a `p` into `tasks/`, and one routing a `q` standing in
+/// `q/<area>/` into `tasks/<area>/`, so one route's destination can be a
+/// folder another names as a document.
+const NESTED_ROUTES: &str = "version: 1\nrules:\n  ps:\n    match: {frontmatter: {type: p}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  qs:\n    match: {frontmatter: {type: q}, path: 'zz-repair/q/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/{{path.area}}/'}\n";
+
+/// A case of [`NESTED_ROUTES`]: its label, its documents, the document the
+/// plan moves, and the document whose route skips.
+type Nested<'a> = (&'a str, &'a [(&'a str, &'a [u8])], &'a str, &'a str);
+
+/// **A route whose destination lies above or beneath another route's of the
+/// batch, or beneath a document that stands, skips as destination taken**,
+/// in either batch order, and the earlier route moves: `tasks/a.md` and
+/// `tasks/a.md/x.md` cannot both be documents.
+#[test]
+fn a_route_above_or_beneath_another_destination_skips_as_destination_taken() {
+    // Each case: its label, its documents, the one the plan moves (none
+    // where it moves none), and the one whose route skips.
+    let cases: [Nested<'_>; 3] = [
+        (
+            "host-repair-route-above-a-claimed-destination",
+            &[
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+                ("r/a.md", b"---\ntype: p\n---\n"),
+            ],
+            "q/a.md/x.md",
+            "r/a.md",
+        ),
+        (
+            "host-repair-route-beneath-a-claimed-destination",
+            &[
+                ("b/a.md", b"---\ntype: p\n---\n"),
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+            ],
+            "b/a.md",
+            "q/a.md/x.md",
+        ),
+        (
+            "host-repair-route-beneath-a-standing-document",
+            &[
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+                ("tasks/a.md", b"---\ntype: p\n---\n"),
+            ],
+            "",
+            "q/a.md/x.md",
+        ),
+    ];
+    for (label, documents, moves, taken) in cases {
+        let (_sandbox, vault, host) = a_vault_under(label, NESTED_ROUTES, documents);
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let skipped_route = misplaced_of(&host, &vault, taken);
+
+        let plan = applied_leaving_only_its_skips(&host, &vault);
+
+        let moved: Vec<String> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match &operation.kind {
+                OperationKind::MoveDocument { from, .. } => Some(from.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<String> = if moves.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("{FOLDER}{moves}")]
+        };
+        assert_eq!(moved, expected, "{label}");
+        let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.finding, skipped.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [(skipped_route, SkipReason::DestinationTaken)],
+            "{label}"
+        );
+    }
+}
+
+/// **A fix never brings back what an earlier fix took away**: removing `k`
+/// fixes its finding, so renaming `z_k` onto `k` would make the document
+/// forbid `k` again, and skips as one the judge would refuse, with its
+/// candidate and its value.
+#[test]
+fn a_rename_onto_the_field_an_earlier_removal_fixed_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  s:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      k: remove\n  t:\n    match: {path: 'zz-repair/**'}\n    forbidden:\n      z_k: {rename_to: k}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-rename-onto-a-removed-field",
+        schema,
+        &[("a.md", b"---\ntype: task\nk: on\nz_k: on\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "k");
+    let z_k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "z_k");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "k"
+            ))
+            .with_id(OperationId::new("repair-1").expect("an id"))
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(k, "on")]
+        )]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(z_k, SkipReason::JudgeWouldRefuse)
+                .with_value(norn_store::value_head("on"))
+                .with_candidates(candidates(&[("rename_to: k", "t")]))
+        ]
+    );
+}
+
+/// **A finding an earlier fix dropped is not made to hold again by a later
+/// one**: removing `k` takes the document out of the rule forbidding `m`, so
+/// `m`'s finding is dropped, and the rename of `z_k` onto `k`, which would
+/// bring that rule back, skips; `m` stands unflagged after.
+#[test]
+fn a_finding_an_earlier_fix_dropped_is_not_made_to_hold_again() {
+    let schema = "version: 1\nrules:\n  r:\n    match: {frontmatter: {k: on}}\n    forbidden:\n      m:\n  s:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      k: remove\n  t:\n    match: {path: 'zz-repair/**'}\n    forbidden:\n      z_k: {rename_to: k}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-dropped-stays-dropped",
+        schema,
+        &[("a.md", b"---\ntype: task\nk: on\nm: x\nz_k: on\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let z_k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "z_k");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(skipped_ids(&plan), vec![z_k]);
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nm: x\nz_k: on\n---\n"
+    );
+}
+
+/// **A fix that leaves its finding standing is no fix**: the synonym maps
+/// `complete` onto itself, a member of its own rule's set but not of the
+/// set the two rules narrow `status` to, so it skips as one the judge would
+/// refuse, with its candidate and its value, and nothing is written.
+#[test]
+fn a_synonym_that_leaves_its_finding_standing_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, complete], synonyms: {complete: complete}}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fix-leaving-its-finding",
+        schema,
+        &[("a.md", b"---\ntype: task\nstatus: complete\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let status = finding_of(&host, &vault, "a.md", FindingKind::NotOneOf, "status");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, _) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(status, SkipReason::JudgeWouldRefuse)
+            .with_value(norn_store::value_head("complete"))
+            .with_candidates(candidates(&[("complete", "a-rule")]))
+    );
+}
+
+/// A declared tag vocabulary reporting every other tag, and a rule removing
+/// a task's `tags`.
+const UNTAGGED: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\nrules:\n  bans:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      tags: remove\n";
+
+/// **A finding of a kind no fix answers is dropped where a fix of the batch
+/// eliminates it, and skipped where it still stands**: removing `a.md`'s
+/// `tags` takes its undeclared `draft` with it, so that finding is neither
+/// fixed nor skipped; `b.md` writes `#draft` in its body too, so its tag
+/// finding still stands after the removal and is skipped as having no
+/// declared fix.
+#[test]
+fn a_finding_a_fix_eliminates_is_dropped_whatever_its_kind() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fix-eliminates-a-tag",
+        UNTAGGED,
+        &[
+            ("a.md", b"---\ntype: task\ntags: [draft]\n---\n# A\n"),
+            (
+                "b.md",
+                b"---\ntype: task\ntags: [draft]\n---\nA #draft body\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let tag_of = |name: &str| {
+        let ids: Vec<u64> = findings_beneath(&host, &vault)
+            .iter()
+            .filter(|row| row.path == at(name) && row.kind == FindingKind::UndeclaredTag)
+            .map(|row| row.id)
+            .collect();
+        let [id] = ids.as_slice() else {
+            panic!("one tag finding of {name}: {ids:?}");
+        };
+        *id
+    };
+    let b_tag = tag_of("b.md");
+    let _ = tag_of("a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+    let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.finding, skipped.reason))
+        .collect();
+    assert_eq!(skipped, [(b_tag, SkipReason::NoDeclaredFix)]);
+}
+
+/// **A repair plan routing by no route that reads the clock reads it not at
+/// all.**
+#[test]
+fn a_repair_plan_routing_by_no_clock_route_reads_no_clock() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-no-clock-reading",
+        TASKED,
+        &[("loose/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
+}
+
+/// A rule routing a task into its area's `tasks/` folder by the area as it
+/// is spelled, and one routing a note there by its area slugged.
+const FILLED_ROUTES: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n  notes:\n    match: {frontmatter: {type: note}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area|slug}}/tasks/'}\n";
+
+/// **A route that fills to no folder a document can be moved into skips as
+/// one the judge would refuse, noting the route and why**, rather than
+/// moving or failing: a capture holding `:`, which no route writes, and one
+/// slugging to nothing, which would leave its segment empty.
+#[test]
+fn a_route_filling_to_no_folder_skips_as_judge_would_refuse() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unfillable",
+        FILLED_ROUTES,
+        &[
+            ("a:b/a.md", b"---\ntype: task\n---\n"),
+            ("!!!/n.md", b"---\ntype: note\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let colon = misplaced_of(&host, &vault, "a:b/a.md");
+    let empty = misplaced_of(&host, &vault, "!!!/n.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let skipped: BTreeMap<u64, (SkipReason, String)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| {
+            (
+                skipped.finding,
+                (
+                    skipped.reason,
+                    skipped.note.clone().expect("the skip carries a note"),
+                ),
+            )
+        })
+        .collect();
+    let (reason, note) = &skipped[&colon];
+    assert_eq!(*reason, SkipReason::JudgeWouldRefuse);
+    assert!(
+        note.contains("zz-repair/{{path.area}}/tasks/") && note.contains(':'),
+        "{note}"
+    );
+    let (reason, note) = &skipped[&empty];
+    assert_eq!(*reason, SkipReason::JudgeWouldRefuse);
+    assert!(note.contains("{{path.area|slug}}"), "{note}");
+}

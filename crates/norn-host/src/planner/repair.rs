@@ -31,12 +31,17 @@
 //!
 //! **A document is composed in finding order.** Its route comes first, then
 //! its other findings in kind, field and offending value order, each fix
-//! composed onto the bytes and the place the earlier ones left and judged
-//! against the document's own before-state by the applier's one judge
-//! ([`crate::applier::verdict`]); a fix the judge refuses is skipped and the
-//! next composes without it, so the plan stays applicable. A selected finding
-//! the composed document no longer holds is dropped: it is neither fixed nor
-//! skipped. The skipped findings keep the batch's order.
+//! composed onto the bytes and the place the earlier ones left and judged by
+//! the applier's one judge ([`crate::applier::verdict`]) against the
+//! document's own before-state and against the state it composes onto; a fix
+//! the judge refuses, or after which the document still holds its finding,
+//! is skipped and the next composes without it, so the plan stays applicable
+//! and no fix brings back what an earlier one took away. A selected finding
+//! the composed document no longer holds, whatever its kind, is dropped: it
+//! is neither fixed nor skipped. The skipped findings keep the batch's order.
+//! A route's link cascade is judged with the whole plan once it is resolved,
+//! by the host's handler (`crate::apply`), which plans the batch again
+//! without a route the judgment lays a violation to ([`Repairing::refused`]).
 //!
 //! **The planning is pure**: a function of the batch's rows, the pinned
 //! declaration, the case its globs compare under, what the vault holds as
@@ -52,7 +57,7 @@
 
 mod declared;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
@@ -91,6 +96,11 @@ pub(crate) struct Repairing<'a> {
     /// The plan's one clock reading, shared with the planning its operations
     /// resolve through.
     pub(crate) clock: &'a OneReading<'a>,
+    /// The routes the judgment of the whole plan refused, by the id of the
+    /// misplaced finding each would fix, each with the note its skip carries:
+    /// a route whose link cascade breaks a document's schema, which no
+    /// judgment of the routed document's own bytes can see (`crate::apply`).
+    pub(crate) refused: &'a BTreeMap<u64, String>,
 }
 
 /// What one read of a batch document's bytes found.
@@ -105,8 +115,12 @@ pub(crate) enum Before {
 /// What a document routed to a path would land on.
 pub(crate) enum Destination {
     /// Nothing stands there: the place, by the identity the root's case rule
-    /// gives it, so two spellings of one place are one destination.
-    Free(NormalizedPath),
+    /// gives it, so two spellings of one place are one destination, and each
+    /// folder above it, by the same rule.
+    Free {
+        at: NormalizedPath,
+        folders: Vec<NormalizedPath>,
+    },
     /// Something stands there or above it: a document, a folder, or any
     /// other entry.
     Taken,
@@ -134,18 +148,21 @@ pub(crate) trait Reading {
 /// fix may be made to, once, and no other document's, and what stands at
 /// each destination a route names.
 ///
-/// **A destination is taken by the first route of the batch to it.** Routes
-/// are judged in batch order, and a route to a place another route of the
-/// batch already moves a document to skips as destination taken, as a route
-/// to a place something stands at does. A place another operation of the
-/// batch vacates is judged as the vault holds it at planning, taken.
+/// **A destination is taken by the first route of the batch to it, and so
+/// is every place above and beneath it.** Routes are judged in batch order,
+/// and a route to a place another route of the batch already moves a
+/// document to, to a folder above one, or to a place beneath one, skips as
+/// destination taken, as a route to a place something stands at, or
+/// beneath a document that stands, does: no two documents of a vault stand
+/// one inside the other. A place another operation of the batch vacates is
+/// judged as the vault holds it at planning, taken.
 pub(crate) fn plan<R: Reading>(
     rows: &[FindingRow],
     repairing: &Repairing<'_>,
     vault: &R,
 ) -> Result<Planned, R::Error> {
     let mut planned = Planned::default();
-    let mut claimed: BTreeSet<NormalizedPath> = BTreeSet::new();
+    let mut claimed = Claimed::default();
     let mut decided: Vec<Option<SkippedFinding>> = Vec::with_capacity(rows.len());
     // A batch never splits a document, and it reads in path order, so one
     // document's findings stand together.
@@ -179,6 +196,37 @@ pub(crate) fn plan<R: Reading>(
     }
     planned.skipped = decided.into_iter().flatten().collect();
     Ok(planned)
+}
+
+/// The destinations the batch's routes took so far: each document's place,
+/// and every folder above one, by the identity the root's case rule gives
+/// them.
+#[derive(Default)]
+pub(crate) struct Claimed {
+    documents: BTreeSet<NormalizedPath>,
+    folders: BTreeSet<NormalizedPath>,
+}
+
+impl Claimed {
+    /// Why a document cannot be moved to `at`, beneath `folders`, beside the
+    /// routes claimed so far; `None` where it can.
+    fn collides(&self, at: &NormalizedPath, folders: &[NormalizedPath]) -> Option<&'static str> {
+        if self.documents.contains(at) {
+            Some("an earlier route of the batch moves a document to")
+        } else if self.folders.contains(at) {
+            Some("an earlier route of the batch moves a document beneath")
+        } else if folders.iter().any(|folder| self.documents.contains(folder)) {
+            Some("an earlier route of the batch moves a document above")
+        } else {
+            None
+        }
+    }
+
+    /// Claim `at`, beneath `folders`, for a route of the batch.
+    fn claim(&mut self, at: NormalizedPath, folders: Vec<NormalizedPath>) {
+        self.documents.insert(at);
+        self.folders.extend(folders);
+    }
 }
 
 /// The finding `row` left alone, for the reason no fix is made from the row
@@ -284,10 +332,12 @@ mod tests {
         let declared = Declared::unpinned();
         let clock = || panic!("a plan of no fix read the clock");
         let reading = OneReading::of(&clock);
+        let refused = BTreeMap::new();
         let repairing = Repairing {
             declared: &declared,
             case: CaseFold::Exact,
             clock: &reading,
+            refused: &refused,
         };
         match super::plan(rows, &repairing, &Unread) {
             Ok(planned) => planned,

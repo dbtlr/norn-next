@@ -22,7 +22,8 @@ use std::collections::BTreeSet;
 use norn_config::schema::ForbiddenFix;
 use norn_wire::{FindingRow, SkipReason, SkippedFinding, ValueHead};
 
-use super::{Document, Fix, State, cited, field_of, skip, spelled_candidates};
+use super::{Document, Fix, Fixing, State, cited, field_of, skip, spelled_candidates};
+use crate::applier::Held;
 
 /// What one rule declares for a forbidden field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,13 +42,15 @@ impl Remedy {
     }
 }
 
-/// The fix of the forbidden `field`, the finding `row`'s, that `rules`, the
-/// rules forbidding it on the composed document, declare, made from `state`;
-/// or the skip it is left alone with.
+/// The fix of the forbidden `field`, the finding `row`'s — `finding`, as the
+/// before-state holds it — that `rules`, the rules forbidding it on the
+/// composed document, declare, made from `state`; or the skip it is left
+/// alone with.
 pub(super) fn fix(
     document: &Document<'_>,
     state: &State,
     row: &FindingRow,
+    finding: &Held,
     field: &str,
     rules: &BTreeSet<String>,
 ) -> Result<Fix, Box<SkippedFinding>> {
@@ -107,7 +110,15 @@ pub(super) fn fix(
             ]
         }
     };
-    let composed = document.admit(&state.at, &state.bytes, &edits, row, &candidates)?;
+    let composed = document.admit(
+        state,
+        &edits,
+        Fixing {
+            row,
+            finding,
+            candidates: &candidates,
+        },
+    )?;
     Ok(Fix {
         operations: edits,
         cited: vec![cited(row, field, false)],

@@ -477,6 +477,13 @@ const fn same_kind(left: FindingKind, right: FindingKind) -> bool {
     true
 }
 
+/// Whether a finding of `kind` is one the derivation concludes of a
+/// document's bytes ([`plan_document`]), so a judgment of those bytes says
+/// whether it holds; a link's health is the store's to judge, and is not.
+pub(crate) const fn judged_by_bytes(kind: FindingKind) -> bool {
+    causes_carrying(kind) > 0
+}
+
 /// How many causes in [`CAUSES`] record findings under this kind.
 const fn causes_carrying(kind: FindingKind) -> usize {
     let mut count = 0;

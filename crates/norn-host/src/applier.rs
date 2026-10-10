@@ -482,6 +482,36 @@ pub(crate) fn preview(
     }))
 }
 
+/// The schema violations `plan` introduces, judged by the check an apply of
+/// it runs ([`stage::check`]) on what `view` reads, its links judged through
+/// `links`, with nothing staged and nothing written: each target's composed
+/// result against the document its content came from, the link cascades its
+/// moves generate included, which no judgment of one document's own edits
+/// can see.
+///
+/// **Only the schema is asked.** Where the check stops the plan for another
+/// cause — drift, a failed condition, a shape that is not what its
+/// operations do, a vault or a snapshot that does not read — no violation is
+/// answered, and an apply or a preview of the plan answers that cause as it
+/// would.
+///
+/// A repair reads it (`crate::apply`'s `repaired`) to judge its plan whole
+/// once a route's move is in it.
+pub(crate) fn introduced_violations<V: VaultView>(
+    plan: &ResolvedPlan,
+    view: &V,
+    declared: &Declared,
+    links: Links<'_>,
+) -> Vec<SchemaViolation>
+where
+    V::Error: std::fmt::Display,
+{
+    match stage::check_forcing(plan, true, view, declared, links, &mut Citations::default()) {
+        Ok(checked) => checked.forced,
+        Err(_) => Vec::new(),
+    }
+}
+
 /// The answer when the root at `anchor` the plan was judged under is no
 /// longer the directory the root's spelling names.
 fn root_replaced(anchor: &Path, plan: ResolvedPlan) -> ApplyOutcome {

@@ -51,21 +51,30 @@
 //! route first, then kind, field, offending value — and each fix is set into
 //! the bytes and the place the earlier fixes left ([`edited`], the
 //! composition a `set` writes a field by; a route moves the bytes it is given
-//! unchanged), then judged at that place against the document's own
-//! before-state by the applier's one judge ([`verdict`]): the plan the fixes
-//! resolve to is refused exactly where a fix introduces a violation, so a
-//! refused fix is skipped and the next composes without it. **The route comes
+//! unchanged), then judged at that place by the applier's one judge
+//! ([`verdict`]) against the document's own before-state and against the
+//! state it composes onto: the plan the fixes resolve to is refused exactly
+//! where a fix introduces a violation against the before-state, and a fix
+//! introducing one against the composed state would bring back what an
+//! earlier fix took away, so either is skipped and the next composes without
+//! it. A fix after which the document still holds the finding it answers —
+//! a synonym mapping a value onto itself, outside the set co-selecting rules
+//! narrow the field to — is no fix, and skips as
+//! [`SkipReason::JudgeWouldRefuse`] too. **The route comes
 //! first so that every other fix is judged where the document will stand**:
 //! a rule the route takes the document out of no longer selects it there, so
 //! a finding that rule concluded is no longer held and is dropped rather
 //! than fixed, and a field fix names the document at its destination, after
 //! the move in plan order, as a Layer 4 plan moving and then editing a
 //! document does. What a finding is, and whether the composed document
-//! still holds it, are read off the same judgment: a row is held where the
-//! judgment concludes a finding of its kind on its field whose offending
-//! value has the row's head — its bytes, length and hash, so a head cut short
-//! still names one value. A selected finding the composed document no longer
-//! holds is dropped, neither fixed nor skipped.
+//! still holds it, are read off the same judgment: a row names the finding
+//! the before-state's judgment concludes of its kind on its field or tag
+//! whose offending value has the row's head — its bytes, length and hash, so
+//! a head cut short still names one value — and the composition asks after
+//! that finding by its identity. A selected finding the composed document no
+//! longer holds is dropped, neither fixed nor skipped, whatever its kind: a
+//! rule's, an undeclared tag, or one about the document whole, each decided
+//! against the document as the last fix leaves it.
 //!
 //! **A list's elements are fixed one by one into one change to the field.**
 //! Every selected `field/not-one-of` finding of one field composes into one
@@ -81,8 +90,7 @@ mod synonyms;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use norn_config::schema::{Breach, Rule, VaultSchema};
-use norn_fs::NormalizedPath;
+use norn_config::schema::{FillError, Rule, VaultSchema};
 use norn_wire::{
     AuthoredValue, Binding, Captures, CaseFold, Citation, CitedFinding, Confidence, DocumentPath,
     FindingKind, FindingRow, Operation, OperationId, OperationKind, RequiredField,
@@ -91,9 +99,9 @@ use norn_wire::{
     WriteTarget,
 };
 
-use super::{Planned, Reading, Repairing, skip};
+use super::{Claimed, Planned, Reading, Repairing, skip};
 use crate::applier::{Held, Standing, standing, verdict};
-use crate::derivation::{stored_spelling, written_fields};
+use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::planner::edit::edited;
 
 /// Whether `row` is a finding a declared fix may answer, so its document's
@@ -114,7 +122,7 @@ pub(super) fn has_fix(row: &FindingRow) -> bool {
 /// routes took.
 pub(super) struct Routing<'r, R> {
     pub(super) vault: &'r R,
-    pub(super) claimed: &'r mut BTreeSet<NormalizedPath>,
+    pub(super) claimed: &'r mut Claimed,
 }
 
 /// Compose the declared fixes of `document` — one document's findings, in
@@ -122,6 +130,14 @@ pub(super) struct Routing<'r, R> {
 /// `planned` with its citation; what each row was decided, in the rows'
 /// order: the skip it is left alone with, or `None` where it is fixed or
 /// dropped.
+///
+/// **Every finding is decided against the composed document at the end.**
+/// A row names its finding by the before-state's judgment, and the
+/// composition asks after that finding by its identity; a skipped finding
+/// the composed document no longer holds — one a later fix eliminated, or of
+/// a kind no fix answers that a fix eliminated — is dropped. Each addition is
+/// judged against the state it composes onto as well ([`verdict`]), so a
+/// finding fixed or dropped never holds again.
 pub(super) fn compose<R: Reading>(
     document: &[FindingRow],
     before: &Arc<[u8]>,
@@ -135,18 +151,27 @@ pub(super) fn compose<R: Reading>(
         before: standing(path, before, repairing.declared, repairing.case),
         repairing,
     };
-    let mut state = State {
-        at: path.clone(),
-        bytes: Arc::clone(before),
-        holds: composing.before.holds(),
-    };
+    let mut state = State::of(path.clone(), Arc::clone(before), composing.before.clone());
+    // The finding each row names, as the before-state holds it; a row it does
+    // not hold, or of a kind no judgment of the bytes concludes, names none.
+    let found: Vec<Option<Held>> = document
+        .iter()
+        .map(|row| {
+            judged_by_bytes(row.kind)
+                .then(|| holding(row, &state.holds).cloned())
+                .flatten()
+        })
+        .collect();
     let mut decided = vec![None; document.len()];
+    // The rows whose fix reads a clock that gives no reading: neither fixed
+    // nor skipped, and still held.
+    let mut unresolved = BTreeSet::new();
     let order = finding_order(document);
     let mut next = 0;
     while let Some(&at) = order.get(next) {
         next += 1;
         let row = &document[at];
-        if !is_rule_kind(row.kind) {
+        if !judged_by_bytes(row.kind) {
             decided[at] = Some(super::skipped(row));
             continue;
         }
@@ -161,9 +186,15 @@ pub(super) fn compose<R: Reading>(
                     document[other].kind == row.kind && document[other].target == row.target
                 })
                 .count();
-            let rows: Vec<(usize, &FindingRow)> = order[next - 1..=next + siblings - 1]
+            let rows: Vec<synonyms::Element<'_>> = order[next - 1..=next + siblings - 1]
                 .iter()
-                .map(|&at| (at, &document[at]))
+                .filter_map(|&at| {
+                    Some(synonyms::Element {
+                        at,
+                        row: &document[at],
+                        finding: found[at].as_ref()?,
+                    })
+                })
                 .collect();
             next += siblings;
             let mapped = synonyms::fix_field(&composing, &state, field, &rows);
@@ -173,7 +204,12 @@ pub(super) fn compose<R: Reading>(
             }
             continue;
         }
-        let Some(held) = holding(row, &state.holds) else {
+        // A row whose finding the composed document no longer holds is
+        // dropped.
+        let Some(finding) = &found[at] else {
+            continue;
+        };
+        let Some(held) = state.holding(finding) else {
             continue;
         };
         if row.kind == FindingKind::Misplaced {
@@ -182,13 +218,17 @@ pub(super) fn compose<R: Reading>(
                 &composing,
                 &state,
                 row,
+                finding,
                 &rules,
                 next_id(planned),
                 &mut routing,
             )? {
                 Ok(fix) => state = push(planned, fix),
                 Err(Unmade::Skipped(skip)) => decided[at] = Some(*skip),
-                Err(Unmade::ClockUnread(left)) => planned.unresolved.push(*left),
+                Err(Unmade::ClockUnread(left)) => {
+                    unresolved.insert(at);
+                    planned.unresolved.push(*left);
+                }
             }
             continue;
         }
@@ -199,12 +239,14 @@ pub(super) fn compose<R: Reading>(
         let rules = held.rules.clone();
         let made = match row.kind {
             FindingKind::Forbidden => {
-                forbidden::fix(&composing, &state, row, field, &rules).map_err(Unmade::Skipped)
+                forbidden::fix(&composing, &state, row, finding, field, &rules)
+                    .map_err(Unmade::Skipped)
             }
             _ => Composing {
                 document: &composing,
                 state: &state,
                 row,
+                finding,
                 field,
             }
             .defaulted(&rules, next_id(planned)),
@@ -214,8 +256,30 @@ pub(super) fn compose<R: Reading>(
             Err(Unmade::Skipped(skip)) => decided[at] = Some(*skip),
             // The repair is refused, as a creation is: the finding is
             // neither fixed nor skipped.
-            Err(Unmade::ClockUnread(left)) => planned.unresolved.push(*left),
+            Err(Unmade::ClockUnread(left)) => {
+                unresolved.insert(at);
+                planned.unresolved.push(*left);
+            }
         }
+    }
+    for (at, (decision, finding)) in decided.iter_mut().zip(&found).enumerate() {
+        let Some(finding) = finding else {
+            continue;
+        };
+        if unresolved.contains(&at) {
+            continue;
+        }
+        let stands = state.holding(finding).is_some();
+        if decision.is_some() && !stands {
+            *decision = None;
+        }
+        // Each addition introduces nothing against the state it composed
+        // onto, so a finding fixed or dropped on the way holds at the end only
+        // through a defect of the composition.
+        debug_assert!(
+            decision.is_some() || !stands,
+            "a finding fixed or dropped holds again on the composed document: {finding:?}"
+        );
     }
     Ok(decided)
 }
@@ -274,14 +338,8 @@ fn finding_order(document: &[FindingRow]) -> Vec<usize> {
     order
 }
 
-/// Whether a finding of `kind` is one a schema rule or a field declaration
-/// concludes, which the composed document's judgment says it holds or not.
-fn is_rule_kind(kind: FindingKind) -> bool {
-    Breach::ALL.iter().any(|breach| breach.kind() == kind)
-}
-
-/// The finding of `holds` that `row` names: its kind, its field, and the
-/// offending value whose head the row carries.
+/// The finding of `holds` that `row` names: its kind, its field or tag, and
+/// the offending value whose head the row carries.
 fn holding<'h>(row: &FindingRow, holds: &'h [Held]) -> Option<&'h Held> {
     holds.iter().find(|held| {
         held.kind == row.kind
@@ -352,11 +410,32 @@ struct Document<'c> {
 }
 
 /// What the fixes made so far have composed: where the document stands, its
-/// bytes, and the findings those bytes hold there.
+/// bytes, their judgment there, and the findings that judgment concludes.
+#[derive(Clone)]
 struct State {
     at: DocumentPath,
     bytes: Arc<[u8]>,
+    standing: Standing,
     holds: Vec<Held>,
+}
+
+impl State {
+    /// The document standing at `at` holding `bytes`, judged as `standing`.
+    fn of(at: DocumentPath, bytes: Arc<[u8]>, standing: Standing) -> Self {
+        State {
+            at,
+            bytes,
+            holds: standing.holds(),
+            standing,
+        }
+    }
+
+    /// The finding `finding` is, as this state holds it: by its identity,
+    /// whatever rules state it here; `None` where the state no longer holds
+    /// it.
+    fn holding(&self, finding: &Held) -> Option<&Held> {
+        self.holds.iter().find(|held| held.is(finding))
+    }
 }
 
 impl Document<'_> {
@@ -376,56 +455,70 @@ impl Document<'_> {
         OperationKind::remove_frontmatter(WriteTarget::path(at.clone()), field)
     }
 
-    /// The state `edits` compose `bytes`, the document standing at `at`, to,
-    /// each set into the bytes the one before left and the result judged
-    /// there ([`Self::judged`]); or the skip of the finding `row`, with
-    /// `candidates`, where an edit cannot be set into the document or the
-    /// judgment refuses the result.
+    /// The state `edits` compose `from` to, each set into the bytes the one
+    /// before left and the result judged where `from` stands
+    /// ([`Self::judged`]); or the skip of the finding `row` names,
+    /// `finding`, with `candidates`, where an edit cannot be set into the
+    /// document or the judgment refuses the result.
     fn admit(
         &self,
-        at: &DocumentPath,
-        bytes: &Arc<[u8]>,
+        from: &State,
         edits: &[OperationKind],
-        row: &FindingRow,
-        candidates: &SkippedCandidates,
+        fixing: Fixing<'_>,
     ) -> Result<State, Box<SkippedFinding>> {
-        let mut composed = Arc::clone(bytes);
+        let mut composed = Arc::clone(&from.bytes);
         for edit in edits {
             composed = edited(edit, &composed).map_err(|detail| {
                 Box::new(
-                    skip(row, SkipReason::JudgeWouldRefuse)
-                        .with_candidates(candidates.clone())
+                    skip(fixing.row, SkipReason::JudgeWouldRefuse)
+                        .with_candidates(fixing.candidates.clone())
                         .with_note(format!("the fix cannot be set into the document: {detail}")),
                 )
             })?;
         }
-        self.judged(at, composed, row, candidates)
+        self.judged(
+            from,
+            &from.at,
+            composed,
+            fixing,
+            "the fix leaves it still standing",
+        )
     }
 
     /// The state the document holding `composed` at `at` is, judged there
-    /// against its before-state; or the skip of the finding `row`, with
-    /// `candidates`, for the reason the judgment gives: a fix that brings in
-    /// required fields the document lacks, or one that introduces any other
-    /// violation.
+    /// against its before-state and against `from`, the state it was composed
+    /// from; or the skip of the finding `fixing` names, with its candidates,
+    /// for the reason the judgment gives: a fix that brings in required
+    /// fields the document lacks, one that introduces any other violation,
+    /// or one after which the document still holds the finding, noted as
+    /// `still`.
     fn judged(
         &self,
+        from: &State,
         at: &DocumentPath,
         composed: Arc<[u8]>,
-        row: &FindingRow,
-        candidates: &SkippedCandidates,
+        fixing: Fixing<'_>,
+        still: &str,
     ) -> Result<State, Box<SkippedFinding>> {
+        let Fixing {
+            row,
+            finding,
+            candidates,
+        } = fixing;
         let verdict = verdict(
             &self.before,
+            &from.standing,
             at,
             &composed,
             self.repairing.declared,
             self.repairing.case,
         );
+        let state = State::of(at.clone(), composed, verdict.standing);
         let brought = brought_in(&verdict.introduced);
         if !brought.is_empty() {
             return Err(Box::new(
                 skip(row, SkipReason::BringsInRequiredFields)
-                    .with_required_fields(required_fields(&brought, &verdict.holds, self.schema())),
+                    .with_required_fields(required_fields(&brought, &state.holds, self.schema())),
             ));
         }
         if !verdict.introduced.is_empty() {
@@ -433,12 +526,25 @@ impl Document<'_> {
                 skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
             ));
         }
-        Ok(State {
-            at: at.clone(),
-            bytes: composed,
-            holds: verdict.holds,
-        })
+        // A fix is cited only for a finding the result no longer holds.
+        if state.holding(finding).is_some() {
+            return Err(Box::new(
+                skip(row, SkipReason::JudgeWouldRefuse)
+                    .with_candidates(candidates.clone())
+                    .with_note(still.to_string()),
+            ));
+        }
+        Ok(state)
     }
+}
+
+/// What one fix answers: the selected finding `row`, the finding it names
+/// as the before-state holds it, and the candidates a skip of it carries.
+#[derive(Clone, Copy)]
+struct Fixing<'f> {
+    row: &'f FindingRow,
+    finding: &'f Held,
+    candidates: &'f SkippedCandidates,
 }
 
 /// Why a fix is not made.
@@ -472,6 +578,7 @@ struct Composing<'c> {
     document: &'c Document<'c>,
     state: &'c State,
     row: &'c FindingRow,
+    finding: &'c Held,
     field: &'c str,
 }
 
@@ -488,6 +595,8 @@ enum Proposed {
     /// A default reading the clock, which gives no reading a default can
     /// fill: the default as its rule writes it.
     NoClockReading { source: AuthoredValue },
+    /// A default that fills to no value, and why.
+    Unfillable { rule: String, error: FillError },
 }
 
 impl Composing<'_> {
@@ -520,6 +629,12 @@ impl Composing<'_> {
                     operation, reason,
                 ))));
             }
+            Proposed::Unfillable { rule, error } => {
+                return skipped(skip(row, SkipReason::JudgeWouldRefuse).with_note(format!(
+                    "the rule `{rule}` defaults `{}` to no value in `{}`: {error}",
+                    self.field, self.state.at,
+                )));
+            }
         };
         let Some((first, rest)) = proposals.split_first() else {
             return skipped(skip(row, SkipReason::NoDeclaredFix));
@@ -535,11 +650,13 @@ impl Composing<'_> {
         let state = self
             .document
             .admit(
-                &self.state.at,
-                &self.state.bytes,
+                self.state,
                 std::slice::from_ref(&set),
-                self.row,
-                &candidates(&proposals),
+                Fixing {
+                    row: self.row,
+                    finding: self.finding,
+                    candidates: &candidates(&proposals),
+                },
             )
             .map_err(Unmade::Skipped)?;
         let clocked = proposals.iter().any(|proposal| proposal.clocked);
@@ -592,9 +709,18 @@ impl Composing<'_> {
             } else {
                 None
             };
-            let value = default.fill(at, captures).expect(
-                "a rule default's tokens are the clock's and its own rule's captures, judged at read",
-            );
+            // Schema read holds a default's tokens to the clock's and its own
+            // rule's captures, each supplied here, so a default fills; a
+            // failure is answered as a skip, never a panic.
+            let value = match default.fill(at, captures) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Proposed::Unfillable {
+                        rule: name.clone(),
+                        error,
+                    };
+                }
+            };
             proposals.push(Proposal {
                 value,
                 rule: name.clone(),
@@ -741,10 +867,12 @@ mod tests {
                 Ok(reading())
             };
             let one = OneReading::of(&clock);
+            let refused = BTreeMap::new();
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
+                refused: &refused,
             };
             let reading = Read {
                 vault: self,
@@ -764,10 +892,12 @@ mod tests {
             let clock =
                 || -> Result<LocalTimestamp, NotALocalTimestamp> { Err(NotALocalTimestamp) };
             let one = OneReading::of(&clock);
+            let refused = BTreeMap::new();
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
+                refused: &refused,
             };
             let reading = Read {
                 vault: self,
@@ -813,11 +943,18 @@ mod tests {
             } else {
                 let normalizer =
                     norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
-                Destination::Free(
+                let normalized = |spelled: &str| {
                     normalizer
                         .normalize(std::path::Path::new(spelled))
-                        .expect("a document path normalizes"),
-                )
+                        .expect("a document path normalizes")
+                };
+                Destination::Free {
+                    at: normalized(spelled),
+                    folders: spelled
+                        .match_indices('/')
+                        .map(|(end, _)| normalized(&spelled[..end]))
+                        .collect(),
+                }
             })
         }
     }
@@ -1385,6 +1522,37 @@ mod tests {
         );
         assert_eq!(planned.skipped.len(), 1);
         assert_eq!(planned.skipped[0].finding, 2);
+    }
+
+    /// **A list's elements compose in offending value order, whatever the
+    /// batch's ids say, and an element's fix never brings back a value an
+    /// earlier element's fix replaced.** Two rules narrow `color` to `b`:
+    /// `a` maps to `b`, and `x` maps to `a`. Taken in value order, `a`
+    /// becomes `b` first, so `x`'s fix would write the `a` just fixed and
+    /// skips; taken by id, `x` would go first and both would be fixed.
+    #[test]
+    fn elements_compose_in_value_order_and_never_bring_back_a_replaced_value() {
+        let schema = "version: 1\nfields:\n  color: {type: text, shape: list}\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      color: {values: [a, b], synonyms: {x: a}}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      color: {values: [b, c], synonyms: {a: b}}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\ncolor: [a, x]\n---\n")]);
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "color", "x"),
+            offending(2, NOT_ONE_OF, "a.md", "color", "a"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "color", list(&["b", "x"]))]
+        );
+        assert_eq!(planned.citations, vec![citing_values(1, &[(2, "a")])]);
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
+                    .with_value(norn_store::value_head("x"))
+                    .with_candidates(values(&[("a", "a-rule")]))
+            ]
+        );
     }
 
     /// **A repeated offending element is one finding whose fix rewrites
