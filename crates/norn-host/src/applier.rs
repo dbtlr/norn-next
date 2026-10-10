@@ -115,6 +115,8 @@ use schema::Citations;
 pub(crate) use schema::{Held, Holdings, Standing, standing, verdict};
 pub(crate) use stage::Links;
 use stage::Stop;
+#[cfg(test)]
+pub(crate) use stage::kernel_refusing;
 
 /// Where a publication is recorded so the watcher's echo of it is known as
 /// the applier's own.
@@ -452,7 +454,8 @@ pub(crate) fn preview(
 /// **One check serves both**, so the answer is exactly [`preview`]'s. Where
 /// another check stops the plan first — drift, a failed condition, a shape
 /// that is not what its operations do, a link whose resolution moved, a vault
-/// or a snapshot that does not read — no judgment is answered, and the answer
+/// or a snapshot that does not read — or the kernel's judgment of its targets
+/// stops a plan the schema passed, no judgment is answered, and the answer
 /// is that cause, as an apply or a preview of the plan answers it.
 ///
 /// A repair reads it (`crate::apply`'s repair) to hold the plan it planned
@@ -527,7 +530,7 @@ fn previewing(
         schema,
     };
     let mut citations = Citations::default();
-    let mut judged = Whole::default();
+    let mut judged = None;
     let checked = stage::check_judging(
         &plan,
         &view,
@@ -536,25 +539,12 @@ fn previewing(
         &mut citations,
         whole.is_some().then_some(&mut judged),
     );
-    if let Some(whole) = whole {
-        // The judgment is kept only where the check reached it with nothing
-        // else stopping the plan: a plan the schema alone refuses, or one it
-        // passes.
-        let reached = match &checked {
-            Ok(_) => true,
-            Err(stage::Unfit::Refused(checks)) => checks
-                .iter()
-                .all(|check| matches!(check, RefusedCheck::SchemaViolation { .. })),
-            Err(_) => false,
-        };
-        if reached {
-            judged.rule_sets = citations.cited_by(&judged.introduced);
-            *whole = Some(judged);
-        }
-    }
     let stop = match checked {
         Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
             Ok(()) => {
+                if let Some(whole) = whole {
+                    *whole = judged;
+                }
                 let cited = citations.cited_by(&checked.forced);
                 return match forecast(&plan.transitions, &view) {
                     Ok(forecast) => Ok((
@@ -566,9 +556,19 @@ fn previewing(
                     Err(error) => Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
                 };
             }
+            // The kernel stops the plan after the schema passed it: the
+            // schema is not what stops it, so its judgment is not answered.
             Err(stop) => stop,
         },
-        Err(unfit) => Stop::from(unfit),
+        Err(unfit) => {
+            // Where the schema alone refuses the plan, the check reached it
+            // with nothing else stopping the plan and set `judged`; any
+            // other stop left it `None`.
+            if let Some(whole) = whole {
+                *whole = judged;
+            }
+            Stop::from(unfit)
+        }
     };
     Err(Box::new(match stop {
         Stop::Refused(checks) => {
