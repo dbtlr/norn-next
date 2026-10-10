@@ -3666,6 +3666,11 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
 /// the preview's of the plan it resolved.
 const REPAIR_STATEMENTS: u64 = 7;
 
+/// The read holds a narrowed repair's preview takes, at every scale: the
+/// repair's own and the preview's. A read on a hold of its own would cost the
+/// same at both scales and hide from the pair, so the count is pinned exactly.
+const REPAIR_HOLDS: u64 = 2;
+
 /// **A repair narrowed to a path evaluates the documents that path admits and
 /// no others, and costs the same at both scales (NORN-373).** This drives
 /// `Host::repair` itself in a preview over `counter-gate/fixed/**`, in a read
@@ -3720,6 +3725,16 @@ fn a_narrowed_repair_costs_the_same_at_both_scales() {
                  snapshot, and its shape runs {REPAIR_STATEMENTS}",
                 profile.name
             ));
+        }
+        for count in ["planning_holds", "reads_served"] {
+            let held = reading.narrowed.get(count);
+            if held != REPAIR_HOLDS {
+                failures.push(format!(
+                    "a narrowed repair over `{}` counted {held} on `{count}`, and its shape \
+                     takes {REPAIR_HOLDS} holds",
+                    profile.name
+                ));
+            }
         }
     }
     failures.extend(

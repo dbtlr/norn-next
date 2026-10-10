@@ -579,7 +579,13 @@ fn an_apply_drains_the_selection_along_its_cursors_covering_every_finding_once()
     let mut batches = Vec::new();
     let mut seen = Vec::new();
     let mut request = repairing(&vault, ApplyMode::Apply).with_limit(2);
-    loop {
+    // Each batch covers at least one finding, so a drain that has not ended
+    // after one batch per finding is following a cursor that does not advance.
+    for drained in 0.. {
+        assert!(
+            drained <= by_id.len(),
+            "the drain did not end after {drained} batches: {batches:?}"
+        );
         let ApplyReport::Applied { plan, .. } = planned(host.repair(request.clone())) else {
             panic!("an apply answered another report");
         };
