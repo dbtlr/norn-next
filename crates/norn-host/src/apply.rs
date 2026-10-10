@@ -65,8 +65,8 @@ use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
     DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, MoveParams,
     NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
-    RewriteWikilinkParams, RootIdentity, SetParams, SkippedFinding, TrustState, UntrustedReason,
-    VaultAddress, VaultAnswer, VaultName,
+    RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -217,7 +217,14 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
     }
 }
 
-/// The resolved plan of the repair of `rows`, a batch's findings, under
+/// A repair batch's findings: its rows, and the rule sets they cite.
+#[derive(Clone, Copy)]
+struct Findings<'b> {
+    rows: &'b [FindingRow],
+    rule_sets: &'b [RuleSet],
+}
+
+/// The resolved plan of the repair of the batch `batch`, under
 /// `ground`'s declaration, with the findings it skips and the findings each
 /// operation fixes: each fix composed onto the bytes `view` reads, its clock
 /// read once through `clock`, and the plan it makes resolved on `snapshot`.
@@ -233,7 +240,7 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
 /// no judgment of one document's own fixes sees, are not planned yet
 /// (NORN-380); a misplaced finding skips until they are.
 fn repaired<V: VaultView>(
-    rows: &[FindingRow],
+    batch: Findings<'_>,
     ground: &PlanGround,
     name: &VaultName,
     snapshot: &PlanSnapshot<'_>,
@@ -249,8 +256,9 @@ where
         declared: &ground.declared,
         case,
         clock,
+        rule_sets: batch.rule_sets,
     };
-    let planned = repair::plan(rows, &repairing, &RepairReading(view))
+    let planned = repair::plan(batch.rows, &repairing, &RepairReading(view))
         .map_err(|error| unreadable(name, error))?;
     let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
     // The resolution reads the clock through the plan's one reading: no
@@ -880,7 +888,10 @@ where
                 let view = Remembered::over(&view);
                 let reading = OneReading::of(&crate::clock::local_now);
                 let (plan, skipped, citations) = repaired(
-                    &batch.rows,
+                    Findings {
+                        rows: &batch.rows,
+                        rule_sets: &batch.rule_sets,
+                    },
                     ground,
                     name,
                     snapshot,
@@ -1129,7 +1140,10 @@ mod tests {
         let refused = |_: PageRefused| -> ErrorEnvelope { panic!("the snapshot was asked") };
 
         let answered = repaired(
-            &[missing],
+            Findings {
+                rows: &[missing],
+                rule_sets: &[],
+            },
             &ground,
             &name,
             &snapshot,

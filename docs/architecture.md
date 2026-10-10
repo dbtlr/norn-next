@@ -2715,8 +2715,9 @@ findings it fixes, and one writing a clock-filled value notes that it is the rep
 `allowed_paths` route moves a document with a link cascade that rewrites documents no
 judgment of one document's own fixes sees, so it is judged with the whole plan; that design
 is NORN-380's. Until it lands the finding is `no_declared_fix` with the value it judged where
-it has one, and where a rule its judgment cites declares a route, the skip's note says so and
-that routes are planned by NORN-380. A document's fixes compose in finding order — kind,
+it has one, and where a rule its row's rule set cites declares a route, the skip's note says so and
+that routes are planned by NORN-380; the note is decided from the batch's rule sets, so the
+document is not read for it. A document's fixes compose in finding order — kind,
 field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
@@ -2748,10 +2749,9 @@ at the snapshot the repair reads because link health is re-decided in every chan
 and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
-resolution: each document holding a finding a declared fix may answer, or a misplaced
-finding whose skip notes a route, is read whole once, beside resolution and never a second
-time; a document holding no such finding is not read. Those bytes stay held for the batch's
-planning, so the planning heap grows with the bytes of the batch's read documents. The plan carries a provenance block recording
+resolution: each document holding a finding a declared fix may answer is read whole once,
+beside resolution and never a second time; a document holding no such finding is not read. Those bytes stay held for the batch's
+planning, so the planning heap grows with the bytes of the batch's fixed documents. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request

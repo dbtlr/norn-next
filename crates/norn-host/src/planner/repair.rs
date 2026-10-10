@@ -27,9 +27,10 @@
 //!
 //! **Routes are not planned yet, which is the interim state of NORN-374.** A
 //! `document/misplaced` finding is skipped as [`SkipReason::NoDeclaredFix`],
-//! with its value where it has one and, where a rule it cites declares an
+//! with its value where it has one and, where a rule its row cites declares an
 //! `allowed_paths` route, a note that the rule declares a route and routes are
-//! planned by NORN-380. The route's fill and its link cascade, which only the
+//! planned by NORN-380. The note is decided from the batch's rule sets, so a
+//! document holding only such findings is not read. The route's fill and its link cascade, which only the
 //! whole plan judges, come with that task; the config's route fill
 //! (`Rule::fill_route`) is the dormant carrier it consumes.
 //!
@@ -46,8 +47,7 @@
 //!
 //! **The planning is pure**: a function of the batch's rows, the pinned
 //! declaration, the case its globs compare under, what the vault holds as
-//! [`Reading`] answers it — the bytes each document with a fix to make, or a
-//! misplaced finding to note, held, read once — and the plan's one clock
+//! [`Reading`] answers it — the bytes each document with a fix to make held, read once — and the plan's one clock
 //! reading ([`OneReading`]), taken only where a default reads the clock. **A
 //! clock that gives no reading refuses the repair as it refuses a creation**:
 //! the operation of each default that reads the clock is left in
@@ -61,7 +61,7 @@ mod declared;
 use std::sync::Arc;
 
 use norn_wire::{
-    CaseFold, Citation, DocumentPath, FindingKind, FindingRow, Operation, SkipReason,
+    CaseFold, Citation, DocumentPath, FindingKind, FindingRow, Operation, RuleSet, SkipReason,
     SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
@@ -95,6 +95,10 @@ pub(crate) struct Repairing<'a> {
     /// The plan's one clock reading, shared with the planning its operations
     /// resolve through.
     pub(crate) clock: &'a OneReading<'a>,
+    /// The rule sets the batch's rows cite, each row naming its set by
+    /// `rule_set`: which rules contributed to a finding, without reading its
+    /// document.
+    pub(crate) rule_sets: &'a [RuleSet],
 }
 
 /// What one read of a batch document's bytes found.
@@ -118,8 +122,7 @@ pub(crate) trait Reading {
 
 /// Plan the findings `rows`, a repair batch's, in the order it read them,
 /// under `repairing`, reading through `vault` the bytes of each document a
-/// fix may be made to, or a note may be made of, once, and no other
-/// document's.
+/// fix may be made to, once, and no other document's.
 pub(crate) fn plan<R: Reading>(
     rows: &[FindingRow],
     repairing: &Repairing<'_>,
@@ -130,8 +133,8 @@ pub(crate) fn plan<R: Reading>(
     // A batch never splits a document, and it reads in path order, so one
     // document's findings stand together.
     for document in rows.chunk_by(|left, right| left.path == right.path) {
-        if !document.iter().any(declared::reads_document) {
-            decided.extend(document.iter().map(|row| Some(skipped(row))));
+        if !document.iter().any(declared::has_fix) {
+            decided.extend(document.iter().map(|row| Some(unfixed(row, repairing))));
             continue;
         }
         match vault.before(&document[0].path)? {
@@ -139,16 +142,42 @@ pub(crate) fn plan<R: Reading>(
                 decided.extend(declared::compose(document, &bytes, repairing, &mut planned));
             }
             Before::Unread => decided.extend(document.iter().map(|row| {
-                Some(if declared::reads_document(row) {
+                Some(if declared::has_fix(row) {
                     skip(row, SkipReason::Unreadable)
                 } else {
-                    skipped(row)
+                    unfixed(row, repairing)
                 })
             })),
         }
     }
     planned.skipped = decided.into_iter().flatten().collect();
     Ok(planned)
+}
+
+/// The finding `row` left alone as [`skipped`] leaves it, a misplaced one
+/// noting the routes its rules declare.
+///
+/// **A misplaced finding notes the routes its rules declare from the rule set
+/// its row cites and the pinned declaration alone**, so its document is not
+/// read: each cited rule declaring an `allowed_paths` route is named, with the
+/// note that routes are planned by NORN-380. The route is read and named here
+/// and moved by nothing until that task, which plans routes with the whole
+/// plan's judgment of their link cascade (see the [module](self)).
+fn unfixed(row: &FindingRow, repairing: &Repairing<'_>) -> SkippedFinding {
+    let skipped = skipped(row);
+    if row.kind != FindingKind::Misplaced {
+        return skipped;
+    }
+    match routing_rules(row, repairing).as_slice() {
+        [] => skipped,
+        [rule] => skipped.with_note(format!(
+            "{rule} declares an `allowed_paths` route, and routes are planned by NORN-380"
+        )),
+        rules => skipped.with_note(format!(
+            "{} declare an `allowed_paths` route, and routes are planned by NORN-380",
+            rules.join(", ")
+        )),
+    }
 }
 
 /// The finding `row` left alone, for the reason no fix is made from the row
@@ -174,6 +203,30 @@ fn skipped(row: &FindingRow) -> SkippedFinding {
         SkipReason::NoDeclaredFix
     };
     skip(row, reason)
+}
+
+/// The rules the rule set `row` cites holds that declare an `allowed_paths`
+/// route, each in backticks, in rule name order.
+fn routing_rules(row: &FindingRow, repairing: &Repairing<'_>) -> Vec<String> {
+    let Some(set) = repairing
+        .rule_sets
+        .iter()
+        .find(|set| Some(set.id) == row.rule_set)
+    else {
+        return Vec::new();
+    };
+    set.rules
+        .iter()
+        .filter(|name| {
+            repairing
+                .declared
+                .schema()
+                .rule(name)
+                .and_then(|rule| rule.allowed_paths())
+                .is_some_and(|allowed| allowed.route().is_some())
+        })
+        .map(|name| format!("`{name}`"))
+        .collect()
 }
 
 /// The skip of the finding `row` for `reason`, carrying the value the
@@ -254,6 +307,7 @@ mod tests {
             declared: &declared,
             case: CaseFold::Exact,
             clock: &reading,
+            rule_sets: &[],
         };
         match super::plan(rows, &repairing, &Unread) {
             Ok(planned) => planned,
@@ -309,9 +363,8 @@ mod tests {
             );
         }
         // A missing required field, a value outside a closed set, a
-        // forbidden field and a misplaced document may have a fix, which
-        // reads its document (`declared`), and a rules conflict is skipped as
-        // one.
+        // forbidden field may have a fix, which reads its document
+        // (`declared`), and a rules conflict is skipped as one.
         let readable: Vec<_> = FindingKind::ALL
             .into_iter()
             .filter(|kind| {
