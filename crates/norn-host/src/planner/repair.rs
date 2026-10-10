@@ -40,8 +40,12 @@
 //! the composed document no longer holds, whatever its kind, is dropped: it
 //! is neither fixed nor skipped. The skipped findings keep the batch's order.
 //! A route's link cascade is judged with the whole plan once it is resolved,
-//! by the host's handler (`crate::apply`), which plans the batch again
-//! without a route the judgment lays a violation to ([`Repairing::refused`]).
+//! by the host's handler (`crate::apply`): the batch is planned with every
+//! route withheld, then again for each route in batch order with the routes
+//! the judgment admitted so far and that one ([`Repairing::admitted`]), each
+//! plan resolved and judged whole and held to its own claims ([`unkept`]),
+//! at one planning, resolution and judgment per route; a skipped finding the
+//! final plan's result no longer holds is dropped ([`settle`]).
 //!
 //! **The planning is pure**: a function of the batch's rows, the pinned
 //! declaration, the case its globs compare under, what the vault holds as
@@ -66,6 +70,7 @@ use norn_wire::{
     SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
+use crate::applier::{Held, Holdings};
 use crate::clock::OneReading;
 use crate::derivation::Declared;
 
@@ -82,6 +87,86 @@ pub(crate) struct Planned {
     /// the clock gives no reading, numbered in the operations' sequence. The
     /// repair is refused where there is any, as a creation is.
     pub(crate) unresolved: Vec<UnresolvedOperation>,
+    /// The routes the composition withheld, in batch order: each route its
+    /// document's own judgment admits but [`Repairing::admitted`] does not
+    /// name, its finding skipped meanwhile as one the judge would refuse.
+    pub(crate) withheld: Vec<Withheld>,
+    /// Every selected finding the judgment of a document's bytes names, with
+    /// where its document stands once the plan's operations land: what the
+    /// plan claims of each is held to the plan's resolved result
+    /// ([`unkept`], [`settle`]).
+    pub(crate) found: Vec<Found>,
+}
+
+/// A route a plan withholds: the misplaced finding it would fix, and where
+/// it would move the document.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Withheld {
+    pub(crate) finding: u64,
+    pub(crate) to: DocumentPath,
+}
+
+/// A selected finding the judgment of its document's bytes names: the
+/// finding's id, where its document stands once the plan's operations land,
+/// and the finding as the document's before-state holds it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Found {
+    pub(crate) finding: u64,
+    pub(crate) at: DocumentPath,
+    pub(crate) held: Held,
+}
+
+/// A finding `planned` fixes or drops that `holdings`, what the plan's
+/// resolved result holds, says still holds, if any, in batch order, and
+/// whether an operation cites it as fixed.
+///
+/// **A plan's claims are kept by construction where no route's cascade
+/// rewrites a document**: each document's composition decides every finding
+/// of it against the state its own fixes leave, which is the state the plan
+/// writes. A cascade rewrites documents on top of their own fixes, so a plan
+/// holding a route is held to what its resolved result holds.
+pub(crate) fn unkept<'p>(planned: &'p Planned, holdings: &Holdings) -> Option<(&'p Found, bool)> {
+    let skipped: BTreeSet<u64> = planned.skipped.iter().map(|skip| skip.finding).collect();
+    let cited: BTreeSet<u64> = planned
+        .citations
+        .iter()
+        .flat_map(|citation| citation.findings.iter().map(|cited| cited.finding))
+        .collect();
+    planned
+        .found
+        .iter()
+        .filter(|found| !skipped.contains(&found.finding))
+        .find(|found| holds(found, holdings))
+        .map(|found| (found, cited.contains(&found.finding)))
+}
+
+/// Settle `planned`'s skips against `holdings`, what its resolved result
+/// holds: the skip of each route of `refused` notes why the judgment of the
+/// whole plan refused it, and a skipped finding the result no longer holds —
+/// one a route's cascade eliminated — is dropped, neither fixed nor skipped.
+pub(crate) fn settle(planned: &mut Planned, holdings: &Holdings, refused: &BTreeMap<u64, String>) {
+    let eliminated: BTreeSet<u64> = planned
+        .found
+        .iter()
+        .filter(|found| holdings.contains_key(&found.at) && !holds(found, holdings))
+        .map(|found| found.finding)
+        .collect();
+    planned
+        .skipped
+        .retain(|skip| !eliminated.contains(&skip.finding));
+    for skip in &mut planned.skipped {
+        if let Some(note) = refused.get(&skip.finding) {
+            *skip = skip.clone().with_note(note.clone());
+        }
+    }
+}
+
+/// Whether `holdings` says `found` holds where its document stands: never
+/// for a document `holdings` does not name, whose composition decided it.
+fn holds(found: &Found, holdings: &Holdings) -> bool {
+    holdings
+        .get(&found.at)
+        .is_some_and(|holds| holds.iter().any(|held| held.is(&found.held)))
 }
 
 /// What a repair plans under: the declaration the applier judges its result
@@ -96,11 +181,12 @@ pub(crate) struct Repairing<'a> {
     /// The plan's one clock reading, shared with the planning its operations
     /// resolve through.
     pub(crate) clock: &'a OneReading<'a>,
-    /// The routes the judgment of the whole plan refused, by the id of the
-    /// misplaced finding each would fix, each with the note its skip carries:
-    /// a route whose link cascade breaks a document's schema, which no
-    /// judgment of the routed document's own bytes can see (`crate::apply`).
-    pub(crate) refused: &'a BTreeMap<u64, String>,
+    /// The routes the plan makes, by the id of the misplaced finding each
+    /// fixes: the routes the judgment of the whole plan admitted, since a
+    /// route's link cascade rewrites documents no judgment of the routed
+    /// document's own bytes can see (`crate::apply`). Every other route its
+    /// document's own judgment admits is withheld ([`Planned::withheld`]).
+    pub(crate) admitted: &'a BTreeSet<u64>,
 }
 
 /// What one read of a batch document's bytes found.
@@ -148,8 +234,9 @@ pub(crate) trait Reading {
 /// fix may be made to, once, and no other document's, and what stands at
 /// each destination a route names.
 ///
-/// **A destination is taken by the first route of the batch to it, and so
-/// is every place above and beneath it.** Routes are judged in batch order,
+/// **A destination is taken by the first route of the batch to it that the
+/// plan makes, and so is every place above and beneath it**; a withheld
+/// route takes none. Routes are judged in batch order,
 /// and a route to a place another route of the batch already moves a
 /// document to, to a folder above one, or to a place beneath one, skips as
 /// destination taken, as a route to a place something stands at, or
@@ -332,12 +419,12 @@ mod tests {
         let declared = Declared::unpinned();
         let clock = || panic!("a plan of no fix read the clock");
         let reading = OneReading::of(&clock);
-        let refused = BTreeMap::new();
+        let admitted = BTreeSet::new();
         let repairing = Repairing {
             declared: &declared,
             case: CaseFold::Exact,
             clock: &reading,
-            refused: &refused,
+            admitted: &admitted,
         };
         match super::plan(rows, &repairing, &Unread) {
             Ok(planned) => planned,

@@ -197,6 +197,9 @@ pub(super) struct Checked {
     /// What the plan does to the links a caller should look at, from its
     /// resolution change set computed again.
     pub(super) links: Vec<LinkAdvisory>,
+    /// Every finding the judge concludes of each target whose bytes the plan
+    /// writes, by the path it is written at.
+    pub(super) holdings: schema::Holdings,
     units: Vec<Unit>,
     contents: Vec<Option<Written>>,
     phases: Vec<Phase>,
@@ -279,7 +282,7 @@ where
 /// [`check`] `plan`, its schema violations let through and listed where
 /// `force` is true, whatever the plan itself says: the one judgment, asked
 /// for the violations a plan introduces without refusing on them
-/// ([`super::introduced_violations`]).
+/// ([`super::judged_whole`]).
 pub(super) fn check_forcing<V: VaultView>(
     plan: &ResolvedPlan,
     force: bool,
@@ -437,7 +440,8 @@ where
         normalizer,
         declared,
     };
-    let violations = schema.violations(&units, &contents, &carried, citations);
+    let mut holdings = schema::Holdings::new();
+    let violations = schema.violations(&units, &contents, &carried, citations, &mut holdings);
     let forced = if force {
         violations
     } else {
@@ -451,6 +455,7 @@ where
     Ok(Checked {
         forced,
         links: recomputed.advisories,
+        holdings,
         units,
         contents,
         phases,
@@ -476,6 +481,7 @@ pub(super) fn stage(
     let Checked {
         forced,
         links: _,
+        holdings: _,
         units,
         contents,
         phases,
@@ -831,12 +837,18 @@ impl Judging<'_> {
     /// identity the destination introduces refuses, a changed combined
     /// constraint included. Where no rule reads a place, nothing is judged
     /// again.
+    ///
+    /// **What each written result holds is kept in `holdings`**: every
+    /// finding its judgment concludes, by the path it is written at. A
+    /// carried document's are not: its bytes are the moved document's own,
+    /// unchanged, and only its frontmatter block is judged here.
     fn violations(
         &self,
         units: &[Unit],
         contents: &[Option<Written>],
         carried: &[Option<CarriedReading>],
         citations: &mut Citations,
+        holdings: &mut schema::Holdings,
     ) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
         let case = crate::stored_path_order(self.normalizer.case_sensitivity()).glob_case();
@@ -894,6 +906,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared, case);
+            holdings.insert(path.clone(), after.holds());
             checks.extend(schema::introduced(path, after, &before, citations));
         }
         checks

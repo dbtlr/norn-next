@@ -192,6 +192,20 @@ fn unstood(
 }
 
 impl Judged {
+    /// Every finding the judgment concludes, in the judge's order.
+    pub(super) fn holds(&self) -> Vec<Held> {
+        self.violations
+            .iter()
+            .map(|violation| Held {
+                kind: violation.kind,
+                field: violation.target.clone(),
+                value: violation.value.clone(),
+                rules: violation.rules.clone(),
+                identity: violation.identity.clone(),
+            })
+            .collect()
+    }
+
     /// Whether the judgment concludes a violation of `identity`.
     fn concludes(&self, identity: &Identity) -> bool {
         self.violations
@@ -213,6 +227,12 @@ pub(crate) struct Verdict {
     /// against.
     pub(crate) standing: Standing,
 }
+
+/// Every finding the judge concludes of each document a plan writes the
+/// bytes of, by the path it is written at, in the judge's order: what the
+/// plan's own claims about those documents are held to (`crate::apply`'s
+/// repair, through [`crate::applier::judged_whole`]).
+pub(crate) type Holdings = std::collections::BTreeMap<DocumentPath, Vec<Held>>;
 
 /// One finding the judge concludes of a document's bytes, as a finding row
 /// names it, with the identity that tells it from another (see the
@@ -255,17 +275,7 @@ impl Standing {
     /// a schema rule's or a field declaration's, an undeclared tag, and one
     /// about the document as a whole.
     pub(crate) fn holds(&self) -> Vec<Held> {
-        self.0
-            .violations
-            .iter()
-            .map(|violation| Held {
-                kind: violation.kind,
-                field: violation.target.clone(),
-                value: violation.value.clone(),
-                rules: violation.rules.clone(),
-                identity: violation.identity.clone(),
-            })
-            .collect()
+        self.0.holds()
     }
 }
 

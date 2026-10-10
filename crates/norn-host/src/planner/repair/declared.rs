@@ -109,7 +109,7 @@ use norn_wire::{
     UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead, WriteTarget,
 };
 
-use super::{Claimed, Planned, Reading, Repairing, skip};
+use super::{Claimed, Found, Planned, Reading, Repairing, Withheld, skip};
 use crate::applier::{Held, Standing, standing, verdict};
 use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::evidence::count_rule_work;
@@ -234,7 +234,14 @@ pub(super) fn compose<R: Reading>(
                 next_id(planned),
                 &mut routing,
             )? {
-                Ok(fix) => state = push(planned, fix),
+                Ok(routes::Route::Moved(fix)) => state = push(planned, fix),
+                Ok(routes::Route::Withheld { skip, to }) => {
+                    decided[at] = Some(*skip);
+                    planned.withheld.push(Withheld {
+                        finding: row.id,
+                        to,
+                    });
+                }
                 Err(Unmade::Skipped(skip)) => decided[at] = Some(*skip),
                 Err(Unmade::ClockUnread(left)) => {
                     unresolved.insert(at);
@@ -291,6 +298,11 @@ pub(super) fn compose<R: Reading>(
             decision.is_some() || !stands,
             "a finding fixed or dropped holds again on the composed document: {finding:?}"
         );
+        planned.found.push(Found {
+            finding: document[at].id,
+            at: state.at.clone(),
+            held: finding.clone(),
+        });
     }
     Ok(decided)
 }
@@ -887,12 +899,12 @@ mod tests {
                 Ok(reading())
             };
             let one = OneReading::of(&clock);
-            let refused = BTreeMap::new();
+            let admitted = every_route(rows);
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
-                refused: &refused,
+                admitted: &admitted,
             };
             let reading = Read {
                 vault: self,
@@ -912,12 +924,12 @@ mod tests {
             let clock =
                 || -> Result<LocalTimestamp, NotALocalTimestamp> { Err(NotALocalTimestamp) };
             let one = OneReading::of(&clock);
-            let refused = BTreeMap::new();
+            let admitted = every_route(rows);
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
-                refused: &refused,
+                admitted: &admitted,
             };
             let reading = Read {
                 vault: self,
@@ -926,6 +938,13 @@ mod tests {
             let Ok(planned) = plan(rows, &repairing, &reading);
             planned
         }
+    }
+
+    /// Every row's id, so every route the rows name is admitted: the cases
+    /// here judge each document's own composition, and the judgment of the
+    /// whole plan that admits a route is the host's (`crate::apply`).
+    fn every_route(rows: &[FindingRow]) -> BTreeSet<u64> {
+        rows.iter().map(|row| row.id).collect()
     }
 
     /// The vault as a repair reads it, each document read noted in order.

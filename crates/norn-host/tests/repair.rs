@@ -2480,6 +2480,312 @@ fn a_route_its_cascade_refuses_leaves_the_batchs_other_fixes_applied() {
     );
 }
 
+/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
+/// link field over the link to `loose/a.md` as it is written now.
+const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+
+/// The kinds of `plan`'s operations, in plan order, without their cascades.
+fn kinds(plan: &ResolvedPlan) -> Vec<OperationKind> {
+    plan.operations
+        .iter()
+        .map(|operation| operation.kind.clone())
+        .collect()
+}
+
+/// **Of two routes whose cascades rewrite one hub, only the one that breaks
+/// it skips**: moving `loose/a.md` respells the hub's closed `up`, moving
+/// `loose/b.md` respells its open `down`, so `b` moves, its cascade landing,
+/// and `a` skips as one the judge would refuse, noting the hub and `up`.
+#[test]
+fn of_two_routes_rewriting_one_hub_only_the_one_breaking_it_skips() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-two-routes-one-hub",
+        HUB_UP,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[zz-repair/loose/b]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("loose/b.md", b"---\ntype: task\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = misplaced_of(&host, &vault, "loose/a.md");
+    let b = misplaced_of(&host, &vault, "loose/b.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/b.md"),
+            at("tasks/b.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[b])]);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(a, SkipReason::JudgeWouldRefuse)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("`up`"),
+        "{note}"
+    );
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[tasks/b]]\"\n---\n"
+    );
+}
+
+/// **A route after a skipped route is judged with the routes accepted before
+/// it alone**: of three routes rewriting one hub, `a`'s and `c`'s respell
+/// open fields and `b`'s the closed `up`, so `a` moves, `b` skips, and `c`,
+/// judged with `a`'s move and without `b`'s, moves too.
+#[test]
+fn a_route_after_a_skipped_route_is_judged_with_the_accepted_routes_alone() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/b]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-after-a-skipped-route",
+        schema,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/b]]\"\nx: \"[[zz-repair/loose/a]]\"\ny: \"[[zz-repair/loose/c]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("loose/b.md", b"---\ntype: task\n---\n# B\n"),
+            ("loose/c.md", b"---\ntype: task\n---\n# C\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let b = misplaced_of(&host, &vault, "loose/b.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![
+            OperationKind::move_document(at("loose/a.md"), at("tasks/a.md")),
+            OperationKind::move_document(at("loose/c.md"), at("tasks/c.md")),
+        ]
+    );
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (b, SkipReason::JudgeWouldRefuse)
+    );
+    assert!(note.contains("`up`"), "{note}");
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nup: \"[[zz-repair/loose/b]]\"\nx: \"[[tasks/a]]\"\ny: \"[[tasks/c]]\"\n---\n"
+    );
+}
+
+/// **A route the whole plan refuses takes no destination from a later
+/// one**: `loose/a.md` and `other/a.md` both route to `tasks/a.md`; the
+/// first's cascade would break the hub's closed `up`, so it skips, and the
+/// second moves there.
+#[test]
+fn a_route_the_whole_plan_refuses_leaves_its_destination_to_a_later_route() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-refused-route-takes-no-destination",
+        HUB_UP,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("other/a.md", b"---\ntype: task\n---\n# Other A\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let refused = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("other/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (refused, SkipReason::JudgeWouldRefuse)
+    );
+    assert!(note.contains("`up`"), "{note}");
+    assert_eq!(
+        written(&vault, "tasks/a.md"),
+        "---\ntype: task\n---\n# Other A\n"
+    );
+}
+
+/// **A finding a route's cascade eliminates is dropped**: the hub's `up`
+/// names `loose/a.md` as it is written now, which brings it under a rule
+/// requiring `reviewed` with no default; moving `loose/a.md` respells `up`,
+/// taking the hub out of that rule, so its finding is in neither the
+/// operations nor the skipped findings.
+#[test]
+fn a_finding_a_routes_cascade_eliminates_is_dropped() {
+    let schema = "version: 1\nrules:\n  linked:\n    match: {frontmatter: {up: '[[zz-repair/loose/a]]'}}\n    required:\n      reviewed:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-cascade-drops",
+        schema,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+    finding_of(
+        &host,
+        &vault,
+        "h.md",
+        FindingKind::RequiredMissing,
+        "reviewed",
+    );
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[misplaced])]);
+    assert!(
+        provenance(&plan).skipped.is_empty(),
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **A route whose cascade would bring back a finding a fix dropped skips**:
+/// replacing the hub's `kind: old` takes it out of the rule forbidding
+/// `scratch`, dropping that finding, and moving `loose/a.md` would respell
+/// its `up` into a rule forbidding `scratch` again; the replacement stands,
+/// the route skips noting `scratch`, and `scratch` stands unflagged.
+#[test]
+fn a_route_whose_cascade_would_bring_back_a_finding_a_fix_dropped_skips() {
+    let schema = "version: 1\nrules:\n  old:\n    match: {frontmatter: {kind: old}}\n    forbidden:\n      scratch:\n  initial:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      kind: {values: [new], synonyms: {old: new}}\n  later:\n    match: {frontmatter: {up: '[[tasks/a]]'}}\n    forbidden:\n      scratch:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-cascade-brings-back-a-dropped-finding",
+        schema,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nkind: old\nscratch: x\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(plan.operations, vec![setting(1, "h.md", "kind", "new")]);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(misplaced, SkipReason::JudgeWouldRefuse)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("`scratch`"),
+        "{note}"
+    );
+    assert!(stands(&vault, "loose/a.md"));
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nkind: new\nscratch: x\nup: \"[[zz-repair/loose/a]]\"\n---\n"
+    );
+}
+
+/// **A route whose cascade would restore a finding a fix cites skips, and the
+/// fix stands**: the hub's `see` element `[[tasks/a]]` is replaced by its
+/// synonym `ok`, and moving `loose/a.md` would respell the other element to
+/// `[[tasks/a]]`, the value just replaced; the route skips noting `see`.
+#[test]
+fn a_route_whose_cascade_would_restore_a_finding_a_fix_cites_skips_and_the_fix_stands() {
+    let schema = "version: 1\nfields:\n  see: {type: text, shape: list}\nrules:\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      see: {values: [ok], synonyms: {'[[tasks/a]]': ok}}\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-cascade-restores-a-cited-finding",
+        schema,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nsee:\n  - \"[[tasks/a]]\"\n  - \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+    let replaced = finding_valued(
+        &host,
+        &vault,
+        "h.md",
+        FindingKind::NotOneOf,
+        "see",
+        "[[tasks/a]]",
+    );
+    let unmapped = finding_valued(
+        &host,
+        &vault,
+        "h.md",
+        FindingKind::NotOneOf,
+        "see",
+        "[[zz-repair/loose/a]]",
+    );
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_list(
+            1,
+            "h.md",
+            "see",
+            &["ok", "[[zz-repair/loose/a]]"]
+        )]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(replaced, "[[tasks/a]]")]
+        )]
+    );
+    let skipped: BTreeMap<u64, &SkippedFinding> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.finding, skipped))
+        .collect();
+    assert_eq!(skipped[&unmapped].reason, SkipReason::NoDeclaredFix);
+    let route = skipped[&misplaced];
+    assert_eq!(route.reason, SkipReason::JudgeWouldRefuse);
+    let note = route.note.as_deref().expect("the skip carries a note");
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("`see`"),
+        "{note}"
+    );
+    assert!(stands(&vault, "loose/a.md"));
+}
+
 /// A rule routing a `p` into `tasks/`, and one routing a `q` standing in
 /// `q/<area>/` into `tasks/<area>/`, so one route's destination can be a
 /// folder another names as a document.

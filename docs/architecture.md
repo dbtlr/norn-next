@@ -2737,17 +2737,28 @@ inside the other, the first in batch order moves and the later skips; a place an
 operation of the batch vacates is judged as it stands, taken. A route filling to no folder a
 document can be moved into — a capture holding `:`, which a route's own text never holds,
 or one slugging to nothing — and a route to a place where the document would still be
-misplaced, are `judge_would_refuse`. **A plan holding a route is judged whole.** A route's
-link cascade rewrites links in other documents and in the moved document itself, which no
-judgment of one document's fixes sees, so the resolved plan is judged by the applier's own
-check, read-only, on the same view and clock reading; each violation it introduces is laid
-to the last route in plan order whose cascade rewrites the document it stands on, that route
-is skipped as `judge_would_refuse`, noting the document and the violation, and the batch is
-planned again without it, its document's other fixes judged where it stands. That costs one
-resolution and one judgment of the plan per round, at most one round more than the batch has
-routes; a plan holding no route is resolved once and not judged in planning. A violation no
-route's cascade explains is a defect of the repair's own judgment and is answered as
-`vault/plan-refused` naming it, not planned again. A fix
+misplaced, are `judge_would_refuse`. **Routes are admitted one at a time, each judged on the
+plan the routes before it left.** A route's link cascade rewrites links in other documents
+and in the moved document itself, which no judgment of one document's fixes sees. So the
+batch is first planned with every route withheld, each document's fixes judged where it
+stands; with no cascade, each document's own composition judges it exactly. Each withheld
+route is then tried in batch order on the plan the routes accepted so far make: the batch is
+planned again with that route admitted too, its document composed with the route first and
+its fixes judged where it lands, resolved, and judged whole by the applier's own check,
+read-only, on the same view and clock reading. The trial is accepted where it introduces no
+violation and every finding it fixes or drops no longer holds where its document lands, as
+the check's judgment of each document the plan writes concludes. Otherwise the route is
+skipped as `judge_would_refuse`, noting the document and the violation or the finding it
+would make hold again — which only that route can explain, since the plan it was tried on was
+accepted — and the next route is tried without it. A route the whole plan refuses claims no
+destination. A skipped finding the final plan's result no longer holds, one a cascade
+eliminated, is dropped. That costs one resolution of the plan with every route withheld and
+one planning, resolution and judgment per route tried, at most one resolution more than the
+batch has routes; a route whose destination an accepted route took changes no operation and
+is neither resolved nor judged, and a batch holding no route is resolved once and not judged
+in planning. A trial that does not resolve is answered as that refusal; one the check stops
+for a cause other than the schema, such as drift, is judged clean in planning and answered
+with that cause by its preview or apply. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
 defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every

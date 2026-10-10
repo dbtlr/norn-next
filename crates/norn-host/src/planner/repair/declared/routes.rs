@@ -24,22 +24,28 @@
 //! beneath, is [`SkipReason::DestinationTaken`]; one where no document can be
 //! made, and a route filling to no folder — a capture holding `:` or slugging
 //! to nothing ([`Rule::fill_route`](norn_config::schema::Rule::fill_route)) — is
-//! [`SkipReason::JudgeWouldRefuse`], noting why. A route the judgment of the
-//! whole plan refused for its link cascade ([`Repairing::refused`]) skips the
-//! same way, with that judgment's note. **The move is
+//! [`SkipReason::JudgeWouldRefuse`], noting why. **The move is
 //! judged at its destination**: the document's bytes there against its
 //! before-state, since `match.path`, `exclude.path` and `allowed_paths` can
 //! each judge the same bytes differently in another place — a destination
 //! that brings in required fields, that introduces any other violation, or
 //! where the document is still misplaced, skips through the judge as any fix
 //! does.
+//!
+//! **A route its document's judgment admits moves only where the judgment of
+//! the whole plan admitted it** ([`Repairing::admitted`]): its link cascade
+//! rewrites documents that judgment alone sees. Until then it is withheld —
+//! its document composed as though it did not move, its finding skipped as
+//! one the judge would refuse, with its destination — and it claims no
+//! destination, so a route the whole plan refuses takes no place from a
+//! later one.
 
 use std::collections::BTreeSet;
 
 use norn_config::schema::{FillRefusal, PathBindings, RuleWork};
 use norn_wire::{
     CitedFinding, Confidence, DocumentPath, FindingRow, Operation, OperationId, OperationKind,
-    SkipReason, UnresolvedOperation, UnresolvedReason,
+    SkipReason, SkippedFinding, UnresolvedOperation, UnresolvedReason,
 };
 
 use super::{Document, Fix, Fixing, Routing, State, Unmade, skip, spelled, spelled_candidates};
@@ -56,6 +62,20 @@ struct Proposal {
     clocked: bool,
 }
 
+/// A route its document's own judgment admits.
+pub(super) enum Route {
+    /// The move, which the judgment of the whole plan admitted
+    /// ([`Repairing::admitted`]).
+    Moved(Fix),
+    /// The move withheld until the judgment of the whole plan admits it: the
+    /// skip its finding carries meanwhile, as one the judge would refuse with
+    /// its destination, and the destination.
+    Withheld {
+        skip: Box<SkippedFinding>,
+        to: DocumentPath,
+    },
+}
+
 /// The fix of the misplaced document `row` names — `finding`, as the
 /// before-state holds it — standing as `state` composes it, that `rules`,
 /// the placement rules its finding cites, route it by, judged against what
@@ -69,7 +89,7 @@ pub(super) fn fix<R: Reading>(
     rules: &BTreeSet<String>,
     id: OperationId,
     routing: &mut Routing<'_, R>,
-) -> Result<Result<Fix, Unmade>, R::Error> {
+) -> Result<Result<Route, Unmade>, R::Error> {
     let skipped = |finding| Ok(Err(Unmade::Skipped(Box::new(finding))));
     let proposals = match proposed(document, state, row, rules) {
         Ok(proposals) => proposals,
@@ -104,9 +124,6 @@ pub(super) fn fix<R: Reading>(
             .with_candidates(candidates.clone())
             .with_note(note)
     };
-    if let Some(note) = document.repairing.refused.get(&row.id) {
-        return skipped(refused(note.clone()));
-    }
     let taken = |note: String| {
         skip(row, SkipReason::DestinationTaken)
             .with_candidates(candidates.clone())
@@ -151,13 +168,19 @@ pub(super) fn fix<R: Reading>(
             return Ok(Err(Unmade::Skipped(skip)));
         }
     };
+    if !document.repairing.admitted.contains(&row.id) {
+        return Ok(Ok(Route::Withheld {
+            skip: Box::new(skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates)),
+            to: to.clone(),
+        }));
+    }
     routing.claimed.claim(identity, folders);
     let clocked = proposals.iter().any(|proposal| proposal.clocked);
-    Ok(Ok(Fix {
+    Ok(Ok(Route::Moved(Fix {
         operations: vec![OperationKind::move_document(state.at.clone(), to.clone())],
         cited: vec![cited(row, to, clocked)],
         state: moved,
-    }))
+    })))
 }
 
 /// Why no destination is proposed.
