@@ -766,12 +766,7 @@ where
                 // nothing in it is the caller's to act on. Its advisories are
                 // dropped as a `where` target's are (`PlanSnapshot::matching`
                 // reads only the find's rows).
-                let planned = repair::plan(&batch.rows, &mut |address| {
-                    snapshot
-                        .target(&PathOverlay::new(), address, PlanSide::Before)
-                        .map(|naming| naming.candidates)
-                })
-                .map_err(refused)?;
+                let planned = repair::plan(&batch.rows);
                 let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
                 let resolution = resolve_on(authored, ground, name, snapshot).map_err(refused)?;
                 let plan = fully_resolved(resolution)?.plan;

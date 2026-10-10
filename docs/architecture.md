@@ -2701,8 +2701,9 @@ the applier judges and writes a repair as it does any plan and is not told it is
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`; an ambiguous link
-is `ambiguous_link`, with the documents its address names on the held snapshot, read live
-and not from the finding; and a finding no rule declares a fix for is `no_declared_fix`,
+is `ambiguous_link`, with the candidate head its finding is filed with, which is the class
+at the snapshot the repair reads because link health is re-decided in every changeset;
+and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the

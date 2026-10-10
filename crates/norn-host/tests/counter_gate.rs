@@ -3661,10 +3661,10 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
 }
 
 /// The statements a narrowed repair's preview runs on its two read holds'
-/// snapshots, at every scale: the six its batch read accounts for, and the
+/// snapshots, at every scale: the five its batch read accounts for, and the
 /// statement that establishes each of the two snapshots, the repair's own and
 /// the preview's of the plan it resolved.
-const REPAIR_STATEMENTS: u64 = 8;
+const REPAIR_STATEMENTS: u64 = 7;
 
 /// **A repair narrowed to a path evaluates the documents that path admits and
 /// no others, and costs the same at both scales (NORN-373).** This drives
@@ -3674,13 +3674,12 @@ const REPAIR_STATEMENTS: u64 = 8;
 /// plan ran, and the snapshots it established. A read added anywhere inside
 /// the handler is counted there, so it cannot hide behind the batch read.
 ///
-/// The narrowed selection admits the one finding the planted neighborhood's
-/// unclosed document stands under, at `ambiguous` (300 documents) and at
-/// `realistic` (2000), where the vaults differ only in documents outside the
-/// path. It leaves out the neighborhood's pointer: its ambiguous link names
-/// the crowd's stem, and a repair reads the live class that link names, which
-/// is the crowd, so that finding's cost follows the class and not the path.
-/// **The control** is the same repair unnarrowed: it counts every finding the
+/// The narrowed selection admits the two findings the planted neighborhood
+/// holds, the pointer's ambiguous link and the unclosed document, at
+/// `ambiguous` (300 documents) and at `realistic` (2000), where the vaults
+/// differ only in documents outside the path. The ambiguous finding names the
+/// crowd's candidates by the head it is filed with, so the repair reads no
+/// class. **The control** is the same repair unnarrowed: it counts every finding the
 /// crowd's broken documents stand under, so it must read more at the larger
 /// scale on the batch's steps and the snapshot's.
 #[test]
@@ -3731,17 +3730,15 @@ fn a_narrowed_repair_costs_the_same_at_both_scales() {
         )
         .violations(),
     );
-    // The snapshot's own steps are not a growth line here: the unnarrowed
-    // batch is a page of findings, and the `ambiguous` profile files more
-    // ambiguous links per page than `realistic` does, each read live.
-    let grows = "validate_vm_steps";
-    let grown = (at_small.control.get(grows), at_large.control.get(grows));
-    if grown.1 <= grown.0 {
-        failures.push(format!(
-            "the unnarrowed repair did not grow with the vault on `{grows}`, reading {} over {} \
-             documents and {} over {}",
-            grown.0, at_small.documents, grown.1, at_large.documents
-        ));
+    for grows in ["validate_vm_steps", "vm_steps"] {
+        let grown = (at_small.control.get(grows), at_large.control.get(grows));
+        if grown.1 <= grown.0 {
+            failures.push(format!(
+                "the unnarrowed repair did not grow with the vault on `{grows}`, reading {} \
+                 over {} documents and {} over {}",
+                grown.0, at_small.documents, grown.1, at_large.documents
+            ));
+        }
     }
     assert!(
         failures.is_empty(),
@@ -3771,8 +3768,8 @@ fn read_a_repair(label: &str, profile: &norn_fixtures::Profile) -> RepairReading
         narrowed: repair_cost(
             &host,
             &vault,
-            [Predicate::path(format!("{PLANTED}/fixed/cg-unclosed.md"))],
-            1,
+            [Predicate::path(format!("{PLANTED}/fixed/**"))],
+            2,
         ),
         control: repair_cost(&host, &vault, [], 0),
     }

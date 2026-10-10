@@ -18,9 +18,9 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorDetail,
-    ErrorEnvelope, FieldChange, FindingKind, PagedRows, PlanDocument, Predicate, Provenance,
-    ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason, SkippedCandidates,
-    Unsatisfied, ValidateParams, ValidateReport, VaultAddress, WriteTarget,
+    ErrorEnvelope, FieldChange, FindingKind, NewParams, PagedRows, PlanDocument, Predicate,
+    Provenance, ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason,
+    SkippedCandidates, Unsatisfied, ValidateParams, ValidateReport, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -675,42 +675,85 @@ fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
     assert_eq!(altered, none);
 }
 
+/// The documents a previewed repair of the vault's ambiguous links skipped
+/// the one ambiguous link with, as paths, and how many it said there were.
+fn ambiguous_candidates(plan: &ResolvedPlan) -> (Vec<String>, u64) {
+    let [skipped] = provenance(plan).skipped.as_slice() else {
+        panic!("one ambiguous link stands: {:?}", provenance(plan).skipped);
+    };
+    assert_eq!(skipped.reason, SkipReason::AmbiguousLink);
+    let Some(SkippedCandidates::Documents { head, .. }) = &skipped.candidates else {
+        panic!("the skip names no documents: {skipped:?}");
+    };
+    let named = head
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.path.as_str().to_string())
+        .collect();
+    (named, head.total())
+}
+
+/// The documents the ambiguity fixture holds: two twins and a pointer to them.
+const TWINS: [(&str, &[u8]); 3] = [
+    ("a/twin.md", b"---\ntype: note\n---\n# A\n"),
+    ("b/twin.md", b"---\ntype: note\n---\n# B\n"),
+    ("pointer.md", b"---\ntype: note\n---\nSee [[twin]].\n"),
+];
+
 /// **An ambiguous link is skipped as ambiguous, naming the documents its
 /// address could name.** `[[twin]]` names `a/twin.md` and `b/twin.md`; the
-/// finding is skipped as `ambiguous_link` with both as its candidates, read
-/// from the links as they stand. Findings are derived again in the changeset
-/// that adds a third `twin.md`, so a finding's stored candidates are never
-/// older than the snapshot the repair reads, and the live read is pinned by
-/// the planner's own cases.
+/// finding is skipped as `ambiguous_link` with both as its candidates, the
+/// head the finding is filed with.
 #[test]
 fn an_ambiguous_link_is_skipped_as_ambiguous_naming_the_documents_it_could_name() {
-    let documents: [(&str, &[u8]); 3] = [
-        ("a/twin.md", b"---\ntype: note\n---\n# A\n"),
-        ("b/twin.md", b"---\ntype: note\n---\n# B\n"),
-        ("pointer.md", b"---\ntype: note\n---\nSee [[twin]].\n"),
-    ];
-    let (_sandbox, vault, host) = a_vault_holding("host-repair-ambiguous", &documents);
+    let (_sandbox, vault, host) = a_vault_holding("host-repair-ambiguous", &TWINS);
     let _lease = attach::attach_and_wait(&host, vault.name());
 
     let plan = previewed(
         host.repair(repairing(&vault, ApplyMode::Preview).with_kinds([FindingKind::Ambiguous])),
     );
 
-    let [skipped] = provenance(&plan).skipped.as_slice() else {
-        panic!("one ambiguous link stands: {:?}", provenance(&plan).skipped);
-    };
-    assert_eq!(skipped.reason, SkipReason::AmbiguousLink);
-    let Some(SkippedCandidates::Documents { head, .. }) = &skipped.candidates else {
-        panic!("the skip names no documents: {skipped:?}");
-    };
-    let named: Vec<&str> = head
-        .candidates()
-        .iter()
-        .map(|candidate| candidate.path.as_str())
-        .collect();
     assert_eq!(
-        named,
-        [format!("{FOLDER}a/twin.md"), format!("{FOLDER}b/twin.md")]
+        ambiguous_candidates(&plan),
+        (
+            vec![format!("{FOLDER}a/twin.md"), format!("{FOLDER}b/twin.md")],
+            2
+        )
     );
-    assert_eq!(head.total(), 2);
+}
+
+/// **A third twin added after a repair names all three on the next one.** The
+/// changeset that adds `c/twin.md` files the pointer's finding again, so the
+/// head a repair reads is the class at its own snapshot.
+#[test]
+fn an_ambiguous_link_names_a_twin_added_since_the_last_repair() {
+    let (_sandbox, vault, host) = a_vault_holding("host-repair-third-twin", &TWINS);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let narrowed = || repairing(&vault, ApplyMode::Preview).with_kinds([FindingKind::Ambiguous]);
+    assert_eq!(
+        ambiguous_candidates(&previewed(host.repair(narrowed()))).1,
+        2
+    );
+
+    host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        norn_wire::DocumentPath::new(format!("{FOLDER}c/twin.md")).expect("a document path"),
+        "# C\n",
+    ))
+    .expect("the write is admitted")
+    .wait()
+    .expect("c/twin.md is written");
+
+    assert_eq!(
+        ambiguous_candidates(&previewed(host.repair(narrowed()))),
+        (
+            vec![
+                format!("{FOLDER}a/twin.md"),
+                format!("{FOLDER}b/twin.md"),
+                format!("{FOLDER}c/twin.md")
+            ],
+            3
+        )
+    );
 }
