@@ -23,9 +23,9 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 /// it: the planner's expansion of each creation (`crate::planner::rule`) reads
 /// it the first time a creation by rule, or a rule default reading a clock
 /// token that is proposed for a field or compared with a filled value, asks,
-/// and a repair (`crate::planner::repair`) the first time a rule default it
-/// fills reads a clock token; every template and default of the plan fills
-/// from that one reading ([`OneReading`]).
+/// and a repair (`crate::planner::repair`) the first time a rule default or
+/// a route it fills reads a clock token; every template, default and route of
+/// the plan fills from that one reading ([`OneReading`]).
 ///
 /// **The one seam the host reads the clock through, and counted**: each call
 /// is one reading, tallied on the account the planning thread works for
@@ -46,7 +46,8 @@ pub(crate) fn cannot_fill(named: &str) -> String {
 
 /// A plan's one clock reading: taken from `clock` the first time something
 /// asks, and answered from then on, so every part of one plan that reads the
-/// clock — a repair's rule defaults and the creations its planning expands —
+/// clock — a repair's rule defaults and routes and the creations its planning
+/// expands —
 /// fills from the same instant, and a plan nothing of which asks takes none.
 pub(crate) struct OneReading<'c> {
     clock: &'c dyn Fn() -> Result<LocalTimestamp, NotALocalTimestamp>,

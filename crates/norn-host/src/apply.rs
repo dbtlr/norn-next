@@ -57,7 +57,6 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 use norn_fs::WatchError;
 use norn_store::{
     ContentModel, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink,
@@ -181,7 +180,7 @@ pub(crate) fn resolve_on(
         name,
         snapshot,
         &view,
-        &crate::clock::local_now,
+        &OneReading::of(&crate::clock::local_now),
     )
 }
 
@@ -312,8 +311,7 @@ where
         // repair plan reaches a clock read in expansion today, and the shared
         // reading keeps the plan at one should a repair ever create by rule.
         let mut resolution =
-            resolve_through(authored, ground, name, snapshot, view, &|| clock.get())
-                .map_err(refused)?;
+            resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
         resolution.unresolved.extend(planned.unresolved);
         let Resolution { plan, forecast, .. } = fully_resolved(resolution)?;
         let routes = routes_of(&plan, &planned.citations);
@@ -447,7 +445,7 @@ fn resolve_through<V: VaultView>(
     name: &VaultName,
     snapshot: &PlanSnapshot<'_>,
     view: &V,
-    clock: &dyn Fn() -> Result<LocalTimestamp, NotALocalTimestamp>,
+    clock: &OneReading<'_>,
 ) -> Result<Resolution, PageRefused>
 where
     V::Error: std::fmt::Display,

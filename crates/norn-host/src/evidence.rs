@@ -100,6 +100,8 @@ pub struct JobEvidence {
     /// What the jobs' rule judgments paid, summed: one total of several
     /// counts, folded whole under its lock when a job ends.
     rule_work: Mutex<RuleWork>,
+    /// The readings the jobs' plans took of the host's clock, summed: folded
+    /// whole when a job ends ([`EvidenceReading::clock_reads`]).
     clock_reads: AtomicU64,
     /// The file each counted read of every job read, in the order the jobs
     /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
@@ -262,8 +264,8 @@ pub struct EvidenceReading {
     /// so every count here is the sum of what each one paid.
     pub rule_work: RuleWork,
     /// Readings the jobs' plans took of the host's clock: at most one per
-    /// plan, and none for a plan no template or rule default of which reads
-    /// `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
+    /// plan, and none for a plan no template, rule default or route of which
+    /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
     pub clock_reads: u64,
 }
 

@@ -129,6 +129,8 @@ use norn_wire::{
     ValueMap, Variables, WriteTarget,
 };
 
+use crate::clock::OneReading;
+
 use super::edit::{edited, text_value};
 use super::view::VaultView;
 
@@ -138,8 +140,8 @@ use super::view::VaultView;
 pub(crate) struct Rules<'a> {
     /// The schema the entry's store pins.
     pub(crate) schema: &'a VaultSchema,
-    /// The host's clock, read at most once for a plan.
-    pub(crate) clock: &'a dyn Fn() -> Result<LocalTimestamp, NotALocalTimestamp>,
+    /// The plan's one clock reading, taken the first time anything asks.
+    pub(crate) clock: &'a OneReading<'a>,
 }
 
 /// Expand every `create_by_rule` of `operations` in place into the
@@ -152,7 +154,6 @@ pub(crate) fn expand<V: VaultView>(
     view: &V,
 ) -> Result<(), V::Error> {
     let mut numbering = None;
-    let mut reading = None;
     let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
     let defaults = states_rule_defaults(rules.schema);
     for position in 0..operations.len() {
@@ -163,7 +164,7 @@ pub(crate) fn expand<V: VaultView>(
                 fields,
                 body,
             } => {
-                let at = *reading.get_or_insert_with(|| (rules.clock)());
+                let at = rules.clock.get();
                 let numbering = numbering.get_or_insert_with(|| Numbering::of(operations));
                 let asked = Asked {
                     rule: rule.as_deref(),
@@ -182,7 +183,7 @@ pub(crate) fn expand<V: VaultView>(
                 }
             }
             OperationKind::CreateDocument { path, content } if defaults => {
-                let mut clock = || *reading.get_or_insert_with(|| (rules.clock)());
+                let mut clock = || rules.clock.get();
                 match defaulted(path, content, rules.schema, &mut clock, case) {
                     Ok(Some(filled)) => {
                         operations[position].kind =
@@ -600,6 +601,7 @@ pub(crate) mod testing {
     use norn_config::schema::{LocalTimestamp, NotALocalTimestamp, VaultSchema};
 
     use super::Rules;
+    use crate::clock::OneReading;
 
     /// A schema declaring nothing.
     static NO_SCHEMA: LazyLock<VaultSchema> = LazyLock::new(VaultSchema::default);
@@ -612,9 +614,11 @@ pub(crate) mod testing {
     /// The rules of a vault declaring none, for a case that creates nothing
     /// by rule: its clock fails the case if read.
     pub(crate) fn no_rules() -> Rules<'static> {
+        // A reading no case takes from: leaked, as a case's rules outlive it.
+        let reading: &'static OneReading<'static> = Box::leak(Box::new(OneReading::of(&unread)));
         Rules {
             schema: &NO_SCHEMA,
-            clock: &unread,
+            clock: reading,
         }
     }
 }
@@ -686,9 +690,10 @@ inbox:
             reads.set(reads.get() + 1);
             at
         };
+        let reading = OneReading::of(&clock);
         let rules = Rules {
             schema,
-            clock: &clock,
+            clock: &reading,
         };
         let links = (EmptyStore::new(), std::marker::PhantomData);
         let name = VaultName::new("notes").expect("a vault name");

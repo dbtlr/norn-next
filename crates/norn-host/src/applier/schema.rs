@@ -297,11 +297,25 @@ pub(crate) fn standing(
 /// composed state holds nothing the before-state does not, and the second
 /// comparison is the stricter.
 ///
-/// **A repair's composition reads it** (`crate::planner::repair`): each fix
-/// it adds to a document is judged on the running composed bytes, the
-/// before-state judged once however many fixes are made and each result
-/// judged once, and the findings the result holds say which of the selected
-/// findings still stand to be fixed.
+/// **A repair's composition reads it** (`crate::planner::repair`), for two
+/// kinds of addition: a fix **edited in place**, whose composed bytes are
+/// judged where the document stands, and a route's **destination**, where the
+/// document is judged at the place it lands: a move, which the fixes after
+/// it in the plan edit at that place. Each is judged on the running composed
+/// bytes, the before-state judged once however many fixes are made and each
+/// result judged once, and the findings the result holds say which of the
+/// selected findings still stand to be fixed.
+///
+/// **Judging a moved document's whole bytes agrees with the applier's
+/// judgment of a carried move.** The applier judges a document a move carries
+/// byte for byte by its frontmatter block alone ([`judge_block`]), because
+/// every other finding a document's bytes conclude is a function of those
+/// bytes alone, the same at the place it leaves and the place it lands. A
+/// violation is introduced only where its identity stood in neither state,
+/// so a finding the bytes alone conclude stands in the before-state and at
+/// the destination alike and is never introduced by the move; only a rule's
+/// finding, which reads where the document stands, can be, and those are the
+/// findings the block judgment concludes.
 pub(crate) fn verdict(
     before: &Standing,
     composed: &Standing,
