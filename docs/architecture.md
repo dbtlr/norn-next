@@ -2757,9 +2757,11 @@ links probed beside the links the store holds, and each holder of such a link re
 judged once, so the check costs the links under the routed documents' keys and is the same
 whatever order the routes are made in. That cost, and the plan's one resolution's, rests on
 the resolution door reading what each key could name once per judgment, however many links
-hold the key and however they interleave with other keys' links (below), so routes whose
-documents share one class — a stem, a dotted stem, links written with the extension — cost
-what their links touch, not the class once per link. Destinations are then claimed in batch order: a
+hold the key and however they interleave with other keys' links, and on each chunk of links
+paying upkeep for its own keys only, never for the keys the overlay names (below). So routes
+cost what their links touch: where their documents share one class — a stem, a dotted stem,
+links written with the extension — not the class once per link, and where each names a class
+of its own, not every route's keys once per chunk. Destinations are then claimed in batch order: a
 destination something stands at — a document a route of the batch moves away included — or
 beneath a document that stands, or at, above or beneath an earlier route's destination, is
 `destination_taken`; a skipped route claims none. **The resolved plan is held to its
@@ -3283,6 +3285,9 @@ out. A key that could name a target or a place the plan reaches is resolved once
 judgment, its targets read off the overlay then, and held until the judgment ends — no more
 such keys than the overlay names — so links naming two classes in turn read each class
 once; any other key's head is two rows and is held only while consecutive chunks hold it.
+The keys held for the judgment are held apart from the others, and each chunk's end sweeps
+only the others — the last chunk's keys and its own — so what a chunk pays to drop what the
+next will not reuse follows its own links, never the keys the overlay names.
 A link held under several keys hands back each key's shared list of the places it could
 name rather than a merge of them, and the change set reads each list once, so no link costs
 more than its keys, however many documents a key could name. A

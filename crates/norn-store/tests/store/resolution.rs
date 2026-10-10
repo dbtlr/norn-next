@@ -763,6 +763,64 @@ fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
     assert_eq!(few.0, 2 * MOVED as u64, "each stem's targets, read once");
 }
 
+/// **What a judgment keeps between chunks costs each chunk its own keys,
+/// never the keys kept for the whole judgment**: a plan moving `n` documents
+/// of `n` stems keeps every stem's key until the judgment ends, and each
+/// chunk's end drops only the keys the next chunk will not reuse — those no
+/// target or reached place could name — so the keys it visits to drop them
+/// grow as the links do. Written links naming the stems and links naming no
+/// target are taken in turn, and as many documents link each stem; twice
+/// the routes visit twice the keys.
+#[test]
+fn a_chunks_cache_upkeep_visits_its_own_keys_never_the_keys_kept_for_the_judgment() {
+    let work = |moved: usize| {
+        let mut vault = Vault::new(&format!("resolution-upkeep-{moved}"), Sensitive);
+        let origins: Vec<String> = (0..moved)
+            .map(|at| format!("a/{at:04}/t{at:04}.md"))
+            .collect();
+        let held: Vec<(String, String)> = (0..moved)
+            .map(|at| (format!("h/{at:04}.md"), format!("[[t{at:04}]]\n")))
+            .collect();
+        let mut documents: Vec<(&str, &str)> =
+            origins.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().map(|(at, body)| (at.as_str(), body.as_str())));
+        vault.write(&documents);
+        let plan = origins.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let probes: Vec<ProbedLink> = (0..moved)
+            .flat_map(|at| {
+                let holder = format!("p/{at:04}.md");
+                [
+                    probed(&holder, &holder, &format!("[[t{at:04}]]\n"), true),
+                    probed(&holder, &holder, &format!("[[n{at:04}]]\n"), true),
+                ]
+            })
+            .collect();
+        let (judged_links, work) = vault.judge(&plan, &probes);
+        assert_eq!(judged_links.len(), 3 * moved);
+        (work.keys_swept, work.links_evaluated)
+    };
+
+    let few = work(200);
+    let many = work(400);
+
+    assert_eq!(many.1, 2 * few.1, "twice the links judged");
+    assert!(
+        // Two chunks of 256 links, where the halves split a chunk apart.
+        many.0 <= 2 * few.0 + 512,
+        "the keys swept grow as the links do: {few:?} then {many:?}"
+    );
+    assert!(
+        many.0 <= 2 * many.1,
+        "each chunk visits its own keys and the chunk before's: {many:?}"
+    );
+}
+
 /// **A link held under several keys reads each key's places once per key,
 /// never once per link**: a plan moving every `t.v.md` and every `t.md` of
 /// `a/NNNN/` to `b/NNNN/` gives `[[t.v]]` both of its reductions' targets,

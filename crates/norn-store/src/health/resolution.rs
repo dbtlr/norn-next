@@ -75,10 +75,15 @@
 //! shares names every one of them, and its links do not read them each. **A
 //! key that could name a target, or a place the plan reaches, is resolved
 //! once per judgment**, however its links interleave with other keys' — two
-//! stems' links taken in turn read each stem's targets once — and kept until
-//! the judgment ends; there are no more such keys than the overlay names. Any
-//! other key's head is two rows at most, and is kept while consecutive chunks
-//! hold it, so what a judgment holds is the overlay's keys and two chunks'.
+//! stems' links taken in turn read each stem's targets once — and kept apart
+//! until the judgment ends; there are no more such keys than the overlay
+//! names. Any other key's head is two rows at most, and is kept while
+//! consecutive chunks hold it, so what a judgment holds is the overlay's keys
+//! and two chunks'. **Each chunk's end sweeps only those other keys**, the
+//! last chunk's and its own, never the keys kept for the judgment: the upkeep
+//! a chunk pays follows its own links, so the judgment's cost stays linear
+//! in the links it reaches however many keys the overlay names
+//! ([`ResolutionWork::keys_swept`]).
 //!
 //! **The members a class keeps out are never read.** The head seeks the
 //! members the ambiguity-ignore set admits by the admitting count each
@@ -382,6 +387,11 @@ pub struct ResolutionWork {
     /// Rows the key resolutions read, each a document a key names, at most
     /// two more than the targets the key could name.
     pub head_rows: u64,
+    /// Resolved keys each chunk's end visited to drop those the next chunk
+    /// will not reuse: the keys the chunk before it held and its own, never
+    /// those kept for the whole judgment, so they grow as the links judged
+    /// do.
+    pub keys_swept: u64,
     /// Targets of the plan, and places it reaches, read off the overlay:
     /// each key's once per key resolution, so a link's judgment adds its
     /// keys' targets without reading them again, however many targets a key
@@ -586,7 +596,13 @@ struct Judging<'a, R> {
     /// Each key that could name a document the plan reaches, and the
     /// documents it could name, by their place in the overlay's list.
     reaching: BTreeMap<String, Vec<usize>>,
-    resolved: BTreeMap<Key, KeyHeld>,
+    /// Each key resolved so far that could name a target or a reached place,
+    /// kept for the whole judgment and never swept: there are no more of
+    /// them than the overlay names.
+    kept: BTreeMap<Key, KeyHeld>,
+    /// Each other key the last chunk held, swept at each chunk's end to the
+    /// keys that chunk held, so a sweep visits two chunks' keys at most.
+    passing: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
     /// Every target and reached place read off the overlay so far
     /// ([`ResolutionWork::targets_read`]).
@@ -632,7 +648,8 @@ impl<'a, R: Runner> Judging<'a, R> {
             naming,
             sought,
             reaching,
-            resolved: BTreeMap::new(),
+            kept: BTreeMap::new(),
+            passing: BTreeMap::new(),
             work: ResolutionWork::default(),
             targets_read: std::cell::Cell::new(0),
         }
@@ -829,13 +846,10 @@ impl<'a, R: Runner> Judging<'a, R> {
         let totals = self.totals(filled)?;
         // Which of the targets the filled keys could name the store holds a
         // document at, read by their path keys, one row each at most.
-        let mut held_at: Vec<Key> = Vec::new();
+        let mut held_at: BTreeSet<Key> = BTreeSet::new();
         for key in filled {
             for target in self.members(key) {
-                let at = (target.path.path_key_in(self.key).as_str().to_string(), None);
-                if !held_at.contains(&at) {
-                    held_at.push(at);
-                }
+                held_at.insert((target.path.path_key_in(self.key).as_str().to_string(), None));
             }
         }
         let bounds: Vec<(&Key, usize)> = held_at.iter().map(|key| (key, 1)).collect();
@@ -925,7 +939,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                     .before
                     .iter()
                     .chain(&judged.after)
-                    .any(|key| self.resolved[key].members.changes);
+                    .any(|key| self.held(key).members.changes);
             let before_targets = self.before_targets(&judged.before);
             each(LinkChange {
                 holder: judged.holder,
@@ -938,17 +952,15 @@ impl<'a, R: Runner> Judging<'a, R> {
                 before_targets,
             });
         }
-        // A key that could name a target or a reached place is kept for the
-        // whole judgment, so its targets and its head are read once however
-        // its links interleave with another key's; there are no more such
-        // keys than the overlay names, which the judgment holds already.
-        // Any other key's head is two rows at most, so what the next chunk
-        // may reuse of those is what this one held: two chunks' keys at
-        // most, however many links the plan reaches.
-        let (naming, reaching) = (&self.naming, &self.reaching);
-        self.resolved.retain(|key, _| {
-            held.contains(key) || naming.contains_key(&key.0) || reaching.contains_key(&key.0)
-        });
+        // A key that could name a target or a reached place is kept apart
+        // for the whole judgment, so its targets and its head are read once
+        // however its links interleave with another key's, and no sweep
+        // visits it. Any other key's head is two rows at most, so what the
+        // next chunk may reuse of those is what this one held: the sweep
+        // visits the keys the last chunk kept and this one's own, never more,
+        // however many keys the judgment keeps.
+        self.work.keys_swept += self.passing.len() as u64;
+        self.passing.retain(|key, _| held.contains(key));
         Ok(())
     }
 
@@ -999,7 +1011,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         let mut total = 0usize;
         let mut one: Option<&str> = None;
         for key in keys {
-            let held = &self.resolved[key];
+            let held = self.held(key);
             let targets = match side {
                 PlanSide::Before => &held.members.before,
                 PlanSide::After => &held.members.after,
@@ -1053,7 +1065,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         BeforeTargets {
             lists: keys
                 .iter()
-                .map(|key| &self.resolved[key].members.before_targets)
+                .map(|key| &self.held(key).members.before_targets)
                 .filter(|list| !list.is_empty())
                 .cloned()
                 .collect(),
@@ -1069,7 +1081,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     fn resolve(&mut self, keys: &BTreeSet<Key>) -> Result<(), StoreError> {
         let bounds: Vec<(&Key, usize)> = keys
             .iter()
-            .filter(|key| !self.resolved.contains_key(*key))
+            .filter(|key| !self.kept.contains_key(*key) && !self.passing.contains_key(*key))
             .map(|key| (key, self.naming.get(&key.0).map_or(0, Vec::len) + 2))
             .collect();
         for (key, head) in self.heads(&bounds)? {
@@ -1081,9 +1093,29 @@ impl<'a, R: Runner> Judging<'a, R> {
             }
             self.work.keys_resolved += 1;
             let members = self.members_of(&key);
-            self.resolved.insert(key, KeyHeld { stored, members });
+            let held = KeyHeld { stored, members };
+            if self.is_kept(&key) {
+                self.kept.insert(key, held);
+            } else {
+                self.passing.insert(key, held);
+            }
         }
         Ok(())
+    }
+
+    /// Whether `key` is kept for the whole judgment: it could name a target
+    /// or a place the plan reaches.
+    fn is_kept(&self, key: &Key) -> bool {
+        self.naming.contains_key(&key.0) || self.reaching.contains_key(&key.0)
+    }
+
+    /// What the store holds under the resolved `key`.
+    fn held(&self, key: &Key) -> &KeyHeld {
+        if self.is_kept(key) {
+            &self.kept[key]
+        } else {
+            &self.passing[key]
+        }
     }
 
     /// The head of what the store holds under each key `bounds` lists, cut
