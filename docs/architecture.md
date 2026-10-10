@@ -2755,7 +2755,11 @@ judged in planning. The batch's routes are read together, through one batched re
 resolution door over an overlay of every route and the routed documents' own frontmatter
 links probed beside the links the store holds, and each holder of such a link read and
 judged once, so the check costs the links under the routed documents' keys and is the same
-whatever order the routes are made in. Destinations are then claimed in batch order: a
+whatever order the routes are made in. That cost, and the plan's one resolution's, rests on
+the resolution door reading what each key could name once per judgment, however many links
+hold the key and however they interleave with other keys' links (below), so routes whose
+documents share one class — a stem, a dotted stem, links written with the extension — cost
+what their links touch, not the class once per link. Destinations are then claimed in batch order: a
 destination something stands at — a document a route of the batch moves away included — or
 beneath a document that stands, or at, above or beneath an earlier route's destination, is
 `destination_taken`; a skipped route claims none. **The resolved plan is held to its
@@ -3275,7 +3279,13 @@ a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
 and a head seeks the members its class admits, never the ones the ambiguity-ignore set keeps
-out. A
+out. A key that could name a target or a place the plan reaches is resolved once per
+judgment, its targets read off the overlay then, and held until the judgment ends — no more
+such keys than the overlay names — so links naming two classes in turn read each class
+once; any other key's head is two rows and is held only while consecutive chunks hold it.
+A link held under several keys hands back each key's shared list of the places it could
+name rather than a merge of them, and the change set reads each list once, so no link costs
+more than its keys, however many documents a key could name. A
 plan that changes no document's presence, deletes no document, writes no link and carries
 no wikilink rewrite records nothing and reads no snapshot; a delete is read even where the
 plan refills its path, since the document there is then replaced with every presence as it
