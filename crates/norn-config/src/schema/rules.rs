@@ -150,9 +150,10 @@
 //! Every creation — `new` by a creation rule, inbox capture and `new` at a
 //! bare path — takes the defaults fixpoint at planning, and repair fills a
 //! selected missing field from the defaults its contributing rules declare
-//! (`norn-host`'s `planner::repair::declared`). **A dormant carrier beyond
-//! that:** repair's other declared fixes — synonyms, forbidden fields' fixes
-//! and routes — land in later steps of Layer 5B (NORN-374). A rule's
+//! (`norn-host`'s `planner::repair::declared`), replaces an offending value
+//! by the member a `one_of`'s synonym maps it to, and removes or renames a
+//! forbidden field as the rule declares. **A dormant carrier beyond that:**
+//! a route lands in a later step of Layer 5B (NORN-374). A rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
@@ -199,10 +200,10 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// Schema read's own checks read it, rule judgment reads it as a constraint
 /// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
 /// `norn-host` reads its accessors into the declaration `describe`'s rule
-/// facet reports, and repair reads the defaults its required fields declare.
-/// **A dormant carrier** beyond that: repair's other declared fixes —
-/// synonyms, forbidden fields' fixes and routes — read it in later steps of
-/// Layer 5B (NORN-374), and are not built.
+/// facet reports, and repair reads the defaults its required fields declare,
+/// the synonyms its `one_of` maps and the fix it declares for a forbidden
+/// field. **A dormant carrier** beyond that: a route is read in a later step
+/// of Layer 5B (NORN-374), and is not built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,

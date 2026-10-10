@@ -1,26 +1,29 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **A missing required field fills from its rule default; every other
-//! finding is skipped.** The declared fix of a selected `field/required-missing`
-//! finding is the default the rules requiring the field declare, filled and
-//! judged by [`declared`]: one `set_frontmatter` per fix, numbered `repair-1`,
-//! `repair-2` and on in plan order, each cited at
-//! [`Confidence::Declared`](norn_wire::Confidence::Declared) with the finding
-//! it fixes. A fix that cannot be made is skipped with its
-//! reason and its decision data — no default declared, defaults that
-//! disagree, a capture bound several ways, a fill that would bring in
-//! required fields, or one the write gate would refuse. A finding the rules
-//! conflict over (`field/rules-conflict`, `document/rules-conflict`) is
-//! skipped as [`SkipReason::RulesConflict`]. A finding of a document that does
-//! not read — a path derived state cannot hold (not UTF-8, or spelling no
-//! document path), a body that does not decode, or a frontmatter block nothing
-//! read — is skipped as [`SkipReason::Unreadable`]; an ambiguous link is
-//! skipped as [`SkipReason::AmbiguousLink`], with the candidates its row
-//! carries; every other finding is skipped as [`SkipReason::NoDeclaredFix`],
-//! with the value it judged where it carries one. Synonyms, forbidden fields'
-//! fixes and routes (NORN-374's later steps) and derived fixes (NORN-375) add
-//! operations here, beside the default.
+//! **Three kinds of finding have a declared fix; every other is skipped.** A
+//! selected `field/required-missing` finding fills from the default the rules
+//! requiring the field declare; a `field/not-one-of` finding is replaced by
+//! the member a rule's synonym maps its offending value to, a list field's
+//! elements fixed one by one into one `set_frontmatter` of the field; a
+//! `field/forbidden` finding is removed or renamed as a rule declares. All are
+//! filled and judged by [`declared`], one operation per fix (a rename is two),
+//! numbered `repair-1`, `repair-2` and on in plan order, each cited at
+//! [`Confidence::Declared`](norn_wire::Confidence::Declared) with the
+//! findings it fixes. A fix that cannot be made is skipped with its reason and
+//! its decision data — no fix declared, candidates that tie or defaults that
+//! disagree, a capture bound several ways, a rename onto an occupied field, a
+//! fix that would bring in required fields, or one the write gate would
+//! refuse. A finding the rules conflict over (`field/rules-conflict`,
+//! `document/rules-conflict`) is skipped as [`SkipReason::RulesConflict`]. A
+//! finding of a document that does not read — a path derived state cannot
+//! hold (not UTF-8, or spelling no document path), a body that does not
+//! decode, or a frontmatter block nothing read — is skipped as
+//! [`SkipReason::Unreadable`]; an ambiguous link is skipped as
+//! [`SkipReason::AmbiguousLink`], with the candidates its row carries; every
+//! other finding is skipped as [`SkipReason::NoDeclaredFix`], with the value
+//! it judged where it carries one. Routes (NORN-374's later steps) and derived
+//! fixes (NORN-375) add operations here, beside these.
 //!
 //! **A document is composed in finding order.** Its findings are taken in
 //! kind, field and offending value order, each fix composed onto the bytes the
@@ -267,7 +270,8 @@ mod tests {
                 "{kind:?}"
             );
         }
-        // A missing required field may have a fix, which reads its document
+        // A missing required field, a value outside a closed set and a
+        // forbidden field may have a fix, which reads its document
         // (`declared`), and a rules conflict is skipped as one.
         let readable: Vec<_> = FindingKind::ALL
             .into_iter()
@@ -277,6 +281,8 @@ mod tests {
                         kind,
                         FindingKind::Ambiguous
                             | FindingKind::RequiredMissing
+                            | FindingKind::NotOneOf
+                            | FindingKind::Forbidden
                             | FindingKind::FieldRulesConflict
                             | FindingKind::DocumentRulesConflict
                     )
