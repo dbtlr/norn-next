@@ -14,11 +14,14 @@
 //! moved document, and its members are read once, not once per link —
 //! whether a link is held under that one key, or under two as a dotted stem
 //! and a link written with its extension are, and whether links naming two
-//! such classes are taken in turn.
+//! such classes are taken in turn. Routes whose documents each name a class
+//! of their own add each link once as well: the plan names a key per route,
+//! and each chunk of links pays for its own keys, never for every route's.
 //!
 //! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
-//! It records each case's best of three previews and holds 800 routes to
-//! within 2.5 times 400 in any build; in a release build — run it with
+//! It records each case's best of three previews and holds each doubling of
+//! the routes to within 2.5 times — 2.3 for routes naming classes of their
+//! own — in any build; in a release build — run it with
 //! `cargo test --release -p norn-host --test repair_cost -- --ignored --nocapture`
 //! — it holds them to the bars the routes were accepted on as well: 400
 //! routes within 0.48 s, and 400 routes and a hub within 1.28 s.
@@ -211,21 +214,69 @@ impl Shared {
 /// stem is a member of the one class its links name, and so is every such
 /// link's resolution.
 fn previewing_shared(routes: usize, shared: Shared) -> Duration {
-    let sandbox = Sandbox::new(
-        Path::new(env!("CARGO_TARGET_TMPDIR")),
-        &format!("repair-cost-{shared:?}-{routes}"),
-    )
-    .expect("a sandbox");
-    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
-    std::fs::write(vault.path().join(".norn/schema.yaml"), AREAS).expect("the schema");
-    for at in 0..routes {
+    previewing_areas(&format!("{shared:?}"), routes, AREAS, &|at| {
         let (stem, address) = shared.named(at);
-        let task = vault.path().join(format!("{FOLDER}a{at:04}/{stem}.md"));
-        std::fs::create_dir_all(task.parent().expect("an area")).expect("the area");
         let body = match shared {
             Shared::TwoStemsInTurn => format!("[[{address}]]\n").repeat(256),
             _ => String::new(),
         };
+        (stem.to_string(), address.to_string(), body)
+    })
+}
+
+/// [`AREAS`], with every area's `tasks/` kept out of the classes a link
+/// opens: each route carries its document across the ambiguity-ignore set.
+const AREAS_IGNORED: &str = "version: 1\npaths:\n  ambiguity_ignore: ['zz-repair/*/tasks/**']\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+
+/// How each routed document names a class of its own, linked by its stem
+/// from one document outside the selection, from its frontmatter and its
+/// body.
+#[derive(Clone, Copy, Debug)]
+enum Own {
+    /// Every task `tNNNN.md`, its holder linking `[[tNNNN]]`.
+    Stem,
+    /// The same, every route carrying its document across the
+    /// ambiguity-ignore set ([`AREAS_IGNORED`]).
+    IgnoredStem,
+}
+
+/// The best of three previews of the repair of `routes` misplaced tasks, one
+/// per area, each naming a class of its own as `own` says: the plan's
+/// overlay names a key per route, and each route's links are judged under
+/// its own.
+fn previewing_own(routes: usize, own: Own) -> Duration {
+    let schema = match own {
+        Own::Stem => AREAS,
+        Own::IgnoredStem => AREAS_IGNORED,
+    };
+    previewing_areas(&format!("{own:?}"), routes, schema, &|at| {
+        let stem = format!("t{at:04}");
+        (stem.clone(), stem, String::new())
+    })
+}
+
+/// The best of three previews of the repair of `routes` misplaced tasks
+/// under `schema`, the task of area `at` named and linked as `task` says —
+/// its file stem, the address its holder's links are written with, and its
+/// own body — each linked from one holder outside the selection, from its
+/// frontmatter and its body.
+fn previewing_areas(
+    label: &str,
+    routes: usize,
+    schema: &str,
+    task: &dyn Fn(usize) -> (String, String, String),
+) -> Duration {
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("repair-cost-{label}-{routes}"),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("the schema");
+    for at in 0..routes {
+        let (stem, address, body) = task(at);
+        let task = vault.path().join(format!("{FOLDER}a{at:04}/{stem}.md"));
+        std::fs::create_dir_all(task.parent().expect("an area")).expect("the area");
         std::fs::write(task, format!("---\ntype: task\n---\n# T\n{body}")).expect("a task");
         let holder = vault.path().join(format!("zz-holders/h{at:04}.md"));
         std::fs::create_dir_all(holder.parent().expect("the holders")).expect("the holders");
@@ -236,6 +287,54 @@ fn previewing_shared(routes: usize, shared: Shared) -> Duration {
         .expect("a holder");
     }
     best_of_three(&vault, routes, &|_| {})
+}
+
+/// Each of `shapes` previewed at each of `scales` by `preview`, recorded
+/// under `title`, every doubling held within `bound` times.
+fn linear<S: Copy + std::fmt::Debug>(
+    title: &str,
+    shapes: &[S],
+    scales: &[usize],
+    bound: f64,
+    preview: impl Fn(usize, S) -> Duration,
+) {
+    let mut recorded: Vec<(String, String)> = Vec::new();
+    let mut grown: Vec<(S, Vec<(usize, Duration)>)> = Vec::new();
+    for &shape in shapes {
+        let readings: Vec<(usize, Duration)> = scales
+            .iter()
+            .map(|&routes| (routes, preview(routes, shape)))
+            .collect();
+        recorded.extend(
+            readings
+                .iter()
+                .map(|(routes, took)| (format!("{routes} routes, {shape:?}"), format!("{took:?}"))),
+        );
+        recorded.extend(readings.windows(2).map(|pair| {
+            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
+            (
+                format!("{} over {}, {shape:?}", pair[1].0, pair[0].0),
+                format!("{ratio:.2}"),
+            )
+        }));
+        grown.push((shape, readings));
+    }
+    norn_testkit::readings::record(
+        title,
+        &recorded
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect::<Vec<_>>(),
+    );
+    for (shape, readings) in grown {
+        for pair in readings.windows(2) {
+            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
+            assert!(
+                ratio <= bound,
+                "{shape:?} grows faster than linear: {readings:?}"
+            );
+        }
+    }
 }
 
 /// **A repair of routes sharing a file stem previews in time linear in its
@@ -249,49 +348,39 @@ fn previewing_shared(routes: usize, shared: Shared) -> Duration {
 #[test]
 #[ignore = "soak-lane case: a clock of a repair's routes sharing a stem"]
 fn a_repair_of_routes_sharing_a_stem_previews_in_time_linear_in_routes_and_links_touched() {
-    let shapes = [
-        Shared::Stem,
-        Shared::DottedStem,
-        Shared::Extension,
-        Shared::TwoStemsInTurn,
-    ];
-    let mut recorded: Vec<(String, String)> = Vec::new();
-    let mut grown: Vec<(Shared, Vec<(usize, Duration)>)> = Vec::new();
-    for shared in shapes {
-        let readings: Vec<(usize, Duration)> = [200, 400, 800]
-            .into_iter()
-            .map(|routes| (routes, previewing_shared(routes, shared)))
-            .collect();
-        recorded.extend(
-            readings.iter().map(|(routes, took)| {
-                (format!("{routes} routes, {shared:?}"), format!("{took:?}"))
-            }),
-        );
-        recorded.extend(readings.windows(2).map(|pair| {
-            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
-            (
-                format!("{} over {}, {shared:?}", pair[1].0, pair[0].0),
-                format!("{ratio:.2}"),
-            )
-        }));
-        grown.push((shared, readings));
-    }
-    norn_testkit::readings::record(
+    linear(
         "a repair's preview of routes sharing a stem, best of three",
-        &recorded
-            .iter()
-            .map(|(label, value)| (label.as_str(), value.clone()))
-            .collect::<Vec<_>>(),
+        &[
+            Shared::Stem,
+            Shared::DottedStem,
+            Shared::Extension,
+            Shared::TwoStemsInTurn,
+        ],
+        &[200, 400, 800],
+        2.5,
+        previewing_shared,
     );
-    for (shared, readings) in grown {
-        for pair in readings.windows(2) {
-            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
-            assert!(
-                ratio <= 2.5,
-                "{shared:?} grows faster than linear: {readings:?}"
-            );
-        }
-    }
+}
+
+/// **A repair of routes each naming a class of its own previews in time
+/// linear in its routes and the links they touch**: the plan's overlay
+/// names a key per route, kept for the whole judgment, and every route's
+/// links are judged a chunk at a time, so a judgment whose chunks each paid
+/// for every key the overlay names would grow with the square of the
+/// routes — whether the routes stay in the classes their links open, or
+/// carry their documents across the ambiguity-ignore set. 250, 500 and 1000
+/// routes of each shape, each doubling within 2.3 times.
+#[test]
+#[ignore = "soak-lane case: a clock of a repair's routes each naming a class of its own"]
+fn a_repair_of_routes_naming_classes_of_their_own_previews_in_time_linear_in_routes_and_links_touched()
+ {
+    linear(
+        "a repair's preview of routes each naming a class of its own, best of three",
+        &[Own::Stem, Own::IgnoredStem],
+        &[250, 500, 1000],
+        2.3,
+        previewing_own,
+    );
 }
 
 /// **A repair of many routes previews in time linear in its routes and the
