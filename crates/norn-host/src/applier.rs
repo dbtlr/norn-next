@@ -112,6 +112,7 @@ pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 use schema::Citations;
+pub(crate) use schema::{Held, Verdict, verdict};
 pub(crate) use stage::Links;
 use stage::Stop;
 

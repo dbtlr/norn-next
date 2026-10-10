@@ -185,6 +185,72 @@ pub(super) fn introduced(
         .collect()
 }
 
+/// What the write gate concludes of one document a plan composes: the
+/// violations the composed result introduces against what stood before it,
+/// and every rule finding the result holds.
+pub(crate) struct Verdict {
+    /// The violations `after` introduces against `before`, each of which
+    /// refuses an unforced plan ([`introduced`]); their rule-set identities
+    /// are this verdict's own numbering, which no response carries.
+    pub(crate) introduced: Vec<SchemaViolation>,
+    /// Every finding a schema rule or a field declaration concludes of the
+    /// result, in the judge's order.
+    pub(crate) holds: Vec<Held>,
+}
+
+/// One finding a schema rule or a field declaration concludes of a composed
+/// result, as a finding row names it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Held {
+    /// The kind it is filed under.
+    pub(crate) kind: FindingKind,
+    /// The field it stands on; `None` for one about where the document
+    /// stands.
+    pub(crate) field: Option<String>,
+    /// The offending value whole, spelled as the store keeps a field value,
+    /// whose head a finding row carries; `None` where it names none.
+    pub(crate) value: Option<String>,
+    /// The rules it cites, by name; empty where it cites none.
+    pub(crate) rules: BTreeSet<String>,
+}
+
+/// Judge `after`, the document composed at `after_path`, against `before`,
+/// the bytes at `before_path` it was composed from, under `declared`, its
+/// rules' path globs comparing letters as `case` says: exactly the judgment
+/// the applier's schema check runs on a target edited in place
+/// ([`judge`] and [`introduced`]), so a planner deciding what it may add to a
+/// plan reads the one judge the applier refuses by, and no second reading of
+/// the schema.
+///
+/// **A repair's composition reads it** (`crate::planner::repair`): each fix
+/// it adds to a document is judged here on the running composed bytes
+/// against the document's own before-state, and the findings the result
+/// holds say which of the selected findings still stand to be fixed.
+pub(crate) fn verdict(
+    before_path: &DocumentPath,
+    before: &[u8],
+    after_path: &DocumentPath,
+    after: &[u8],
+    declared: &Declared,
+    case: CaseFold,
+) -> Verdict {
+    let before = judge(before_path, before, declared, case);
+    let after = judge(after_path, after, declared, case);
+    let holds = after
+        .violations
+        .iter()
+        .filter(|violation| matches!(violation.identity, Identity::Rule(_)))
+        .map(|violation| Held {
+            kind: violation.kind,
+            field: violation.target.clone(),
+            value: violation.value.clone(),
+            rules: violation.rules.clone(),
+        })
+        .collect();
+    let introduced = introduced(after_path, after, &[before], &mut Citations::default());
+    Verdict { introduced, holds }
+}
+
 /// The rule sets one response's violations cite, each numbered once, from 1,
 /// in the order first cited.
 ///

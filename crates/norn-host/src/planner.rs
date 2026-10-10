@@ -166,8 +166,10 @@
 //!
 //! **A repair plans findings into operations first.** [`repair`] turns a
 //! batch of findings into the operations they call for, the findings each
-//! fixes and the findings it leaves alone; the operations then plan through
-//! the steps above like any authored plan, and the verb attaches the
+//! fixes and the findings it leaves alone, each fix judged on the document it
+//! composes by the applier's own schema check; the operations then plan
+//! through the steps above like any authored plan, over the same view the
+//! repair read its documents' bytes through, and the verb attaches the
 //! provenance to the plan they resolve to (`crate::apply`).
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every

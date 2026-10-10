@@ -148,9 +148,11 @@
 //! derivation on each composed result and refuses each violation whose
 //! identity ([`FindingIdentity`]) no document it was composed from held.
 //! Every creation — `new` by a creation rule, inbox capture and `new` at a
-//! bare path — takes the defaults fixpoint at planning. **A dormant carrier
-//! beyond that:** repair's declared fixes land at Layer 5B (NORN-351). A
-//! rule's
+//! bare path — takes the defaults fixpoint at planning, and repair fills a
+//! selected missing field from the defaults its contributing rules declare
+//! (`norn-host`'s `planner::repair::declared`). **A dormant carrier beyond
+//! that:** repair's other declared fixes — synonyms, forbidden fields' fixes
+//! and routes — land in later steps of Layer 5B (NORN-374). A rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
@@ -197,8 +199,10 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// Schema read's own checks read it, rule judgment reads it as a constraint
 /// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
 /// `norn-host` reads its accessors into the declaration `describe`'s rule
-/// facet reports. **A dormant carrier** beyond that: repair's declared fixes
-/// (NORN-351) read it as a constraint, and are not built.
+/// facet reports, and repair reads the defaults its required fields declare.
+/// **A dormant carrier** beyond that: repair's other declared fixes —
+/// synonyms, forbidden fields' fixes and routes — read it in later steps of
+/// Layer 5B (NORN-374), and are not built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -403,8 +407,9 @@ impl RuleDefault {
     /// no clock token; one reading the clock refuses it as
     /// [`FillError::NoClock`].
     ///
-    /// Read by the defaults fixpoint here. Repair's declared fix fills one
-    /// default the same way at Layer 5B (NORN-351), which is not built.
+    /// Read by the defaults fixpoint here, and by repair's declared fix,
+    /// which fills one selected field's default the same way
+    /// (`norn-host`'s `planner::repair::declared`).
     pub fn fill(
         &self,
         at: Option<LocalTimestamp>,
@@ -414,13 +419,14 @@ impl RuleDefault {
             .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
     }
 
-    /// Whether the default reads a path capture.
-    fn reads_captures(&self) -> bool {
+    /// Whether the default reads a path capture, so filling it needs its
+    /// rule's `match.path` bound uniquely in the document's path.
+    pub fn reads_captures(&self) -> bool {
         templates(&self.value).any(|template| template.path_captures().next().is_some())
     }
 
     /// Whether the default reads the clock, so filling it needs a reading.
-    fn reads_clock(&self) -> bool {
+    pub fn reads_clock(&self) -> bool {
         templates(&self.value).any(Template::reads_clock)
     }
 }
@@ -737,8 +743,8 @@ impl VaultSchema {
 
     /// The rule called `name`, if the schema declares one.
     ///
-    /// Its consumer is not built: repair (Layer 5B, NORN-351), which reads
-    /// back each rule a stored finding cites for the fixes it declares. Rule
+    /// Repair reads back by it each rule a finding cites for the defaults it
+    /// declares (`norn-host`'s `planner::repair::declared`). Rule
     /// judgment reads the rules selecting a document rather than one by name,
     /// `describe` reports every rule, in name order, and takes no rule name,
     /// and a `validate` naming a rule is checked against the declaration the

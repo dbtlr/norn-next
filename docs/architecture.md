@@ -2698,6 +2698,23 @@ rule — as whole documents in path order (the builder's repair batch), under on
 batch's findings into operations and resolves them on its snapshot as a preview does; the
 hold is then given back, and the resolved plan enters `Host::apply` as a resolved plan, so
 the applier judges and writes a repair as it does any plan and is not told it is one. A
+selected `field/required-missing` finding is fixed from the default the rules requiring the
+field declare: one `set_frontmatter`, numbered `repair-1`, `repair-2` and on in plan order and
+cited at the `declared` confidence with the finding it fixes, filled from the rule's own
+captures and the plan's one clock reading, an operation writing a clock-filled value noting
+that it is the repair's time. Candidates agree only as one written value, and a repair fills
+that one field and cascades no default. A document's fixes compose in finding order — kind,
+field, offending value — onto the bytes the planning's view reads once, the same reading its
+operations then resolve from, each judged against the document's before-state by the
+applier's own schema check, so a fix the applier would refuse is skipped and the next
+composes without it; a selected finding the composed document no longer holds is dropped,
+neither fixed nor skipped. Such a fix is skipped as `no_declared_fix` where no rule declares
+a default, `conflicting_defaults` with every candidate and its rule where they disagree,
+`ambiguous_capture` where a default reads a capture its rule's `match.path` binds several
+ways, `brings_in_required_fields` naming each field and its declared default where the fill
+brings in a rule requiring a field the document lacks, and `judge_would_refuse` with its
+candidates where it introduces any other violation. A finding the rules conflict over is
+`rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`; an ambiguous link
@@ -2845,6 +2862,11 @@ needs it — any creation by rule, whose target and templates may read it, and a
 reading `{{now}}`, `{{date}}` or `{{time}}` that is proposed for a field or compared with a
 filled value, even where the field then conflicts — and every template and default of the plan
 fills from that reading; a creation needing no reading never fails on an unreadable clock.
+A repair plan's rule defaults and the planning its operations resolve through share one
+reading, taken the first time a default it fills reads a clock token. Every reading goes
+through one counted seam, tallied as `clock_reads` on the account the planning thread works
+for: the read account for a preview's or a repair's planning hold, the job account for an
+apply's planning.
 The text is the rule's
 frontmatter defaults, each string scalar filled and every type and order kept, with the
 caller's typed fields laid over them — an overriding field keeping the default's place, a new

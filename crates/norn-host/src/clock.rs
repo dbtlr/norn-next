@@ -19,11 +19,13 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 /// zone whose offset is a day or more from UTC, which POSIX allows and
 /// RFC 3339 cannot write, reads as UTC here.
 ///
-/// **Read once per plan**, and only by a plan whose creations need it: the
-/// planner's expansion of each creation (`crate::planner::rule`) reads it the
-/// first time a creation by rule, or a rule default reading a clock token that
-/// is proposed for a field or compared with a filled value, asks, and fills
-/// every template and default of the plan from that one reading.
+/// **Read once per plan**, and only by a plan whose creations or repairs need
+/// it: the planner's expansion of each creation (`crate::planner::rule`) reads
+/// it the first time a creation by rule, or a rule default reading a clock
+/// token that is proposed for a field or compared with a filled value, asks,
+/// and a repair (`crate::planner::repair`) the first time a rule default it
+/// fills reads a clock token; every template and default of the plan fills
+/// from that one reading ([`OneReading`]).
 ///
 /// **The one seam the host reads the clock through, and counted**: each call
 /// is one reading, tallied on the account the planning thread works for
@@ -31,6 +33,35 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
     crate::evidence::count_clock_read();
     local_timestamp(Timestamp::now(), &TimeZone::system())
+}
+
+/// A plan's one clock reading: taken from `clock` the first time something
+/// asks, and answered from then on, so every part of one plan that reads the
+/// clock — a repair's rule defaults and the creations its planning expands —
+/// fills from the same instant, and a plan nothing of which asks takes none.
+pub(crate) struct OneReading<'c> {
+    clock: &'c dyn Fn() -> Result<LocalTimestamp, NotALocalTimestamp>,
+    read: std::cell::Cell<Option<Result<LocalTimestamp, NotALocalTimestamp>>>,
+}
+
+impl<'c> OneReading<'c> {
+    /// A reading not yet taken from `clock`.
+    pub(crate) fn of(clock: &'c dyn Fn() -> Result<LocalTimestamp, NotALocalTimestamp>) -> Self {
+        OneReading {
+            clock,
+            read: std::cell::Cell::new(None),
+        }
+    }
+
+    /// The reading, taken now where none is yet.
+    pub(crate) fn get(&self) -> Result<LocalTimestamp, NotALocalTimestamp> {
+        if let Some(read) = self.read.get() {
+            return read;
+        }
+        let read = (self.clock)();
+        self.read.set(Some(read));
+        read
+    }
 }
 
 /// `instant` as the local reading `zone` gives it, or as UTC gives it where
@@ -152,6 +183,26 @@ mod tests {
                 "{posix}"
             );
         }
+    }
+
+    /// **A plan's reading is taken once, the first time it is asked for, and
+    /// never where nothing asks.**
+    #[test]
+    fn a_plans_reading_is_taken_once_and_only_when_asked_for() {
+        let reads = std::cell::Cell::new(0);
+        let at = LocalTimestamp::new(2026, 10, 1, 9, 30, 15, 120).expect("a reading");
+        let clock = || {
+            reads.set(reads.get() + 1);
+            Ok(at)
+        };
+
+        let _ = OneReading::of(&clock);
+        assert_eq!(reads.get(), 0);
+
+        let reading = OneReading::of(&clock);
+        assert_eq!(reading.get(), Ok(at));
+        assert_eq!(reading.get(), Ok(at));
+        assert_eq!(reads.get(), 1);
     }
 
     /// **The system clock reads as the instant it is**: read in the system's

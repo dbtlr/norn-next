@@ -1,34 +1,39 @@
 //! **The `repair` verb, end to end**: `Host::repair` over a real vault and a
 //! real attachment.
 //!
-//! No finding has a fix yet, so what is pinned here is the verb's core: the
-//! findings a request selects are read in batches of whole documents in path
-//! order, every one is left alone for the reason it has, the plan that comes
-//! back is the resolved plan an apply would land (none of it), and the
-//! provenance it carries counts what remains, names where the next batch
-//! continues, and decides nothing an apply does.
+//! The verb's core is pinned over a schema declaring no fix: the findings a
+//! request selects are read in batches of whole documents in path order,
+//! every one is left alone for the reason it has, the plan that comes back is
+//! the resolved plan an apply would land (none of it), and the provenance it
+//! carries counts what remains, names where the next batch continues, and
+//! decides nothing an apply does. Declared fixes are pinned over schemas of
+//! their own: a missing required field filled from its rule default, and each
+//! reason such a fill is skipped for.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorDetail,
-    ErrorEnvelope, FieldChange, FindingKind, NewParams, PagedRows, PlanDocument, Predicate,
-    Provenance, ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason,
-    SkippedCandidates, Unsatisfied, ValidateParams, ValidateReport, VaultAddress, WriteTarget,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Citation, CitedFinding,
+    Confidence, Cursor, DocumentPath, ErrorDetail, ErrorEnvelope, FieldChange, FindingKind,
+    NewParams, Operation, OperationId, OperationKind, PagedRows, PlanDocument, Predicate,
+    Provenance, ReasonCode, RepairParams, RequiredField, RequiredFieldHead, ResolvedPlan,
+    SetParams, Severity, SkipReason, SkippedCandidates, SkippedFinding, Unsatisfied,
+    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
 
-/// The schema the cases pin: one rule, so a task missing its `status` or
-/// holding one outside its closed set is a finding that cites it.
-const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done]}\n";
+/// The schema the batch cases pin: one rule, so a task missing its `status`
+/// or holding one outside its closed set is a finding that cites it. It
+/// declares no default, so no finding here has a fix.
+const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n    one_of:\n      status: {values: [todo, done]}\n";
 
 /// Where every document the cases judge stands, so a path predicate leaves
 /// the profile's own documents out.
@@ -73,9 +78,19 @@ fn a_vault_holding(
     label: &str,
     documents: &[(&str, &[u8])],
 ) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(label, SCHEMA, documents)
+}
+
+/// A sandbox and a vault holding `documents`, each named beneath [`FOLDER`],
+/// under `schema`, attached.
+fn a_vault_under(
+    label: &str,
+    schema: &str,
+    documents: &[(&str, &[u8])],
+) -> (Sandbox, attach::Vault, attach::ServingHost) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
-    std::fs::write(vault.path().join(".norn/schema.yaml"), SCHEMA).expect("write the schema");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the schema");
     for (name, bytes) in documents {
         let at = vault.path().join(FOLDER).join(name);
         std::fs::create_dir_all(at.parent().expect("a parent folder")).expect("make the folder");
@@ -762,4 +777,466 @@ fn an_ambiguous_link_names_a_twin_added_since_the_last_repair() {
             3
         )
     );
+}
+
+/// The document beneath [`FOLDER`] at `name`, as a path.
+fn at(name: &str) -> DocumentPath {
+    DocumentPath::new(format!("{FOLDER}{name}")).expect("a document path")
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// `value`.
+fn setting(n: usize, name: &str, field: &str, value: &str) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        AuthoredValue::string(value),
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The id of the one finding of `kind` on `field` the validate of the
+/// repair's documents reports for the document at `name`.
+fn finding_of(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    name: &str,
+    kind: FindingKind,
+    field: &str,
+) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    let answered = host.validate(&request).expect("a validate answers");
+    let ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered a tally");
+    };
+    let ids: Vec<u64> = page
+        .rows
+        .iter()
+        .filter(|row| {
+            row.path == at(name) && row.kind == kind && row.target.as_deref() == Some(field)
+        })
+        .map(|row| row.id)
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!("one {kind:?} on `{field}` of {name}: {:?}", page.rows);
+    };
+    *id
+}
+
+/// The value candidates `values` name, each with the rule proposing it.
+fn candidates(values: &[(&str, &str)]) -> SkippedCandidates {
+    SkippedCandidates::values(
+        ValueCandidateHead::new(
+            values.iter().map(|(value, rule)| {
+                ValueCandidate::new(norn_store::value_head(value)).by_rule(*rule)
+            }),
+            values.len() as u64,
+        )
+        .expect("a head"),
+    )
+}
+
+/// One rule requiring a task's `status`, defaulting it to `todo`.
+const DEFAULTING: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n";
+
+/// **A missing required field fills from its rule default.** The preview's
+/// plan sets the default, cited at the declared level; its apply writes it,
+/// and the finding no longer stands.
+#[test]
+fn a_missing_required_field_fills_from_its_rule_default() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-default",
+        DEFAULTING,
+        &[("a.md", b"---\ntype: task\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let missing = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "status", "todo")]);
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![CitedFinding::new(missing, Confidence::Declared)]
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+
+    let ApplyReport::Applied { changeset, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(written, "---\ntype: task\nstatus: todo\n---\n# A\n");
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **Co-selecting rules whose defaults disagree skip the field as
+/// conflicting defaults with both candidates, while an unrelated fix on the
+/// same document applies**: `priority`, which one rule defaults, fills.
+#[test]
+fn disagreeing_defaults_skip_as_conflicting_defaults_while_an_unrelated_fix_applies() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n      priority: {default: normal}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: doing}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-conflicting-defaults",
+        schema,
+        &[("a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let status = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "priority", "normal")]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(status, SkipReason::ConflictingDefaults)
+                .with_candidates(candidates(&[("todo", "a-rule"), ("doing", "b-rule")]))
+        ]
+    );
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(written, "---\ntype: task\npriority: normal\n---\n");
+}
+
+/// **A default reading a capture its rule's `match.path` binds several ways
+/// skips as an ambiguous capture**: `<area>` binds `red` and `blue` in
+/// `red/blue/a.md`.
+#[test]
+fn a_default_reading_a_capture_bound_several_ways_skips_as_ambiguous_capture() {
+    let schema = "version: 1\nrules:\n  areas:\n    match: {path: 'zz-repair/**/<area>/**'}\n    required:\n      area: {default: '{{path.area}}'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-ambiguous-capture",
+        schema,
+        &[("red/blue/a.md", b"---\ntitle: A\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    // `zz-repair/*` names one level beneath the folder; the document stands
+    // two below it.
+    let plan = previewed(
+        host.repair(
+            RepairParams::new(address(&vault), ApplyMode::Preview)
+                .with_predicates([Predicate::path(format!("{FOLDER}**"))]),
+        ),
+    );
+
+    assert!(plan.operations.is_empty());
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(skipped.reason, SkipReason::AmbiguousCapture);
+    let note = skipped
+        .note
+        .as_deref()
+        .expect("the skip notes the bindings");
+    assert!(
+        note.contains("{area=red}") && note.contains("{area=blue}"),
+        "{note}"
+    );
+}
+
+/// **A default fill bringing a document under a forbidding rule skips as one
+/// the judge would refuse**, and nothing is written: `kind: special` brings
+/// in the rule forbidding the `scratch` the document holds.
+#[test]
+fn a_default_fill_bringing_a_document_under_a_forbidding_rule_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: task}}\n    required:\n      kind: {default: special}\n  specials:\n    match: {frontmatter: {kind: special}}\n    forbidden:\n      scratch:\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidding",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("special", "kinds")]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a refused fill wrote");
+}
+
+/// **Filling `kind` where `kind: task` brings in a rule requiring `status`
+/// skips as bringing in required fields, naming `status` and its declared
+/// default, and fills no `status`.**
+#[test]
+fn filling_kind_where_kind_task_brings_in_a_rule_requiring_status_skips_and_fills_no_status() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: work}}\n    required:\n      kind: {default: task}\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-brings-in",
+        schema,
+        &[("a.md", b"---\ntype: work\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let fields = RequiredFieldHead::new(
+        [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+        1,
+    )
+    .expect("a head");
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::BringsInRequiredFields)
+                .with_required_fields(fields)
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped fill wrote");
+}
+
+/// **Fixes compose in finding order and a fix the judge refuses skips while
+/// earlier ones stand**: `a_owner` fills, `kind` would bring in the rule
+/// forbidding `scratch` and skips, and `z_due` composes without it; the apply
+/// lands both fills.
+#[test]
+fn fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand() {
+    let schema = "version: 1\nrules:\n  base:\n    match: {frontmatter: {type: task}}\n    required:\n      a_owner: {default: me}\n      kind: {default: special}\n      z_due: {default: soon}\n  specials:\n    match: {frontmatter: {kind: special}}\n    forbidden:\n      scratch:\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-composition",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "a_owner", "me"),
+            setting(2, "a.md", "z_due", "soon")
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("special", "base")]))
+        ]
+    );
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(
+        written,
+        "---\ntype: task\nscratch: x\na_owner: me\nz_due: soon\n---\n"
+    );
+}
+
+/// One rule stamping each task it requires `created` of with the clock.
+const STAMPED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n";
+
+/// **Every default a repair plan fills comes from one clock reading**: five
+/// clock defaults across three documents read the host's clock once, read off
+/// its read account, in both modes, and write one instant, each noting it is
+/// the repair's time.
+#[test]
+fn every_default_a_repair_plan_fills_comes_from_one_clock_reading() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-one-clock-reading",
+        STAMPED,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\ncreated: then\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+    assert_eq!(plan.operations.len(), 5, "{:?}", plan.operations);
+    let created: BTreeSet<String> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::SetFrontmatter { field, value, .. } if field == "created" => {
+                Some(format!("{value:?}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "one instant: {created:?}");
+    for citation in &provenance(&plan).citations {
+        assert!(
+            citation.findings[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("the repair's time")),
+            "{citation:?}"
+        );
+    }
+
+    let account = host.read_evidence();
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+}
+
+/// **A repair plan filling no default that reads the clock reads it not at
+/// all.**
+#[test]
+fn a_repair_plan_filling_no_clock_default_reads_no_clock() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-no-clock-reading",
+        DEFAULTING,
+        &[("a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
+}
+
+/// **A `new` reads the clock through the same counted reading**: a creation
+/// whose rule default reads the clock takes one reading for its plan.
+#[test]
+fn a_new_reads_the_clock_once_through_the_counted_reading() {
+    let (_sandbox, vault, host) = a_vault_under("host-repair-new-clock-reading", STAMPED, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let account = host.read_evidence();
+    let report = planned(host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Preview,
+        at("fresh.md"),
+        "---\ntype: task\n---\n# Fresh\n",
+    )));
+
+    assert!(
+        matches!(report, ApplyReport::Previewed { .. }),
+        "{report:?}"
+    );
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+}
+
+/// **Findings the rules conflict over skip as a rules conflict**, in batch
+/// order: a field one rule requires and another forbids, and placement rules
+/// allowing no path in common.
+#[test]
+fn rules_conflict_findings_skip_as_rules_conflict() {
+    let schema = "version: 1\nrules:\n  needs:\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n    allowed_paths: {paths: ['zz-repair/x/**']}\n  bans:\n    match: {frontmatter: {priority: high}}\n    forbidden:\n      status:\n    allowed_paths: {paths: ['zz-repair/y/**']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-rules-conflict",
+        schema,
+        &[("a.md", b"---\ntype: task\npriority: high\nstatus: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let skipped: Vec<(FindingKind, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (by_id[&skipped.finding].1, skipped.reason))
+        .collect();
+    assert_eq!(
+        skipped,
+        [
+            (FindingKind::FieldRulesConflict, SkipReason::RulesConflict),
+            (
+                FindingKind::DocumentRulesConflict,
+                SkipReason::RulesConflict
+            ),
+        ],
+        "{by_id:?}"
+    );
+}
+
+/// **Operations are numbered `repair-1`, `repair-2` and on in plan order
+/// across documents, each cited at the declared level with the finding it
+/// fixes.**
+#[test]
+fn operations_are_numbered_repair_n_and_cited_at_declared_confidence() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-numbering",
+        DEFAULTING,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+    let b = finding_of(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "status", "todo"),
+            setting(2, "b.md", "status", "todo")
+        ]
+    );
+    let cited = |n: usize, id: u64| {
+        Citation::new(
+            OperationId::new(format!("repair-{n}")).expect("an id"),
+            vec![CitedFinding::new(id, Confidence::Declared)],
+        )
+    };
+    assert_eq!(provenance(&plan).citations, vec![cited(1, a), cited(2, b)]);
 }

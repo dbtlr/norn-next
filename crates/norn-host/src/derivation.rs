@@ -1087,8 +1087,10 @@ fn authored(value: &FrontmatterValue) -> AuthoredValue {
 
 /// An offending value spelled as the store keeps a field value: a scalar as
 /// its field row's raw text, a list or a map as its canonical JSON. A null has
-/// no spelling, and names no value.
-fn stored_spelling(value: &AuthoredValue) -> Option<String> {
+/// no spelling, and names no value. A repair heads the values it proposes by
+/// the same spelling (`crate::planner::repair`), so a candidate and a finding
+/// naming one value carry one head.
+pub(crate) fn stored_spelling(value: &AuthoredValue) -> Option<String> {
     match value {
         AuthoredValue::List(_) | AuthoredValue::Map(_) => {
             norn_store::canonical_json(&projected(value)).ok()

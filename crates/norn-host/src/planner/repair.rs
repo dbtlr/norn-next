@@ -1,30 +1,60 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **Today no finding has a fix, so every finding is skipped.** A finding of
-//! a document that does not read — a path derived state cannot hold (not
-//! UTF-8, or spelling no document path), a body that does not decode, or a
-//! frontmatter block nothing read — is skipped as
-//! [`SkipReason::Unreadable`]; an ambiguous link is skipped as
-//! [`SkipReason::AmbiguousLink`], with the candidates its row carries; every
-//! other finding is skipped as [`SkipReason::NoDeclaredFix`], with the
-//! value it judged where it carries one. Declared fixes (NORN-374) and derived
-//! fixes (NORN-375) add operations and citations here, and the skips that
-//! remain keep the batch's order.
+//! **A missing required field fills from its rule default; every other
+//! finding is skipped.** The declared fix of a selected `field/required-missing`
+//! finding is the default the rules requiring the field declare, filled and
+//! judged by [`declared`]: one `set_frontmatter` per fix, numbered `repair-1`,
+//! `repair-2` and on in plan order, each cited at
+//! [`Confidence::Declared`](norn_wire::Confidence::Declared) with the finding
+//! it fixes. A fix that cannot be made is skipped with its
+//! reason and its decision data — no default declared, defaults that
+//! disagree, a capture bound several ways, a fill that would bring in
+//! required fields, or one the write gate would refuse. A finding the rules
+//! conflict over (`field/rules-conflict`, `document/rules-conflict`) is
+//! skipped as [`SkipReason::RulesConflict`]. A finding of a document that does
+//! not read — a path derived state cannot hold (not UTF-8, or spelling no
+//! document path), a body that does not decode, or a frontmatter block nothing
+//! read — is skipped as [`SkipReason::Unreadable`]; an ambiguous link is
+//! skipped as [`SkipReason::AmbiguousLink`], with the candidates its row
+//! carries; every other finding is skipped as [`SkipReason::NoDeclaredFix`],
+//! with the value it judged where it carries one. Synonyms, forbidden fields'
+//! fixes and routes (NORN-374's later steps) and derived fixes (NORN-375) add
+//! operations here, beside the default.
 //!
-//! The function is pure: it reads the batch's rows and nothing else, so the
-//! host's `repair` handler (`crate::apply`) owns the hold, the resolution and
-//! the provenance around it.
+//! **A document is composed in finding order.** Its findings are taken in
+//! kind, field and offending value order, each fix composed onto the bytes the
+//! earlier ones left and judged against the document's own before-state by
+//! the applier's one judge ([`crate::applier::verdict`]); a fix the judge
+//! refuses is skipped and the next composes without it, so the plan stays
+//! applicable. A selected finding the composed document no longer holds is
+//! dropped: it is neither fixed nor skipped. The skipped findings keep the
+//! batch's order.
+//!
+//! **The planning is pure**: a function of the batch's rows, the pinned
+//! declaration, the case its globs compare under, the bytes each document
+//! with a fix to make held, read once through `read`, and the plan's one clock
+//! reading ([`OneReading`]), taken only where a default reads `{{now}}`,
+//! `{{date}}` or `{{time}}`. The host's `repair` handler (`crate::apply`) owns
+//! the hold, the view the bytes are read from, the resolution and the
+//! provenance around it.
+
+mod declared;
+
+use std::sync::Arc;
 
 use norn_wire::{
-    Citation, FindingKind, FindingRow, Operation, SkipReason, SkippedCandidates, SkippedFinding,
+    CaseFold, Citation, DocumentPath, FindingKind, FindingRow, Operation, SkipReason,
+    SkippedCandidates, SkippedFinding,
 };
+
+use crate::clock::OneReading;
+use crate::derivation::Declared;
 
 /// What a batch of findings plans to.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Planned {
-    /// The operations, in plan order. Their ids are minted when fixes add
-    /// operations (NORN-374).
+    /// The operations, in plan order, numbered `repair-1`, `repair-2` and on.
     pub(crate) operations: Vec<Operation>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
@@ -32,18 +62,67 @@ pub(crate) struct Planned {
     pub(crate) skipped: Vec<SkippedFinding>,
 }
 
-/// Plan the findings `rows`, a repair batch's, in the order it read them.
-pub(crate) fn plan(rows: &[FindingRow]) -> Planned {
-    Planned {
-        operations: Vec::new(),
-        citations: Vec::new(),
-        skipped: rows.iter().map(skipped).collect(),
-    }
+/// What a repair plans under: the declaration the applier judges its result
+/// by, how that declaration's path globs compare letters, and the plan's one
+/// clock reading.
+pub(crate) struct Repairing<'a> {
+    /// The declaration the entry's store pins.
+    pub(crate) declared: &'a Declared,
+    /// How the rules' path globs compare letters with a document's path, as
+    /// the root's recorded path order names it.
+    pub(crate) case: CaseFold,
+    /// The plan's one clock reading, shared with the planning its operations
+    /// resolve through.
+    pub(crate) clock: &'a OneReading<'a>,
 }
 
-/// The finding `row` left alone, for the reason no fix exists yet: it is
-/// about a document nothing read, it is an ambiguous link a repair does not
-/// choose between, or no rule declares a fix for it.
+/// What one read of a batch document's bytes found.
+pub(crate) enum Before {
+    /// The document, whole.
+    Held(Arc<[u8]>),
+    /// No document whose bytes can be read: the document was taken away, or
+    /// something that is no document stands there now.
+    Unread,
+}
+
+/// Plan the findings `rows`, a repair batch's, in the order it read them,
+/// under `repairing`, reading the bytes of each document a fix may be made
+/// to through `read`, once, and no other document's.
+pub(crate) fn plan<E>(
+    rows: &[FindingRow],
+    repairing: &Repairing<'_>,
+    read: &mut dyn FnMut(&DocumentPath) -> Result<Before, E>,
+) -> Result<Planned, E> {
+    let mut planned = Planned::default();
+    let mut decided: Vec<Option<SkippedFinding>> = Vec::with_capacity(rows.len());
+    // A batch never splits a document, and it reads in path order, so one
+    // document's findings stand together.
+    for document in rows.chunk_by(|left, right| left.path == right.path) {
+        if !document.iter().any(declared::has_fix) {
+            decided.extend(document.iter().map(|row| Some(skipped(row))));
+            continue;
+        }
+        match read(&document[0].path)? {
+            Before::Held(bytes) => {
+                decided.extend(declared::compose(document, &bytes, repairing, &mut planned));
+            }
+            Before::Unread => decided.extend(document.iter().map(|row| {
+                Some(if declared::has_fix(row) {
+                    SkippedFinding::new(row.id, SkipReason::Unreadable)
+                } else {
+                    skipped(row)
+                })
+            })),
+        }
+    }
+    planned.skipped = decided.into_iter().flatten().collect();
+    Ok(planned)
+}
+
+/// The finding `row` left alone, for the reason no fix is made from the row
+/// alone: it is about a document nothing read, it is an ambiguous link a
+/// repair does not choose between, its rules conflict, or no rule declares a
+/// fix for it.
 fn skipped(row: &FindingRow) -> SkippedFinding {
     if row.kind == FindingKind::Ambiguous {
         // A repair reads the finding at its own snapshot. Link health is
@@ -54,6 +133,11 @@ fn skipped(row: &FindingRow) -> SkippedFinding {
     }
     let reason = if leaves_document_unread(row.kind) {
         SkipReason::Unreadable
+    } else if matches!(
+        row.kind,
+        FindingKind::FieldRulesConflict | FindingKind::DocumentRulesConflict
+    ) {
+        SkipReason::RulesConflict
     } else {
         SkipReason::NoDeclaredFix
     };
@@ -109,6 +193,25 @@ mod tests {
         }
     }
 
+    /// `rows` planned under a declaration stating nothing, no document read:
+    /// none of the rows the cases here plan has a fix to make.
+    fn plan(rows: &[FindingRow]) -> Planned {
+        let declared = Declared::unpinned();
+        let clock = || panic!("a plan of no fix read the clock");
+        let reading = OneReading::of(&clock);
+        let repairing = Repairing {
+            declared: &declared,
+            case: CaseFold::Exact,
+            clock: &reading,
+        };
+        let read = &mut |path: &DocumentPath| -> Result<Before, std::convert::Infallible> {
+            panic!("`{path}` was read for a plan of no fix")
+        };
+        match super::plan(rows, &repairing, read) {
+            Ok(planned) => planned,
+        }
+    }
+
     fn twins(names: &[&str]) -> CandidateHead {
         let candidates = names.iter().map(|name| {
             Candidate::new(
@@ -119,8 +222,8 @@ mod tests {
         CandidateHead::new(candidates, names.len() as u64).expect("a head")
     }
 
-    /// **No fix exists yet, so a finding is skipped as one no rule declares a
-    /// fix for, with the value it judged.**
+    /// **A finding no rule declares a fix for is skipped as such, with the
+    /// value it judged.**
     #[test]
     fn a_finding_no_rule_declares_a_fix_for_is_skipped_with_its_value() {
         let rows = [row(7, FindingKind::UndeclaredTag, "a.md", Some("draft"))];
@@ -157,9 +260,20 @@ mod tests {
                 "{kind:?}"
             );
         }
+        // A missing required field may have a fix, which reads its document
+        // (`declared`), and a rules conflict is skipped as one.
         let readable: Vec<_> = FindingKind::ALL
             .into_iter()
-            .filter(|kind| !unreadable.contains(kind) && *kind != FindingKind::Ambiguous)
+            .filter(|kind| {
+                !unreadable.contains(kind)
+                    && !matches!(
+                        kind,
+                        FindingKind::Ambiguous
+                            | FindingKind::RequiredMissing
+                            | FindingKind::FieldRulesConflict
+                            | FindingKind::DocumentRulesConflict
+                    )
+            })
             .collect();
         for kind in readable {
             let planned = plan(&[row(1, kind, "a.md", None)]);
@@ -187,6 +301,29 @@ mod tests {
             .collect();
 
         assert_eq!(skipped, vec![9, 2, 5]);
+    }
+
+    /// **A finding the rules conflict over is skipped as a rules conflict,
+    /// with the value it judged where it names one**: the field's whole
+    /// value, and none for where the document stands.
+    #[test]
+    fn rules_conflict_findings_skip_as_rules_conflict() {
+        let rows = [
+            row(3, FindingKind::FieldRulesConflict, "a.md", Some("x")),
+            row(4, FindingKind::DocumentRulesConflict, "a.md", None),
+        ];
+
+        let planned = plan(&rows);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(3, SkipReason::RulesConflict)
+                    .with_value(ValueHead::of("x", content_hash(b"x"))),
+                SkippedFinding::new(4, SkipReason::RulesConflict),
+            ]
+        );
     }
 
     /// **An ambiguous link is skipped as ambiguous, naming the candidates its
