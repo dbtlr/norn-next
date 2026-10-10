@@ -289,7 +289,7 @@ pub(crate) fn standing(
 /// [`introduced`]), so a planner deciding what it may add to a plan reads the
 /// one judge the applier refuses by, and no second reading of the schema.
 ///
-/// **A violation is introduced where it stood in either state.** Against the
+/// **A violation is introduced unless it stood in both states.** Against the
 /// before-state, a result the applier would refuse is refused; against the
 /// composed state, an addition that brings back what an earlier addition
 /// took away is refused, so a finding an earlier fix dropped is never made
@@ -311,9 +311,10 @@ pub(crate) fn standing(
 /// byte for byte by its frontmatter block alone ([`judge_block`]), because
 /// every other finding a document's bytes conclude is a function of those
 /// bytes alone, the same at the place it leaves and the place it lands. A
-/// violation is introduced only where its identity stood in neither state,
-/// so a finding the bytes alone conclude stands in the before-state and at
-/// the destination alike and is never introduced by the move; only a rule's
+/// violation is introduced unless its identity stood in both states, so a
+/// finding the bytes alone conclude, standing in the before-state, stands in
+/// the composed state and at the destination alike and is never introduced by
+/// the move; only a rule's
 /// finding, which reads where the document stands, can be, and those are the
 /// findings the block judgment concludes.
 pub(crate) fn verdict(
