@@ -353,6 +353,15 @@ jobs:
         run: .github/scripts/lane-suite.sh norn-host settle --nocapture --test-threads=1
         env:
           NORN_SETTLE_PROFILE: soak
+      # The clock on a repair's routes: the preview of 400 and 800 routes,
+      # alone and with a hub linking every moved document, recorded as
+      # readings. The lane builds without optimisation, so it holds the
+      # readings to growing linearly with the routes and the links they
+      # touch; the absolute bars the routes were accepted on are a release
+      # build's, read by hand (`crates/norn-host/tests/repair_cost.rs`).
+      - name: Repair routes clock
+        if: ${{ !cancelled() }}
+        run: .github/scripts/lane-suite.sh norn-host repair_cost --nocapture --test-threads=1
       # The certification cases, one step per cargo target.
       #
       # Every step runs whatever happened before it. A case that failed is

@@ -10,12 +10,12 @@
 //! linking every moved document — in its body, or in a frontmatter list no
 //! rule reads by value — adds its links once, not once per route.
 //!
-//! This is a clock, so it is a scheduled-lane reading (ADR 0004), not a
-//! per-PR gate: run it with
-//! `cargo test --release -p norn-host --test repair_cost -- --ignored --nocapture`.
-//! It records each case's best of three previews, and in a release build holds
-//! them to the bars the routes were accepted on: 400 routes within 0.48 s,
-//! 400 routes and a hub within 1.28 s, and 800 within 2.5 times 400.
+//! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
+//! It records each case's best of three previews and holds 800 routes to
+//! within 2.5 times 400 in any build; in a release build — run it with
+//! `cargo test --release -p norn-host --test repair_cost -- --ignored --nocapture`
+//! — it holds them to the bars the routes were accepted on as well: 400
+//! routes within 0.48 s, and 400 routes and a hub within 1.28 s.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -144,7 +144,7 @@ fn previewing(routes: usize, hub: Hub) -> Duration {
 /// links they touch**: 400 routes, 400 routes with a hub linking every one
 /// from its body and from a frontmatter list, and the same at 800.
 #[test]
-#[ignore = "clock: a release-build reading of the routes' bars, run by hand or by the scheduled lane"]
+#[ignore = "soak-lane case: a clock of a repair's routes, its absolute bars read in a release build"]
 fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     let mut readings = Vec::new();
     for routes in [400, 800] {
@@ -175,8 +175,12 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
             .map(|(label, value)| (label.as_str(), value.clone()))
             .collect::<Vec<_>>(),
     );
-    // A debug build's clock says nothing of the bars, which are read in a
-    // release build only.
+    for hub in hubs {
+        let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
+        assert!(ratio <= 2.5, "{hub} grows faster than linear: {readings:?}");
+    }
+    // A debug build's clock says nothing of the absolute bars, which are
+    // read in a release build only.
     if cfg!(debug_assertions) {
         return;
     }
@@ -186,9 +190,5 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     );
     for hub in ["Body", "Frontmatter"] {
         assert!(at(400, hub) <= Duration::from_millis(1280), "{readings:?}");
-    }
-    for hub in hubs {
-        let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
-        assert!(ratio <= 2.5, "{hub} grows faster than linear: {readings:?}");
     }
 }
