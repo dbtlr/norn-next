@@ -7,8 +7,10 @@
 //! the resolved plan an apply would land (none of it), and the provenance it
 //! carries counts what remains, names where the next batch continues, and
 //! decides nothing an apply does. Declared fixes are pinned over schemas of
-//! their own: a missing required field filled from its rule default, and each
-//! reason such a fill is skipped for.
+//! their own: a missing required field filled from its rule default, a value
+//! outside a closed set replaced by its synonym's member (a list's elements
+//! one by one into one change), a forbidden field removed or renamed, and each
+//! reason such a fix is skipped for.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -1070,6 +1072,498 @@ fn fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlie
         written,
         "---\ntype: task\nscratch: x\na_owner: me\nz_due: soon\n---\n"
     );
+}
+
+/// The id of the one finding of `kind` on `field` the validate of the
+/// repair's documents reports for the document at `name`, offending with
+/// `value`.
+fn finding_valued(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    name: &str,
+    kind: FindingKind,
+    field: &str,
+    value: &str,
+) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    let answered = host.validate(&request).expect("a validate answers");
+    let ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered a tally");
+    };
+    let ids: Vec<u64> = page
+        .rows
+        .iter()
+        .filter(|row| {
+            row.path == at(name)
+                && row.kind == kind
+                && row.target.as_deref() == Some(field)
+                && row.value.as_ref().map(|head| head.text()) == Some(value)
+        })
+        .map(|row| row.id)
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!(
+            "one {kind:?} on `{field}` of {name} offending with `{value}`: {:?}",
+            page.rows
+        );
+    };
+    *id
+}
+
+/// What the document at `name` holds now.
+fn written(vault: &attach::Vault, name: &str) -> String {
+    std::fs::read_to_string(vault.path().join(FOLDER).join(name)).expect("read a document")
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// the list of strings `items`.
+fn setting_list(n: usize, name: &str, field: &str, items: &[&str]) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        AuthoredValue::List(
+            items
+                .iter()
+                .map(|item| AuthoredValue::string(*item))
+                .collect(),
+        ),
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The citation of `repair-<n>` fixing the findings `ids`, each at the
+/// declared level.
+fn citing(n: usize, ids: &[u64]) -> Citation {
+    Citation::new(
+        OperationId::new(format!("repair-{n}")).expect("an id"),
+        ids.iter()
+            .map(|id| CitedFinding::new(*id, Confidence::Declared))
+            .collect(),
+    )
+}
+
+/// The finding `id` as a citation carries it, with its offending `value`.
+fn cited_valued(id: u64, value: &str) -> CitedFinding {
+    CitedFinding::new(id, Confidence::Declared).with_value(norn_store::value_head(value))
+}
+
+/// A list-shaped `status`, closed over `todo` and `done`, with `complete`
+/// mapped to `done`.
+const LISTED: &str = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+
+/// **A list's element with a synonym is repaired and the element without one
+/// stands, still reported**: `status: [complete, bogus]` repairs to
+/// `[done, bogus]` in one operation, `bogus` is skipped as having no declared
+/// fix, and a validate afterwards reports it and nothing else; and
+/// `status: [todo, done]` has no finding at all.
+#[test]
+fn a_list_repairs_the_element_with_a_synonym_and_the_other_stands_reported() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-list-synonym",
+        LISTED,
+        &[
+            (
+                "a.md",
+                b"---\ntype: task\nstatus: [complete, bogus]\n---\n# A\n",
+            ),
+            ("b.md", b"---\ntype: task\nstatus: [todo, done]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+    assert!(
+        by_id.values().all(|(path, _)| path.ends_with("a.md")),
+        "`[todo, done]` stands under no finding: {by_id:?}"
+    );
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let bogus = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "bogus",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_list(1, "a.md", "status", &["done", "bogus"])]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(complete, "complete")]
+        )]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(bogus, SkipReason::NoDeclaredFix)
+                .with_value(norn_store::value_head("bogus"))
+        ]
+    );
+
+    let ApplyReport::Applied { changeset, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}a.md"), FindingKind::NotOneOf)],
+        "{after:?}"
+    );
+    // The finding is filed again with the re-derived document, under the value
+    // that stands.
+    finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "bogus",
+    );
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: [done, bogus]\n---\n# A\n"
+    );
+}
+
+/// **A repeated offending element is one finding whose fix rewrites every
+/// occurrence**: `[complete, todo, complete]` stands under one finding and
+/// repairs to `[done, todo, done]`.
+#[test]
+fn a_repeated_offending_element_is_one_finding_whose_fix_rewrites_every_occurrence() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-list-repeated",
+        LISTED,
+        &[(
+            "a.md",
+            b"---\ntype: task\nstatus: [complete, todo, complete]\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+    assert_eq!(
+        by_id.len(),
+        1,
+        "one finding for the repeated element: {by_id:?}"
+    );
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_list(1, "a.md", "status", &["done", "todo", "done"])]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(complete, "complete")]
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert!(standing(&host, &vault, |request| request).is_empty());
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: [done, todo, done]\n---\n"
+    );
+}
+
+/// **Co-selecting rules mapping one value to different members skip as a tie
+/// with both candidates and their rules.**
+#[test]
+fn co_selecting_rules_mapping_a_value_to_different_members_skip_as_a_tie() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: todo}}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-tie",
+        schema,
+        &[("a.md", b"---\ntype: task\nstatus: complete\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(complete, SkipReason::Tie)
+                .with_candidates(candidates(&[("done", "a-rule"), ("todo", "b-rule")]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a tie wrote");
+}
+
+/// **A synonym the judge refuses skips as one it would refuse, while an
+/// earlier fix on the document stands**: `done` is outside the closed set
+/// `strict` narrows `status` to, and `a_priority` repairs.
+#[test]
+fn a_synonym_the_judge_refuses_skips_while_an_earlier_fix_stands() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      a_priority: {values: [low, high], synonyms: {hi: high}}\n      status: {values: [todo, done], synonyms: {complete: done}}\n  strict:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-refused",
+        schema,
+        &[(
+            "a.md",
+            b"---\ntype: task\na_priority: hi\nstatus: complete\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "a_priority", "high")]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(complete, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("done", "tasks")]))
+        ]
+    );
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\na_priority: high\nstatus: complete\n---\n"
+    );
+}
+
+/// **A synonym that brings a document under a rule requiring `status` skips
+/// as bringing in required fields, naming `status` and its default**: mapping
+/// `kind` to `task` selects the rule requiring it.
+#[test]
+fn a_synonym_that_brings_in_a_rule_requiring_status_skips_as_brings_in_required_fields() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: work}}\n    one_of:\n      kind: {values: [task, note], synonyms: {todo: task}}\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-brings-in",
+        schema,
+        &[("a.md", b"---\ntype: work\nkind: todo\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let todo = finding_valued(&host, &vault, "a.md", FindingKind::NotOneOf, "kind", "todo");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let fields = RequiredFieldHead::new(
+        [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+        1,
+    )
+    .expect("a head");
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(todo, SkipReason::BringsInRequiredFields)
+                .with_required_fields(fields)
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped synonym wrote");
+}
+
+/// One rule fixing three forbidden fields: `scratch` is removed, `due_date`
+/// renamed to `due`, and `legacy` has no fix.
+const BANNED: &str = "version: 1\nrules:\n  bans:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: remove\n      due_date: {rename_to: due}\n      legacy:\n";
+
+/// **A forbidden field a rule removes is removed.**
+#[test]
+fn a_forbidden_field_a_rule_removes_is_removed() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-remove",
+        BANNED,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scratch = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "scratch");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "scratch"
+            ))
+            .with_id(OperationId::new("repair-1").expect("an id"))
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(scratch, "x")]
+        )]
+    );
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A forbidden field a rule renames is set under the new name and removed
+/// under the old, the removal requiring the set, both cited for the
+/// finding.**
+#[test]
+fn a_forbidden_field_a_rule_renames_is_set_under_the_new_name_and_removed() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-rename",
+        BANNED,
+        &[("a.md", b"---\ntype: task\ndue_date: soon\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let due_date = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "due_date");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let first = OperationId::new("repair-1").expect("an id");
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "due", "soon"),
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "due_date"
+            ))
+            .with_id(OperationId::new("repair-2").expect("an id"))
+            .with_requires(vec![first])
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![citing(1, &[due_date]), citing(2, &[due_date])]
+            .into_iter()
+            .map(|citation| Citation::new(citation.operation, vec![cited_valued(due_date, "soon")]))
+            .collect::<Vec<_>>()
+    );
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\ndue: soon\n---\n# A\n"
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A rename onto a field the document already holds is skipped as one onto
+/// an occupied field, and writes nothing.**
+#[test]
+fn a_rename_onto_an_occupied_field_is_skipped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-occupied",
+        BANNED,
+        &[(
+            "a.md",
+            b"---\ntype: task\ndue_date: soon\ndue: later\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let due_date = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "due_date");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(skipped.finding, due_date);
+    assert_eq!(skipped.reason, SkipReason::RenameOntoOccupiedField);
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped rename wrote");
+}
+
+/// **Rules that remove and rename one forbidden field skip it as a tie with
+/// each candidate and its rule.**
+#[test]
+fn rules_that_remove_and_rename_a_forbidden_field_skip_it_as_a_tie() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: remove\n  b-rule:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: {rename_to: notes}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-tie",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scratch = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "scratch");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(scratch, SkipReason::Tie).with_candidates(candidates(&[
+                ("remove", "a-rule"),
+                ("rename_to: notes", "b-rule")
+            ]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a tie wrote");
 }
 
 /// One rule stamping each task it requires `created` of with the clock.
