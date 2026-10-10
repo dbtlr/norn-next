@@ -1605,6 +1605,65 @@ mod tests {
         );
     }
 
+    /// **A check the applier makes after reading the links answers the
+    /// applier's own refusal too**: the plan claims a finding stands where its
+    /// document lands that no longer holds there, but it also carries an
+    /// address resolution its after-state does not keep, so the applier
+    /// stops it for the failed condition before its schema judgment could be
+    /// held to the claims — never a repair defect.
+    #[test]
+    fn a_failed_address_condition_answers_the_appliers_own_refusal_though_the_plan_breaks_its_claims()
+     {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-condition",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+        repaired
+            .plan
+            .conditions
+            .push(norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    DocumentPath::new("tasks/a.md").unwrap(),
+                    norn_wire::LinkFamily::Wikilink,
+                    "nowhere",
+                ),
+                norn_wire::Resolves::one(DocumentPath::new("nowhere.md").unwrap()),
+            ));
+
+        let answered = guarding(repaired, &ground, &snapshot).expect("no repair defect");
+
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the failed condition answered {answered:?}");
+        };
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+        assert!(
+            !refusal.message().contains("repair defect"),
+            "{}",
+            refusal.message()
+        );
+        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+            panic!("refused with {:?}", refusal.detail());
+        };
+        assert!(
+            checks
+                .iter()
+                .any(|check| matches!(check, norn_wire::RefusedCheck::ConditionFailed { .. })),
+            "{checks:?}"
+        );
+    }
+
     /// The claims of `repaired`, one more added: `finding` 99, `field` of
     /// the document `bytes` spell judged at `judged_at`, claimed at `at` as
     /// `standing`, and cited by the plan's first operation where `cited`.
