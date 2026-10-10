@@ -725,7 +725,11 @@ where
     /// it judges any, and the provenance it carries decides nothing there.
     ///
     /// A request a read would refuse is refused as the read refuses it,
-    /// including a cursor no repair minted.
+    /// including a cursor no repair minted. A selection holding parts the
+    /// builder could not apply as asked, such as a predicate on a key the
+    /// vault does not hold, is refused as `request/unsatisfied` naming every
+    /// part, in both modes: a read answers such a part in-band and matches
+    /// nothing, and a write goes no further than that nothing.
     pub fn repair(&self, params: RepairParams) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
         let plan = self.repair_plan(&params)?;
@@ -753,12 +757,20 @@ where
             .snapshot()
             .repair_batch(&RepairSelection::from(params), hold.content_model())
             .map_err(|refusal| refused(page_refusal(refusal)))?;
+        // A read answers an unsatisfied part in-band and matches nothing; a
+        // write goes no further than that nothing (`planner::expand`), so the
+        // repair is refused, naming every part, before anything is planned.
+        if !batch.unsatisfied.is_empty() {
+            return Err(ErrorEnvelope::new(
+                "the repair's selection holds parts that could not be applied as asked, so \
+                 nothing was planned",
+                ErrorDetail::unsatisfied(batch.unsatisfied),
+            ));
+        }
         // The batch's `moved` is not carried: a repair cursor names a path and
         // the batch reads the state that stands now, so nothing in it is the
         // caller's to act on. Its advisories are dropped as a `where` target's
-        // are (`PlanSnapshot::matching` reads only the find's rows). Its
-        // `unsatisfied` parts name a selection that matched nothing as asked;
-        // refusing them waits on an error detail that can carry them.
+        // are (`PlanSnapshot::matching` reads only the find's rows).
         let planned = repair::plan(&batch.rows);
         let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
         let resolution = resolve_on(authored, ground, name, &snapshot).map_err(refused);

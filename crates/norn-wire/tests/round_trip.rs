@@ -166,6 +166,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::RequestPartNotTaken,
         ReasonCode::RequestCursorNotTaken,
         ReasonCode::RequestPlanInvalid,
+        ReasonCode::RequestUnsatisfied,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -284,6 +285,8 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::part_not_taken(RequestPart::Limit, Some(AnswerShape::Record)),
         ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary)),
         ErrorDetail::part_not_taken(RequestPart::unknown("a sort key"), None),
+        ErrorDetail::unsatisfied(unsatisfied_parts()),
+        ErrorDetail::unsatisfied(vec![Unsatisfied::unknown_predicate_key("stauts", vec![])]),
         ErrorDetail::cursor_not_taken(PagedRows::Tally, PagedRows::Document),
         ErrorDetail::cursor_not_taken(PagedRows::Document, PagedRows::Tally),
         ErrorDetail::cursor_not_taken(PagedRows::Hit, PagedRows::Finding),
@@ -1957,6 +1960,17 @@ fn a_request_refusal_crosses_as_the_shape_facts_it_names() {
         concat!(
             r#"{"code":"request/cursor-not-taken","#,
             r#""cursor":{"row":"collection","of":"findings"},"paged":{"row":"document_finding"}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::unsatisfied(vec![
+            Unsatisfied::unknown_predicate_key("stauts", vec!["status".to_string()]),
+            Unsatisfied::bare_directory("docs"),
+        ])),
+        concat!(
+            r#"{"code":"request/unsatisfied","parts":["#,
+            r#"{"part":"unknown_predicate_key","key":"stauts","did_you_mean":["status"]},"#,
+            r#"{"part":"bare_directory","path":"docs"}]}"#
         )
     );
 }

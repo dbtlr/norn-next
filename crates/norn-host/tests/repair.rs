@@ -17,10 +17,10 @@ use std::path::Path;
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorEnvelope,
-    FieldChange, FindingKind, PagedRows, PlanDocument, Predicate, Provenance, ReasonCode,
-    RepairParams, ResolvedPlan, SetParams, Severity, SkipReason, ValidateParams, ValidateReport,
-    VaultAddress, WriteTarget,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorDetail,
+    ErrorEnvelope, FieldChange, FindingKind, PagedRows, PlanDocument, Predicate, Provenance,
+    ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason, Unsatisfied,
+    ValidateParams, ValidateReport, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -491,4 +491,40 @@ fn a_plan_applies_the_same_whatever_its_provenance_says() {
         other => panic!("an apply answered {other:?}"),
     };
     assert_eq!(without_provenance(unaltered), without_provenance(altered));
+}
+
+/// **A selection the builder cannot apply as asked is refused, in both modes,
+/// naming the part.** A read answers a predicate on a key the vault does not
+/// hold in-band and matches nothing; a repair goes no further than that
+/// nothing, so it is refused as `request/unsatisfied` with every such part,
+/// and nothing is written.
+#[test]
+fn a_selection_naming_a_key_the_vault_does_not_hold_is_refused_in_both_modes() {
+    let (_sandbox, vault, host) = a_vault("host-repair-unsatisfied");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = tree_bytes(vault.path());
+
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        let refusal = refused(host.repair(
+            RepairParams::new(address(&vault), mode).with_predicates([
+                Predicate::path(format!("{FOLDER}*")),
+                Predicate::equal_to("stauts", "open"),
+                Predicate::equal_to("prioritee", "high"),
+            ]),
+        ));
+
+        assert_eq!(refusal.code(), &ReasonCode::RequestUnsatisfied, "{mode:?}");
+        let ErrorDetail::Unsatisfied { parts, .. } = refusal.detail() else {
+            panic!("{mode:?} refused with {:?}", refusal.detail());
+        };
+        let keys: Vec<&str> = parts
+            .iter()
+            .map(|part| match part {
+                Unsatisfied::UnknownPredicateKey { key, .. } => key.as_str(),
+                other => panic!("{mode:?} named another part: {other:?}"),
+            })
+            .collect();
+        assert_eq!(keys, ["stauts", "prioritee"], "{mode:?}");
+        assert_eq!(tree_bytes(vault.path()), before, "{mode:?} wrote");
+    }
 }

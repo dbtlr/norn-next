@@ -75,6 +75,7 @@ use crate::plan::outcome::{
     InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
 };
 use crate::plan::root::RootIdentity;
+use crate::product::Unsatisfied;
 use crate::read::validate::RuleSet;
 use crate::reading::Rung;
 use crate::reload::{ControlFile, ReloadFailure};
@@ -490,6 +491,15 @@ pub enum ReasonCode {
     /// its operations again, never to wait for the vault.
     #[serde(rename = "request/plan-invalid")]
     RequestPlanInvalid,
+    /// `request/unsatisfied` — the request's selection holds parts the
+    /// builder could not apply as asked: a key the vault's field universe does
+    /// not hold, a path part that is a bare directory or a glob that does not
+    /// parse, and the like. A read answers such a part in-band and matches
+    /// nothing; a write goes no further than that nothing, so it is refused
+    /// and nothing was written. The detail is every such part, as the read
+    /// would report it.
+    #[serde(rename = "request/unsatisfied")]
+    RequestUnsatisfied,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
     /// asked for. The detail is the rung, and what to do about it.
     #[serde(rename = "engine/not-enabled")]
@@ -930,6 +940,15 @@ pub enum ErrorDetail {
         /// The fault.
         fault: PlanFault,
     },
+    /// The detail of `request/unsatisfied`: every part of the request's
+    /// selection the builder could not apply as asked, in the order the
+    /// request names them.
+    #[serde(rename = "request/unsatisfied")]
+    #[non_exhaustive]
+    Unsatisfied {
+        /// The parts, each as a read reports it in-band.
+        parts: Vec<Unsatisfied>,
+    },
     /// The detail of `engine/not-enabled`: which rung, and what enables it.
     #[serde(rename = "engine/not-enabled")]
     #[non_exhaustive]
@@ -1196,6 +1215,12 @@ impl ErrorDetail {
         ErrorDetail::PlanInvalid { fault }
     }
 
+    /// The detail of `request/unsatisfied`, for the `parts` of the selection
+    /// the builder could not apply as asked.
+    pub const fn unsatisfied(parts: Vec<Unsatisfied>) -> Self {
+        ErrorDetail::Unsatisfied { parts }
+    }
+
     /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
     pub fn engine_not_enabled(rung: Rung, detail: impl Into<String>) -> Self {
         ErrorDetail::EngineNotEnabled {
@@ -1254,6 +1279,7 @@ impl ErrorDetail {
             ErrorDetail::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
             ErrorDetail::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
             ErrorDetail::PlanInvalid { .. } => ReasonCode::RequestPlanInvalid,
+            ErrorDetail::Unsatisfied { .. } => ReasonCode::RequestUnsatisfied,
             ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
             ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
             ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
@@ -1435,6 +1461,7 @@ mod tests {
             ReasonCode::RequestPartNotTaken => "request/part-not-taken",
             ReasonCode::RequestCursorNotTaken => "request/cursor-not-taken",
             ReasonCode::RequestPlanInvalid => "request/plan-invalid",
+            ReasonCode::RequestUnsatisfied => "request/unsatisfied",
             ReasonCode::EngineNotEnabled => "engine/not-enabled",
             ReasonCode::EngineUnavailable => "engine/unavailable",
             ReasonCode::EngineFailed => "engine/failed",
@@ -1541,6 +1568,12 @@ mod tests {
             }
             ReasonCode::RequestPlanInvalid => {
                 ErrorDetail::plan_invalid(PlanFault::content_cycle(vec![0, 1]))
+            }
+            ReasonCode::RequestUnsatisfied => {
+                ErrorDetail::unsatisfied(vec![Unsatisfied::unknown_predicate_key(
+                    "stauts",
+                    vec!["status".to_string()],
+                )])
             }
             ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
                 Rung::Vector,

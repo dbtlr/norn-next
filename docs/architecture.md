@@ -2712,7 +2712,11 @@ a validate's summary reads — the selection's tally less the findings the batch
 it is counted into the batch's work and explained with its plans, costs the findings the
 selection admits, and describes the batch's own snapshot; a continuation carries none and
 runs no such statement. A cursor that is no repair's is refused as a
-validate refuses a foreign cursor: `request/cursor-not-taken`. The cursor names a document
+validate refuses a foreign cursor: `request/cursor-not-taken`. A selection holding parts
+the builder cannot apply as asked, such as a predicate on a key the vault does not hold, is
+refused in both modes as `request/unsatisfied`, naming every part as a read reports it
+in-band, before anything is planned: a read answers such a part and matches nothing, and a
+write goes no further than that nothing. The cursor names a document
 path and no finding, so it survives the findings behind it being derived again, and the
 continuation reads only the documents after that path. Provenance is a record, never
 checked when the plan is applied: a plan applies the same whatever its block says, and the
