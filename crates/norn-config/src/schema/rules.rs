@@ -530,6 +530,13 @@ impl Route {
     /// route reading no clock token; one reading the clock refuses it as
     /// [`FillError::NoClock`].
     ///
+    /// **Each value is judged as a creation rule's target judges one**: a
+    /// value empty after its filter, holding `/`, `\` or `:`, or that is `.`
+    /// or `..`, is refused as [`FillError::UnsafeValue`], so a capture
+    /// spelled with a `:`, which a document path admits, never writes one
+    /// into a route, whose own text holds none. The caller judges the whole
+    /// filled path as a document path too.
+    ///
     /// Read by repair's declared fix, which fills a misplaced document's
     /// destination as it fills a rule default ([`RuleDefault::fill`];
     /// `norn-host`'s `planner::repair::declared`).
@@ -538,8 +545,10 @@ impl Route {
         at: Option<LocalTimestamp>,
         captures: Captures,
     ) -> Result<String, FillError> {
-        self.template
-            .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
+        super::creation::fill_path(
+            self.template.parts(),
+            &TemplateValues::reading(BTreeMap::new(), at).with_captures(captures),
+        )
     }
 
     /// Whether the route reads a path capture, so filling it needs its

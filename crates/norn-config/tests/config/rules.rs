@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 
 use norn_config::schema::{
-    CaseFold, CreationProblem, ElementProblem, FieldType, ForbiddenFix, GlobProblem,
-    PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, VaultSchema,
-    VaultSchemaError,
+    CaseFold, CreationProblem, ElementProblem, FieldType, FillError, ForbiddenFix, GlobProblem,
+    PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, UnsafeValue,
+    VaultSchema, VaultSchemaError,
 };
-use norn_wire::{AuthoredValue, PathProblem, Severity, ValueMap};
+use norn_wire::{AuthoredValue, Binding, PathProblem, Severity, ValueMap};
 
 /// A schema holding one rule of every key the grammar has.
 const TASK: &[u8] = b"version: 1
@@ -862,6 +862,54 @@ fn a_route_reading_one_capture_twice_is_judged_as_two_independent_fills() {
         b"version: 1\nrules:\n  r:\n    match: { path: '<p>/**' }\n    allowed_paths: { paths: ['red/blue/*.md'], route: '{{path.p}}/{{path.p}}/' }\n",
     )
     .expect("a route some independent filling of its tokens admits");
+}
+
+/// **A route fills each value as a creation rule's target does**: a capture
+/// holding `:`, which a document path admits and a route's own text never
+/// holds, is refused as an unsafe value rather than written into the folder,
+/// and so is one slugging to nothing; a plain capture fills.
+#[test]
+fn a_route_refuses_a_capture_that_would_break_its_folder() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nrules:\n  r:\n    match: { path: '<area>/**' }\n    allowed_paths: { paths: ['*/tasks/**'], route: '{{path.area|slug}}/tasks/' }\n  s:\n    match: { path: '<area>/**' }\n    allowed_paths: { paths: ['*/tasks/**'], route: '{{path.area}}/tasks/' }\n",
+    )
+    .expect("a schema");
+    let filled = |name: &str, path: &str| {
+        let rule = schema.rule(name).expect("the rule");
+        let route = rule
+            .allowed_paths()
+            .and_then(|allowed| allowed.route())
+            .expect("a route");
+        let glob = rule.selector().path().expect("a match path");
+        let Binding::Unique(captures) = glob.bind(path, CaseFold::Exact) else {
+            panic!("`{path}` binds once");
+        };
+        route.fill(None, captures)
+    };
+
+    assert_eq!(filled("s", "work/a.md"), Ok("work/tasks/".to_string()));
+    assert!(
+        matches!(
+            filled("s", "a:b/a.md"),
+            Err(FillError::UnsafeValue {
+                problem: UnsafeValue::Colon,
+                ..
+            })
+        ),
+        "{:?}",
+        filled("s", "a:b/a.md")
+    );
+    assert!(
+        matches!(
+            filled("r", "!!!/a.md"),
+            Err(FillError::UnsafeValue {
+                problem: UnsafeValue::Empty,
+                ..
+            })
+        ),
+        "{:?}",
+        filled("r", "!!!/a.md")
+    );
 }
 
 /// **A route's judgment is weighed before it is walked.** A long route

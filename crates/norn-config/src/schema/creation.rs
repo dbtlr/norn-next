@@ -293,7 +293,8 @@ impl SeqSlot {
     }
 }
 
-/// `parts` of a target filled under `values`, each token's value judged.
+/// `parts` of a target or a route filled under `values`, each token's value
+/// judged.
 ///
 /// A value is refused where it is empty after its filter, holds `/`, `\` or
 /// `:`, or is `.` or `..`, so a value names no folder the target does not and
@@ -304,7 +305,7 @@ impl SeqSlot {
 /// what makes a path outside the vault, or one the store cannot hold,
 /// unfillable by construction, and the value rules are what name the token at
 /// fault in the common case.
-fn fill_path(parts: &[Part], values: &TemplateValues) -> Result<String, FillError> {
+pub(super) fn fill_path(parts: &[Part], values: &TemplateValues) -> Result<String, FillError> {
     parts.iter().try_fold(String::new(), |mut path, part| {
         match part {
             Part::Literal(literal) => path.push_str(literal),
