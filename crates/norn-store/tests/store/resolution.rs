@@ -767,8 +767,9 @@ fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
 /// never once per link**: a plan moving every `t.v.md` and every `t.md` of
 /// `a/NNNN/` to `b/NNNN/` gives `[[t.v]]` both of its reductions' targets,
 /// and `[[t.md]]` the stem's, so each holder's link could name a moved
-/// document under two keys; ten times the holders read no more places, and
-/// every link still names each moved document its keys could name.
+/// document under two keys; ten times the holders read no more places, every
+/// link holding a key shares that key's one list, and every link still names
+/// each moved document its keys could name.
 #[test]
 fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_them() {
     const MOVED: usize = 40;
@@ -803,8 +804,14 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
         });
         let snapshot = vault.snapshot();
         let mut named: BTreeMap<String, BTreeSet<Vec<String>>> = BTreeMap::new();
+        let mut lists: Vec<std::sync::Arc<[norn_store::DocumentPath]>> = Vec::new();
         let work = snapshot
             .resolution_changes(&plan, &[], &declared(), |change| {
+                for list in change.before_targets.lists() {
+                    if !lists.iter().any(|seen| std::sync::Arc::ptr_eq(seen, list)) {
+                        lists.push(std::sync::Arc::clone(list));
+                    }
+                }
                 let mut places: Vec<String> = change
                     .before_targets
                     .iter()
@@ -832,6 +839,11 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
                 ("t.v".to_string(), BTreeSet::from([stems])),
             ]),
             "each link names every moved document its keys could name"
+        );
+        assert_eq!(
+            lists.len(),
+            2,
+            "one shared list per key that could name a moved document, however many links"
         );
         work.targets_read
     };
