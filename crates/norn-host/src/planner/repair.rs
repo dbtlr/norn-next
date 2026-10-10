@@ -35,9 +35,12 @@
 //! declaration, the case its globs compare under, the bytes each document
 //! with a fix to make held, read once through `read`, and the plan's one clock
 //! reading ([`OneReading`]), taken only where a default reads `{{now}}`,
-//! `{{date}}` or `{{time}}`. The host's `repair` handler (`crate::apply`) owns
-//! the hold, the view the bytes are read from, the resolution and the
-//! provenance around it.
+//! `{{date}}` or `{{time}}`. **A clock that gives no reading refuses the
+//! repair as it refuses a creation**: the operation of each default that
+//! reads the clock is left in [`Planned::unresolved`], and the host's handler
+//! answers `vault/plan-refused` in both modes. The host's `repair` handler
+//! (`crate::apply`) owns the hold, the view the bytes are read from, the
+//! resolution and the provenance around it.
 
 mod declared;
 
@@ -45,7 +48,7 @@ use std::sync::Arc;
 
 use norn_wire::{
     CaseFold, Citation, DocumentPath, FindingKind, FindingRow, Operation, SkipReason,
-    SkippedCandidates, SkippedFinding,
+    SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
 use crate::clock::OneReading;
@@ -60,6 +63,10 @@ pub(crate) struct Planned {
     pub(crate) citations: Vec<Citation>,
     /// The findings left alone, in batch order.
     pub(crate) skipped: Vec<SkippedFinding>,
+    /// The operations a fix would have been that cannot be resolved because
+    /// the clock gives no reading, numbered in the operations' sequence. The
+    /// repair is refused where there is any, as a creation is.
+    pub(crate) unresolved: Vec<UnresolvedOperation>,
 }
 
 /// What a repair plans under: the declaration the applier judges its result

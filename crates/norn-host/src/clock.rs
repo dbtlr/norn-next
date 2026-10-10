@@ -35,6 +35,15 @@ pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
     local_timestamp(Timestamp::now(), &TimeZone::system())
 }
 
+/// The refusal in words of a plan that needs a local time from a clock that
+/// gives none: `named` is what could not be filled, as the refusal names it.
+/// The one wording a creation and a repair refuse an unreadable clock in.
+pub(crate) fn cannot_fill(named: &str) -> String {
+    format!(
+        "the host's clock cannot be read as a local time {named} can fill: {NotALocalTimestamp}"
+    )
+}
+
 /// A plan's one clock reading: taken from `clock` the first time something
 /// asks, and answered from then on, so every part of one plan that reads the
 /// clock — a repair's rule defaults and the creations its planning expands —

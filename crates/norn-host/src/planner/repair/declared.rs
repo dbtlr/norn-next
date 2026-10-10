@@ -24,7 +24,10 @@
 //! [`SkipReason::BringsInRequiredFields`], naming each such field and the
 //! default its rules declare, whatever else it introduces; and a fill that
 //! introduces any other violation, or that cannot be set into the document,
-//! is [`SkipReason::JudgeWouldRefuse`], with its candidates.
+//! is [`SkipReason::JudgeWouldRefuse`], with its candidates. **A default
+//! reading a clock that gives no reading is no skip**: the repair is refused
+//! as a creation is, the default's operation left unresolved
+//! ([`Planned::unresolved`]).
 //!
 //! **Composition.** A document's findings are taken in finding order — kind,
 //! field, offending value — and each fix is set into the bytes the earlier
@@ -47,7 +50,8 @@ use norn_wire::{
     AuthoredValue, Binding, Captures, Citation, CitedFinding, Confidence, DocumentPath,
     FindingKind, FindingRow, Operation, OperationId, OperationKind, RequiredField,
     RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding,
-    ValueCandidate, ValueCandidateHead, ValueHead, WriteTarget,
+    UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead,
+    WriteTarget,
 };
 
 use super::{Planned, Repairing};
@@ -92,6 +96,7 @@ pub(super) fn compose(
             continue;
         };
         let rules = held.rules.clone();
+        let id = next_id(planned);
         let fix = Composing {
             row,
             field,
@@ -100,11 +105,9 @@ pub(super) fn compose(
             composed: &composed,
             repairing,
         }
-        .defaulted(&rules);
+        .defaulted(&rules, id.clone());
         match fix {
             Ok(fix) => {
-                let id = OperationId::new(format!("repair-{}", planned.operations.len() + 1))
-                    .expect("a repair's operation id is not empty");
                 let set = OperationKind::set_frontmatter(
                     WriteTarget::path(path.clone()),
                     field,
@@ -119,10 +122,20 @@ pub(super) fn compose(
                 composed = fix.bytes;
                 holds = fix.holds;
             }
-            Err(skip) => decided[at] = Some(*skip),
+            Err(Unmade::Skipped(skip)) => decided[at] = Some(*skip),
+            // The repair is refused, as a creation is: the finding is
+            // neither fixed nor skipped.
+            Err(Unmade::ClockUnread(left)) => planned.unresolved.push(*left),
         }
     }
     decided
+}
+
+/// The id the next operation of `planned` takes: `repair-1`, `repair-2` and
+/// on, in plan order, an operation left unresolved holding its place.
+fn next_id(planned: &Planned) -> OperationId {
+    let taken = planned.operations.len() + planned.unresolved.len();
+    OperationId::new(format!("repair-{}", taken + 1)).expect("a repair's operation id is not empty")
 }
 
 /// The positions of `document`'s rows in finding order: kind, field,
@@ -199,6 +212,16 @@ struct Composing<'c> {
     repairing: &'c Repairing<'c>,
 }
 
+/// Why a fix is not made.
+enum Unmade {
+    /// The finding is left alone, for the reason and with the data it names.
+    Skipped(Box<SkippedFinding>),
+    /// The fix reads a clock that gives no reading, so the repair is refused
+    /// as a creation is: the operation the fix would have been, as its
+    /// default is written, left unresolved.
+    ClockUnread(Box<UnresolvedOperation>),
+}
+
 /// A fix the judge admits: the value it writes, the bytes it composes to and
 /// what those bytes hold.
 struct Fix {
@@ -226,16 +249,16 @@ enum Proposed {
         bindings: Box<[Captures; 2]>,
     },
     /// A default reading the clock, which gives no reading a default can
-    /// fill.
-    NoClockReading,
+    /// fill: the default as its rule writes it.
+    NoClockReading { source: AuthoredValue },
 }
 
 impl Composing<'_> {
     /// The fix of a missing required field — the default `rules`, the rules
     /// requiring it, declare — or the skip it is left alone with.
-    fn defaulted(&self, rules: &BTreeSet<String>) -> Result<Fix, Box<SkippedFinding>> {
+    fn defaulted(&self, rules: &BTreeSet<String>, id: OperationId) -> Result<Fix, Unmade> {
         let skip = |reason| SkippedFinding::new(self.row.id, reason);
-        let skipped = |finding| Err(Box::new(finding));
+        let skipped = |finding| Err(Unmade::Skipped(Box::new(finding)));
         let proposals = match self.proposed(rules) {
             Proposed::Candidates(proposals) => proposals,
             Proposed::AmbiguousCapture { rule, bindings } => {
@@ -248,12 +271,19 @@ impl Composing<'_> {
                     spelled(&bindings[1]),
                 )));
             }
-            Proposed::NoClockReading => {
-                return skipped(skip(SkipReason::NoDeclaredFix).with_note(format!(
-                    "the default for `{}` reads the clock, and the host's clock cannot be read \
-                     as a local time a default can fill",
-                    self.field
-                )));
+            Proposed::NoClockReading { source } => {
+                let operation = Operation::new(OperationKind::set_frontmatter(
+                    WriteTarget::path(self.path.clone()),
+                    self.field,
+                    source,
+                ))
+                .with_id(id);
+                let reason = UnresolvedReason::no_longer_resolves(crate::clock::cannot_fill(
+                    &format!("the rule default for `{}`", self.field),
+                ));
+                return Err(Unmade::ClockUnread(Box::new(UnresolvedOperation::new(
+                    operation, reason,
+                ))));
             }
         };
         let Some((first, rest)) = proposals.split_first() else {
@@ -346,7 +376,11 @@ impl Composing<'_> {
             let at = if default.reads_clock() {
                 match self.repairing.clock.get() {
                     Ok(at) => Some(at),
-                    Err(_) => return Proposed::NoClockReading,
+                    Err(_) => {
+                        return Proposed::NoClockReading {
+                            source: default.source(),
+                        };
+                    }
                 }
             } else {
                 None
@@ -510,6 +544,26 @@ mod tests {
         /// `rows` planned over the vault.
         fn plan(&self, rows: &[FindingRow]) -> Planned {
             self.planned(rows, &Cell::new(0)).0
+        }
+
+        /// `rows` planned over the vault, the clock giving no reading.
+        fn planned_unread(&self, rows: &[FindingRow]) -> Planned {
+            let clock =
+                || -> Result<LocalTimestamp, NotALocalTimestamp> { Err(NotALocalTimestamp) };
+            let one = OneReading::of(&clock);
+            let repairing = Repairing {
+                declared: &self.declared,
+                case: norn_wire::CaseFold::Exact,
+                clock: &one,
+            };
+            let read = &mut |path: &DocumentPath| -> Result<Before, std::convert::Infallible> {
+                Ok(match self.documents.get(path.as_str()) {
+                    Some(bytes) => Before::Held(Arc::clone(bytes)),
+                    None => Before::Unread,
+                })
+            };
+            let Ok(planned) = plan(rows, &repairing, read);
+            planned
         }
     }
 
@@ -886,6 +940,37 @@ mod tests {
 
         assert_eq!(planned.operations.len(), 2);
         assert_eq!(paid, expected);
+    }
+
+    /// **A clock that gives no reading leaves each default that reads it
+    /// unresolved, as `new` leaves a creation, and skips none**: the operation
+    /// is the default as the schema writes it, numbered as it would be, the
+    /// reason names the clock, and a default reading no clock still plans.
+    #[test]
+    fn a_clock_that_gives_no_reading_leaves_each_clock_default_unresolved() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      status: {default: todo}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\n---\n")]);
+
+        let planned =
+            vault.planned_unread(&[missing(1, "a.md", "created"), missing(2, "a.md", "status")]);
+
+        assert_eq!(planned.operations, vec![set(2, "a.md", "status", "todo")]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+        let [left] = planned.unresolved.as_slice() else {
+            panic!("one unresolved: {:?}", planned.unresolved);
+        };
+        assert_eq!(
+            left.operation,
+            set(1, "a.md", "created", "{{now}}"),
+            "the default as the schema writes it"
+        );
+        let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+            panic!("left out for {:?}", left.reason);
+        };
+        assert_eq!(
+            detail,
+            &crate::clock::cannot_fill("the rule default for `created`")
+        );
     }
 
     /// **Operations are numbered `repair-1`, `repair-2` and on in plan order

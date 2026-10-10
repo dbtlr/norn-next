@@ -292,11 +292,8 @@ fn refused_defaults(refusal: RuleDefaultsRefusal) -> UnresolvedReason {
             };
             UnresolvedReason::ambiguous_capture(rule, field, [named(first), named(second)])
         }
-        RuleDefaultsRefusal::NoClockReading(unread) => {
-            UnresolvedReason::no_longer_resolves(format!(
-                "the host's clock cannot be read as a local time the rule defaults can fill: \
-                 {unread}"
-            ))
+        RuleDefaultsRefusal::NoClockReading(_) => {
+            UnresolvedReason::no_longer_resolves(crate::clock::cannot_fill("the rule defaults"))
         }
     }
 }
@@ -496,9 +493,7 @@ fn composed_by_rule<V: VaultView>(
         )));
     }
     let Ok(at) = at else {
-        return Ok(Err(format!(
-            "the host's clock cannot be read as a local time {named} can fill: {NotALocalTimestamp}"
-        )));
+        return Ok(Err(crate::clock::cannot_fill(&named)));
     };
     let values = TemplateValues::new(supplied.iter().cloned().collect(), at);
     let cannot = |detail: String| format!("{named} cannot make a document: {detail}");
