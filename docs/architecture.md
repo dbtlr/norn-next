@@ -2730,7 +2730,11 @@ not read for it. **A route's link cascade is judged by construction.** The move 
 cascade the one planner generates for any move, written by the plan's one resolution: every
 link the text layer can respell is rewritten, and every other is listed on the forecast with
 the reason a Layer 4 move's forecast gives it, so an unrespellable link never holds a route
-back. The cascade rewrites documents no judgment of the moved document sees, but the schema
+back. That holds however many links a route leaves broken: a holder whose frontmatter block
+stands near the 16 KiB bound the text layer reads may take only some of its respellings
+before the block would pass the bound, and every link past that point is left as written,
+broken once its document moves, and advised on — a repair moving 888 documents a hub lists in
+a frontmatter block that close to the bound respells 22 of its links and leaves 866 broken. The cascade rewrites documents no judgment of the moved document sees, but the schema
 judge reads a document's path, its frontmatter and its body's tags, a body link's rewrite
 never changes a tag (the text layer proves each rewrite by reading it back), and a
 frontmatter Markdown link is no link; so a cascade changes a judgment only where it
