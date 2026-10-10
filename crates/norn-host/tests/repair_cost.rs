@@ -200,7 +200,7 @@ impl Shared {
             Shared::Stem => ("t", "t"),
             Shared::DottedStem => ("t.v", "t.v"),
             Shared::Extension => ("t", "t.md"),
-            Shared::TwoStemsInTurn if at % 2 == 0 => ("t", "t"),
+            Shared::TwoStemsInTurn if at.is_multiple_of(2) => ("t", "t"),
             Shared::TwoStemsInTurn => ("u", "u"),
         }
     }

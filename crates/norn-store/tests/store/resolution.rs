@@ -716,7 +716,12 @@ fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
     let work = |blocks: usize| {
         let mut vault = Vault::new(&format!("resolution-turns-{blocks}"), Sensitive);
         let moved: Vec<String> = (0..MOVED)
-            .map(|at| format!("a/{at:04}/{}.md", if at % 2 == 0 { "t" } else { "u" }))
+            .map(|at| {
+                format!(
+                    "a/{at:04}/{}.md",
+                    if at.is_multiple_of(2) { "t" } else { "u" }
+                )
+            })
             .collect();
         vault.write(
             &moved
@@ -733,7 +738,7 @@ fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
         });
         let probes: Vec<ProbedLink> = (0..blocks)
             .flat_map(|block| {
-                let stem = if block % 2 == 0 { "t" } else { "u" };
+                let stem = if block.is_multiple_of(2) { "t" } else { "u" };
                 let holder = format!("h/{block:04}.md");
                 std::iter::repeat_n(
                     probed(&holder, &holder, &format!("[[{stem}]]\n"), true),
@@ -770,13 +775,18 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
     let work = |holders: usize| {
         let mut vault = Vault::new(&format!("resolution-reductions-{holders}"), Sensitive);
         let moved: Vec<String> = (0..MOVED)
-            .map(|at| format!("a/{at:04}/{}.md", if at % 2 == 0 { "t.v" } else { "t" }))
+            .map(|at| {
+                format!(
+                    "a/{at:04}/{}.md",
+                    if at.is_multiple_of(2) { "t.v" } else { "t" }
+                )
+            })
             .collect();
         let held: Vec<String> = (0..holders).map(|at| format!("h/{at:04}.md")).collect();
         let mut documents: Vec<(&str, &str)> =
             moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
         documents.extend(held.iter().enumerate().map(|(at, holder)| {
-            let body = if at % 2 == 0 {
+            let body = if at.is_multiple_of(2) {
                 "[[t.v]]\n"
             } else {
                 "[[t.md]]\n"
