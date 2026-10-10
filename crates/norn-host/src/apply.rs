@@ -1451,8 +1451,8 @@ mod tests {
     /// blinded, the route moving `loose/a.md` is planned though its cascade
     /// respells the hub's closed `up`, and the guard refuses the plan as
     /// `vault/plan-refused`, its note naming the defect and its checks the
-    /// violation; planned with the check, the route is skipped and the plan
-    /// passes.
+    /// violation, and its forecast the cascade's advisories; planned with the
+    /// check, the route is skipped and the plan passes.
     #[test]
     fn the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect() {
         let (_scratch, ground, store) = routed_vault(
@@ -1460,7 +1460,10 @@ mod tests {
             CLOSED_UP,
             &[
                 ("loose/a.md", "---\ntype: task\n---\n# A\n"),
-                ("h.md", "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n"),
+                (
+                    "h.md",
+                    "---\ntype: hub\nup: \"[[loose/a]]\"\nsee: [\"[[loose/a]]\"]\n---\n",
+                ),
             ],
         );
         let snapshot = store.index();
@@ -1477,7 +1480,10 @@ mod tests {
             "{}",
             refusal.message()
         );
-        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+        let ErrorDetail::PlanRefused {
+            checks, forecast, ..
+        } = refusal.detail()
+        else {
             panic!("refused with {:?}", refusal.detail());
         };
         assert!(
@@ -1486,6 +1492,18 @@ mod tests {
                 [norn_wire::RefusedCheck::SchemaViolation { .. }]
             ),
             "{checks:?}"
+        );
+        // The refusal carries the plan's forecast: the cascade's advisory on
+        // the link it cannot respell included.
+        assert_eq!(
+            forecast.links,
+            [norn_wire::LinkAdvisory::skipped_unplaced(
+                norn_wire::LinkKey::new(
+                    DocumentPath::new("h.md").unwrap(),
+                    norn_wire::LinkFamily::Wikilink,
+                    "loose/a",
+                )
+            )]
         );
 
         let checked = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");

@@ -2492,6 +2492,72 @@ fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
     assert_eq!(forecast.links, [unplaced]);
 }
 
+/// **A holder is judged at the state its own fixes compose where it
+/// stands**: the hub reads `up` by value only once its own default fills
+/// `phase`, which brings it under the rule limiting `up`, so the route that
+/// would respell `up` skips while the hub's default is filled.
+#[test]
+fn a_holders_own_fix_bringing_its_field_under_a_rule_reading_it_by_value_skips_the_route() {
+    let schema = format!(
+        "{TASKED}  hubs:\n    match: {{frontmatter: {{type: hub}}}}\n    required:\n      phase: {{default: judged}}\n  judged:\n    match: {{frontmatter: {{phase: judged}}}}\n    max_length:\n      up: 100\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-holder-own-fix",
+        &schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: '[[zz-repair/loose/a]]'\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(kinds(&plan), [setting(1, "h.md", "phase", "judged").kind]);
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
+}
+
+/// **A route its respell check skips claims no destination**: `x/a.md`'s
+/// route would respell the hub's limited `up`, so it skips, and `y/a.md`'s
+/// route to the same destination moves.
+#[test]
+fn a_route_its_respell_check_skips_claims_no_destination() {
+    let schema = format!(
+        "{TASKED}  hubs:\n    match: {{frontmatter: {{type: hub}}}}\n    max_length:\n      up: 100\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-skipped-claims-none",
+        &schema,
+        &[
+            ("x/a.md", b"---\ntype: task\n---\n"),
+            ("y/a.md", b"---\ntype: task\n---\n"),
+            ("h.md", b"---\ntype: hub\nup: '[[zz-repair/x/a]]'\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        [OperationKind::move_document(at("y/a.md"), at("tasks/a.md"))]
+    );
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
+}
+
 /// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
 /// link field over the link to `loose/a.md` as it is written now.
 const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";

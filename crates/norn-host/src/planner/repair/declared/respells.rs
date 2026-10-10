@@ -744,6 +744,55 @@ mod tests {
         }
     }
 
+    /// The rule limiting a hub's `up`, which reads it by value.
+    const LIMITED_UP: &str =
+        "  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
+
+    /// **A `vault://` wikilink may be respelled however few segments it
+    /// spells**: `[[vault://a]]` names the root document `a.md` by its path,
+    /// not by its stem, so the route moving it would respell the hub's
+    /// limited `up`.
+    #[test]
+    fn a_vault_link_to_a_root_document_may_be_respelled() {
+        let planned = planned(
+            &routing(LIMITED_UP),
+            &[
+                ("a.md", "---\ntype: task\n---\n# A\n"),
+                ("h.md", "---\ntype: hub\nup: \"[[vault://a]]\"\n---\n"),
+            ],
+            &["a.md"],
+        );
+
+        assert!(planned.operations.is_empty(), "{planned:?}");
+        assert_eq!(
+            planned
+                .skipped
+                .iter()
+                .map(|skip| skip.reason)
+                .collect::<Vec<_>>(),
+            [SkipReason::RespellsAJudgedLink]
+        );
+    }
+
+    /// **A field declared a type other than text or link is read by value
+    /// even where no finding stands on it**: a `tags`-typed field holds
+    /// `[[loose/a]]` as a tag name, which the judge accepts, and a
+    /// respelling would write another name.
+    #[test]
+    fn a_field_typed_other_than_text_or_link_is_read_by_value_with_no_finding_on_it() {
+        let schema = "version: 1\nfields:\n  labels: {type: tags}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
+        let holder = "---\nlabels:\n  - \"[[loose/a]]\"\n---\n";
+
+        let planned = planned(schema, &[TASK, ("h.md", holder)], &["loose/a.md"]);
+
+        assert!(planned.operations.is_empty(), "{planned:?}");
+        let [(_, reason, note)] = skips(&planned)
+            .try_into()
+            .unwrap_or_else(|skips| panic!("one skip: {skips:?}"));
+        assert_eq!(reason, SkipReason::RespellsAJudgedLink);
+        assert!(note.contains("`labels`"), "{note}");
+    }
+
     /// **A frontmatter link the text layer cannot place is never respelled,
     /// so it never holds a route back**, wherever it stands: a flow list's
     /// item has no bytes a rewrite can write over, so the cascade leaves it
