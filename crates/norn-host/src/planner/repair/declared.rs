@@ -629,22 +629,15 @@ fn field_of(bytes: &[u8], name: &str) -> Option<Option<AuthoredValue>> {
     )
 }
 
-/// The citation of the finding `row` fixed by setting `field`, noting where
-/// the value written is the repair's own time.
-fn cited(row: &FindingRow, field: &str, clocked: bool) -> CitedFinding {
-    let cited = CitedFinding::new(row.id, Confidence::Declared);
+/// The citation of the finding `row` fixed at `level`, with `notes` about
+/// the fix.
+fn cited(row: &FindingRow, level: Confidence, notes: Vec<String>) -> CitedFinding {
+    let cited = CitedFinding::new(row.id, level);
     let cited = match &row.value {
         Some(value) => cited.with_value(value.clone()),
         None => cited,
     };
-    if clocked {
-        cited.with_notes(vec![format!(
-            "`{field}` is filled from a rule default reading the clock, so the value is the \
-             repair's time"
-        )])
-    } else {
-        cited
-    }
+    cited.with_notes(notes)
 }
 
 /// One document being composed: what it held before any fix, and what the
@@ -1009,10 +1002,18 @@ impl Composing<'_> {
                 },
             )
             .map_err(Unmade::Skipped)?;
-        let clocked = proposals.iter().any(|proposal| proposal.clocked);
+        let notes = if proposals.iter().any(|proposal| proposal.clocked) {
+            vec![format!(
+                "`{}` is filled from a rule default reading the clock, so the value is the \
+                 repair's time",
+                self.field
+            )]
+        } else {
+            Vec::new()
+        };
         Ok(Fix {
             operations: vec![set],
-            cited: vec![cited(self.row, self.field, clocked)],
+            cited: vec![cited(self.row, Confidence::Declared, notes)],
             state,
         })
     }
@@ -1142,6 +1143,8 @@ mod tests {
         files: MemoryVault,
         /// The rule sets the batch's rows cite: [`RULE_SET`] names `rules`.
         rule_sets: Vec<RuleSet>,
+        /// The threshold the plan is made at.
+        threshold: Confidence,
     }
 
     impl Vault {
@@ -1157,7 +1160,14 @@ mod tests {
                     .collect(),
                 files: MemoryVault::with(documents),
                 rule_sets: Vec::new(),
+                threshold: Confidence::DEFAULT_THRESHOLD,
             }
+        }
+
+        /// The vault planned at `threshold`.
+        fn at(mut self, threshold: Confidence) -> Self {
+            self.threshold = threshold;
+            self
         }
 
         /// The vault, its batch citing as [`RULE_SET`] the rules `names`.
@@ -1209,6 +1219,7 @@ mod tests {
                 },
                 clock: &one,
                 rule_sets: &self.rule_sets,
+                threshold: self.threshold,
             };
             let index = (EmptyStore::new(), std::marker::PhantomData);
             let reading = Read {

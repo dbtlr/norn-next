@@ -63,7 +63,8 @@ use norn_store::{
     RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
-    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
+    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, Confidence,
+    DeleteParams,
     DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, Forecast,
     MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
     RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
@@ -191,11 +192,13 @@ fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, Erro
         .map_err(|error| unreadable(name, error))
 }
 
-/// A repair batch's findings: its rows, and the rule sets they cite.
+/// A repair batch's findings: its rows, the rule sets they cite, and the
+/// weakest confidence the request writes a fix at.
 #[derive(Clone, Copy)]
 struct Findings<'b> {
     rows: &'b [FindingRow],
     rule_sets: &'b [RuleSet],
+    threshold: Confidence,
 }
 
 /// What a repair batch plans to: the resolved plan, its forecast, the
@@ -247,6 +250,7 @@ where
         case,
         clock,
         rule_sets: batch.rule_sets,
+        threshold: batch.threshold,
     };
     let reading = repair::Over {
         view,
@@ -1061,6 +1065,7 @@ where
                 Findings {
                     rows: &batch.rows,
                     rule_sets: &batch.rule_sets,
+                    threshold: params.threshold(),
                 },
                 ground,
                 name,
@@ -1320,6 +1325,7 @@ mod tests {
             Findings {
                 rows: &[missing],
                 rule_sets: &[],
+                threshold: Confidence::DEFAULT_THRESHOLD,
             },
             &ground,
             &name,
@@ -1419,6 +1425,7 @@ mod tests {
             Findings {
                 rows: &[misplaced],
                 rule_sets: &rule_sets,
+                threshold: Confidence::DEFAULT_THRESHOLD,
             },
             ground,
             &name,
@@ -1736,7 +1743,7 @@ mod tests {
                 .findings
                 .push(norn_wire::CitedFinding::new(
                     99,
-                    norn_wire::Confidence::Declared,
+                    Confidence::Declared,
                 ));
         }
     }

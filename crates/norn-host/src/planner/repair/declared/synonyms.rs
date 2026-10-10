@@ -23,7 +23,7 @@
 //! skipped stands where it is.
 
 use norn_config::schema::VaultSchema;
-use norn_wire::{AuthoredValue, FindingRow, SkipReason, SkippedFinding};
+use norn_wire::{AuthoredValue, Confidence, FindingRow, SkipReason, SkippedFinding};
 
 use super::{Document, Fix, Fixing, Proposal, State, candidates, cited, field_of, skip};
 use crate::applier::Held;
@@ -123,7 +123,7 @@ pub(super) fn fix_field(
             Ok(next) => {
                 working = replaced;
                 current = next;
-                cites.push(cited(row, field, false));
+                cites.push(cited(row, Confidence::Declared, Vec::new()));
             }
             Err(skip) => skipped.push((at, *skip)),
         }

@@ -86,7 +86,7 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_store::{LinkChange, PathOverlay, ProbedLink};
 use norn_wire::{
-    CaseFold, Citation, DocumentPath, FindingKind, FindingRow, Operation, RuleSet, SkipReason,
+    CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, Operation, RuleSet, SkipReason,
     SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
@@ -153,6 +153,10 @@ pub(crate) struct Repairing<'a> {
     /// `rule_set`: which rules contributed to a finding, without reading its
     /// document.
     pub(crate) rule_sets: &'a [RuleSet],
+    /// The weakest [`Confidence`] the plan writes a fix at: the request's
+    /// threshold. A fix of a weaker level is skipped as below the threshold,
+    /// carrying the operation the plan would have held.
+    pub(crate) threshold: Confidence,
 }
 
 /// What one read of a batch document's bytes found.
@@ -485,6 +489,7 @@ mod tests {
             case: CaseFold::Exact,
             clock: &reading,
             rule_sets: &[],
+            threshold: Confidence::DEFAULT_THRESHOLD,
         };
         match super::plan(rows, &repairing, &Unread) {
             Ok(planned) => planned,

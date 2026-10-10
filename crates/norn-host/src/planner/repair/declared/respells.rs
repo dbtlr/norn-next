@@ -455,7 +455,7 @@ fn stored(path: &DocumentPath) -> norn_store::DocumentPath {
 mod tests {
     use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
     use norn_testkit::scratch::Scratch;
-    use norn_wire::{CandidateHead, FindingRow, RuleSet, Severity};
+    use norn_wire::{CandidateHead, Confidence, FindingRow, RuleSet, Severity};
 
     use super::*;
     use crate::clock::OneReading;
@@ -534,6 +534,7 @@ mod tests {
             case: norn_wire::CaseFold::Exact,
             clock: &one,
             rule_sets: &rule_sets,
+            threshold: Confidence::DEFAULT_THRESHOLD,
         };
         let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a view");
         let store = TreeStore::over(scratch.root());
