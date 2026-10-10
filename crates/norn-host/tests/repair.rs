@@ -2473,7 +2473,7 @@ fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
     else {
         panic!("a preview answers a preview");
     };
-    assert_eq!(moved.links, [unplaced.clone()]);
+    assert_eq!(moved.links, std::slice::from_ref(&unplaced));
 
     let ApplyReport::Previewed { plan, forecast, .. } =
         planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)))

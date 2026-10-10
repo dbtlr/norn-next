@@ -49,15 +49,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use norn_config::schema::{FillRefusal, PathBindings, RuleWork};
 use norn_fs::NormalizedPath;
 use norn_wire::{
     CitedFinding, Confidence, DocumentPath, FindingRow, OperationKind, SkipReason,
     SkippedCandidates, SkippedFinding, UnresolvedReason,
 };
 
-use super::{Draft, Fixing, Made, Reckoned, State, skip, spelled, spelled_candidates};
-use crate::evidence::count_rule_work;
+use super::{Draft, Fixing, Made, Proposal, Reckoned, State, skip, spelled, spelled_candidates};
 use crate::planner::repair::{Destination, Reading};
 
 /// What became of a document's route, judged alone.
@@ -135,7 +133,7 @@ pub(super) fn route<R: Reading>(
     };
     let candidates = spelled_candidates(proposals.iter().map(|proposal| {
         (
-            norn_store::value_head(proposal.to.as_str()),
+            norn_store::value_head(proposal.value.as_str()),
             proposal.rule.as_str(),
         )
     }));
@@ -145,7 +143,7 @@ pub(super) fn route<R: Reading>(
     let place = |to: &DocumentPath| vault.place(to).ok_or_else(|| to.clone());
     if rest
         .iter()
-        .any(|proposal| place(&proposal.to) != place(&first.to))
+        .any(|proposal| place(&proposal.value) != place(&first.value))
     {
         return skipped(skip(row, SkipReason::Tie).with_candidates(candidates));
     }
@@ -154,7 +152,7 @@ pub(super) fn route<R: Reading>(
             .with_candidates(candidates.clone())
             .with_note(note)
     };
-    let (to, place, folders) = match vault.destination(&first.to)? {
+    let (to, place, folders) = match vault.destination(&first.value)? {
         Destination::Free { at, place, folders } => (at, place, folders),
         Destination::Taken => {
             return skipped(
@@ -162,14 +160,14 @@ pub(super) fn route<R: Reading>(
                     .with_candidates(candidates.clone())
                     .with_note(format!(
                         "something stands at `{}`, or a document above it",
-                        first.to
+                        first.value
                     )),
             );
         }
         Destination::Closed(detail) => {
             return skipped(refused(format!(
                 "no document can be moved to `{}`: {detail}",
-                first.to
+                first.value
             )));
         }
     };
@@ -210,13 +208,6 @@ pub(super) fn route<R: Reading>(
     })))
 }
 
-/// One destination a rule's route proposes.
-struct Proposal {
-    to: DocumentPath,
-    rule: String,
-    clocked: bool,
-}
-
 /// Why no destination is proposed.
 enum Unproposed {
     /// The finding is left alone, for the reason and with the data it names.
@@ -227,13 +218,14 @@ enum Unproposed {
 }
 
 /// The destination each of `rules` routes the document `reckoned` holds to,
-/// standing where it stands, in rule name order, the clock read only for a
-/// route reading it.
+/// standing where it stands, in rule name order, proposed as every declared
+/// fix is ([`super::proposed`]): each rule's route filled, and the
+/// document's file name after the folder it fills.
 fn proposed(
     reckoned: &Reckoned<'_>,
     row: &FindingRow,
     rules: &BTreeSet<String>,
-) -> Result<Vec<Proposal>, Unproposed> {
+) -> Result<Vec<Proposal<DocumentPath>>, Unproposed> {
     let repairing = reckoned.document.repairing;
     let at = &reckoned.start.at;
     let name = at
@@ -241,73 +233,81 @@ fn proposed(
         .rsplit('/')
         .next()
         .expect("a path has a last segment");
-    let mut proposals = Vec::new();
-    let mut bindings = PathBindings::default();
-    for rule_name in rules {
-        let Some(rule) = reckoned.document.schema().rule(rule_name) else {
-            continue;
-        };
-        let Some(route) = rule.allowed_paths().and_then(|allowed| allowed.route()) else {
-            continue;
-        };
-        let mut clocked = false;
-        let mut work = RuleWork::default();
-        let filled = rule.fill_route(
-            at.as_str(),
-            repairing.case,
-            &mut || {
-                clocked = true;
-                repairing.clock.get()
-            },
-            &mut bindings,
-            &mut work,
-        );
-        count_rule_work(work);
-        let Some(filled) = filled else {
-            continue;
-        };
-        let unfillable = |why: String| {
-            Unproposed::Skipped(Box::new(skip(row, SkipReason::JudgeWouldRefuse).with_note(
+    let unfillable = |rule: &str, why: String| {
+        let route = reckoned
+            .document
+            .schema()
+            .rule(rule)
+            .and_then(|rule| rule.allowed_paths()?.route())
+            .expect("a rule routing the document declares a route");
+        Unproposed::Skipped(Box::new(skip(row, SkipReason::JudgeWouldRefuse).with_note(
+            format!(
+                "the rule `{rule}` routes `{at}` by `{}` to no folder a document can be moved \
+                 into: {why}",
+                route.as_str(),
+            ),
+        )))
+    };
+    let folders = super::proposed(
+        reckoned.document.schema(),
+        rules,
+        repairing,
+        |rule, clock, bindings, work| {
+            rule.fill_route(at.as_str(), repairing.case, clock, bindings, work)
+        },
+    )
+    .map_err(|unproposed| match unproposed {
+        super::Unproposed::AmbiguousCapture { rule, bindings } => {
+            let route = reckoned
+                .document
+                .schema()
+                .rule(&rule)
+                .and_then(|rule| rule.allowed_paths()?.route())
+                .expect("a rule routing the document declares a route");
+            Unproposed::Skipped(Box::new(skip(row, SkipReason::AmbiguousCapture).with_note(
                 format!(
-                    "the rule `{rule_name}` routes `{at}` by `{}` to no folder a document can \
-                     be moved into: {why}",
+                    "the rule `{rule}` routes to `{}` from a capture its `match.path` binds \
+                     several ways in `{at}`: {} and {}",
                     route.as_str(),
+                    spelled(&bindings[0]),
+                    spelled(&bindings[1]),
                 ),
             )))
-        };
-        let folder = match filled {
-            Ok(folder) => folder,
-            Err(FillRefusal::AmbiguousCapture { bindings }) => {
-                return Err(Unproposed::Skipped(Box::new(
-                    skip(row, SkipReason::AmbiguousCapture).with_note(format!(
-                        "the rule `{rule_name}` routes to `{}` from a capture its `match.path` \
-                         binds several ways in `{at}`: {} and {}",
-                        route.as_str(),
-                        spelled(&bindings[0]),
-                        spelled(&bindings[1]),
-                    )),
-                )));
-            }
-            Err(FillRefusal::NoClockReading(_)) => {
-                return Err(Unproposed::NoClockReading {
-                    written: in_folder(route.as_str(), name).expect(
-                        "schema read refuses a route whose text, each token standing as plain \
-                         text, is no folder path",
-                    ),
-                });
-            }
-            Err(FillRefusal::Unfillable(error)) => return Err(unfillable(error.to_string())),
-        };
-        let to = in_folder(&folder, name).map_err(|problem| {
-            unfillable(format!("`{folder}{name}` is no document path: {problem}"))
-        })?;
-        proposals.push(Proposal {
-            to,
-            rule: rule_name.clone(),
-            clocked,
-        });
-    }
-    Ok(proposals)
+        }
+        super::Unproposed::NoClockReading { rule } => Unproposed::NoClockReading {
+            written: in_folder(
+                rule.allowed_paths()
+                    .and_then(|allowed| allowed.route())
+                    .expect("a route reading the clock is declared")
+                    .as_str(),
+                name,
+            )
+            .expect(
+                "schema read refuses a route whose text, each token standing as plain text, is \
+                 no folder path",
+            ),
+        },
+        super::Unproposed::Unfillable { rule, error } => unfillable(&rule, error.to_string()),
+    })?;
+    // Each filled folder is judged whole as a document path with the file
+    // name after it, since a value stands beside literal text.
+    folders
+        .into_iter()
+        .map(|proposal| {
+            let folder = proposal.value;
+            let to = in_folder(&folder, name).map_err(|problem| {
+                unfillable(
+                    &proposal.rule,
+                    format!("`{folder}{name}` is no document path: {problem}"),
+                )
+            })?;
+            Ok(Proposal {
+                value: to,
+                rule: proposal.rule,
+                clocked: proposal.clocked,
+            })
+        })
+        .collect()
 }
 
 /// The document named `name` in `folder`, a route's folder ending in `/`;

@@ -104,7 +104,10 @@ mod synonyms;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use norn_config::schema::{FillError, FillRefusal, PathBindings, RuleWork, VaultSchema};
+use norn_config::schema::{
+    FillError, FillRefusal, LocalTimestamp, NotALocalTimestamp, PathBindings, Rule, RuleWork,
+    VaultSchema,
+};
 use norn_wire::{
     AuthoredValue, Captures, Citation, CitedFinding, Confidence, DocumentPath, FindingKind,
     FindingRow, Operation, OperationId, OperationKind, RequiredField, RequiredFieldHead,
@@ -826,9 +829,10 @@ impl Fix {
     }
 }
 
-/// One value a rule's declaration proposes for a field.
-struct Proposal {
-    value: AuthoredValue,
+/// One value a rule's declaration proposes for a fix: a default's value, a
+/// synonym's member, or a route's destination.
+struct Proposal<T = AuthoredValue> {
+    value: T,
     rule: String,
     clocked: bool,
 }
@@ -843,21 +847,92 @@ struct Composing<'c> {
     field: &'c str,
 }
 
-/// What the defaults of the rules requiring a field propose for it.
-enum Proposed {
-    /// The value each rule declaring a default fills it to, in rule name
-    /// order.
-    Candidates(Vec<Proposal>),
-    /// A default reading a capture its rule's `match.path` binds several ways.
+/// Why the declarations of a fix's rules fill to nothing a fix is made from.
+enum Unproposed<'s> {
+    /// A declaration reading a capture its rule's `match.path` binds several
+    /// ways.
     AmbiguousCapture {
         rule: String,
         bindings: Box<[Captures; 2]>,
     },
-    /// A default reading the clock, which gives no reading a default can
-    /// fill: the default as its rule writes it.
-    NoClockReading { source: AuthoredValue },
-    /// A default that fills to no value, and why.
+    /// A declaration reading the clock, which gives no reading a template can
+    /// fill: the rule declaring it.
+    NoClockReading { rule: &'s Rule },
+    /// A declaration that fills to no value, and why.
     Unfillable { rule: String, error: FillError },
+}
+
+/// What each of `rules`, in name order, declares for the fix, filled by
+/// `fill` — [`Rule::fill_default`](norn_config::schema::Rule::fill_default)
+/// or [`Rule::fill_route`](norn_config::schema::Rule::fill_route), the one
+/// way each is filled — for a document under `repairing`; a rule declaring
+/// nothing proposes nothing. The first declaration in rule name order that
+/// fills to no value answers for them all.
+///
+/// **One way to propose**: the clock is read through the plan's one reading,
+/// and only for a declaration reading it; every rule's `match.path` is bound
+/// at most once for the pass, through one memo shared across the rules as
+/// the defaults fixpoint shares one across a path's fields (a binding is a
+/// rule's own, so sharing it costs and answers the same as one memo per
+/// rule, and one rule is never bound twice); and the work is tallied on the
+/// logical rule counters.
+fn proposed<'s, T>(
+    schema: &'s VaultSchema,
+    rules: &BTreeSet<String>,
+    repairing: &Repairing<'_>,
+    fill: impl Fn(
+        &'s Rule,
+        &mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
+        &mut PathBindings<'s>,
+        &mut RuleWork,
+    ) -> Option<Result<T, FillRefusal>>,
+) -> Result<Vec<Proposal<T>>, Unproposed<'s>> {
+    let mut proposals = Vec::new();
+    let mut bindings = PathBindings::default();
+    for name in rules {
+        let Some(rule) = schema.rule(name) else {
+            continue;
+        };
+        let mut clocked = false;
+        let mut work = RuleWork::default();
+        let filled = fill(
+            rule,
+            &mut || {
+                clocked = true;
+                repairing.clock.get()
+            },
+            &mut bindings,
+            &mut work,
+        );
+        count_rule_work(work);
+        // Schema read holds a default's tokens to the clock's and its own
+        // rule's captures, so a default fills; a failure is answered as a
+        // skip, never a panic.
+        match filled {
+            None => {}
+            Some(Ok(value)) => proposals.push(Proposal {
+                value,
+                rule: name.clone(),
+                clocked,
+            }),
+            Some(Err(FillRefusal::AmbiguousCapture { bindings })) => {
+                return Err(Unproposed::AmbiguousCapture {
+                    rule: name.clone(),
+                    bindings,
+                });
+            }
+            Some(Err(FillRefusal::NoClockReading(_))) => {
+                return Err(Unproposed::NoClockReading { rule });
+            }
+            Some(Err(FillRefusal::Unfillable(error))) => {
+                return Err(Unproposed::Unfillable {
+                    rule: name.clone(),
+                    error,
+                });
+            }
+        }
+    }
+    Ok(proposals)
 }
 
 impl Composing<'_> {
@@ -866,9 +941,18 @@ impl Composing<'_> {
     fn defaulted(&self, rules: &BTreeSet<String>) -> Result<Fix, Unmade> {
         let row = self.row;
         let skipped = |finding| Err(Unmade::Skipped(Box::new(finding)));
-        let proposals = match self.proposed(rules) {
-            Proposed::Candidates(proposals) => proposals,
-            Proposed::AmbiguousCapture { rule, bindings } => {
+        let repairing = self.document.repairing;
+        let at = self.state.at.as_str();
+        let proposals = match proposed(
+            self.document.schema(),
+            rules,
+            repairing,
+            |rule, clock, bindings, work| {
+                rule.fill_default(self.field, at, repairing.case, clock, bindings, work)
+            },
+        ) {
+            Ok(proposals) => proposals,
+            Err(Unproposed::AmbiguousCapture { rule, bindings }) => {
                 return skipped(skip(row, SkipReason::AmbiguousCapture).with_note(format!(
                     "the rule `{rule}` defaults `{}` from a capture its `match.path` binds \
                      several ways in `{}`: {} and {}",
@@ -878,7 +962,13 @@ impl Composing<'_> {
                     spelled(&bindings[1]),
                 )));
             }
-            Proposed::NoClockReading { source } => {
+            Err(Unproposed::NoClockReading { rule }) => {
+                let source = rule
+                    .required()
+                    .find(|(required, _)| *required == self.field)
+                    .and_then(|(_, default)| default)
+                    .expect("a default reading the clock is declared")
+                    .source();
                 return Err(Unmade::ClockUnread(Box::new(Made::Unresolved {
                     operation: self.document.set(&self.state.at, self.field, source),
                     reason: UnresolvedReason::no_longer_resolves(crate::clock::cannot_fill(
@@ -886,7 +976,7 @@ impl Composing<'_> {
                     )),
                 })));
             }
-            Proposed::Unfillable { rule, error } => {
+            Err(Unproposed::Unfillable { rule, error }) => {
                 return skipped(skip(row, SkipReason::JudgeWouldRefuse).with_note(format!(
                     "the rule `{rule}` defaults `{}` to no value in `{}`: {error}",
                     self.field, self.state.at,
@@ -922,73 +1012,6 @@ impl Composing<'_> {
             cited: vec![cited(self.row, self.field, clocked)],
             state,
         })
-    }
-
-    /// What the default each of `rules` declares for the field fills to, in
-    /// rule name order, filled as the defaults fixpoint fills one
-    /// ([`Rule::fill_default`](norn_config::schema::Rule::fill_default)) — the clock read only for a default reading
-    /// it — and its work tallied on the logical rule counters.
-    fn proposed(&self, rules: &BTreeSet<String>) -> Proposed {
-        let repairing = self.document.repairing;
-        let schema = self.document.schema();
-        let mut proposals = Vec::new();
-        for name in rules {
-            let Some(rule) = schema.rule(name) else {
-                continue;
-            };
-            let Some(default) = rule
-                .required()
-                .find(|(required, _)| *required == self.field)
-                .and_then(|(_, default)| default)
-            else {
-                continue;
-            };
-            let mut clocked = false;
-            let mut work = RuleWork::default();
-            let filled = rule.fill_default(
-                self.field,
-                self.state.at.as_str(),
-                repairing.case,
-                &mut || {
-                    clocked = true;
-                    repairing.clock.get()
-                },
-                &mut PathBindings::default(),
-                &mut work,
-            );
-            count_rule_work(work);
-            let Some(filled) = filled else {
-                continue;
-            };
-            // Schema read holds a default's tokens to the clock's and its own
-            // rule's captures, so a default fills; a failure is answered as a
-            // skip, never a panic.
-            match filled {
-                Ok(value) => proposals.push(Proposal {
-                    value,
-                    rule: name.clone(),
-                    clocked,
-                }),
-                Err(FillRefusal::AmbiguousCapture { bindings }) => {
-                    return Proposed::AmbiguousCapture {
-                        rule: name.clone(),
-                        bindings,
-                    };
-                }
-                Err(FillRefusal::NoClockReading(_)) => {
-                    return Proposed::NoClockReading {
-                        source: default.source(),
-                    };
-                }
-                Err(FillRefusal::Unfillable(error)) => {
-                    return Proposed::Unfillable {
-                        rule: name.clone(),
-                        error,
-                    };
-                }
-            }
-        }
-        Proposed::Candidates(proposals)
     }
 }
 
