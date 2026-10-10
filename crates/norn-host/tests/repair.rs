@@ -13,8 +13,13 @@
 //! each reason such a fix is skipped for; a misplaced document moved into the
 //! folder its rule's route names, its move's link cascade with it, and each
 //! reason such a route is skipped for, a cascade that may respell a link a
-//! rule reads by value among them; and over a schema declaring every kind of
-//! fix, that the validator flags nothing a repair wrote.
+//! rule reads by value among them. Derived fixes are pinned over schemas of
+//! their own, each through a preview then an apply: a shape mismatch wrapped
+//! or unwrapped, a boolean spelled by case written as the boolean, a value
+//! differing from a closed set's member by case or white space written as the
+//! member, the excluded classes, the request's threshold taking effect alike
+//! in both modes, and a declared fix outranking the derived answer. Over a
+//! schema declaring every kind of fix, that the validator flags nothing a repair wrote.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -3026,4 +3031,500 @@ fn a_finding_a_fix_eliminates_is_dropped_whatever_its_kind() {
         .map(|skipped| (skipped.finding, skipped.reason))
         .collect();
     assert_eq!(skipped, [(b_tag, SkipReason::NoDeclaredFix)]);
+}
+
+/// The finding `id` as a citation carries it at the derived level, with its
+/// offending `value`.
+fn cited_derived(id: u64, value: &str) -> CitedFinding {
+    CitedFinding::new(id, Confidence::Derived).with_value(norn_store::value_head(value))
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// `value`.
+fn setting_value(n: usize, name: &str, field: &str, value: AuthoredValue) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        value,
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The plan `host` previews for the repair, then the one it applies, which
+/// must be the same whole plan: the planner is shared, and an apply holds no
+/// more than its preview.
+fn previewed_then_applied(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    request: impl Fn(RepairParams) -> RepairParams,
+) -> ResolvedPlan {
+    let preview = previewed(host.repair(request(repairing(vault, ApplyMode::Preview))));
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.repair(request(repairing(vault, ApplyMode::Apply))))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(plan, preview, "an apply plans what its preview did");
+    preview
+}
+
+/// **A scalar in a list field is wrapped as a one-item list, through preview
+/// then apply.** The plan sets the one-item list, its YAML type kept (`3` is
+/// the number in the list), cited at the derived level; the apply writes it
+/// and the validator flags nothing.
+#[test]
+fn a_scalar_in_a_list_field_is_wrapped_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-wrap",
+        "version: 1\nfields:\n  ranks: {type: number, shape: list}\n",
+        &[("a.md", b"---\nranks: 3\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_of(&host, &vault, "a.md", FindingKind::ShapeMismatch, "ranks");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_value(
+            1,
+            "a.md",
+            "ranks",
+            AuthoredValue::List(vec![AuthoredValue::Integer(3)])
+        )]
+    );
+    let citations = &provenance(&plan).citations;
+    assert_eq!(citations.len(), 1);
+    assert_eq!(
+        citations[0]
+            .findings
+            .iter()
+            .map(|cited| (cited.finding, cited.confidence))
+            .collect::<Vec<_>>(),
+        vec![(mismatch, Confidence::Derived)]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+    assert!(
+        written(&vault, "a.md").contains("3") && !written(&vault, "a.md").contains("\"3\""),
+        "{}",
+        written(&vault, "a.md")
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A one-item list in a single field is unwrapped to its item, through
+/// preview then apply; a list of two items has no fix and stands reported.**
+#[test]
+fn a_one_item_list_in_a_single_field_is_unwrapped_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-unwrap",
+        "version: 1\nfields:\n  owner: {type: text, shape: single}\n",
+        &[
+            ("a.md", b"---\nowner: [drew]\n---\n# A\n"),
+            ("b.md", b"---\nowner: [drew, sam]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = finding_of(&host, &vault, "a.md", FindingKind::ShapeMismatch, "owner");
+    let b = finding_of(&host, &vault, "b.md", FindingKind::ShapeMismatch, "owner");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "owner", "drew")]);
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Derived
+    );
+    assert_eq!(provenance(&plan).citations[0].findings[0].finding, a);
+    assert_eq!(
+        skipped_ids(&plan),
+        vec![b],
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert_eq!(
+        provenance(&plan).skipped[0].reason,
+        SkipReason::NoDeclaredFix
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::ShapeMismatch)],
+        "{after:?}"
+    );
+}
+
+/// **A boolean spelled with another case or padding is written as the YAML
+/// boolean, through preview then apply, and a yes/no spelling is skipped as an
+/// excluded class and stands reported**: a scalar, and the elements of a
+/// list into one write.
+#[test]
+fn a_boolean_spelled_by_case_is_written_as_the_boolean_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-boolean",
+        "version: 1\nfields:\n  done: {type: boolean}\n  flags: {type: boolean, shape: list}\n",
+        &[
+            ("a.md", b"---\ndone: \"True\"\n---\n# A\n"),
+            ("b.md", b"---\nflags: [\"FALSE\", \"yes\"]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scalar = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::TypeMismatch,
+        "done",
+        "True",
+    );
+    let element = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::TypeMismatch,
+        "flags",
+        "FALSE",
+    );
+    let yes = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::TypeMismatch,
+        "flags",
+        "yes",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting_value(1, "a.md", "done", AuthoredValue::Bool(true)),
+            setting_value(
+                2,
+                "b.md",
+                "flags",
+                AuthoredValue::List(vec![
+                    AuthoredValue::Bool(false),
+                    AuthoredValue::string("yes")
+                ])
+            ),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![
+            Citation::new(
+                OperationId::new("repair-1").expect("an id"),
+                vec![cited_derived(scalar, "True")]
+            ),
+            Citation::new(
+                OperationId::new("repair-2").expect("an id"),
+                vec![cited_derived(element, "FALSE")]
+            ),
+        ]
+    );
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        (skipped[0].finding, skipped[0].reason),
+        (yes, SkipReason::ExcludedClass)
+    );
+    assert!(
+        skipped[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("yes/no coercion")),
+        "{skipped:?}"
+    );
+    assert!(
+        written(&vault, "a.md").contains("done: true"),
+        "{}",
+        written(&vault, "a.md")
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::TypeMismatch)],
+        "{after:?}"
+    );
+}
+
+/// A closed `status` over `todo`, `done` and `in progress`, a list `labels`
+/// closed over `red` and `blue`.
+const FOLDING: &str = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, 'in progress']}\n      labels: {values: [red, blue]}\n";
+
+/// **A value differing from exactly one member only by case or white space is
+/// written as that member, through preview then apply**: a scalar, and a
+/// list's element into one write beside a neighbour that stands reported.
+#[test]
+fn a_value_differing_from_a_member_by_case_or_white_space_is_written_as_the_member() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fold",
+        FOLDING,
+        &[
+            (
+                "a.md",
+                b"---\ntype: task\nstatus: \" In   Progress \"\n---\n# A\n",
+            ),
+            ("b.md", b"---\ntype: task\nlabels: [Red, mauve]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scalar = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        " In   Progress ",
+    );
+    let element = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "labels",
+        "Red",
+    );
+    let mauve = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "labels",
+        "mauve",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "status", "in progress"),
+            setting_list(2, "b.md", "labels", &["red", "mauve"]),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![
+            Citation::new(
+                OperationId::new("repair-1").expect("an id"),
+                vec![cited_derived(scalar, " In   Progress ")]
+            ),
+            Citation::new(
+                OperationId::new("repair-2").expect("an id"),
+                vec![cited_derived(element, "Red")]
+            ),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(mauve, SkipReason::NoDeclaredFix)
+                .with_value(norn_store::value_head("mauve"))
+        ]
+    );
+    assert!(
+        written(&vault, "a.md").contains("status: \"in progress\""),
+        "{}",
+        written(&vault, "a.md")
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::NotOneOf)],
+        "{after:?}"
+    );
+}
+
+/// **A type mismatch on a date or a number field is skipped as an excluded
+/// class in both modes, and stands reported**: the repair writes nothing.
+#[test]
+fn a_date_or_number_type_mismatch_is_skipped_as_an_excluded_class_and_stands() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-excluded",
+        "version: 1\nfields:\n  due: {type: date}\n  points: {type: number}\n",
+        &[("a.md", b"---\ndue: 1/2/26\npoints: three\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = standing(&host, &vault, |request| request);
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan)
+            .skipped
+            .iter()
+            .map(|skipped| skipped.reason)
+            .collect::<Vec<_>>(),
+        vec![SkipReason::ExcludedClass, SkipReason::ExcludedClass]
+    );
+    assert_eq!(
+        standing(&host, &vault, |request| request)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        before.values().cloned().collect::<Vec<_>>()
+    );
+}
+
+/// **A derived fix below the request's threshold is skipped in both modes,
+/// carrying its value and the operation the plan would have held; the same
+/// plan at the default threshold writes it.** A declared fix is written at
+/// every threshold.
+#[test]
+fn a_derived_fix_below_the_threshold_is_skipped_in_preview_and_apply_alike() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-threshold",
+        schema,
+        &[
+            ("a.md", b"---\ntype: task\nstatus: Done\n---\n# A\n"),
+            ("b.md", b"---\ntype: task\nstatus: complete\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let folded = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Done",
+    );
+    let synonym = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let before = tree_bytes(vault.path());
+
+    let plan = previewed_then_applied(&host, &vault, |request| {
+        request.with_threshold(Confidence::Declared)
+    });
+
+    assert_eq!(plan.operations, vec![setting(1, "b.md", "status", "done")]);
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(synonym, "complete")]
+        )]
+    );
+    let proposed = Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at("a.md")),
+        "status",
+        AuthoredValue::string("done"),
+    ));
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(folded, SkipReason::BelowThreshold)
+                .with_value(norn_store::value_head("Done"))
+                .with_proposed(proposed)
+        ]
+    );
+    let after = tree_bytes(vault.path());
+    assert_eq!(
+        after.get(&format!("{FOLDER}a.md")),
+        before.get(&format!("{FOLDER}a.md"))
+    );
+    assert_ne!(
+        after.get(&format!("{FOLDER}b.md")),
+        before.get(&format!("{FOLDER}b.md"))
+    );
+
+    // At the default threshold the fold is written.
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+    assert_eq!(plan.operations.len(), 1, "{:?}", plan.operations);
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: done\n---\n# A\n"
+    );
+}
+
+/// **A declared synonym decides over the fold, and the citation notes the
+/// derived answer when it differs; a declared fix the judge refuses blocks
+/// the derived answer, and the finding skips with both candidates.**
+#[test]
+fn a_declared_fix_outranks_the_derived_answer_through_preview_then_apply() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished, Todo: finished}}\n  strict:\n    match: {frontmatter: {type: task, strict: yes}}\n    one_of:\n      status: {values: [todo, done]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-precedence",
+        schema,
+        &[
+            ("a.md", b"---\ntype: task\nstatus: Done\n---\n# A\n"),
+            (
+                "b.md",
+                b"---\ntype: task\nstrict: yes\nstatus: Todo\n---\n# B\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let decided = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Done",
+    );
+    let blocked = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Todo",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "status", "finished")]
+    );
+    let cited = &provenance(&plan).citations[0].findings[0];
+    assert_eq!(
+        (cited.finding, cited.confidence),
+        (decided, Confidence::Declared)
+    );
+    assert_eq!(cited.notes.len(), 1, "{:?}", cited.notes);
+    assert!(cited.notes[0].contains("`done`"), "{:?}", cited.notes);
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        (skipped[0].finding, skipped[0].reason),
+        (blocked, SkipReason::JudgeWouldRefuse)
+    );
+    let Some(SkippedCandidates::Values { head, .. }) = &skipped[0].candidates else {
+        panic!("candidates: {skipped:?}");
+    };
+    let named: Vec<(String, Option<String>)> = head
+        .candidates()
+        .iter()
+        .map(|candidate| (candidate.value.text().to_string(), candidate.rule.clone()))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            ("finished".to_string(), Some("tasks".to_string())),
+            ("todo".to_string(), None)
+        ]
+    );
+    assert_eq!(
+        written(&vault, "b.md"),
+        "---\ntype: task\nstrict: yes\nstatus: Todo\n---\n# B\n"
+    );
 }
