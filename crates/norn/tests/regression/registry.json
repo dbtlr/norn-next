@@ -1905,10 +1905,13 @@
       "property": "A repair's element fix is written against a list's elements rather than its wrapped whole: the element a finding names is the element its fix rewrites, every occurrence of it, and every other element, a standing violation included, stays as it stood, so the fixed field refuses no identity the fix leaves unchanged.",
       "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
       "binding": {
-        "status": "dormant",
-        "reason": "nothing fixes: the repair verb reads and skips every selected finding, since no fix exists yet, so no plan writes an element fix and there is no precondition to match and no fix to compare. The query, validate and mutate clauses of element-vs-collection-semantics-are-one-rule are bound there; this case binds at NORN-374 (Layer 5B declared fixes), pre-committed as the declared-fix module crates/norn-host/src/planner/repair.rs::declared.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::declared" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/repair.rs::a_list_repairs_the_element_with_a_synonym_and_the_other_stands_reported",
+          "crates/norn-host/tests/repair.rs::a_repeated_offending_element_is_one_finding_whose_fix_rewrites_every_occurrence",
+          "crates/norn-host/src/planner/repair/declared.rs::one_operation_cites_every_element_it_fixes_and_a_skipped_element_leaves_the_rest",
+          "crates/norn-host/src/planner/repair/declared.rs::elements_are_compared_by_the_fields_typed_equality",
+          "crates/norn-host/src/applier/tests/gate.rs::a_written_field_refuses_only_the_element_violations_it_introduces"
         ]
       }
     },
