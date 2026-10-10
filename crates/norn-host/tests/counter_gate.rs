@@ -3660,24 +3660,29 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
     );
 }
 
-/// The statements a first batch of a narrowed repair runs on its snapshot,
-/// the establishing statement included, at every scale: five the batch reads
-/// and accounts for, and the one that establishes the snapshot.
-const REPAIR_STATEMENTS: u64 = 6;
+/// The statements a narrowed repair's preview runs on its two read holds'
+/// snapshots, at every scale: the six its batch read accounts for, and the
+/// statement that establishes each of the two snapshots, the repair's own and
+/// the preview's of the plan it resolved.
+const REPAIR_STATEMENTS: u64 = 8;
 
 /// **A repair narrowed to a path evaluates the documents that path admits and
-/// no others, and costs the same at both scales (NORN-373).** `Host::repair`
-/// reads its batch with one call, the store's repair batch read, which on a
-/// first batch also counts the selection; this takes a read hold on the host,
-/// makes that call over `counter-gate/fixed/**`, and sums what the batch
-/// reports it read with what the snapshot ran, as a read shape does.
+/// no others, and costs the same at both scales (NORN-373).** This drives
+/// `Host::repair` itself in a preview over `counter-gate/fixed/**`, in a read
+/// window, and reads what the repair cost off the host's read account: the
+/// batch read the repair ran on its hold's snapshot, the link judgments its
+/// plan ran, and the snapshots it established. A read added anywhere inside
+/// the handler is counted there, so it cannot hide behind the batch read.
 ///
-/// The narrowed selection admits the two findings the planted neighborhood
-/// holds, the pointer's ambiguous link and the unclosed document, at `ambiguous` (300 documents) and at `realistic` (2000), where the
-/// vaults differ only in documents outside the path. **The control** is the
-/// same call unnarrowed: it counts every finding the crowd's broken documents
-/// stand under, so it must read more at the larger scale on the batch's steps
-/// and the snapshot's.
+/// The narrowed selection admits the one finding the planted neighborhood's
+/// unclosed document stands under, at `ambiguous` (300 documents) and at
+/// `realistic` (2000), where the vaults differ only in documents outside the
+/// path. It leaves out the neighborhood's pointer: its ambiguous link names
+/// the crowd's stem, and a repair reads the live class that link names, which
+/// is the crowd, so that finding's cost follows the class and not the path.
+/// **The control** is the same repair unnarrowed: it counts every finding the
+/// crowd's broken documents stand under, so it must read more at the larger
+/// scale on the batch's steps and the snapshot's.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_narrowed_repair_costs_the_same_at_both_scales() {
@@ -3712,8 +3717,8 @@ fn a_narrowed_repair_costs_the_same_at_both_scales() {
         let ran = reading.narrowed.get("statements_executed");
         if ran != REPAIR_STATEMENTS {
             failures.push(format!(
-                "a narrowed repair over `{}` ran {ran} statements on its snapshot, and its \
-                 shape runs {REPAIR_STATEMENTS}",
+                "a narrowed repair over `{}` ran {ran} statements on its repair hold's \
+                 snapshot, and its shape runs {REPAIR_STATEMENTS}",
                 profile.name
             ));
         }
@@ -3726,15 +3731,17 @@ fn a_narrowed_repair_costs_the_same_at_both_scales() {
         )
         .violations(),
     );
-    for grows in ["validate_vm_steps", "vm_steps"] {
-        let grown = (at_small.control.get(grows), at_large.control.get(grows));
-        if grown.1 <= grown.0 {
-            failures.push(format!(
-                "the unnarrowed repair did not grow with the vault on `{grows}`, reading {} \
-                 over {} documents and {} over {}",
-                grown.0, at_small.documents, grown.1, at_large.documents
-            ));
-        }
+    // The snapshot's own steps are not a growth line here: the unnarrowed
+    // batch is a page of findings, and the `ambiguous` profile files more
+    // ambiguous links per page than `realistic` does, each read live.
+    let grows = "validate_vm_steps";
+    let grown = (at_small.control.get(grows), at_large.control.get(grows));
+    if grown.1 <= grown.0 {
+        failures.push(format!(
+            "the unnarrowed repair did not grow with the vault on `{grows}`, reading {} over {} \
+             documents and {} over {}",
+            grown.0, at_small.documents, grown.1, at_large.documents
+        ));
     }
     assert!(
         failures.is_empty(),
@@ -3751,57 +3758,92 @@ struct RepairReading {
     control: CounterSnapshot,
 }
 
-/// Attach `profile` with the planted documents beside it and make the
-/// repair's batch read over a live hold, narrowed and not.
+/// Attach `profile` with the planted documents beside it and preview the
+/// repair through the host, narrowed and not.
 fn read_a_repair(label: &str, profile: &norn_fixtures::Profile) -> RepairReading {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
     let planted = plant(&vault, profile);
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
-    let mut store = vault.store();
-    let reader = Reader {
-        host: &host,
-        name: vault.name().clone(),
-        declared: the_pinned_declaration(&mut store),
-    };
     RepairReading {
         documents: profile.docs + planted,
-        narrowed: repair_batch_cost(&reader, [Predicate::path(format!("{PLANTED}/fixed/**"))], 2),
-        control: repair_batch_cost(&reader, [], 0),
+        narrowed: repair_cost(
+            &host,
+            &vault,
+            [Predicate::path(format!("{PLANTED}/fixed/cg-unclosed.md"))],
+            1,
+        ),
+        control: repair_cost(&host, &vault, [], 0),
     }
 }
 
-/// What the first batch of a repair of the documents `predicates` admit cost
-/// on a live hold's snapshot, which must hold `rows` findings and, narrowed,
-/// count none remaining.
-fn repair_batch_cost(
-    reader: &Reader<'_>,
+/// What the preview of a repair of the documents `predicates` admit cost the
+/// host, read off its read account in a read window on this thread: the first
+/// batch must hold `rows` findings and, narrowed, count none remaining.
+fn repair_cost(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
     predicates: impl IntoIterator<Item = Predicate>,
     rows: usize,
 ) -> CounterSnapshot {
-    let params = norn_wire::RepairParams::new(reader.vault(), norn_wire::ApplyMode::Preview)
-        .with_predicates(predicates);
-    let hold = reader
-        .host
-        .begin_read(&reader.name)
-        .expect("a live attachment answers a read");
-    let batch = hold
-        .snapshot()
-        .repair_batch(
-            &norn_store::RepairSelection::from(&params),
-            &reader.declared,
-        )
-        .unwrap_or_else(|refusal| panic!("a repair batch was refused: {refusal:?}"));
+    let params = norn_wire::RepairParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Preview,
+    )
+    .with_predicates(predicates);
+    let account = host.read_evidence();
+    let window = ReadWindow::open();
+    let previewed = host
+        .repair(params)
+        .expect("a repair is answered")
+        .wait()
+        .expect("the repair previews");
+    let read = window.finish();
+    let spent = host.read_evidence().since(account);
+    let norn_wire::ApplyReport::Previewed { plan, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    let provenance = plan
+        .provenance
+        .expect("a repair plan carries its provenance");
     if rows > 0 {
-        assert_eq!(batch.rows.len(), rows, "the narrowed batch's findings");
         assert_eq!(
-            batch.remaining,
+            provenance.skipped.len(),
+            rows,
+            "the narrowed batch's findings"
+        );
+        assert_eq!(
+            provenance.remaining,
             Some(0),
             "the narrowed batch counts none left"
         );
     }
-    cost(batch.work.readings(), &hold.snapshot().counters())
+    let batch = spent.repair_batches;
+    let held = spent.planning_holds;
+    let judged = spent.preview_link_judgments;
+    [
+        ("repair_batches", batch.batches),
+        ("validate_statements", batch.validate_statements),
+        ("validate_rows_read", batch.validate_rows_read),
+        ("validate_full_scan_steps", batch.validate_full_scan_steps),
+        ("validate_sorts", batch.validate_sorts),
+        ("validate_vm_steps", batch.validate_vm_steps),
+        ("statements_executed", held.statements_executed),
+        ("vm_steps", held.vm_steps),
+        ("full_scan_steps", held.full_scan_steps),
+        ("planning_holds", held.holds),
+        ("judgments", judged.judgments),
+        ("judgment_statements", judged.statements_executed),
+        ("judgment_vm_steps", judged.vm_steps),
+        ("reads_served", spent.reads_served),
+        ("document_opens", read.document_opens),
+        ("target_reads", read.target_reads),
+        ("stats", read.stats),
+        ("walk_dirents", read.walk_dirents),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// The directory the planted documents sit in, beside the generated tree.

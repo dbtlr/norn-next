@@ -19,8 +19,8 @@ use norn_testkit::process::Sandbox;
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorDetail,
     ErrorEnvelope, FieldChange, FindingKind, PagedRows, PlanDocument, Predicate, Provenance,
-    ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason, Unsatisfied,
-    ValidateParams, ValidateReport, VaultAddress, WriteTarget,
+    ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason, SkippedCandidates,
+    Unsatisfied, ValidateParams, ValidateReport, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -64,12 +64,22 @@ const FINDINGS: usize = 7;
 
 /// A sandbox and a vault holding [`DOCUMENTS`] under [`SCHEMA`], attached.
 fn a_vault(label: &str) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_holding(label, &DOCUMENTS)
+}
+
+/// A sandbox and a vault holding `documents`, each named beneath [`FOLDER`],
+/// under [`SCHEMA`], attached.
+fn a_vault_holding(
+    label: &str,
+    documents: &[(&str, &[u8])],
+) -> (Sandbox, attach::Vault, attach::ServingHost) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
     std::fs::write(vault.path().join(".norn/schema.yaml"), SCHEMA).expect("write the schema");
-    std::fs::create_dir_all(vault.path().join(FOLDER)).expect("make the folder");
-    for (name, bytes) in DOCUMENTS {
-        std::fs::write(vault.path().join(FOLDER).join(name), bytes).expect("write a document");
+    for (name, bytes) in documents {
+        let at = vault.path().join(FOLDER).join(name);
+        std::fs::create_dir_all(at.parent().expect("a parent folder")).expect("make the folder");
+        std::fs::write(at, bytes).expect("write a document");
     }
     let host = vault.host();
     (sandbox, vault, host)
@@ -527,4 +537,180 @@ fn a_selection_naming_a_key_the_vault_does_not_hold_is_refused_in_both_modes() {
         assert_eq!(keys, ["stauts", "prioritee"], "{mode:?}");
         assert_eq!(tree_bytes(vault.path()), before, "{mode:?} wrote");
     }
+}
+
+/// **A preview and an apply of the same batch plan the same whole plan, at a
+/// limit that leaves a cursor and a count, and again for the continuation.**
+/// An apply of nothing to write answers the plan its preview did, provenance
+/// included.
+#[test]
+fn a_preview_and_an_apply_plan_the_same_whole_plan_at_every_batch() {
+    let (_sandbox, vault, host) = a_vault("host-repair-modes-agree");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let applied = |answered| match planned(answered) {
+        ApplyReport::Applied { plan, .. } => plan,
+        other => panic!("an apply answered {other:?}"),
+    };
+
+    let preview = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(3)));
+    let apply = applied(host.repair(repairing(&vault, ApplyMode::Apply).with_limit(3)));
+
+    assert!(provenance(&preview).cursor.is_some());
+    assert_eq!(provenance(&preview).remaining, Some(4));
+    assert_eq!(apply, preview);
+
+    let cursor = provenance(&preview).cursor.clone().expect("a cursor");
+    let continued = repairing(&vault, ApplyMode::Preview).with_after(*cursor.clone());
+    let preview = previewed(host.repair(continued));
+    let apply = applied(host.repair(repairing(&vault, ApplyMode::Apply).with_after(*cursor)));
+
+    assert_eq!(apply, preview);
+}
+
+/// **A vault drained in apply mode, batch by batch along each plan's cursor,
+/// covers every selected finding once.** The cursor an applied plan carries is
+/// the one that continues the repair.
+#[test]
+fn an_apply_drains_the_selection_along_its_cursors_covering_every_finding_once() {
+    let (_sandbox, vault, host) = a_vault("host-repair-apply-drain");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+
+    let mut batches = Vec::new();
+    let mut seen = Vec::new();
+    let mut request = repairing(&vault, ApplyMode::Apply).with_limit(2);
+    loop {
+        let ApplyReport::Applied { plan, .. } = planned(host.repair(request.clone())) else {
+            panic!("an apply answered another report");
+        };
+        batches.push(skipped_paths(&plan, &by_id));
+        seen.extend(skipped_ids(&plan));
+        match provenance(&plan).cursor.clone() {
+            Some(cursor) => request = request.with_after(*cursor),
+            None => break,
+        }
+    }
+
+    assert!(
+        batches.len() >= 2,
+        "one batch drained the vault: {batches:?}"
+    );
+    seen.sort_unstable();
+    assert_eq!(seen, by_id.keys().copied().collect::<Vec<_>>());
+}
+
+/// **A block that changes nothing about what applies, shown on a plan that
+/// writes.** The resolved plan of a status edit lands the same bytes and the
+/// same target outcomes with no provenance, with the block a repair attached,
+/// and with it altered: skipped findings emptied, cursor and count taken off,
+/// a finding generation that never stood.
+#[test]
+fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
+    const EDITED: &str = "edited.md";
+    let documents: Vec<(&str, &[u8])> = DOCUMENTS
+        .iter()
+        .copied()
+        .chain([(
+            EDITED,
+            &b"---\ntype: task\nstatus: todo\n---\n# Edited\n"[..],
+        )])
+        .collect();
+    let edit = |vault: &attach::Vault, host: &attach::ServingHost| {
+        previewed(host.set(SetParams::new(
+            address(vault),
+            ApplyMode::Preview,
+            WriteTarget::path(
+                norn_wire::DocumentPath::new(format!("{FOLDER}{EDITED}")).expect("a document path"),
+            ),
+            vec![FieldChange::set("status", AuthoredValue::string("done"))],
+        )))
+    };
+    let landing = |label: &str, block: &dyn Fn(&ResolvedPlan) -> Option<Provenance>| {
+        let (_sandbox, vault, host) = a_vault_holding(label, &documents);
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let mut plan = edit(&vault, &host);
+        assert_eq!(plan.operations.len(), 1, "the edit is an operation");
+        let repair = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)));
+        plan.provenance = block(&repair);
+        let applied = host
+            .apply(ApplyParams::new(
+                ApplyMode::Apply,
+                PlanDocument::resolved(plan),
+            ))
+            .expect("the plan is admitted")
+            .wait()
+            .expect("the plan applies")
+            .report;
+        let ApplyReport::Applied {
+            plan,
+            changeset,
+            targets,
+            ..
+        } = applied
+        else {
+            panic!("an apply answered {applied:?}");
+        };
+        // The plan's root is the fixture's own, so it is the one thing that
+        // differs between three equivalent vaults.
+        let written = std::fs::read(vault.path().join(FOLDER).join(EDITED)).expect("read");
+        (
+            plan.operations,
+            plan.transitions,
+            changeset,
+            targets,
+            written,
+        )
+    };
+
+    let none = landing("host-repair-block-none", &|_| None);
+    let original = landing("host-repair-block-original", &|repair| {
+        repair.provenance.clone()
+    });
+    let altered = landing("host-repair-block-altered", &|_| {
+        Some(Provenance::new(u64::MAX, Vec::new()))
+    });
+
+    assert!(String::from_utf8_lossy(&none.4).contains("status: done"));
+    assert_eq!(original, none);
+    assert_eq!(altered, none);
+}
+
+/// **An ambiguous link is skipped as ambiguous, naming the documents its
+/// address could name.** `[[twin]]` names `a/twin.md` and `b/twin.md`; the
+/// finding is skipped as `ambiguous_link` with both as its candidates, read
+/// from the links as they stand. Findings are derived again in the changeset
+/// that adds a third `twin.md`, so a finding's stored candidates are never
+/// older than the snapshot the repair reads, and the live read is pinned by
+/// the planner's own cases.
+#[test]
+fn an_ambiguous_link_is_skipped_as_ambiguous_naming_the_documents_it_could_name() {
+    let documents: [(&str, &[u8]); 3] = [
+        ("a/twin.md", b"---\ntype: note\n---\n# A\n"),
+        ("b/twin.md", b"---\ntype: note\n---\n# B\n"),
+        ("pointer.md", b"---\ntype: note\n---\nSee [[twin]].\n"),
+    ];
+    let (_sandbox, vault, host) = a_vault_holding("host-repair-ambiguous", &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_kinds([FindingKind::Ambiguous])),
+    );
+
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one ambiguous link stands: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(skipped.reason, SkipReason::AmbiguousLink);
+    let Some(SkippedCandidates::Documents { head, .. }) = &skipped.candidates else {
+        panic!("the skip names no documents: {skipped:?}");
+    };
+    let named: Vec<&str> = head
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.path.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        [format!("{FOLDER}a/twin.md"), format!("{FOLDER}b/twin.md")]
+    );
+    assert_eq!(head.total(), 2);
 }

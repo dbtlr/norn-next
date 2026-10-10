@@ -177,7 +177,9 @@
 //! again; the apply job plans an authored plan through
 //! [`expand::resolve_expanding`] inside the entry's claim over a
 //! [`view::TreeView`], matching on a snapshot it takes there; and a preview
-//! plans the same way on its one snapshot, taking no claim (`crate::apply`).
+//! plans the same way on its one snapshot, taking no claim, as does
+//! `Host::repair` on the snapshot of the hold it reads its batch on
+//! (`crate::apply`).
 
 pub(crate) mod cascade;
 pub(crate) mod compose;

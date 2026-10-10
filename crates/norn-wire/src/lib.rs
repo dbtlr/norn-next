@@ -333,6 +333,7 @@
 //! [`ErrorDetail::apply_outcome_unknown`], [`ErrorDetail::plan_refused`],
 //! [`ErrorDetail::root_changed`], [`ErrorDetail::plan_interrupted`],
 //! [`ErrorDetail::write_failed`], [`ErrorDetail::plan_invalid`],
+//! [`ErrorDetail::unsatisfied`],
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],

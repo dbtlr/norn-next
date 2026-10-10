@@ -62,16 +62,16 @@ use norn_store::{
     RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, DocumentPath, EditParams,
-    ErrorDetail, ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate,
-    Provenance, RepairParams, ResolvedPlan, RewriteWikilinkParams, RootIdentity, SetParams,
-    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, DocumentPath,
+    EditParams, ErrorDetail, ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument,
+    Predicate, Provenance, RepairParams, ResolvedPlan, RewriteWikilinkParams, RootIdentity,
+    SetParams, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
-use crate::evidence::{LinkJudgmentCost, SnapshotWork};
+use crate::evidence::{LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SnapshotWork};
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadHold, ReadRefusal,
     ReadSource, ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
@@ -740,53 +740,90 @@ where
     /// hold that is given back when this returns.
     fn repair_plan(&self, params: &RepairParams) -> Result<ResolvedPlan, ErrorEnvelope> {
         let name = registered_name(&params.vault)?;
+        let (_, plan) =
+            self.planning_on_hold(name, params.vault.clone(), |ground, snapshot, refused| {
+                let selection = RepairSelection::from(params);
+                let batch = snapshot
+                    .reading(|held| held.repair_batch(&selection, snapshot.declared))
+                    .map_err(refused)?;
+                self.count_repair_batch(RepairBatchCost::of(
+                    batch.as_ref().ok().map(|batch| &batch.work),
+                ));
+                let batch = batch.map_err(|refusal| refused(page_refusal(refusal)))?;
+                // A read answers an unsatisfied part in-band and matches
+                // nothing; a write goes no further than that nothing
+                // (`planner::expand`), so the repair is refused, naming every
+                // part, before anything is planned.
+                if !batch.unsatisfied.is_empty() {
+                    return Err(ErrorEnvelope::new(
+                        "the repair's selection holds parts that could not be applied as \
+                         asked, so nothing was planned",
+                        ErrorDetail::unsatisfied(batch.unsatisfied),
+                    ));
+                }
+                // The batch's `moved` is not carried: a repair cursor names a
+                // path and the batch reads the state that stands now, so
+                // nothing in it is the caller's to act on. Its advisories are
+                // dropped as a `where` target's are (`PlanSnapshot::matching`
+                // reads only the find's rows).
+                let planned = repair::plan(&batch.rows, &mut |address| {
+                    snapshot
+                        .target(&PathOverlay::new(), address, PlanSide::Before)
+                        .map(|naming| naming.candidates)
+                })
+                .map_err(refused)?;
+                let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
+                let resolution = resolve_on(authored, ground, name, snapshot).map_err(refused)?;
+                let plan = fully_resolved(resolution)?.plan;
+                let mut provenance = Provenance::new(batch.snapshot.generation, planned.skipped)
+                    .with_citations(planned.citations);
+                if let Some(remaining) = batch.remaining {
+                    provenance = provenance.with_remaining(remaining);
+                }
+                if let Some(next) = batch.next {
+                    provenance = provenance.continued_by(next);
+                }
+                Ok(plan.with_provenance(provenance))
+            })?;
+        Ok(plan)
+    }
+
+    /// Plan on one read hold over the vault `name`: the hold, the ground the
+    /// entry recorded for it, and a [`PlanSnapshot`] of `vault` on the hold's
+    /// snapshot, handed to `plan` with the mapping of a refusal the snapshot
+    /// met to the envelope that answers it, damage withdrawn from service as
+    /// a read withdraws it. This is the one way a request plans on a read
+    /// hold, so a preview and a repair count one account.
+    ///
+    /// What the plan's link judgments cost, and what the hold's snapshot ran
+    /// whoever ran it, are the read account's, however `plan` ended. The hold
+    /// is given back when this returns.
+    fn planning_on_hold<T>(
+        &self,
+        name: &VaultName,
+        vault: VaultAddress,
+        plan: impl FnOnce(
+            &PlanGround,
+            &PlanSnapshot<'_>,
+            &dyn Fn(PageRefused) -> ErrorEnvelope,
+        ) -> Result<T, ErrorEnvelope>,
+    ) -> Result<(AnswerReading, T), ErrorEnvelope> {
         let hold = self
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
-        hold.reading().answer_reading(name)?;
+        let reading = hold.reading().answer_reading(name)?;
         let ground = planning_ground(&hold, name)?;
-        let snapshot =
-            PlanSnapshot::held(params.vault.clone(), hold.snapshot(), hold.content_model());
+        let snapshot = PlanSnapshot::held(vault, hold.snapshot(), hold.content_model());
         let refused = |refused| match refused {
             PageRefused::Answered(refused) => refused,
             PageRefused::Damaged(detail) => {
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let batch = hold
-            .snapshot()
-            .repair_batch(&RepairSelection::from(params), hold.content_model())
-            .map_err(|refusal| refused(page_refusal(refusal)))?;
-        // A read answers an unsatisfied part in-band and matches nothing; a
-        // write goes no further than that nothing (`planner::expand`), so the
-        // repair is refused, naming every part, before anything is planned.
-        if !batch.unsatisfied.is_empty() {
-            return Err(ErrorEnvelope::new(
-                "the repair's selection holds parts that could not be applied as asked, so \
-                 nothing was planned",
-                ErrorDetail::unsatisfied(batch.unsatisfied),
-            ));
-        }
-        // The batch's `moved` is not carried: a repair cursor names a path and
-        // the batch reads the state that stands now, so nothing in it is the
-        // caller's to act on. Its advisories are dropped as a `where` target's
-        // are (`PlanSnapshot::matching` reads only the find's rows).
-        let planned = repair::plan(&batch.rows);
-        let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
-        let resolution = resolve_on(authored, ground, name, &snapshot).map_err(refused);
-        // Repair plans under a read hold as a preview does, so what its link
-        // judgments cost is the same read account's, however it ended.
+        let planned = plan(ground, &snapshot, &refused);
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
-        let plan = fully_resolved(resolution?)?.plan;
-        let mut provenance = Provenance::new(batch.snapshot.generation, planned.skipped)
-            .with_citations(planned.citations);
-        if let Some(remaining) = batch.remaining {
-            provenance = provenance.with_remaining(remaining);
-        }
-        if let Some(next) = batch.next {
-            provenance = provenance.continued_by(next);
-        }
-        Ok(plan.with_provenance(provenance))
+        self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
+        Ok((reading, planned?))
     }
 
     /// A write verb's compiled `plan`, entering the one `apply` path.
@@ -810,44 +847,30 @@ where
     /// whether its root still stands there is asked of the filesystem after
     /// the gate is given back, as an apply's planning asks it.
     pub(crate) fn preview(&self, name: &VaultName, plan: PlanDocument) -> ApplyAnswer {
-        let hold = self
-            .begin_read(name)
-            .map_err(|refusal| refusal.answer(name))?;
-        let reading = hold.reading().answer_reading(name)?;
-        let ground = planning_ground(&hold, name)?;
-        let snapshot =
-            PlanSnapshot::held(plan.vault().clone(), hold.snapshot(), hold.content_model());
-        let answered = |refused| match refused {
-            PageRefused::Answered(refused) => refused,
-            PageRefused::Damaged(detail) => {
-                self.withdraw_for_read_damage(&hold, detail).answer(name)
-            }
-        };
-        let report = (|| match plan {
-            // Planned as an apply plans it, then judged as an apply judges
-            // what it planned: resolving checks no schema, so the plan it
-            // answers goes through the same checks a resolved plan's does.
-            PlanDocument::Operations(authored) => {
-                let resolution = resolve_on(authored, ground, name, &snapshot).map_err(answered)?;
-                let resolution = fully_resolved(resolution)?;
-                preview_resolved(
-                    resolution.plan,
-                    resolution.forecast.left_behind,
-                    ground,
-                    &snapshot,
-                )
-                .map_err(answered)
-            }
-            PlanDocument::Resolved(resolved) => {
-                preview_resolved(resolved, Vec::new(), ground, &snapshot).map_err(answered)
-            }
-        })();
-        // What the preview's link judgments cost is the read account's,
-        // however the preview answered.
-        self.count_preview_link_judgments(snapshot.link_judgment_cost());
-        let report = report?;
-        drop(snapshot);
-        drop(hold);
+        let (reading, report) =
+            self.planning_on_hold(name, plan.vault().clone(), |ground, snapshot, answered| {
+                match plan {
+                    // Planned as an apply plans it, then judged as an apply
+                    // judges what it planned: resolving checks no schema, so
+                    // the plan it answers goes through the same checks a
+                    // resolved plan's does.
+                    PlanDocument::Operations(authored) => {
+                        let resolution =
+                            resolve_on(authored, ground, name, snapshot).map_err(answered)?;
+                        let resolution = fully_resolved(resolution)?;
+                        preview_resolved(
+                            resolution.plan,
+                            resolution.forecast.left_behind,
+                            ground,
+                            snapshot,
+                        )
+                        .map_err(answered)
+                    }
+                    PlanDocument::Resolved(resolved) => {
+                        preview_resolved(resolved, Vec::new(), ground, snapshot).map_err(answered)
+                    }
+                }
+            })?;
         Ok(VaultAnswer::new(reading, Vec::new(), report))
     }
 }

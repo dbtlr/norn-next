@@ -1934,9 +1934,9 @@
       "sources": ["norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no link fix exists: the repair verb skips every broken, ambiguous and missing-anchor finding, and since ADR 0038 no derived fix answers a broken link, so the similarity suggestion and the move-following that target unresolvable text, and the repair guidance outside the validation scope, land at Layer 5C (NORN-352), pre-committed as the module crates/norn-host/src/planner/repair.rs::suggested, which is where they can first be asserted.",
+        "reason": "no link fix exists: the repair verb skips every broken and missing-anchor finding for want of a declared fix, and an ambiguous link with the documents it could name. No derived fix answers a broken link by normalizing its spelling (ADR 0038); a broken link's answers are Layer 5C's (NORN-352): move-following through the tombstone suffix lookup, which is derived, and the similarity suggestion, which is suggested. Both target unresolvable text, and the repair guidance outside the validation scope lands with them, pre-committed as the module crates/norn-host/src/planner/repair.rs::broken_links, which is where they can first be asserted.",
         "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::suggested" }
+          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::broken_links" }
         ]
       }
     },

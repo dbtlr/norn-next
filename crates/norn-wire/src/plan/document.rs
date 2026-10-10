@@ -52,7 +52,7 @@
 //! **Provenance is what a repair plan was planned from.** Repair plans cite
 //! the finding generation they read, the findings each operation fixes, the
 //! findings they skipped and where the next batch continues. `Host::repair`
-//! is the one planner that emits it, and only on a resolved plan: an authored
+//! is the one handler that emits it, and only on a resolved plan: an authored
 //! plan plans from no findings. It is a record, never checked when the plan is
 //! applied, and the fresh plan a refusal answers carries none. It is spelled
 //! here so a repair plan is the same document every other plan is.

@@ -40,6 +40,13 @@
 //! that rendering lands above this layer, so the call graph reaches none of
 //! them from this crate today.
 //!
+//! **`request/unsatisfied` is raised by the host's repair handler.** A read
+//! answers a selection part the builder could not apply in-band and matches
+//! nothing; a repair goes no further than that nothing, so its handler refuses
+//! the request with the code, naming every such part, in both modes and before
+//! it plans anything. A `where` write instead ends as an unresolved
+//! operation.
+//!
 //! **The codes an apply ends in are minted ahead of its handler.** An apply
 //! that neither previews nor applies ends in one of seven codes of its own,
 //! beside the admission codes a read carries, which an apply refused at
@@ -495,9 +502,9 @@ pub enum ReasonCode {
     /// builder could not apply as asked: a key the vault's field universe does
     /// not hold, a path part that is a bare directory or a glob that does not
     /// parse, and the like. A read answers such a part in-band and matches
-    /// nothing; a write goes no further than that nothing, so it is refused
-    /// and nothing was written. The detail is every such part, as the read
-    /// would report it.
+    /// nothing. `repair` refuses with this code, in both modes, before it
+    /// plans anything, so nothing was written. The detail is every such part,
+    /// as the read would report it.
     #[serde(rename = "request/unsatisfied")]
     RequestUnsatisfied,
     /// `engine/not-enabled` — the vault has not enabled the rung the request

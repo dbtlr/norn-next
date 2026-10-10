@@ -2699,12 +2699,13 @@ batch's findings into operations and resolves them on its snapshot as a preview 
 hold is then given back, and the resolved plan enters `Host::apply` as a resolved plan, so
 the applier judges and writes a repair as it does any plan and is not told it is one. A
 finding the plan makes no fix for is skipped with its reason: a document that does not read
-— an undecodable path or body, or a frontmatter block nothing read — is `unreadable`, and a
-finding no rule declares a fix for is `no_declared_fix`, with the value it judged where it
-has one. Every operation of a repair plan is numbered `repair-1`, `repair-2`, and so on,
-which its citations name. The plan carries a provenance block recording what it was planned
-from: the write generation of the snapshot it read, the findings each operation fixes, the
-findings it skipped in batch order, and `cursor`, the position after the last document the
+— a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
+does not decode, or a frontmatter block nothing read — is `unreadable`; an ambiguous link
+is `ambiguous_link`, with the documents its address names on the held snapshot, read live
+and not from the finding; and a finding no rule declares a fix for is `no_declared_fix`,
+with the value it judged where it has one. The plan carries a provenance block recording
+what it was planned from: the write generation of the snapshot it read, the findings each
+operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request
 carrying no `after`, also carries `remaining`, the exact number of selected findings left
 after it. The store's batch read takes that count in the same call, as one more statement
@@ -3000,8 +3001,7 @@ folder move carrying an identifier or a requirement is `request/plan-invalid`
 becomes of the links naming its document: rewritten to `rewrite_to`, left broken where
 `allow_broken_links` says so, or — saying neither — forbidden, so that a delete any link
 names does not resolve. The `move`, `delete` and `rewrite_wikilink` requests compile to
-one such operation each, and the operations a `repair` plans are numbered `repair-1`,
-`repair-2`, and so on. A cascade on an authored operation or on a kind that does not
+one such operation each. A cascade on an authored operation or on a kind that does not
 cascade, a folder move left in a resolved plan and a `create_by_rule` left in one
 (`unexpanded_rule`) are `request/plan-invalid`.
 
