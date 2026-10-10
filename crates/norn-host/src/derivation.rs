@@ -1456,6 +1456,20 @@ pub(crate) fn document_links(bytes: &[u8]) -> Vec<LinkFact> {
     parsed_links(&parsed(source))
 }
 
+/// The wikilinks the frontmatter of the document `bytes` spell holds, as
+/// [`document_links`] reads them, its body's left out: what a repair probes
+/// of a document whose frontmatter a route's cascade may respell.
+pub(crate) fn frontmatter_links(bytes: &[u8]) -> Vec<LinkFact> {
+    let Ok(source) = document_source(bytes) else {
+        return Vec::new();
+    };
+    parsed(source)
+        .frontmatter_wikilinks()
+        .into_iter()
+        .map(map_link)
+        .collect()
+}
+
 /// The links the parsed `document` holds, as [`document_links`] reads them
 /// from its bytes: for a caller that parsed the document for another reason
 /// and reads its links off that one parse.

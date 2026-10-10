@@ -228,6 +228,51 @@ pub(crate) struct Verdict {
     pub(crate) standing: Standing,
 }
 
+/// Every finding the judge concludes of each document a plan writes, by the
+/// path it is written at: what a repair holds its plan's claims to
+/// ([`crate::applier::preview_judged`]).
+pub(crate) type Holdings = std::collections::BTreeMap<DocumentPath, Holding>;
+
+/// What the judge concludes of one document a plan writes: every finding of
+/// its bytes, or, for a document a move carries byte for byte, those of its
+/// frontmatter block where it lands — a rule's and a field declaration's,
+/// the only ones a move can change.
+#[derive(Clone, Debug)]
+pub(crate) struct Holding {
+    holds: Vec<Held>,
+    whole: bool,
+}
+
+impl Holding {
+    /// What `judged`, a judgment of a document's bytes, concludes.
+    pub(super) fn of_whole(judged: &Judged) -> Self {
+        Holding {
+            holds: judged.holds(),
+            whole: true,
+        }
+    }
+
+    /// What `judged`, a judgment of a frontmatter block, concludes.
+    pub(super) fn of_block(judged: &Judged) -> Self {
+        Holding {
+            holds: judged.holds(),
+            whole: false,
+        }
+    }
+
+    /// Whether the judgment says anything of `finding`: every judgment of a
+    /// document's bytes does, and a block's of a rule's or a field
+    /// declaration's finding alone.
+    pub(crate) fn judges(&self, finding: &Held) -> bool {
+        self.whole || matches!(finding.identity, Identity::Rule(_))
+    }
+
+    /// Whether the document holds `finding`.
+    pub(crate) fn holds(&self, finding: &Held) -> bool {
+        self.holds.iter().any(|held| held.is(finding))
+    }
+}
+
 /// One finding the judge concludes of a document's bytes, as a finding row
 /// names it, with the identity that tells it from another (see the
 /// [module](self)).
@@ -309,10 +354,9 @@ pub(crate) fn standing(
 /// fixed.
 ///
 /// **A document is judged at a place other than the one it was composed at**
-/// by passing that place as `after_path`: a dormant carrier for the routes
-/// NORN-380 plans, whose destination is judged where the document lands. The
-/// current call graph judges every fix where its document stands, so no
-/// caller passes another place yet. Judging a moved document's whole bytes
+/// by passing that place as `after_path`: a repair's route is judged where
+/// its document lands, and each fix composed after it there. Judging a moved
+/// document's whole bytes
 /// agrees with the applier's judgment of a carried move, which judges the
 /// frontmatter block alone ([`judge_block`]): every other finding a document's
 /// bytes conclude is a function of those bytes alone, the same at the place it

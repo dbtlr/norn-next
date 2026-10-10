@@ -112,7 +112,7 @@ pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 use schema::Citations;
-pub(crate) use schema::{Held, Standing, standing, verdict};
+pub(crate) use schema::{Held, Holdings, Standing, standing, verdict};
 pub(crate) use stage::Links;
 use stage::Stop;
 
@@ -431,7 +431,84 @@ pub(crate) fn preview(
     schema: &SchemaPlace,
     declared: &Declared,
     links: Links<'_>,
-) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
+) -> Previewed {
+    previewing(
+        plan,
+        anchor,
+        root,
+        (exclusions, schema),
+        declared,
+        links,
+        None,
+    )
+}
+
+/// [`preview`] the resolved `plan`, and judge its schema whole by the same
+/// one check: the preview's answer, and, where the schema is the one thing
+/// left to stop the plan, what the check concludes of it — the violations
+/// it introduces and every finding each document it writes holds
+/// ([`Whole`]).
+///
+/// **One check serves both**, so the answer is exactly [`preview`]'s. Where
+/// another check stops the plan first — drift, a failed condition, a shape
+/// that is not what its operations do, a link whose resolution moved, a vault
+/// or a snapshot that does not read — no judgment is answered, and the answer
+/// is that cause, as an apply or a preview of the plan answers it.
+///
+/// A repair reads it (`crate::apply`'s repair) to hold the plan it planned
+/// to the plan's own claims, its preview answering from the same check.
+pub(crate) fn preview_judged(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    exclusions: &[PathBuf],
+    schema: &SchemaPlace,
+    declared: &Declared,
+    links: Links<'_>,
+) -> (Previewed, Option<Whole>) {
+    let mut whole = None;
+    let answer = previewing(
+        plan,
+        anchor,
+        root,
+        (exclusions, schema),
+        declared,
+        links,
+        Some(&mut whole),
+    );
+    (answer, whole)
+}
+
+/// What a preview of a resolved plan answers: the same plan and its
+/// forecast, or the outcome an apply of it would end in.
+pub(crate) type Previewed = Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>>;
+
+/// What the applier's check concludes of a plan's schema: the violations it
+/// introduces, and every finding each document it writes holds
+/// ([`preview_judged`]).
+#[derive(Debug, Default)]
+pub(crate) struct Whole {
+    /// The violations the plan introduces, each citing its rules by this
+    /// judgment's own numbering.
+    pub(crate) introduced: Vec<SchemaViolation>,
+    /// Every finding each document the plan writes holds, by the path it is
+    /// written at.
+    pub(crate) holdings: Holdings,
+    /// The rule sets the violations cite.
+    pub(crate) rule_sets: Vec<norn_wire::RuleSet>,
+}
+
+/// [`preview`] `plan`, and where `whole` asks, keep what its check concludes
+/// of its schema there ([`preview_judged`]).
+fn previewing(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    (exclusions, schema): (&[PathBuf], &SchemaPlace),
+    declared: &Declared,
+    links: Links<'_>,
+    whole: Option<&mut Option<Whole>>,
+) -> Previewed {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
         return Err(Box::new(ApplyOutcome::RootChanged {
@@ -450,7 +527,32 @@ pub(crate) fn preview(
         schema,
     };
     let mut citations = Citations::default();
-    let stop = match stage::check(&plan, &view, declared, links, &mut citations) {
+    let mut judged = Whole::default();
+    let checked = stage::check_judging(
+        &plan,
+        &view,
+        declared,
+        links,
+        &mut citations,
+        whole.is_some().then_some(&mut judged),
+    );
+    if let Some(whole) = whole {
+        // The judgment is kept only where the check reached it with nothing
+        // else stopping the plan: a plan the schema alone refuses, or one it
+        // passes.
+        let reached = match &checked {
+            Ok(_) => true,
+            Err(stage::Unfit::Refused(checks)) => checks
+                .iter()
+                .all(|check| matches!(check, RefusedCheck::SchemaViolation { .. })),
+            Err(_) => false,
+        };
+        if reached {
+            judged.rule_sets = citations.cited_by(&judged.introduced);
+            *whole = Some(judged);
+        }
+    }
+    let stop = match checked {
         Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
             Ok(()) => {
                 let cited = citations.cited_by(&checked.forced);

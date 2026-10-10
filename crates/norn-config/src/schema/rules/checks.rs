@@ -26,8 +26,9 @@
 //! so two tokens reading one capture are filled apart: the route
 //! `{{path.p}}/{{path.p}}/` passes against `red/blue/*.md`, though no real
 //! fill writes `red` and `blue` from one capture. The exact judgment is of a
-//! filled route, which repair will make per document when it moves one
-//! (NORN-380, which plans routes); schema read refuses only what no document
+//! filled route, which repair makes per document when it moves one, judging
+//! the document where the route lands (`norn-host`'s
+//! `planner::repair::declared`); schema read refuses only what no document
 //! could escape.
 //!
 //! **A route is judged under [`CaseFold::Exact`].** It is the author's own

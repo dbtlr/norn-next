@@ -4,13 +4,8 @@
 //! The defaults fixpoint ([`VaultSchema::fill_rule_defaults`](crate::schema::VaultSchema::fill_rule_defaults)) fills a
 //! created document's defaults by [`Rule::fill_default`], and repair fills a
 //! missing field's default by it, so a capture is bound, the clock read and
-//! the work tallied ([`RuleWork`]) one way whichever of them asks.
-//!
-//! **A dormant carrier: [`Rule::fill_route`].** It fills a misplaced
-//! document's route the same way, for the routes NORN-380 plans. Repair does
-//! not plan routes yet, so nothing in the current call graph fills one outside
-//! this crate's tests; it stays covered at this seam so the consuming step
-//! needs no second way to bind and fill a route.
+//! the work tallied ([`RuleWork`]) one way whichever of them asks. Repair
+//! fills a misplaced document's route the same way, by [`Rule::fill_route`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -125,12 +120,9 @@ impl Rule {
     /// holding `:` or slugging to nothing fills no folder. The caller
     /// judges the whole destination as a document path too.
     ///
-    /// A dormant carrier: NORN-380, which plans routes, is the consuming step.
-    /// Repair's declared fixes (`norn-host`'s `planner::repair::declared`) do
-    /// not move a misplaced document yet, so the current call graph does not
-    /// reach this; repair reads only whether a rule declares a route
-    /// ([`AllowedPaths::route`](super::AllowedPaths::route)) to note it on the
-    /// skipped finding.
+    /// Read by repair's routes (`norn-host`'s
+    /// `planner::repair::declared::routes`), which move a misplaced document
+    /// into the folder this fills, the document's file name after it.
     pub fn fill_route<'s>(
         &'s self,
         path: &str,
