@@ -68,7 +68,11 @@
 //! number of targets it could name — and the targets are added in memory:
 //! the store's rows that are targets are dropped, and the targets present on
 //! the side being resolved are counted in. Two rows left over tell several
-//! from one, so no key's whole class is ever counted.
+//! from one, so no key's whole class is ever counted. **The targets a key
+//! could name are read off the overlay once, when the key is resolved**, and
+//! kept as counts beside the head, so a link adds them in constant time
+//! however many targets the key could name: a stem every document of a plan
+//! shares names every one of them, and its links do not read them each.
 //!
 //! **The members a class keeps out are never read.** The head seeks the
 //! members the ambiguity-ignore set admits by the admitting count each
@@ -100,6 +104,7 @@
 //! link's judgment reads.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use norn_db::rusqlite::types::Value;
 use norn_wire::{Candidate, CandidateHead, LinkAddressKind, Resolves};
@@ -119,13 +124,19 @@ use crate::store::Snapshot;
 /// The files a plan writes, each with whether a document stands there before
 /// the plan and after it: the overlay its two vaults are read through.
 ///
-/// A path listed twice is overlaid as listed last.
+/// A path listed twice is overlaid as listed last, where it was first
+/// listed. **Each path is held once, by its spelling**, so building an
+/// overlay of `n` files costs `n` lookups of a keyed map, never a scan of the
+/// files listed so far.
 #[derive(Clone, Debug, Default)]
 pub struct PathOverlay {
     targets: Vec<Overlaid>,
+    /// Where each target's path stands in `targets`.
+    listed: BTreeMap<DocumentPath, usize>,
     /// Each document whose naming links the plan reaches though it changes
-    /// nothing there.
+    /// nothing there, each once, in the order first reached.
     reached: Vec<DocumentPath>,
+    reached_once: BTreeSet<DocumentPath>,
 }
 
 /// One file a plan writes, and whether a document stands there on each side.
@@ -156,15 +167,13 @@ impl PathOverlay {
     /// The same overlay, with a document standing at `path` before the plan
     /// where `before` says so, and after it where `after` does.
     #[must_use]
-    pub fn with(mut self, path: DocumentPath, before: bool, after: bool) -> Self {
-        self.targets.retain(|held| held.path != path);
-        self.targets.push(Overlaid {
+    pub fn with(self, path: DocumentPath, before: bool, after: bool) -> Self {
+        self.overlaid(Overlaid {
             path,
             before,
             after,
             replaced: false,
-        });
-        self
+        })
     }
 
     /// The same overlay, with a document standing at `path` on both sides of
@@ -173,14 +182,25 @@ impl PathOverlay {
     /// key that could name `path` is judged, as for a target whose presence
     /// changes, and is said to have had what it names move under it.
     #[must_use]
-    pub fn replacing(mut self, path: DocumentPath) -> Self {
-        self.targets.retain(|held| held.path != path);
-        self.targets.push(Overlaid {
+    pub fn replacing(self, path: DocumentPath) -> Self {
+        self.overlaid(Overlaid {
             path,
             before: true,
             after: true,
             replaced: true,
-        });
+        })
+    }
+
+    /// The same overlay, `target` standing in for whatever it listed at the
+    /// same path.
+    fn overlaid(mut self, target: Overlaid) -> Self {
+        match self.listed.get(&target.path) {
+            Some(&at) => self.targets[at] = target,
+            None => {
+                self.listed.insert(target.path.clone(), self.targets.len());
+                self.targets.push(target);
+            }
+        }
         self
     }
 
@@ -199,10 +219,20 @@ impl PathOverlay {
     /// standing at the place it spells.
     #[must_use]
     pub fn reaching(mut self, path: DocumentPath) -> Self {
-        if !self.reached.contains(&path) {
+        if self.reached_once.insert(path.clone()) {
             self.reached.push(path);
         }
         self
+    }
+
+    /// How many files the overlay lists, each once.
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    /// Whether the overlay lists no file.
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
     }
 
     /// Whether some file the overlay names holds a document on one side and
@@ -287,7 +317,7 @@ pub struct LinkChange {
     /// tells whether an ambiguous link could name a document the plan moves
     /// or a wikilink rewrite reaches; and a link resolving to none names a
     /// reached place where it would resolve to a document standing there.
-    pub before_targets: Vec<DocumentPath>,
+    pub before_targets: Arc<[DocumentPath]>,
 }
 
 /// What one judgment of a plan's links cost, beside the statements its
@@ -308,6 +338,11 @@ pub struct ResolutionWork {
     /// Rows the key resolutions read, each a document a key names, at most
     /// two more than the targets the key could name.
     pub head_rows: u64,
+    /// Targets of the plan, and places it reaches, read off the overlay:
+    /// each key's once per key resolution, so a link's judgment adds its
+    /// keys' targets without reading them again, however many targets a key
+    /// could name; and those a target's naming reads for its head.
+    pub targets_read: u64,
 }
 
 /// What one target names on each side of a plan, read as a wikilink written
@@ -425,7 +460,11 @@ impl Judging<'_, OnSnapshot<'_>> {
                 _ => None,
             })
             .collect();
-        ResolutionWork { ran, ..self.work }
+        ResolutionWork {
+            ran,
+            targets_read: self.targets_read.get(),
+            ..self.work
+        }
     }
 }
 
@@ -442,10 +481,50 @@ struct Judged {
 
 /// What the store holds under one key, less the targets: the paths of at
 /// most two of the documents it names that the plan does not write, in
-/// ladder order. Which targets the key names is read off the overlay.
+/// ladder order; and what the targets the key could name come to.
 #[derive(Debug, Default)]
 struct KeyHeld {
     stored: Vec<String>,
+    members: Members,
+}
+
+/// The targets one key could name, the ambiguity-ignore set letting each in,
+/// read off the overlay once when the key is resolved: **so a link's
+/// judgment adds a key's targets in constant time**, however many targets the
+/// key could name — a stem every routed document shares names them all.
+#[derive(Debug, Default)]
+struct Members {
+    /// How many stand before the plan, and the first of them.
+    before: Present,
+    /// How many stand after the plan, and the first of them.
+    after: Present,
+    /// Whether the plan changes what stands at any of them.
+    changes: bool,
+    /// The places a link held under this key alone could name before the
+    /// plan ([`LinkChange::before_targets`]): the targets standing before
+    /// it, then the places the plan reaches, each once.
+    before_targets: Arc<[DocumentPath]>,
+    /// The targets standing before the plan, and the places the plan
+    /// reaches, each once: what a link held under several keys merges.
+    standing: Vec<DocumentPath>,
+    reaching: Vec<DocumentPath>,
+}
+
+/// How many of a key's targets stand on one side of the plan, and the first.
+#[derive(Debug, Default)]
+struct Present {
+    count: usize,
+    first: Option<DocumentPath>,
+}
+
+impl Present {
+    /// Count `path` standing.
+    fn add(&mut self, path: &DocumentPath) {
+        self.count += 1;
+        if self.first.is_none() {
+            self.first = Some(path.clone());
+        }
+    }
 }
 
 /// One judgment's state: the overlay read into the store's key space, and the
@@ -468,6 +547,9 @@ struct Judging<'a, R> {
     reaching: BTreeMap<String, Vec<usize>>,
     resolved: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
+    /// Every target and reached place read off the overlay so far
+    /// ([`ResolutionWork::targets_read`]).
+    targets_read: std::cell::Cell<u64>,
 }
 
 impl<'a, R: Runner> Judging<'a, R> {
@@ -511,6 +593,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             reaching,
             resolved: BTreeMap::new(),
             work: ResolutionWork::default(),
+            targets_read: std::cell::Cell::new(0),
         }
     }
 
@@ -622,8 +705,8 @@ impl<'a, R: Runner> Judging<'a, R> {
         let keys = self.in_space(suffix_keys(address));
         self.resolve(&keys.iter().cloned().collect())?;
         self.work.links_evaluated += 1;
-        let before = self.resolution(&keys, |target| target.before)?;
-        let after = self.resolution(&keys, |target| target.after)?;
+        let before = self.resolution(&keys, PlanSide::Before)?;
+        let after = self.resolution(&keys, PlanSide::After)?;
         let several = match headed {
             PlanSide::Before => &before,
             PlanSide::After => &after,
@@ -754,8 +837,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         for spelling in document.suffix_spellings() {
             let keys = self.in_space(suffix_keys(&spelling));
             self.resolve(&keys.iter().cloned().collect())?;
-            if let Resolves::One { path: one } =
-                self.resolution(&keys, |target| side.holds(target))?
+            if let Resolves::One { path: one } = self.resolution(&keys, side)?
                 && one.as_str() == path
             {
                 return Ok(spelling);
@@ -795,25 +877,15 @@ impl<'a, R: Runner> Judging<'a, R> {
         self.resolve(&held)?;
         for judged in chunk {
             self.work.links_evaluated += 1;
-            let before = self.resolution(&judged.before, |target| target.before)?;
-            let after = self.resolution(&judged.after, |target| target.after)?;
+            let before = self.resolution(&judged.before, PlanSide::Before)?;
+            let after = self.resolution(&judged.after, PlanSide::After)?;
             let members_moved = judged.before != judged.after
                 || judged
                     .before
                     .iter()
                     .chain(&judged.after)
-                    .any(|key| self.members(key).any(Overlaid::changes));
-            let mut before_targets: Vec<DocumentPath> = Vec::new();
-            for target in judged.before.iter().flat_map(|key| self.members(key)) {
-                if target.before && !before_targets.contains(&target.path) {
-                    before_targets.push(target.path.clone());
-                }
-            }
-            for document in judged.before.iter().flat_map(|key| self.reached(key)) {
-                if !before_targets.contains(document) {
-                    before_targets.push(document.clone());
-                }
-            }
+                    .any(|key| self.resolved[key].members.changes);
+            let before_targets = self.before_targets(&judged.before);
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
@@ -840,6 +912,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             .into_iter()
             .flatten()
             .map(|at| &self.overlay.targets[*at])
+            .inspect(|_| self.targets_read.set(self.targets_read.get() + 1))
             .filter(move |target| {
                 segments.is_none_or(|segments| {
                     self.ignore.admits(
@@ -860,6 +933,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             .into_iter()
             .flatten()
             .map(|at| &self.overlay.reached[*at])
+            .inspect(|_| self.targets_read.set(self.targets_read.get() + 1))
             .filter(move |document| {
                 segments.is_none_or(|segments| {
                     self.ignore.admits(
@@ -871,30 +945,88 @@ impl<'a, R: Runner> Judging<'a, R> {
             })
     }
 
-    /// What a link held under `keys` resolves to, on the side `present`
-    /// reads each target's presence from.
-    fn resolution(
-        &self,
-        keys: &[Key],
-        present: impl Fn(&Overlaid) -> bool,
-    ) -> Result<Resolves, StoreError> {
+    /// What a link held under `keys` resolves to, with every target on
+    /// `side`.
+    fn resolution(&self, keys: &[Key], side: PlanSide) -> Result<Resolves, StoreError> {
         let mut total = 0usize;
         let mut one: Option<&str> = None;
         for key in keys {
             let held = &self.resolved[key];
-            let targets: Vec<&Overlaid> = self.members(key).filter(|t| present(t)).collect();
-            total += held.stored.len() + targets.len();
+            let targets = match side {
+                PlanSide::Before => &held.members.before,
+                PlanSide::After => &held.members.after,
+            };
+            total += held.stored.len() + targets.count;
             if total > 1 {
                 return Ok(Resolves::several());
             }
             one = one
                 .or_else(|| held.stored.first().map(String::as_str))
-                .or_else(|| targets.first().map(|target| target.path.as_str()));
+                .or_else(|| targets.first.as_ref().map(DocumentPath::as_str));
         }
         Ok(match one {
             Some(path) if total == 1 => Resolves::one(wire_path(path)?),
             _ => Resolves::none(),
         })
+    }
+
+    /// What the targets `key` could name come to, and the places the plan
+    /// reaches it could name, the ambiguity-ignore set letting each in.
+    fn members_of(&self, key: &Key) -> Members {
+        let mut members = Members::default();
+        let mut standing: BTreeSet<&DocumentPath> = BTreeSet::new();
+        for target in self.members(key) {
+            if target.before {
+                members.before.add(&target.path);
+                if standing.insert(&target.path) {
+                    members.standing.push(target.path.clone());
+                }
+            }
+            if target.after {
+                members.after.add(&target.path);
+            }
+            members.changes |= target.changes();
+        }
+        let mut reaching: BTreeSet<&DocumentPath> = BTreeSet::new();
+        for document in self.reached(key) {
+            if reaching.insert(document) {
+                members.reaching.push(document.clone());
+            }
+        }
+        members.before_targets = members
+            .standing
+            .iter()
+            .chain(
+                members
+                    .reaching
+                    .iter()
+                    .filter(|document| !standing.contains(document)),
+            )
+            .cloned()
+            .collect();
+        members
+    }
+
+    /// The places a link held under `keys` could name before the plan
+    /// ([`LinkChange::before_targets`]): every key's targets standing before
+    /// it, in key order, then every place the plan reaches, each once. A
+    /// link held under one key shares that key's list.
+    fn before_targets(&self, keys: &[Key]) -> Arc<[DocumentPath]> {
+        if let [key] = keys {
+            return Arc::clone(&self.resolved[key].members.before_targets);
+        }
+        let mut seen: BTreeSet<&DocumentPath> = BTreeSet::new();
+        let mut targets: Vec<DocumentPath> = Vec::new();
+        let held = || keys.iter().map(|key| &self.resolved[key].members);
+        for document in held()
+            .flat_map(|members| &members.standing)
+            .chain(held().flat_map(|members| &members.reaching))
+        {
+            if seen.insert(document) {
+                targets.push(document.clone());
+            }
+        }
+        targets.into()
     }
 
     /// Resolve every key of `keys` not yet resolved: the head of what the
@@ -917,7 +1049,8 @@ impl<'a, R: Runner> Judging<'a, R> {
                 }
             }
             self.work.keys_resolved += 1;
-            self.resolved.insert(key, KeyHeld { stored });
+            let members = self.members_of(&key);
+            self.resolved.insert(key, KeyHeld { stored, members });
         }
         Ok(())
     }

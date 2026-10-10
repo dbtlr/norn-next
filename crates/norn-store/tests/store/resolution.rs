@@ -662,6 +662,65 @@ fn a_hubs_in_links_resolve_one_key_once() {
     });
 }
 
+/// **A link's judgment reads the targets its key could name once per key,
+/// never once per link**: a plan moving every document of one stem, `t`,
+/// from `a/NNNN/` to `b/NNNN/` gives that stem's key twice as many targets as
+/// it moves documents, and the links held under it read them once however
+/// many documents hold one, so judging ten times the links reads no more
+/// targets.
+#[test]
+fn a_stems_targets_are_read_once_however_many_links_its_key_holds() {
+    const MOVED: usize = 40;
+    let targets_read = |holders: usize| {
+        let mut vault = Vault::new(&format!("resolution-stem-{holders}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED).map(|at| format!("a/{at:04}/t.md")).collect();
+        let held: Vec<String> = (0..holders).map(|at| format!("h/{at:04}.md")).collect();
+        let mut documents: Vec<(&str, &str)> =
+            moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().map(|at| (at.as_str(), "[[t]]\n")));
+        vault.write(&documents);
+        let plan = (0..MOVED).fold(PathOverlay::new(), |overlay, at| {
+            overlay
+                .with(path(&format!("a/{at:04}/t.md")), true, false)
+                .with(path(&format!("b/{at:04}/t.md")), false, true)
+        });
+        assert_eq!(plan.len(), 2 * MOVED);
+        let (judged_links, work) = vault.judge(&plan, &[]);
+        assert_eq!(judged_links.len(), holders);
+        assert!(
+            judged_links
+                .iter()
+                .all(|(_, _, before, after)| before == "several" && after == "several")
+        );
+        assert_eq!(work.links_evaluated, holders as u64);
+        work.targets_read
+    };
+
+    let few = targets_read(10);
+    let many = targets_read(100);
+
+    assert_eq!(few, many);
+    assert_eq!(few, 2 * MOVED as u64, "the stem's targets, each read once");
+}
+
+/// **An overlay holds each path once, as it was listed last**: listing a
+/// file again replaces what the overlay said of it rather than adding it, so
+/// building an overlay costs a keyed lookup per file listed.
+#[test]
+fn an_overlay_holds_each_path_once_as_listed_last() {
+    both_orders("resolution-overlay-once", |mut vault| {
+        vault.write(&[("b.md", "[[a]]\n")]);
+        let plan =
+            PathOverlay::new()
+                .with(path("a.md"), true, false)
+                .with(path("a.md"), false, true);
+
+        assert_eq!(plan.len(), 1);
+        let (judged_links, _) = vault.judge(&plan, &[]);
+        assert_eq!(judged_links, [judged("b.md", "a", "none", "one:a.md")]);
+    });
+}
+
 /// What judging a plan that creates `new/index.md` cost over `vault` holding
 /// `members` documents `{place}/aNNNN/index.md` beside `zz/index.md` and
 /// `holder.md` linking `[[index]]`: the links it judged, its work, and the

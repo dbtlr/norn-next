@@ -108,6 +108,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{
@@ -494,6 +495,9 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     // Each delete a link naming its document contradicts.
     let mut named: BTreeSet<usize> = BTreeSet::new();
+    // The places the last ambiguous link could name, and whether a cascade
+    // follows any of them.
+    let mut among_followed: Option<(Arc<[norn_store::DocumentPath]>, bool)> = None;
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
@@ -540,12 +544,21 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                     normalizer,
                 )
             });
+        // Links held under one key share its places, so the places are read
+        // once for a run of them, however many documents the key names.
         let ambiguous_among_moved = unwritten
             && matches!(change.before, Resolves::Several {})
-            && change
-                .before_targets
-                .iter()
-                .any(|target| followed(target.as_str()));
+            && match &among_followed {
+                Some((places, among)) if Arc::ptr_eq(places, &change.before_targets) => *among,
+                _ => {
+                    let among = change
+                        .before_targets
+                        .iter()
+                        .any(|target| followed(target.as_str()));
+                    among_followed = Some((Arc::clone(&change.before_targets), among));
+                    among
+                }
+            };
         let held = judged.entry(entry).or_insert_with(|| Judged {
             key,
             address: change.address,

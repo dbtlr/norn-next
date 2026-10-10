@@ -8,7 +8,10 @@
 //! resolution then writes every cascade. So the preview's cost follows the
 //! routes and the links they touch: doubling both doubles it, and one hub
 //! linking every moved document — in its body, or in a frontmatter list no
-//! rule reads by value — adds its links once, not once per route.
+//! rule reads by value — adds its links once, not once per route. Routes
+//! whose documents all share one file stem, which as many holders link by
+//! that stem, add each link once too: the class the stem names holds every
+//! moved document, and its members are read once, not once per link.
 //!
 //! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
 //! It records each case's best of three previews and holds 800 routes to
@@ -25,7 +28,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use norn_testkit::process::Sandbox;
-use norn_wire::{ApplyMode, ApplyReport, OperationKind, Predicate, RepairParams, VaultAddress};
+use norn_wire::{
+    ApplyMode, ApplyReport, OperationKind, Predicate, RepairParams, ResolvedPlan, VaultAddress,
+};
 
 /// Where every routed document and the hub stand.
 const FOLDER: &str = "zz-repair/";
@@ -103,6 +108,23 @@ fn previewing(routes: usize, hub: Hub) -> Duration {
             }
         }
     }
+    best_of_three(&vault, routes, &|plan: &ResolvedPlan| {
+        if !matches!(hub, Hub::None) {
+            assert!(
+                plan.operations
+                    .iter()
+                    .flat_map(|operation| &operation.cascade)
+                    .any(|rewrite| rewrite.path.as_str() == format!("{FOLDER}hub.md")),
+                "the hub's links are respelled"
+            );
+        }
+    })
+}
+
+/// The best of three previews of the repair of every misplaced task in
+/// `vault`'s `zz-repair/`, `routes` of them, each plan holding a move per
+/// route and passing `check`.
+fn best_of_three(vault: &attach::Vault, routes: usize, check: &dyn Fn(&ResolvedPlan)) -> Duration {
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
     let request = RepairParams::new(VaultAddress::name(vault.name().clone()), ApplyMode::Preview)
@@ -127,17 +149,80 @@ fn previewing(routes: usize, hub: Hub) -> Duration {
             .filter(|operation| matches!(operation.kind, OperationKind::MoveDocument { .. }))
             .count();
         assert_eq!(moves, routes, "every route is planned");
-        if !matches!(hub, Hub::None) {
-            assert!(
-                plan.operations
-                    .iter()
-                    .flat_map(|operation| &operation.cascade)
-                    .any(|rewrite| rewrite.path.as_str() == format!("{FOLDER}hub.md")),
-                "the hub's links are respelled"
-            );
-        }
+        check(&plan);
     }
     best
+}
+
+/// One rule routing each area's task into the area's own `tasks/`, by the
+/// area its `match.path` captures.
+const AREAS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+
+/// The best of three previews of the repair of `routes` misplaced tasks all
+/// named `t.md`, one per area, beside as many documents outside the
+/// selection each linking the stem `[[t]]` from its frontmatter and its body:
+/// every moved document is a member of the one class the stem names, and so
+/// is every link's resolution.
+fn previewing_one_stem(routes: usize) -> Duration {
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("repair-cost-stem-{routes}"),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), AREAS).expect("the schema");
+    for at in 0..routes {
+        let task = vault.path().join(format!("{FOLDER}a{at:04}/t.md"));
+        std::fs::create_dir_all(task.parent().expect("an area")).expect("the area");
+        std::fs::write(task, "---\ntype: task\n---\n# T\n").expect("a task");
+        let holder = vault.path().join(format!("zz-holders/h{at:04}.md"));
+        std::fs::create_dir_all(holder.parent().expect("the holders")).expect("the holders");
+        std::fs::write(holder, "---\nsee: \"[[t]]\"\n---\nSee [[t]].\n").expect("a holder");
+    }
+    best_of_three(&vault, routes, &|_| {})
+}
+
+/// **A repair of routes sharing one file stem previews in time linear in
+/// its routes and the links they touch**: every moved document is a member
+/// of the class `[[t]]` names, and every holder's links resolve against it,
+/// so a cost that read the class once per link would grow with the square
+/// of the routes. 200, 400 and 800 routes, each doubling within 2.5 times.
+#[test]
+#[ignore = "soak-lane case: a clock of a repair's routes sharing a stem"]
+fn a_repair_of_routes_sharing_a_stem_previews_in_time_linear_in_routes_and_links_touched() {
+    let readings: Vec<(usize, Duration)> = [200, 400, 800]
+        .into_iter()
+        .map(|routes| (routes, previewing_one_stem(routes)))
+        .collect();
+    let ratios: Vec<f64> = readings
+        .windows(2)
+        .map(|pair| pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64())
+        .collect();
+    let mut recorded: Vec<(String, String)> = readings
+        .iter()
+        .map(|(routes, took)| {
+            (
+                format!("{routes} routes sharing a stem"),
+                format!("{took:?}"),
+            )
+        })
+        .collect();
+    recorded.extend(readings.windows(2).zip(&ratios).map(|(pair, ratio)| {
+        (
+            format!("{} over {}", pair[1].0, pair[0].0),
+            format!("{ratio:.2}"),
+        )
+    }));
+    norn_testkit::readings::record(
+        "a repair's preview of routes sharing a stem, best of three",
+        &recorded
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect::<Vec<_>>(),
+    );
+    for ratio in ratios {
+        assert!(ratio <= 2.5, "grows faster than linear: {readings:?}");
+    }
 }
 
 /// **A repair of many routes previews in time linear in its routes and the
