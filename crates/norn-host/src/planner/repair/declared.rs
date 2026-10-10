@@ -1737,6 +1737,38 @@ mod tests {
         );
     }
 
+    /// **An element the judge refuses never stops a later element's fix**:
+    /// rule `a` maps `aaa` to `zed` and `bbb` to `red`, but rule `b` narrows
+    /// `labels` to `red` and `blue`, so `zed` is outside the combined set.
+    /// `aaa` skips as one the judge would refuse, and `bbb` is still fixed.
+    #[test]
+    fn an_element_the_judge_refuses_leaves_the_next_elements_fix_standing() {
+        let schema = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  a:\n    match: {frontmatter: {type: task}}\n    one_of:\n      labels: {values: [red, blue, zed], synonyms: {aaa: zed, bbb: red}}\n  b:\n    match: {frontmatter: {type: task}}\n    one_of:\n      labels: {values: [red, blue]}\n";
+        let vault = Vault::of(
+            schema,
+            &[("a.md", "---\ntype: task\nlabels: [aaa, bbb]\n---\n")],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "labels", "aaa"),
+            offending(2, NOT_ONE_OF, "a.md", "labels", "bbb"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "labels", list(&["aaa", "red"]))]
+        );
+        assert_eq!(planned.citations, vec![citing_values(1, &[(2, "bbb")])]);
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
+                    .with_value(norn_store::value_head("aaa"))
+                    .with_candidates(values(&[("zed", "a")]))
+            ]
+        );
+    }
+
     /// **A synonym that brings the document under a rule requiring `status`
     /// skips as bringing in required fields, naming `status` and its
     /// default**: `kind: task` selects the rule.
