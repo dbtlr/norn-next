@@ -13,7 +13,7 @@
 //! This is a clock, so it is a scheduled-lane reading (ADR 0004), not a
 //! per-PR gate: run it with
 //! `cargo test --release -p norn-host --test repair_cost -- --ignored --nocapture`.
-//! It prints each case's best of three previews, and in a release build holds
+//! It records each case's best of three previews, and in a release build holds
 //! them to the bars the routes were accepted on: 400 routes within 0.48 s,
 //! 400 routes and a hub within 1.28 s, and 800 within 2.5 times 400.
 #![cfg(unix)]
@@ -149,9 +149,7 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     let mut readings = Vec::new();
     for routes in [400, 800] {
         for hub in [Hub::None, Hub::Body, Hub::Frontmatter] {
-            let took = previewing(routes, hub);
-            println!("repair preview of {routes} routes, hub {hub:?}: {took:?}");
-            readings.push(((routes, format!("{hub:?}")), took));
+            readings.push(((routes, format!("{hub:?}")), previewing(routes, hub)));
         }
     }
     let at = |routes: usize, hub: &str| {
@@ -161,8 +159,25 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
             .map(|(_, took)| *took)
             .expect("a reading")
     };
+    let hubs = ["None", "Body", "Frontmatter"];
+    let mut recorded: Vec<(String, String)> = readings
+        .iter()
+        .map(|((routes, hub), took)| (format!("{routes} routes, hub {hub}"), format!("{took:?}")))
+        .collect();
+    recorded.extend(hubs.iter().map(|hub| {
+        let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
+        (format!("800 over 400, hub {hub}"), format!("{ratio:.2}"))
+    }));
+    norn_testkit::readings::record(
+        "a repair's preview of many routes, best of three",
+        &recorded
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect::<Vec<_>>(),
+    );
+    // A debug build's clock says nothing of the bars, which are read in a
+    // release build only.
     if cfg!(debug_assertions) {
-        println!("a debug build: the bars are read in a release build only");
         return;
     }
     assert!(
@@ -172,9 +187,8 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     for hub in ["Body", "Frontmatter"] {
         assert!(at(400, hub) <= Duration::from_millis(1280), "{readings:?}");
     }
-    for hub in ["None", "Body", "Frontmatter"] {
+    for hub in hubs {
         let ratio = at(800, hub).as_secs_f64() / at(400, hub).as_secs_f64();
-        println!("800 over 400, hub {hub}: {ratio:.2}");
         assert!(ratio <= 2.5, "{hub} grows faster than linear: {readings:?}");
     }
 }
