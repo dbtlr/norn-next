@@ -99,6 +99,7 @@
 //! and never blocks its neighbours'. The one operation cites every finding it
 //! fixes.
 
+mod derived;
 mod forbidden;
 mod respells;
 mod routes;
@@ -135,7 +136,10 @@ use crate::planner::edit::edited;
 /// route for. A document holding only findings without a fix is not read.
 pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
     match row.kind {
-        FindingKind::RequiredMissing | FindingKind::NotOneOf | FindingKind::Forbidden => true,
+        FindingKind::RequiredMissing
+        | FindingKind::NotOneOf
+        | FindingKind::Forbidden
+        | FindingKind::ShapeMismatch => true,
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
     }
@@ -456,7 +460,9 @@ impl<'d> Reckoned<'d> {
             let (true, Some(field)) = (
                 matches!(
                     row.kind,
-                    FindingKind::RequiredMissing | FindingKind::Forbidden
+                    FindingKind::RequiredMissing
+                        | FindingKind::Forbidden
+                        | FindingKind::ShapeMismatch
                 ),
                 row.target.as_deref(),
             ) else {
@@ -467,6 +473,10 @@ impl<'d> Reckoned<'d> {
             let fixed = match row.kind {
                 FindingKind::Forbidden => {
                     forbidden::fix(&self.document, &state, row, finding, field, &rules)
+                        .map_err(Unmade::Skipped)
+                }
+                FindingKind::ShapeMismatch => {
+                    derived::reshape(&self.document, &state, row, finding, field)
                         .map_err(Unmade::Skipped)
                 }
                 _ => Composing {
@@ -680,6 +690,29 @@ impl Document<'_> {
     /// The schema the document is judged under.
     fn schema(&self) -> &VaultSchema {
         self.repairing.declared.schema()
+    }
+
+    /// Whether the request's threshold admits a fix made at `level`.
+    fn admits(&self, level: Confidence) -> bool {
+        self.repairing.threshold.admits(level)
+    }
+
+    /// `Ok` where a fix made at `level`, judged and admitted, is one the
+    /// request's threshold writes; otherwise the skip of the finding `row`
+    /// as below the threshold, carrying `proposed`, the operation the plan
+    /// would have held.
+    fn written_at(
+        &self,
+        level: Confidence,
+        row: &FindingRow,
+        proposed: &OperationKind,
+    ) -> Result<(), Box<SkippedFinding>> {
+        if self.admits(level) {
+            return Ok(());
+        }
+        Err(Box::new(
+            skip(row, SkipReason::BelowThreshold).with_proposed(Operation::new(proposed.clone())),
+        ))
     }
 
     /// The operation setting `field` of the document standing at `at` to
@@ -2956,5 +2989,255 @@ mod tests {
             read.is_empty(),
             "a misplaced finding no rule routes read {read:?}"
         );
+    }
+
+    /// The citation of `repair-<n>` fixing the findings `fixed`, each about
+    /// its value, at the derived level.
+    fn citing_derived(n: usize, fixed: &[(u64, &str)]) -> Citation {
+        Citation::new(
+            OperationId::new(format!("repair-{n}")).expect("an id"),
+            fixed
+                .iter()
+                .map(|(id, value)| {
+                    CitedFinding::new(*id, Confidence::Derived)
+                        .with_value(norn_store::value_head(value))
+                })
+                .collect(),
+        )
+    }
+
+    /// The operation setting `field` of `at` to `value`, as a below-threshold
+    /// skip carries it: the operation the plan would have held, with no id.
+    fn proposing(at: &str, field: &str, value: AuthoredValue) -> Operation {
+        Operation::new(OperationKind::set_frontmatter(
+            WriteTarget::path(DocumentPath::new(at).expect("a document path")),
+            field,
+            value,
+        ))
+    }
+
+    /// The finding `id` of `kind` on `field` of `at`, judging the whole
+    /// value `value`.
+    fn judging(
+        id: u64,
+        kind: FindingKind,
+        at: &str,
+        field: &str,
+        value: &AuthoredValue,
+    ) -> FindingRow {
+        finding(id, kind, at, field).with_value(head(value))
+    }
+
+    const SHAPE_MISMATCH: FindingKind = FindingKind::ShapeMismatch;
+
+    const PRIORITIES: &str = "version: 1\nfields:\n  priority: {type: number, shape: list}\n  owner: {type: text, shape: single}\n";
+
+    /// **A field declared a list holding a scalar is set to the one-item list
+    /// of that scalar, its YAML type kept**: the number `3` becomes `[3]`, not
+    /// `["3"]`. The fix is derived: the citation says so.
+    #[test]
+    fn a_scalar_in_a_list_field_is_wrapped_as_a_one_item_list_keeping_its_type() {
+        let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: 3\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "priority",
+            &AuthoredValue::Integer(3),
+        )]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(
+                1,
+                "a.md",
+                "priority",
+                AuthoredValue::List(vec![AuthoredValue::Integer(3)])
+            )]
+        );
+        assert_eq!(planned.citations, vec![citing_derived(1, &[(1, "3")])]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A field declared single holding a one-item list is set to that
+    /// item.**
+    #[test]
+    fn a_one_item_list_in_a_single_field_is_unwrapped_to_its_item() {
+        let vault = Vault::of(PRIORITIES, &[("a.md", "---\nowner: [drew]\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "owner",
+            &list(&["drew"]),
+        )]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "owner", "drew")]);
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Derived
+        );
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A list of any other length under single has no derived fix**: an
+    /// empty list and a two-item list are skipped as having none, with their
+    /// value.
+    #[test]
+    fn an_empty_and_a_two_item_list_in_a_single_field_have_no_fix() {
+        let schema = "version: 1\nfields:\n  a: {type: text, shape: single}\n  b: {type: text, shape: single}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\na: []\nb: [x, y]\n---\n")]);
+
+        let planned = vault.plan(&[
+            judging(
+                1,
+                SHAPE_MISMATCH,
+                "a.md",
+                "a",
+                &AuthoredValue::List(Vec::new()),
+            ),
+            judging(2, SHAPE_MISMATCH, "a.md", "b", &list(&["x", "y"])),
+        ]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::NoDeclaredFix)
+                    .with_value(head(&AuthoredValue::List(Vec::new()))),
+                SkippedFinding::new(2, SkipReason::NoDeclaredFix)
+                    .with_value(head(&list(&["x", "y"]))),
+            ]
+        );
+    }
+
+    /// **A derived fix below the request's threshold is skipped as such,
+    /// carrying the finding's value and the operation the plan would have
+    /// held**; the same fix at the default threshold is made.
+    #[test]
+    fn a_derived_fix_below_the_threshold_skips_carrying_its_value_and_proposed_operation() {
+        let documents = [("a.md", "---\npriority: 3\n---\n")];
+        let row = judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "priority",
+            &AuthoredValue::Integer(3),
+        );
+
+        let strict = Vault::of(PRIORITIES, &documents).at(Confidence::Declared);
+        let planned = strict.plan(std::slice::from_ref(&row));
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.citations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::BelowThreshold)
+                    .with_value(head(&AuthoredValue::Integer(3)))
+                    .with_proposed(proposing(
+                        "a.md",
+                        "priority",
+                        AuthoredValue::List(vec![AuthoredValue::Integer(3)])
+                    ))
+            ]
+        );
+        for threshold in [Confidence::Derived, Confidence::Suggested] {
+            let planned = Vault::of(PRIORITIES, &documents)
+                .at(threshold)
+                .plan(std::slice::from_ref(&row));
+            assert_eq!(planned.operations.len(), 1, "{threshold:?}");
+            assert!(planned.skipped.is_empty(), "{threshold:?}");
+        }
+    }
+
+    /// **A wrap the judge refuses skips as one the judge would refuse, with
+    /// the value it would have written**: `abc` is no number, and the
+    /// one-item list holding it brings a type mismatch out.
+    #[test]
+    fn a_wrap_bringing_out_a_type_violation_skips_as_judge_would_refuse() {
+        let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "priority",
+            &AuthoredValue::string("abc"),
+        )]);
+
+        assert!(planned.operations.is_empty());
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
+        };
+        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
+        assert_eq!(skipped.value, Some(head(&AuthoredValue::string("abc"))));
+    }
+
+    /// **A wrap bringing a value outside a closed set out skips as one the
+    /// judge would refuse**, and an unwrap does as well: `bogus` is outside
+    /// the set once it is an element.
+    #[test]
+    fn a_wrap_and_an_unwrap_bringing_out_a_one_of_violation_skip_as_judge_would_refuse() {
+        let schema = "version: 1\nfields:\n  tags_of: {type: text, shape: list}\n  status: {type: text, shape: single}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      tags_of: {values: [red, blue]}\n      status: {values: [todo, done]}\n";
+        let vault = Vault::of(
+            schema,
+            &[(
+                "a.md",
+                "---\ntype: task\ntags_of: bogus\nstatus: [bogus]\n---\n",
+            )],
+        );
+
+        let planned = vault.plan(&[
+            judging(1, SHAPE_MISMATCH, "a.md", "status", &list(&["bogus"])),
+            judging(
+                2,
+                SHAPE_MISMATCH,
+                "a.md",
+                "tags_of",
+                &AuthoredValue::string("bogus"),
+            ),
+        ]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::JudgeWouldRefuse),
+                (2, SkipReason::JudgeWouldRefuse)
+            ]
+        );
+    }
+
+    /// **A wrap that brings the document under a rule requiring fields it
+    /// lacks skips as bringing in required fields**: `kind: [task]` selects
+    /// the rule requiring `status`, which `kind: task` under a list shape did
+    /// not.
+    #[test]
+    fn a_wrap_bringing_in_required_fields_skips_as_such() {
+        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\nkind: task\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "kind",
+            &AuthoredValue::string("task"),
+        )]);
+
+        assert!(planned.operations.is_empty());
+        let fields = RequiredFieldHead::new(
+            [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+            1,
+        )
+        .expect("a head");
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
+        };
+        assert_eq!(skipped.reason, SkipReason::BringsInRequiredFields);
+        assert_eq!(skipped.required_fields, Some(fields));
     }
 }

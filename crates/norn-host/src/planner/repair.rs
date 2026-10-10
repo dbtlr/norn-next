@@ -86,8 +86,8 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_store::{LinkChange, PathOverlay, ProbedLink};
 use norn_wire::{
-    CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, Operation, RuleSet, SkipReason,
-    SkippedCandidates, SkippedFinding, UnresolvedOperation,
+    CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, Operation, RuleSet,
+    SkipReason, SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
 use crate::applier::Held;
@@ -545,8 +545,8 @@ mod tests {
             );
         }
         // A missing required field, a value outside a closed set, a
-        // forbidden field may have a fix, which reads its document
-        // (`declared`), and a rules conflict is skipped as one.
+        // forbidden field, a shape mismatch may have a fix, which reads its
+        // document (`declared`), and a rules conflict is skipped as one.
         let readable: Vec<_> = FindingKind::ALL
             .into_iter()
             .filter(|kind| {
@@ -557,6 +557,7 @@ mod tests {
                             | FindingKind::RequiredMissing
                             | FindingKind::NotOneOf
                             | FindingKind::Forbidden
+                            | FindingKind::ShapeMismatch
                             | FindingKind::Misplaced
                             | FindingKind::FieldRulesConflict
                             | FindingKind::DocumentRulesConflict

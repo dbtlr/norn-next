@@ -64,11 +64,10 @@ use norn_store::{
 };
 use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, Confidence,
-    DeleteParams,
-    DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, Forecast,
-    MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
-    RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    DeleteParams, DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow,
+    Forecast, MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams,
+    ResolvedPlan, RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding,
+    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -1741,10 +1740,7 @@ mod tests {
         if cited {
             repaired.citations[0]
                 .findings
-                .push(norn_wire::CitedFinding::new(
-                    99,
-                    Confidence::Declared,
-                ));
+                .push(norn_wire::CitedFinding::new(99, Confidence::Declared));
         }
     }
 
