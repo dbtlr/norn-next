@@ -473,7 +473,8 @@ pub enum SkipReason {
     RenameOntoOccupiedField,
     /// The link's address resolves to more than one document.
     AmbiguousLink,
-    /// The document belongs to a class a repair does not touch.
+    /// The fix would be one of a class a repair never makes: date
+    /// reformatting, or coercion of yes/no or numeric spellings.
     ExcludedClass,
     /// The write would be refused when the plan is applied.
     JudgeWouldRefuse,

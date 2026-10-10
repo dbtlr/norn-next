@@ -1,6 +1,6 @@
 //! Declared fixes: what the schema's owner wrote as the answer to a finding,
-//! composed into a document one fix at a time and judged as the applier will
-//! judge it.
+//! and the derived fixes beside them, composed into a document one fix at a
+//! time and judged as the applier will judge it.
 //!
 //! **Four kinds of finding have a declared fix.** The candidates for a
 //! selected finding are what the rules its judgment cites — the combined
@@ -20,7 +20,7 @@
 //!   requiring another field does not fill that field too (ADR 0035's
 //!   fixpoint is `new`'s and inbox capture's alone);
 //! - a value outside a closed set (`field/not-one-of`) is replaced by the
-//!   member a rule's synonym for it maps to ([`synonyms`]), the candidates
+//!   member a rule's synonym for it maps to ([`closed_set`]), the candidates
 //!   agreeing as the field's typed equality reads them;
 //! - a forbidden field (`field/forbidden`) is removed or renamed as a rule
 //!   declares ([`forbidden`]);
@@ -28,6 +28,23 @@
 //!   placement rules it cites route it to, keeping its file name
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
+//!
+//! **Three kinds have a derived fix, made at [`Confidence::Derived`]**
+//! ([`derived`]): a shape mismatch is wrapped or unwrapped, a boolean field's
+//! string spelling a boolean but for its case is written as the boolean, and
+//! a value outside a closed set that differs from exactly one member only by
+//! case and white space is replaced by that member ([`closed_set`]). A type
+//! mismatch on a `date`, `number` or `boolean` field no derived fix answers
+//! is an excluded class.
+//!
+//! **Every candidate at or above the request's threshold is pooled for a
+//! finding, and the strongest level present decides.** A declared fix counts
+//! even where it fails the combined constraint or the judge: it blocks the
+//! derived answer, and the finding skips with every candidate. Where a
+//! declared fix decides and the derived answer differs, the citation notes
+//! the derived answer. A derived fix the threshold does not admit is judged
+//! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
+//! operation the plan would have held.
 //!
 //! **A document is drafted alone, its routes judged together.** Each
 //! document's draft composes its fixes where it stands and, where its route
@@ -92,18 +109,20 @@
 //! and is skipped as its row reads, though another route's move may resolve
 //! the link (NORN-381).
 //!
-//! **A list's elements are fixed one by one into one change to the field.**
-//! Every selected `field/not-one-of` finding of one field composes into one
-//! `set_frontmatter` of the whole list, each element's replacement judged on
-//! the state the earlier ones left; an element whose fix is skipped stands,
-//! and never blocks its neighbours'. The one operation cites every finding it
-//! fixes.
+//! **A list's elements are fixed one by one into one change to the field**
+//! ([`elements`]). Every selected `field/not-one-of` finding of one field, and
+//! every selected `field/type-mismatch` finding of a boolean field, composes
+//! into one `set_frontmatter` of the whole list, each element's replacement
+//! judged on the state the earlier ones left; an element whose fix is skipped
+//! stands, and never blocks its neighbours'. The one operation cites every
+//! finding it fixes, each at the level of its own fix.
 
+mod closed_set;
 mod derived;
+mod elements;
 mod forbidden;
 mod respells;
 mod routes;
-mod synonyms;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -130,19 +149,31 @@ use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::evidence::count_rule_work;
 use crate::planner::edit::edited;
 
-/// Whether `row` is a finding a declared fix may answer, so its document's
-/// bytes are read: a missing required field, a value outside a closed set, a
-/// forbidden field, or a misplaced document a rule its row cites declares a
-/// route for. A document holding only findings without a fix is not read.
+/// Whether `row` is a finding a fix may answer, so its document's bytes are
+/// read: a missing required field, a value outside a closed set, a forbidden
+/// field, a shape mismatch, a type mismatch on a boolean field, or a
+/// misplaced document a rule its row cites declares a route for. A document
+/// holding only findings without a fix is not read.
 pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
     match row.kind {
         FindingKind::RequiredMissing
         | FindingKind::NotOneOf
         | FindingKind::Forbidden
         | FindingKind::ShapeMismatch => true,
+        FindingKind::TypeMismatch => row
+            .target
+            .as_deref()
+            .is_some_and(|field| derived::is_boolean(repairing.declared.schema(), field)),
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
     }
+}
+
+/// The finding `row` left alone for want of a fix, decided from the row and
+/// the declaration alone: an excluded class where a type mismatch is one
+/// ([`derived::excluded`]), otherwise as [`super::skipped`] reads it.
+fn unfixed(row: &FindingRow, repairing: &Repairing<'_>) -> SkippedFinding {
+    derived::excluded(row, repairing.declared.schema()).unwrap_or_else(|| super::skipped(row))
 }
 
 /// One document's draft: what its rows, in batch order, were decided from
@@ -190,7 +221,7 @@ pub(super) fn draft<'d, R: Reading>(
         drafted: Drafted::Alone(document.iter().map(decide).collect()),
     };
     if !document.iter().any(|row| has_fix(row, repairing)) {
-        return Ok(alone(&super::skipped));
+        return Ok(alone(&|row| unfixed(row, repairing)));
     }
     let bytes = match vault.before(&document[0].path)? {
         Before::Held(bytes) => bytes,
@@ -199,7 +230,7 @@ pub(super) fn draft<'d, R: Reading>(
                 if has_fix(row, repairing) {
                     skip(row, SkipReason::Unreadable)
                 } else {
-                    super::skipped(row)
+                    unfixed(row, repairing)
                 }
             }));
         }
@@ -385,6 +416,17 @@ impl<'d> Reckoned<'d> {
         }
     }
 
+    /// Whether the findings of `kind` on `field` are fixed element by
+    /// element into one write of the field: a value outside a closed set,
+    /// and a string a boolean field holds that is no boolean.
+    fn fixed_by_elements(&self, kind: FindingKind, field: &str) -> bool {
+        match kind {
+            FindingKind::NotOneOf => true,
+            FindingKind::TypeMismatch => derived::is_boolean(self.document.schema(), field),
+            _ => false,
+        }
+    }
+
     /// The position of the selected misplaced finding the document holds as
     /// it stands, where it holds one: the finding its route answers.
     fn misplaced(&self) -> Option<usize> {
@@ -420,8 +462,8 @@ impl<'d> Reckoned<'d> {
                 decided[at] = Some(super::skipped(row));
                 continue;
             }
-            if row.kind == FindingKind::NotOneOf
-                && let Some(field) = row.target.as_deref()
+            if let Some(field) = row.target.as_deref()
+                && self.fixed_by_elements(row.kind, field)
             {
                 // The finding order keeps a field's offending values
                 // together: they are one list's elements.
@@ -431,10 +473,10 @@ impl<'d> Reckoned<'d> {
                         document[other].kind == row.kind && document[other].target == row.target
                     })
                     .count();
-                let rows: Vec<synonyms::Element<'_>> = order[next - 1..=next + siblings - 1]
+                let rows: Vec<elements::Element<'_>> = order[next - 1..=next + siblings - 1]
                     .iter()
                     .filter_map(|&at| {
-                        Some(synonyms::Element {
+                        Some(elements::Element {
                             at,
                             row: &document[at],
                             finding: self.found[at].as_ref()?,
@@ -442,7 +484,27 @@ impl<'d> Reckoned<'d> {
                     })
                     .collect();
                 next += siblings;
-                let mapped = synonyms::fix_field(&self.document, &state, field, &rows);
+                let mapped = match row.kind {
+                    FindingKind::NotOneOf => {
+                        let mut folds = derived::FoldCache::default();
+                        elements::fix_field(
+                            &self.document,
+                            &state,
+                            field,
+                            &rows,
+                            &mut |offending| {
+                                closed_set::propose(&self.document, field, &mut folds, offending)
+                            },
+                        )
+                    }
+                    _ => elements::fix_field(
+                        &self.document,
+                        &state,
+                        field,
+                        &rows,
+                        &mut |offending| derived::boolean_case(&self.document, offending),
+                    ),
+                };
                 decided_skips(&mut decided, mapped.skipped);
                 if let Some(fix) = mapped.fix {
                     state = fix.made(&mut made);
@@ -466,7 +528,7 @@ impl<'d> Reckoned<'d> {
                 ),
                 row.target.as_deref(),
             ) else {
-                decided[at] = Some(super::skipped(row));
+                decided[at] = Some(unfixed(row, self.document.repairing));
                 continue;
             };
             let rules = held.rules.clone();
@@ -3239,5 +3301,393 @@ mod tests {
         };
         assert_eq!(skipped.reason, SkipReason::BringsInRequiredFields);
         assert_eq!(skipped.required_fields, Some(fields));
+    }
+
+    const TYPE_MISMATCH: FindingKind = FindingKind::TypeMismatch;
+
+    const FLAGS: &str =
+        "version: 1\nfields:\n  done: {type: boolean}\n  flags: {type: boolean, shape: list}\n";
+
+    /// **A string that is a boolean but for its case or padding is written as
+    /// the YAML boolean**: `"True"` becomes `true`, a boolean and no string,
+    /// cited at the derived level.
+    #[test]
+    fn a_boolean_field_holding_a_string_cased_otherwise_is_written_as_the_boolean() {
+        let vault = Vault::of(FLAGS, &[("a.md", "---\ndone: \"True\"\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, TYPE_MISMATCH, "a.md", "done", "True")]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "done", AuthoredValue::Bool(true))]
+        );
+        assert_eq!(planned.citations, vec![citing_derived(1, &[(1, "True")])]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A list's boolean elements are fixed one by one into one write of the
+    /// field, and an element no case fix answers stands, reported**: `maybe`
+    /// is a yes/no spelling no fix answers, skipped as an excluded class.
+    #[test]
+    fn a_boolean_list_fixes_its_elements_into_one_set_and_a_neighbour_without_a_fix_stands() {
+        let vault = Vault::of(
+            FLAGS,
+            &[("a.md", "---\nflags: [\"TRUE\", \" False \", maybe]\n---\n")],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, TYPE_MISMATCH, "a.md", "flags", "TRUE"),
+            offending(2, TYPE_MISMATCH, "a.md", "flags", " False "),
+            offending(3, TYPE_MISMATCH, "a.md", "flags", "maybe"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(
+                1,
+                "a.md",
+                "flags",
+                AuthoredValue::List(vec![
+                    AuthoredValue::Bool(true),
+                    AuthoredValue::Bool(false),
+                    AuthoredValue::string("maybe")
+                ])
+            )]
+        );
+        assert_eq!(
+            planned.citations,
+            vec![citing_derived(1, &[(2, " False "), (1, "TRUE")])]
+        );
+        assert_eq!(reasons(&planned), vec![(3, SkipReason::ExcludedClass)]);
+    }
+
+    /// **A type mismatch no derived fix answers on a date, number or boolean
+    /// field is skipped as an excluded class, its note naming the class and
+    /// its value kept**; any other is left with no declared fix, a link field
+    /// included.
+    #[test]
+    fn an_unfixable_type_mismatch_on_a_date_number_or_boolean_field_skips_as_an_excluded_class() {
+        let schema = "version: 1\nfields:\n  due: {type: date}\n  points: {type: number}\n  done: {type: boolean}\n  up: {type: link}\n  title: {type: text}\n";
+        let vault = Vault::of(
+            schema,
+            &[(
+                "a.md",
+                "---\ndue: 1/2/26\npoints: three\ndone: yes\nup: bare\ntitle: {a: 1}\n---\n",
+            )],
+        );
+
+        let (planned, read) = vault.planned(
+            &[
+                offending(1, TYPE_MISMATCH, "a.md", "done", "yes"),
+                offending(2, TYPE_MISMATCH, "a.md", "due", "1/2/26"),
+                offending(3, TYPE_MISMATCH, "a.md", "points", "three"),
+                judging(
+                    4,
+                    TYPE_MISMATCH,
+                    "a.md",
+                    "title",
+                    &AuthoredValue::map([("a".to_string(), AuthoredValue::Integer(1))])
+                        .expect("a map"),
+                ),
+                offending(5, TYPE_MISMATCH, "a.md", "up", "bare"),
+            ],
+            &Cell::new(0),
+        );
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::ExcludedClass),
+                (2, SkipReason::ExcludedClass),
+                (3, SkipReason::ExcludedClass),
+                (4, SkipReason::NoDeclaredFix),
+                (5, SkipReason::NoDeclaredFix),
+            ]
+        );
+        for (finding, class) in [
+            (1, "yes/no coercion"),
+            (2, "date reformatting"),
+            (3, "number coercion"),
+        ] {
+            let note = note_of(&planned, finding);
+            assert!(note.contains(class), "{note}");
+            let skipped = planned
+                .skipped
+                .iter()
+                .find(|skipped| skipped.finding == finding)
+                .expect("the skip");
+            assert!(skipped.value.is_some(), "{skipped:?}");
+        }
+        // The boolean mismatch's document is read for the case fix, once.
+        assert_eq!(read, vec!["a.md".to_string()]);
+    }
+
+    /// **A date or number type mismatch has no fix to make, so its document
+    /// is not read.**
+    #[test]
+    fn a_document_holding_only_date_and_number_type_mismatches_is_not_read() {
+        let schema = "version: 1\nfields:\n  due: {type: date}\n  points: {type: number}\n";
+        let vault = Vault::of(
+            schema,
+            &[("a.md", "---\ndue: 1/2/26\npoints: three\n---\n")],
+        );
+
+        let (planned, read) = vault.planned(
+            &[
+                offending(1, TYPE_MISMATCH, "a.md", "due", "1/2/26"),
+                offending(2, TYPE_MISMATCH, "a.md", "points", "three"),
+            ],
+            &Cell::new(0),
+        );
+
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::ExcludedClass),
+                (2, SkipReason::ExcludedClass)
+            ]
+        );
+        assert!(read.is_empty(), "read {read:?}");
+    }
+
+    const MEMBERS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, 'in progress']}\n";
+
+    /// **A value differing from exactly one member only by case is written as
+    /// that member**, cited at the derived level.
+    #[test]
+    fn a_value_differing_from_one_member_by_case_is_written_as_that_member() {
+        let vault = Vault::of(MEMBERS, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "status", "done")]);
+        assert_eq!(planned.citations, vec![citing_derived(1, &[(1, "Done")])]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A list's element is folded into the one write of the field, and a
+    /// neighbour with no fix stays reported.**
+    #[test]
+    fn a_list_element_is_folded_into_one_write_and_a_neighbour_without_a_fix_stays_reported() {
+        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done]}\n";
+        let vault = Vault::of(
+            schema,
+            &[(
+                "a.md",
+                "---\ntype: task\nstatus: [Done, bogus, TODO]\n---\n",
+            )],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "status", "Done"),
+            offending(2, NOT_ONE_OF, "a.md", "status", "bogus"),
+            offending(3, NOT_ONE_OF, "a.md", "status", "TODO"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(
+                1,
+                "a.md",
+                "status",
+                list(&["done", "bogus", "todo"])
+            )]
+        );
+        assert_eq!(
+            planned.citations,
+            vec![citing_derived(1, &[(1, "Done"), (3, "TODO")])]
+        );
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(2, SkipReason::NoDeclaredFix)
+                    .with_value(norn_store::value_head("bogus"))
+            ]
+        );
+    }
+
+    /// **Padding and runs of white space fold away**: ` In   Progress ` is
+    /// the member `in progress`.
+    #[test]
+    fn a_value_differing_from_a_member_by_whitespace_and_case_is_written_as_the_member() {
+        let vault = Vault::of(
+            MEMBERS,
+            &[(
+                "a.md",
+                "---\ntype: task\nstatus: \" In   Progress \"\n---\n",
+            )],
+        );
+
+        let planned = vault.plan(&[offending(
+            1,
+            NOT_ONE_OF,
+            "a.md",
+            "status",
+            " In   Progress ",
+        )]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set(1, "a.md", "status", "in progress")]
+        );
+    }
+
+    /// **Members that fold together tie**, with those members as the
+    /// candidates, in the closed set's order, and no rule proposing them.
+    #[test]
+    fn members_folding_together_skip_as_a_tie_with_those_candidates() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [Todo, TODO, done]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: todo\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "todo")]);
+
+        assert!(planned.operations.is_empty());
+        let candidates = SkippedCandidates::values(
+            ValueCandidateHead::new(
+                ["TODO", "Todo"]
+                    .into_iter()
+                    .map(|member| ValueCandidate::new(norn_store::value_head(member))),
+                2,
+            )
+            .expect("a head"),
+        );
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::Tie)
+                    .with_value(norn_store::value_head("todo"))
+                    .with_candidates(candidates)
+            ]
+        );
+    }
+
+    /// **Case folds by Unicode, not by ASCII alone.**
+    #[test]
+    fn a_unicode_case_difference_folds_to_the_member() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      place: {values: [école, zoo]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nplace: ÉCOLE\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "place", "ÉCOLE")]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "place", "école")]);
+    }
+
+    /// **A word join or split is not a fold**: `inprogress` is no `in
+    /// progress`.
+    #[test]
+    fn a_word_join_is_not_derived() {
+        let vault = Vault::of(
+            MEMBERS,
+            &[("a.md", "---\ntype: task\nstatus: inprogress\n---\n")],
+        );
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "inprogress")]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **Only a field whose values compare as text folds**: `4.0` is the
+    /// number `4` under a number field, and a tag key compares under its own
+    /// fold.
+    #[test]
+    fn a_field_whose_values_do_not_compare_as_text_derives_no_fold() {
+        let schema = "version: 1\nfields:\n  level: {type: number}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      level: {values: [1, 2]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nlevel: 3\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "level", "3")]);
+
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **A fold below the threshold is skipped as such**, carrying the value
+    /// and the operation the plan would have held.
+    #[test]
+    fn a_fold_below_the_threshold_skips_carrying_its_proposed_operation() {
+        let vault = Vault::of(MEMBERS, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")])
+            .at(Confidence::Declared);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::BelowThreshold)
+                    .with_value(norn_store::value_head("Done"))
+                    .with_proposed(proposing("a.md", "status", AuthoredValue::string("done")))
+            ]
+        );
+    }
+
+    const DECLARED_AND_FOLDED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished}}\n";
+
+    /// **A declared synonym decides over the fold, and the cited fix notes the
+    /// differing derived answer**: `Done` folds to `done`, the schema's
+    /// synonym says `finished`.
+    #[test]
+    fn a_declared_synonym_blocks_the_fold_and_notes_the_differing_derived_answer() {
+        let vault = Vault::of(
+            DECLARED_AND_FOLDED,
+            &[("a.md", "---\ntype: task\nstatus: Done\n---\n")],
+        );
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set(1, "a.md", "status", "finished")]
+        );
+        let [cited] = planned.citations[0].findings.as_slice() else {
+            panic!("one citation: {:?}", planned.citations);
+        };
+        assert_eq!(cited.confidence, Confidence::Declared);
+        assert_eq!(cited.notes.len(), 1, "{:?}", cited.notes);
+        assert!(cited.notes[0].contains("`done`"), "{:?}", cited.notes);
+    }
+
+    /// **A declared synonym agreeing with the fold needs no note.**
+    #[test]
+    fn a_declared_synonym_the_fold_agrees_with_carries_no_note() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {Done: done}}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "status", "done")]);
+        assert!(planned.citations[0].findings[0].notes.is_empty());
+    }
+
+    /// **A declared fix the judge refuses still blocks the derived answer**:
+    /// the synonym's `finished` is outside the set `strict` narrows `status`
+    /// to, yet `Done` is not folded to `done`; the finding skips with both
+    /// candidates, the derived answer among them.
+    #[test]
+    fn a_declared_fix_the_judge_refuses_blocks_the_derived_answer_and_skips_with_both() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished}}\n  strict:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert!(planned.operations.is_empty());
+        let candidates = SkippedCandidates::values(
+            ValueCandidateHead::new(
+                [
+                    ValueCandidate::new(norn_store::value_head("finished")).by_rule("tasks"),
+                    ValueCandidate::new(norn_store::value_head("done")),
+                ],
+                2,
+            )
+            .expect("a head"),
+        );
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
+                    .with_value(norn_store::value_head("Done"))
+                    .with_candidates(candidates)
+            ]
+        );
     }
 }

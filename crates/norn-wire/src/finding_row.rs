@@ -361,10 +361,11 @@ macro_rules! bounded_head {
 // `planner::repair::declared` names each candidate of a missing field whose
 // rule defaults conflict, of declared fixes that tie (synonym members,
 // forbidden remedies, route destinations) and of an agreed fix the write gate
-// would refuse, with the rule proposing it. Not built yet: a tie at the
-// derived or suggested level, which derived fixes (NORN-375) and suggestions
-// (Layer 5C) consume. The note lives here rather than in the doc comment
-// schemars lifts into the published schema.
+// would refuse, with the rule proposing it; and of members of a closed set
+// that fold together as one derived answer, which no rule proposes. Not built
+// yet: a tie at the suggested level, which suggestions (Layer 5C) consume.
+// The note lives here rather than in the doc comment schemars lifts into the
+// published schema.
 /// One value a repair could have written, and the rule that proposed it: a
 /// field's default or synonym member, a forbidden field's remedy, spelled
 /// `remove` or `rename_to: <field>`, or a destination a route names (a
@@ -404,10 +405,11 @@ impl ValueCandidate {
 // `planner::repair::declared` names each candidate of a missing field whose
 // rule defaults conflict, of declared fixes that tie (synonym members,
 // forbidden remedies, route destinations) and of an agreed fix the write gate
-// would refuse, with the rule proposing it. Not built yet: a tie at the
-// derived or suggested level, which derived fixes (NORN-375) and suggestions
-// (Layer 5C) consume. The note lives here rather than in the doc comment
-// schemars lifts into the published schema.
+// would refuse, with the rule proposing it; and of members of a closed set
+// that fold together as one derived answer, which no rule proposes. Not built
+// yet: a tie at the suggested level, which suggestions (Layer 5C) consume.
+// The note lives here rather than in the doc comment schemars lifts into the
+// published schema.
 bounded_head!(
     ValueCandidateHead of ValueCandidate, candidates,
     what: "value candidate",

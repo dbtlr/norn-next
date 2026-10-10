@@ -1,58 +1,82 @@
-//! Synonyms: the member a rule's `one_of` maps an offending value to.
+//! A field's offending elements, fixed one by one into one write of the
+//! field.
 //!
-//! The candidates for a selected `field/not-one-of` finding are the members
-//! the contributing rules' synonyms for the offending value map it to. A rule
-//! that declares a `one_of` on the field but no synonym for the value
-//! proposes nothing. The value is compared with a synonym's written value by
-//! the field's typed equality, as the judge compares an element
-//! ([`VaultSchema::equality_key`]): `4` and `4.0` are one number under a
-//! `number` field, and `Play` and `#play` one tag under a tag fold. The
-//! candidates agree when they name one member by the same equality. No
-//! candidate is [`SkipReason::NoDeclaredFix`], with the offending value;
-//! candidates that disagree are [`SkipReason::Tie`], with every member and the
-//! rule proposing it; and a member the judge refuses, such as one outside the
-//! combined closed set the co-selecting rules narrow the field to, is
-//! [`SkipReason::JudgeWouldRefuse`], with its candidates.
+//! **One way to write a list's fixed elements.** The selected findings of one
+//! kind on one field — one per distinct offending element, by the field's
+//! typed equality — compose into one `set_frontmatter` of the whole field in
+//! its written order, each element's replacement judged on the state the
+//! earlier ones left. A scalar field is the one element it is. An element
+//! whose fix is skipped stands where it is, and never blocks its neighbours'.
+//! The one operation cites every finding it fixes, each at the level of its
+//! own fix.
 //!
-//! **A field's offending values are fixed together.** A scalar field's one
-//! finding is a `set_frontmatter` of the member. A list field's findings — one
-//! per distinct offending element, by the field's typed equality — compose
-//! into one `set_frontmatter` of the whole list in its written order, each
-//! element's fix replacing every occurrence of its offending value and judged
-//! on the state the earlier elements' fixes left. An element whose fix is
-//! skipped stands where it is.
+//! What each element is replaced by is a kind's own ([`closed_set`](super::closed_set)
+//! and [`derived`](super::derived)): they answer a [`Proposed`], and this
+//! module composes, judges and writes it as one.
 
 use norn_config::schema::VaultSchema;
-use norn_wire::{AuthoredValue, Confidence, FindingRow, SkipReason, SkippedFinding};
+use norn_wire::{
+    AuthoredValue, Confidence, FindingRow, SkipReason, SkippedCandidates, SkippedFinding,
+};
 
-use super::{Document, Fix, Fixing, Proposal, State, candidates, cited, field_of, skip};
+use super::{Document, Fix, Fixing, State, cited, field_of, skip};
 use crate::applier::Held;
 use crate::planner::edit::edited;
 
-/// What the synonyms of one field's selected findings come to: the one fix
-/// that replaces the elements whose synonym is admitted, and the skip of each
-/// element whose is not, by the position of its row.
+/// What the elements of one field come to: the one fix that replaces the
+/// elements whose replacement is admitted, and the skip of each element whose
+/// is not, by the position of its row.
 pub(super) struct Mapped {
     pub(super) fix: Option<Fix>,
     pub(super) skipped: Vec<(usize, SkippedFinding)>,
 }
 
-/// One selected `field/not-one-of` finding of a field: its position among
-/// the document's rows, the row, and the finding it names as the
-/// before-state holds it.
+/// One selected finding of a field: its position among the document's rows,
+/// the row, and the finding it names as the before-state holds it.
 pub(super) struct Element<'e> {
     pub(super) at: usize,
     pub(super) row: &'e FindingRow,
     pub(super) finding: &'e Held,
 }
 
+/// One offending element a kind's proposals are asked for: its row, the
+/// finding as the composed state holds it, and the offending value whole.
+pub(super) struct Offending<'o> {
+    pub(super) row: &'o FindingRow,
+    pub(super) held: &'o Held,
+    pub(super) text: &'o str,
+}
+
+/// What a kind makes of one offending element.
+pub(super) enum Proposed {
+    /// The element is left alone, for the reason and with the data the skip
+    /// names.
+    Skipped(Box<SkippedFinding>),
+    /// Every occurrence of the offending element is replaced.
+    Replace(Replacement),
+}
+
+/// The replacement of an offending element.
+pub(super) struct Replacement {
+    /// The value written in the element's place.
+    pub(super) member: AuthoredValue,
+    /// How sure the repair is of it.
+    pub(super) level: Confidence,
+    /// The candidates a skip of it carries, where the judge refuses it.
+    pub(super) candidates: SkippedCandidates,
+    /// Words about the fix, carried by the citation.
+    pub(super) notes: Vec<String>,
+}
+
 /// Fix the `field` of the document from `state`, for `elements` — the
-/// selected `field/not-one-of` findings of that field, in finding order.
+/// selected findings of that field, in finding order — each as `propose`
+/// answers it.
 pub(super) fn fix_field(
     document: &Document<'_>,
     state: &State,
     field: &str,
     elements: &[Element<'_>],
+    propose: &mut dyn FnMut(&Offending<'_>) -> Proposed,
 ) -> Mapped {
     let schema = document.schema();
     let mut skipped = Vec::new();
@@ -81,49 +105,48 @@ pub(super) fn fix_field(
             skipped.push((at, crate::planner::repair::skipped(row)));
             continue;
         };
-        let proposals = proposals(
-            schema,
-            field,
-            &held.rules.iter().cloned().collect::<Vec<_>>(),
-            &offending,
-        );
-        let Some((first, rest)) = proposals.split_first() else {
-            skipped.push((at, crate::planner::repair::skipped(row)));
-            continue;
+        let replacement = match propose(&Offending {
+            row,
+            held,
+            text: &offending,
+        }) {
+            Proposed::Skipped(skip) => {
+                skipped.push((at, *skip));
+                continue;
+            }
+            Proposed::Replace(replacement) => replacement,
         };
-        if rest
-            .iter()
-            .any(|proposal| !same_member(schema, field, &proposal.value, &first.value))
-        {
-            skipped.push((
-                at,
-                skip(row, SkipReason::Tie).with_candidates(candidates(&proposals)),
-            ));
-            continue;
-        }
-        let Some(replaced) = replaced(&working, schema, field, &offending, &first.value) else {
+        let Some(replaced) = replaced(&working, schema, field, &offending, &replacement.member)
+        else {
             skipped.push((
                 at,
                 skip(row, SkipReason::JudgeWouldRefuse)
-                    .with_candidates(candidates(&proposals))
+                    .with_candidates(replacement.candidates)
                     .with_note(format!("no element of `{field}` is `{offending}`")),
             ));
             continue;
         };
         let set = document.set(&state.at, field, replaced.clone());
-        match document.admit(
-            &current,
-            std::slice::from_ref(&set),
-            Fixing {
-                row,
-                finding,
-                candidates: &candidates(&proposals),
-            },
-        ) {
+        let admitted = document
+            .admit(
+                &current,
+                std::slice::from_ref(&set),
+                Fixing {
+                    row,
+                    finding,
+                    candidates: &replacement.candidates,
+                },
+            )
+            .and_then(|next| {
+                document
+                    .written_at(replacement.level, row, &set)
+                    .map(|()| next)
+            });
+        match admitted {
             Ok(next) => {
                 working = replaced;
                 current = next;
-                cites.push(cited(row, Confidence::Declared, Vec::new()));
+                cites.push(cited(row, replacement.level, replacement.notes));
             }
             Err(skip) => skipped.push((at, *skip)),
         }
@@ -150,37 +173,9 @@ pub(super) fn fix_field(
     }
 }
 
-/// The member each of the rules `contributing` to the field maps `offending`
-/// to, in rule name order.
-fn proposals(
-    schema: &VaultSchema,
-    field: &str,
-    contributing: &[String],
-    offending: &str,
-) -> Vec<Proposal> {
-    let mut proposals = Vec::new();
-    for name in contributing {
-        let Some(rule) = schema.rule(name) else {
-            continue;
-        };
-        for (_, set) in rule.one_of().filter(|(declared, _)| *declared == field) {
-            for (written, member) in set.synonym_values() {
-                if same_value(schema, field, written, offending) {
-                    proposals.push(Proposal {
-                        value: member.clone(),
-                        rule: name.clone(),
-                        clocked: false,
-                    });
-                }
-            }
-        }
-    }
-    proposals
-}
-
 /// Whether the texts `left` and `right` are one value of `field`: one
 /// equality key where the field's type reads them, otherwise one spelling.
-fn same_value(schema: &VaultSchema, field: &str, left: &str, right: &str) -> bool {
+pub(super) fn same_value(schema: &VaultSchema, field: &str, left: &str, right: &str) -> bool {
     match (
         schema.equality_key(field, left),
         schema.equality_key(field, right),
@@ -192,7 +187,7 @@ fn same_value(schema: &VaultSchema, field: &str, left: &str, right: &str) -> boo
 }
 
 /// Whether the members `left` and `right` are one value of `field`.
-fn same_member(
+pub(super) fn same_member(
     schema: &VaultSchema,
     field: &str,
     left: &AuthoredValue,
