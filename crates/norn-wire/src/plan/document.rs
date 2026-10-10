@@ -465,7 +465,9 @@ pub enum SkipReason {
     BringsInRequiredFields,
     /// A capture in the fix's rule matches more than one way.
     AmbiguousCapture,
-    /// The rules selecting the document conflict over where it may stand.
+    /// The rules selecting the document conflict, over what a field may hold
+    /// (`field/rules-conflict`) or over where the document may stand
+    /// (`document/rules-conflict`), so no rule's fix is the answer.
     RulesConflict,
     /// The fix would rename a field onto one the document already holds.
     RenameOntoOccupiedField,
@@ -498,7 +500,10 @@ pub enum SkippedCandidates {
         #[schemars(schema_with = "plan_candidate_head_schema")]
         head: CandidateHead,
     },
-    /// The values a field could have been given.
+    /// The values a repair could have written: a field's defaults or
+    /// synonym members, the destinations a document's routes name, or the
+    /// remedies a forbidden field's rules declare, spelled `remove` and
+    /// `rename_to: <field>`.
     #[non_exhaustive]
     Values {
         /// The head of the values, each with the rule that proposed it.
@@ -539,7 +544,8 @@ pub struct SkippedFinding {
     #[schemars(schema_with = "plan_optional_value_head_schema")]
     pub value: Option<ValueHead>,
     /// What the plan had to choose between, where the reason is a choice it
-    /// would not make.
+    /// would not make, or the fix it would not write, where the fix was
+    /// refused or would bring in required fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidates: Option<SkippedCandidates>,
     /// The fields the fix would bring in, where the reason is that it brings

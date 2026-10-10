@@ -2703,14 +2703,14 @@ declares one for it. A `field/required-missing` finding fills from the default t
 requiring the field declare, filled from the rule's own captures and the plan's one clock
 reading: one `set_frontmatter`. Candidates agree only as one written value, and a repair fills
 that one field and cascades no default. A `field/not-one-of` finding is replaced by the member
-a rule's synonym maps its offending value to, compared by the field's typed equality; a list
+a rule's synonym maps its offending value to, compared by the field's typed equality, and written as the schema wrote the member: rules whose members agree by that equality but are spelled differently write the member as the first of them in rule name order spells it; a list
 field's offending elements are fixed one by one into one `set_frontmatter` of the whole list,
 each replacing every occurrence of its value, and an element whose fix is skipped stands. A
 `field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter`
 of the new field to the old one's whole value, then a `remove_frontmatter` of the old field
 requiring it) as a rule declares. A `document/misplaced` finding is moved into the folder its
 placement rules' `allowed_paths` route names, filled from the rule's own captures and the
-plan's one clock reading, the document keeping its file name: one `move_document`, whose link
+plan's one clock reading, the document keeping its file name, rules agreeing only on a destination spelled alike, so that on a case-folding root `Tasks/` and `tasks/` tie: one `move_document`, whose link
 cascade the one planner generates as any move's, so the move rewrites every link the text
 layer can respell and a preview's forecast advises on every other with the reason a `move`
 of the document gives it (the applier's preview computes them from the plan's change set; an
@@ -2754,7 +2754,9 @@ defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each w
 candidate and its rule, `ambiguous_capture` where a default or route reads a capture its
 rule's `match.path` binds several ways, `rename_onto_occupied_field` where a rename's field
 is already held, `destination_taken` as above, `brings_in_required_fields` naming each field
-and its declared default where the fix brings in a rule requiring a field the document lacks,
+and its declared default where the fix brings in a rule requiring a field the document lacks
+(a field whose rules declare differing defaults is named with none, and the skip's note says
+so; a route's skip carries its destination as its candidate),
 and `judge_would_refuse` with its candidates where it introduces any other violation. A
 finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
