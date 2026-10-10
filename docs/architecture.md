@@ -2708,66 +2708,35 @@ field's offending elements are fixed one by one into one `set_frontmatter` of th
 each replacing every occurrence of its value, and an element whose fix is skipped stands. A
 `field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter`
 of the new field to the old one's whole value, then a `remove_frontmatter` of the old field
-requiring it) as a rule declares. A `document/misplaced` finding is moved into the folder its
-placement rules' `allowed_paths` route names, filled from the rule's own captures and the
-plan's one clock reading, the document keeping its file name, rules agreeing only on a destination spelled alike, so that on a case-folding root `Tasks/` and `tasks/` tie: one `move_document`, whose link
-cascade the one planner generates as any move's, so the move rewrites every link the text
-layer can respell and a preview's forecast advises on every other with the reason a `move`
-of the document gives it (the applier's preview computes them from the plan's change set; an
-applied report carries none, as an applied move's does not). Each operation is numbered
+requiring it) as a rule declares. Each operation is numbered
 `repair-1`, `repair-2` and on in plan order and cited at the `declared` confidence with the
-findings it fixes, and one writing a clock-filled value or destination notes that it is the
-repair's time. A document's fixes compose in finding order — its route first, then kind,
-field, offending value — onto the bytes and the place the earlier ones left, each judged
+findings it fixes, and one writing a clock-filled value notes that it is the repair's time.
+**A `document/misplaced` finding is skipped until routes are planned (NORN-380).** A rule's
+`allowed_paths` route moves a document with a link cascade that rewrites documents no
+judgment of one document's own fixes sees, so it is judged with the whole plan; that design
+is NORN-380's. Until it lands the finding is `no_declared_fix` with the value it judged where
+it has one, and where a rule its judgment cites declares a route, the skip's note says so and
+that routes are planned by NORN-380. A document's fixes compose in finding order — kind,
+field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
 own: a fix the applier would refuse, or one bringing back a violation an earlier fix took
 away, is skipped and the next composes without it, and a fix after which the document still
-holds its finding is no fix. The route comes first so every other fix is judged, and names
-the document, where it will stand, after the move in plan order. Every selected finding the
-judgment of a document's bytes concludes — a rule's, an undeclared tag, one about the
-document whole — is decided against the composed document at the end: one it no longer
-holds is dropped, neither fixed nor skipped, so a route out of a rule's area drops that
-rule's selected findings and a removal taking a tag with it drops the tag's. **A route's
-destination is judged against the vault the planning view reads, as the root reads its
-case, and against the batch's earlier routes**: a destination anything stands at or beneath
-a document that stands, or one another route of the batch already moves a document to,
-above or beneath, is `destination_taken`, so of two routes to one place, or to places one
-inside the other, the first in batch order moves and the later skips; a place another
-operation of the batch vacates is judged as it stands, taken. A route filling to no folder a
-document can be moved into — a capture holding `:`, which a route's own text never holds,
-or one slugging to nothing — and a route to a place where the document would still be
-misplaced, are `judge_would_refuse`. **Routes are admitted one at a time, each judged on the
-plan the routes before it left.** A route's link cascade rewrites links in other documents
-and in the moved document itself, which no judgment of one document's fixes sees. So the
-batch is first planned with every route withheld, each document's fixes judged where it
-stands; with no cascade, each document's own composition judges it exactly. Each withheld
-route is then tried in batch order on the plan the routes accepted so far make: the batch is
-planned again with that route admitted too, its document composed with the route first and
-its fixes judged where it lands, resolved, and judged whole by the applier's own check,
-read-only, on the same view and clock reading. The trial is accepted where it introduces no
-violation and every finding it fixes or drops no longer holds where its document lands, as
-the check's judgment of each document the plan writes concludes. Otherwise the route is
-skipped as `judge_would_refuse`, noting the document and the violation or the finding it
-would make hold again — which only that route can explain, since the plan it was tried on was
-accepted — and the next route is tried without it. A route the whole plan refuses claims no
-destination. A skipped finding the final plan's result no longer holds, one a cascade
-eliminated, is dropped. That costs one resolution of the plan with every route withheld and
-one planning, resolution and judgment per route tried, at most one resolution more than the
-batch has routes; a route whose destination an accepted route took changes no operation and
-is neither resolved nor judged, and a batch holding no route is resolved once and not judged
-in planning. A trial that does not resolve is answered as that refusal; one the check stops
-for a cause other than the schema, such as drift, is judged clean in planning and answered
-with that cause by its preview or apply. A fix
+holds its finding is no fix. Every selected finding the judgment of a document's bytes
+concludes — a rule's, an undeclared tag, one about the document whole — is decided against
+the composed document at the end: one it no longer holds is dropped, neither fixed nor
+skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
+and a removal taking a tag with it drops the tag's. Each fix is judged where its document
+stands, so a plan is resolved once and not judged again in planning. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
-defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
-candidate and its rule, `ambiguous_capture` where a default or route reads a capture its
+defaults disagree and `tie` where synonyms or forbidden fixes do, each with every
+candidate and its rule, `ambiguous_capture` where a default reads a capture its
 rule's `match.path` binds several ways, `rename_onto_occupied_field` where a rename's field
-is already held, `destination_taken` as above, `brings_in_required_fields` naming each field
+is already held, `brings_in_required_fields` naming each field
 and its declared default where the fix brings in a rule requiring a field the document lacks
 (a field whose rules declare differing defaults is named with none, and the skip's note says
-so; a route's skip carries its destination as its candidate),
+so),
 and `judge_would_refuse` with its candidates where it introduces any other violation. A
 finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
@@ -2779,14 +2748,10 @@ at the snapshot the repair reads because link health is re-decided in every chan
 and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
-resolution: each document holding a finding a declared fix may answer is read whole once,
-beside resolution and never a second time — a document only a route moves included, which a
-`move` would carry streamed, never holding its bytes — and each route's destination is read
-once, streamed, resolution's own read of it answered from what that read found; a document
-holding no such finding is not read. Those bytes stay held for the batch's planning, so the
-planning heap grows with the bytes of the batch's fixed documents. A route moving a document
-past the batch's cursor may report its skipped findings again in a later batch: declared,
-and no loop, since the cursor only advances. The plan carries a provenance block recording
+resolution: each document holding a finding a declared fix may answer, or a misplaced
+finding whose skip notes a route, is read whole once, beside resolution and never a second
+time; a document holding no such finding is not read. Those bytes stay held for the batch's
+planning, so the planning heap grows with the bytes of the batch's read documents. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request
@@ -2927,10 +2892,10 @@ needs it — any creation by rule, whose target and templates may read it, and a
 reading `{{now}}`, `{{date}}` or `{{time}}` that is proposed for a field or compared with a
 filled value, even where the field then conflicts — and every template and default of the plan
 fills from that reading; a creation needing no reading never fails on an unreadable clock.
-A repair plan's rule defaults and routes and the planning its operations resolve through
-share one reading, taken the first time a default or route it fills reads a clock token; a
-clock that gives no reading leaves each such fix's operation unresolved, and the repair is
-refused as a creation is. Every reading goes
+A repair plan's rule defaults and the planning its operations resolve through
+share one reading, taken the first time a default it fills reads a clock token; a
+clock that gives no reading leaves each such default's operation unresolved, and the repair
+is refused as a creation is. Every reading goes
 through one counted seam, tallied as `clock_reads` on the account the planning thread works
 for: the read account for a preview's or a repair's planning hold, the job account for an
 apply's planning.

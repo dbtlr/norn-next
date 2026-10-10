@@ -477,6 +477,13 @@ pub enum SkipReason {
     ExcludedClass,
     /// The write would be refused when the plan is applied.
     JudgeWouldRefuse,
+    // A dormant carrier: routes (NORN-380) are the consuming step, which skips
+    // a route to a place something stands at or another route moves to. Repair
+    // plans no route until then (a misplaced finding skips as no declared
+    // fix), so nothing in the current call graph builds this reason, and it is
+    // reached only when a caller sends a plan carrying one back. The roadmap
+    // note lives here rather than in the doc comment schemars lifts into the
+    // published schema.
     /// Something already stands where the fix would write.
     DestinationTaken,
 }
@@ -500,10 +507,15 @@ pub enum SkippedCandidates {
         #[schemars(schema_with = "plan_candidate_head_schema")]
         head: CandidateHead,
     },
+    // Routes are not planned yet (NORN-380): the destinations a document's
+    // routes name are what repair will send here once that task lands; today
+    // it sends the defaults, synonym members and forbidden remedies. The
+    // roadmap note lives here rather than in the doc comment schemars lifts
+    // into the published schema.
     /// The values a repair could have written: a field's defaults or
-    /// synonym members, the destinations a document's routes name, or the
-    /// remedies a forbidden field's rules declare, spelled `remove` and
-    /// `rename_to: <field>`.
+    /// synonym members, the destinations a document's routes name (once
+    /// repair plans routes), or the remedies a forbidden field's rules
+    /// declare, spelled `remove` and `rename_to: <field>`.
     #[non_exhaustive]
     Values {
         /// The head of the values, each with the rule that proposed it.

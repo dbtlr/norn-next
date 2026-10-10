@@ -112,7 +112,7 @@ pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 use schema::Citations;
-pub(crate) use schema::{Held, Holdings, Standing, standing, verdict};
+pub(crate) use schema::{Held, Standing, standing, verdict};
 pub(crate) use stage::Links;
 use stage::Stop;
 
@@ -480,51 +480,6 @@ pub(crate) fn preview(
             healing: Vec::new(),
         },
     }))
-}
-
-/// The schema check an apply of `plan` runs ([`stage::check`]), on what
-/// `view` reads, its links judged through `links`, with nothing staged and
-/// nothing written: the violations the plan introduces — each target's
-/// composed result against the document its content came from, the link
-/// cascades its moves generate included, which no judgment of one
-/// document's own edits can see — and every finding each result whose bytes
-/// it writes holds.
-///
-/// **Only the schema is asked.** Where the check stops the plan for another
-/// cause — drift, a failed condition, a shape that is not what its
-/// operations do, a vault or a snapshot that does not read — no violation
-/// and no holding is answered, and an apply or a preview of the plan answers
-/// that cause as it would.
-///
-/// A repair reads it (`crate::apply`'s `repaired`) to judge each plan
-/// holding a route whole, and to hold the plan's own claims about the
-/// documents it writes to what they would hold.
-pub(crate) fn judged_whole<V: VaultView>(
-    plan: &ResolvedPlan,
-    view: &V,
-    declared: &Declared,
-    links: Links<'_>,
-) -> Whole
-where
-    V::Error: std::fmt::Display,
-{
-    match stage::check_forcing(plan, true, view, declared, links, &mut Citations::default()) {
-        Ok(checked) => Whole {
-            introduced: checked.forced,
-            holdings: checked.holdings,
-        },
-        Err(_) => Whole::default(),
-    }
-}
-
-/// What [`judged_whole`] concludes of a plan.
-#[derive(Default)]
-pub(crate) struct Whole {
-    /// The violations the plan introduces; their rule-set identities are
-    /// this judgment's own numbering, which no response carries.
-    pub(crate) introduced: Vec<SchemaViolation>,
-    /// Every finding each result whose bytes the plan writes holds.
-    pub(crate) holdings: Holdings,
 }
 
 /// The answer when the root at `anchor` the plan was judged under is no

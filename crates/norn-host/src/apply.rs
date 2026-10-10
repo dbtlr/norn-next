@@ -52,7 +52,6 @@
 //! stands and cannot be read.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,8 +65,8 @@ use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
     DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, MoveParams,
     NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
-    RewriteWikilinkParams, RootIdentity, SchemaViolation, SetParams, SkippedFinding, TrustState,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    RewriteWikilinkParams, RootIdentity, SetParams, SkippedFinding, TrustState, UntrustedReason,
+    VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -87,7 +86,7 @@ use crate::planner::links::LinkIndex;
 use crate::planner::repair;
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::rule::Rules;
-use crate::planner::view::{Barrier, Body, Entry, Remembered, TreeView, VaultView};
+use crate::planner::view::{Body, Entry, Remembered, TreeView, VaultView};
 use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
@@ -216,45 +215,6 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
             _ => repair::Before::Unread,
         })
     }
-
-    /// What stands at `path` as the view reads it streamed, under the root's
-    /// identity rule: the read the move's own planning makes of its
-    /// destination, which the shared view answers again from memory.
-    fn destination(&self, path: &DocumentPath) -> Result<repair::Destination, V::Error> {
-        let at = match self
-            .0
-            .normalizer()
-            .normalize(std::path::Path::new(path.as_str()))
-        {
-            Ok(at) => at,
-            Err(error) => return Ok(repair::Destination::Closed(error.to_string())),
-        };
-        Ok(match self.0.streamed_entry(&at)? {
-            Entry::Absent { .. } => {
-                // Every folder above the place, by the same identity rule, so
-                // the batch's routes are judged against one another's places
-                // above and beneath theirs.
-                let spelled = path.as_str();
-                let folders = spelled
-                    .match_indices('/')
-                    .filter_map(|(end, _)| {
-                        self.0
-                            .normalizer()
-                            .normalize(std::path::Path::new(&spelled[..end]))
-                            .ok()
-                    })
-                    .collect();
-                repair::Destination::Free { at, folders }
-            }
-            Entry::Blocked {
-                detail,
-                barrier: Barrier::Closed,
-            } => repair::Destination::Closed(detail),
-            Entry::Document { .. } | Entry::Folder | Entry::Blocked { .. } => {
-                repair::Destination::Taken
-            }
-        })
-    }
 }
 
 /// The resolved plan of the repair of `rows`, a batch's findings, under
@@ -266,37 +226,12 @@ impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
 /// operation of each default that reads the clock is left unresolved, naming
 /// the clock, and `vault/plan-refused` answers it in both modes.
 ///
-/// **Routes are admitted one at a time, each judged on the plan the routes
-/// before it left.** A route's move carries the link cascade the one planner
-/// generates, which rewrites links in other documents and in the moved
-/// document itself, and no judgment of one document's own fixes sees those
-/// rewrites. So the batch is first planned with every route withheld: each
-/// document's fixes judged where it stands, with no cascade, which its own
-/// composition judges exactly. Then each withheld route, in batch order, is
-/// tried on the plan the routes accepted so far make: the batch planned
-/// again with that route admitted too — its document composed with the route
-/// first, its fixes judged where it lands — resolved, and judged whole by
-/// the applier's own check ([`applier::judged_whole`]), on the same view and
-/// the same clock reading, nothing written. The trial is accepted where it
-/// introduces no violation and every finding it fixes or drops no longer
-/// holds where its document lands ([`repair::unkept`]). Otherwise the route
-/// is skipped as one the judge would refuse, noting the document and the
-/// violation, or the finding it would make hold again, which only the route
-/// can explain, since the plan it was tried on was accepted; and the next
-/// route is tried on the accepted plan without it. A skipped finding the
-/// final plan's result no longer holds, one a cascade eliminated, is then
-/// dropped ([`repair::settle`]).
-///
-/// **The cost is one resolution of the plan with every route withheld, and
-/// one planning, resolution and judgment of the plan per route tried**, at
-/// most one more resolution than the batch has routes: a route its trial
-/// cannot make, its destination taken by an accepted route, changes no
-/// operation and is neither resolved nor judged. A batch holding no route is
-/// resolved once and not judged here. **A trial that does not resolve** — an
-/// operation left unresolved, a plan of the wrong shape, a vault that does
-/// not read — is answered as that refusal, as any plan's is; one the check
-/// stops for a cause other than the schema, such as drift, is judged clean
-/// here, and its preview or apply answers that cause.
+/// **It plans once and resolves once**: the batch is planned by
+/// [`repair::plan`], every fix judged where its document stands by the
+/// applier's own schema check, and the operations resolved through the one
+/// planner on the shared view. Routes, whose link cascade rewrites documents
+/// no judgment of one document's own fixes sees, are not planned yet
+/// (NORN-380); a misplaced finding skips until they are.
 fn repaired<V: VaultView>(
     rows: &[FindingRow],
     ground: &PlanGround,
@@ -310,108 +245,22 @@ where
     V::Error: std::fmt::Display,
 {
     let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
-    let planning = |admitted: &BTreeSet<u64>| {
-        let repairing = repair::Repairing {
-            declared: &ground.declared,
-            case,
-            clock,
-            admitted,
-        };
-        repair::plan(rows, &repairing, &RepairReading(view))
-            .map_err(|error| unreadable(name, error))
+    let repairing = repair::Repairing {
+        declared: &ground.declared,
+        case,
+        clock,
     };
-    let resolving = |planned: &repair::Planned| {
-        let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations.clone());
-        // The resolution reads the clock through the plan's one reading: no
-        // repair plan reaches a clock read in expansion today, and the shared
-        // reading keeps the plan at one should a repair ever create by rule.
-        let mut resolution =
-            resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
-        resolution
-            .unresolved
-            .extend(planned.unresolved.iter().cloned());
-        fully_resolved(resolution).map(|resolution| resolution.plan)
-    };
-    let mut admitted = BTreeSet::new();
-    let mut accepted = planning(&admitted)?;
-    let mut plan = resolving(&accepted)?;
-    let mut holdings = applier::Holdings::new();
-    let mut notes = BTreeMap::new();
-    for route in accepted.withheld.clone() {
-        admitted.insert(route.finding);
-        let trial = planning(&admitted)?;
-        if trial.operations == accepted.operations {
-            accepted = trial;
-            continue;
-        }
-        let tried = resolving(&trial)?;
-        let whole = applier::judged_whole(&tried, view, &ground.declared, snapshot);
-        let refusal = match whole.introduced.first() {
-            Some(violation) => Some(breaking(&route.to, violation)),
-            None => repair::unkept(&trial, &whole.holdings)
-                .map(|(found, fixed)| holding_again(&route.to, found, fixed)),
-        };
-        match refusal {
-            Some(note) => {
-                admitted.remove(&route.finding);
-                notes.insert(route.finding, note);
-            }
-            None => {
-                (accepted, plan, holdings) = (trial, tried, whole.holdings);
-            }
-        }
-    }
-    repair::settle(&mut accepted, &holdings, &notes);
-    Ok((plan, accepted.skipped, accepted.citations))
-}
-
-/// The note the skip of a route to `to` carries where the plan it was tried
-/// on would introduce `violation`.
-fn breaking(to: &DocumentPath, violation: &SchemaViolation) -> String {
-    let on = violation
-        .target
-        .as_deref()
-        .map(|target| format!(" on `{target}`"))
-        .unwrap_or_default();
-    let value = violation
-        .value
-        .as_ref()
-        .map(|value| format!(" for `{}`", value.text()))
-        .unwrap_or_default();
-    format!(
-        "moving the document to `{to}`, its link cascade with it, would leave `{}` breaking \
-         its schema: `{}`{on}{value}",
-        violation.path,
-        violation.kind.as_str(),
-    )
-}
-
-/// The note the skip of a route to `to` carries where the plan it was tried
-/// on would make `found` hold again, a finding the plan cites as `fixed` or
-/// drops.
-fn holding_again(to: &DocumentPath, found: &repair::Found, fixed: bool) -> String {
-    let held = &found.held;
-    let on = held
-        .field
-        .as_deref()
-        .map(|field| format!(" on `{field}`"))
-        .unwrap_or_default();
-    let value = held
-        .value
-        .as_deref()
-        .map(|value| format!(" for `{}`", norn_store::value_head(value).text()))
-        .unwrap_or_default();
-    let claim = if fixed {
-        "which the plan fixes"
-    } else {
-        "which the plan no longer finds"
-    };
-    format!(
-        "moving the document to `{to}`, its link cascade with it, would leave `{}` holding \
-         `{}`{on}{value} again, {claim}",
-        found.at,
-        held.kind.as_str(),
-    )
+    let planned = repair::plan(rows, &repairing, &RepairReading(view))
+        .map_err(|error| unreadable(name, error))?;
+    let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
+    // The resolution reads the clock through the plan's one reading: no
+    // repair plan reaches a clock read in expansion today, and the shared
+    // reading keeps the plan at one should a repair ever create by rule.
+    let mut resolution =
+        resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
+    resolution.unresolved.extend(planned.unresolved);
+    let plan = fully_resolved(resolution)?.plan;
+    Ok((plan, planned.skipped, planned.citations))
 }
 
 /// Plan `authored` as [`resolve_on`] does, reading the vault through `view`

@@ -228,12 +228,6 @@ pub(crate) struct Verdict {
     pub(crate) standing: Standing,
 }
 
-/// Every finding the judge concludes of each document a plan writes the
-/// bytes of, by the path it is written at, in the judge's order: what the
-/// plan's own claims about those documents are held to (`crate::apply`'s
-/// repair, through [`crate::applier::judged_whole`]).
-pub(crate) type Holdings = std::collections::BTreeMap<DocumentPath, Vec<Held>>;
-
 /// One finding the judge concludes of a document's bytes, as a finding row
 /// names it, with the identity that tells it from another (see the
 /// [module](self)).
@@ -307,25 +301,24 @@ pub(crate) fn standing(
 /// composed state holds nothing the before-state does not, and the second
 /// comparison is the stricter.
 ///
-/// **A repair's composition reads it** (`crate::planner::repair`), for two
-/// kinds of addition: a fix **edited in place**, whose composed bytes are
-/// judged where the document stands, and a route's **destination**, where the
-/// document is judged at the place it lands: a move, which the fixes after
-/// it in the plan edit at that place. Each is judged on the running composed
-/// bytes, the before-state judged once however many fixes are made and each
-/// result judged once, and the findings the result holds say which of the
-/// selected findings still stand to be fixed.
+/// **A repair's composition reads it** (`crate::planner::repair`) for a fix
+/// **edited in place**, whose composed bytes are judged where the document
+/// stands, each on the running composed bytes, the before-state judged once
+/// however many fixes are made and each result judged once, and the findings
+/// the result holds say which of the selected findings still stand to be
+/// fixed.
 ///
-/// **Judging a moved document's whole bytes agrees with the applier's
-/// judgment of a carried move.** The applier judges a document a move carries
-/// byte for byte by its frontmatter block alone ([`judge_block`]), because
-/// every other finding a document's bytes conclude is a function of those
-/// bytes alone, the same at the place it leaves and the place it lands. A
-/// violation is introduced unless its identity stood in both states, so a
-/// finding the bytes alone conclude, standing in the before-state, stands in
-/// the composed state and at the destination alike and is never introduced by
-/// the move; only a rule's
-/// finding, which reads where the document stands, can be, and those are the
+/// **A document is judged at a place other than the one it was composed at**
+/// by passing that place as `after_path`: a dormant carrier for the routes
+/// NORN-380 plans, whose destination is judged where the document lands. The
+/// current call graph judges every fix where its document stands, so no
+/// caller passes another place yet. Judging a moved document's whole bytes
+/// agrees with the applier's judgment of a carried move, which judges the
+/// frontmatter block alone ([`judge_block`]): every other finding a document's
+/// bytes conclude is a function of those bytes alone, the same at the place it
+/// leaves and the place it lands, so with a violation introduced unless its
+/// identity stood in both states, only a rule's finding, which reads where
+/// the document stands, can be introduced by the move, and those are the
 /// findings the block judgment concludes.
 pub(crate) fn verdict(
     before: &Standing,

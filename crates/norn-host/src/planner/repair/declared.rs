@@ -2,7 +2,7 @@
 //! composed into a document one fix at a time and judged as the applier will
 //! judge it.
 //!
-//! **Four kinds of finding have a declared fix.** The candidates for a
+//! **Three kinds of finding have a declared fix.** The candidates for a
 //! selected finding are what the rules its judgment cites — the combined
 //! constraint's contributing rules, read on the composed document — declare
 //! for it, and a rule declaring nothing for it proposes nothing:
@@ -23,19 +23,25 @@
 //!   member a rule's synonym for it maps to ([`synonyms`]), the candidates
 //!   agreeing as the field's typed equality reads them;
 //! - a forbidden field (`field/forbidden`) is removed or renamed as a rule
-//!   declares ([`forbidden`]);
-//! - a misplaced document (`document/misplaced`) is moved into the folder its
-//!   placement rules' `allowed_paths` route names, keeping its file name
-//!   ([`routes`]).
+//!   declares ([`forbidden`]).
+//!
+//! **A misplaced document is not fixed yet, which is the interim state of
+//! NORN-374.** A `document/misplaced` finding is skipped as
+//! [`SkipReason::NoDeclaredFix`], with the value it judged where it names
+//! one; where a rule it cites declares an `allowed_paths` route, the skip
+//! notes that the rule declares a route and routes are planned by NORN-380.
+//! A route is a move whose link cascade rewrites documents no judgment of one
+//! document's own fixes can see, so it is judged with the whole plan, which
+//! NORN-380 designs; until then the route's fill
+//! ([`Rule::fill_route`](norn_config::schema::Rule::fill_route)) has no
+//! caller here.
 //!
 //! **Each kind's candidates agree by its own rule.** Defaults agree as one
 //! written value (`1` and `1.0` disagree). Synonyms agree by the field's typed
 //! equality (`4` and `4.0` are one number under a `number` field), and where
 //! rules agree typed but spell the member differently, the member is written
-//! as the first rule in name order spells it. Routes agree by the destination's
-//! exact spelling, so on a root folding case `Tasks/` and `tasks/` are two
-//! destinations and tie. Forbidden fixes agree when every one removes the
-//! field, or every one renames it to the same field.
+//! as the first rule in name order spells it. Forbidden fixes agree when every
+//! one removes the field, or every one renames it to the same field.
 //!
 //! **What is skipped, and with what.** No fix declared is
 //! [`SkipReason::NoDeclaredFix`], with the value the finding judged; defaults
@@ -44,48 +50,37 @@
 //! candidate and the rule proposing it; a default reading a capture its rule's
 //! `match.path` binds several ways is [`SkipReason::AmbiguousCapture`], noting
 //! two of the bindings; a rename onto a field the composed document already
-//! holds is [`SkipReason::RenameOntoOccupiedField`]; a route to a place
-//! something stands at, or another route of the batch moves a document to,
-//! is [`SkipReason::DestinationTaken`]; a fix that brings in a
+//! holds is [`SkipReason::RenameOntoOccupiedField`]; a fix that brings in a
 //! required field the document lacks is [`SkipReason::BringsInRequiredFields`],
 //! naming each such field and the default its rules declare (none, with the
 //! note saying so, where its rules declare differing defaults), whatever else
-//! it introduces, and a route's carrying the destination as its candidate; and a fix that introduces any other violation, or that cannot
+//! it introduces; and a fix that introduces any other violation, or that cannot
 //! be set into the document, is [`SkipReason::JudgeWouldRefuse`], with its
 //! candidates. **A default reading a clock that gives no reading is no
 //! skip**: the repair is refused as a creation is, the default's operation
-//! left unresolved ([`Planned::unresolved`]), and so is a route reading it.
-//! Every skip carries the value its finding judged, where the finding names
-//! one.
+//! left unresolved ([`Planned::unresolved`]). Every skip carries the value its
+//! finding judged, where the finding names one.
 //!
-//! **Composition.** A document's findings are taken in finding order — its
-//! route first, then kind, field, offending value — and each fix is set into
-//! the bytes and the place the earlier fixes left ([`edited`], the
-//! composition a `set` writes a field by; a route moves the bytes it is given
-//! unchanged), then judged at that place by the applier's one judge
-//! ([`verdict`]) against the document's own before-state and against the
-//! state it composes onto: the plan the fixes resolve to is refused exactly
-//! where a fix introduces a violation against the before-state, and a fix
-//! introducing one against the composed state would bring back what an
-//! earlier fix took away, so either is skipped and the next composes without
-//! it. A fix after which the document still holds the finding it answers —
-//! a synonym mapping a value onto itself, outside the set co-selecting rules
-//! narrow the field to — is no fix, and skips as
-//! [`SkipReason::JudgeWouldRefuse`] too. **The route comes
-//! first so that every other fix is judged where the document will stand**:
-//! a rule the route takes the document out of no longer selects it there, so
-//! a finding that rule concluded is no longer held and is dropped rather
-//! than fixed, and a field fix names the document at its destination, after
-//! the move in plan order, as a Layer 4 plan moving and then editing a
-//! document does. What a finding is, and whether the composed document
-//! still holds it, are read off the same judgment: a row names the finding
-//! the before-state's judgment concludes of its kind on its field or tag
-//! whose offending value has the row's head — its bytes, length and hash, so
-//! a head cut short still names one value — and the composition asks after
-//! that finding by its identity. A selected finding the composed document no
-//! longer holds is dropped, neither fixed nor skipped, whatever its kind: a
-//! rule's, an undeclared tag, or one about the document whole, each decided
-//! against the document as the last fix leaves it.
+//! **Composition.** A document's findings are taken in finding order — kind,
+//! field, offending value — and each fix is set into the bytes the earlier
+//! fixes left ([`edited`], the composition a `set` writes a field by), then
+//! judged there by the applier's one judge ([`verdict`]) against the
+//! document's own before-state and against the state it composes onto: the
+//! plan the fixes resolve to is refused exactly where a fix introduces a
+//! violation against the before-state, and a fix introducing one against the
+//! composed state would bring back what an earlier fix took away, so either
+//! is skipped and the next composes without it. A fix after which the document
+//! still holds the finding it answers — a synonym mapping a value onto itself,
+//! outside the set co-selecting rules narrow the field to — is no fix, and
+//! skips as [`SkipReason::JudgeWouldRefuse`] too. What a finding is, and
+//! whether the composed document still holds it, are read off the same
+//! judgment: a row names the finding the before-state's judgment concludes of
+//! its kind on its field or tag whose offending value has the row's head — its
+//! bytes, length and hash, so a head cut short still names one value — and the
+//! composition asks after that finding by its identity. A selected finding the
+//! composed document no longer holds is dropped, neither fixed nor skipped,
+//! whatever its kind: a rule's, an undeclared tag, or one about the document
+//! whole, each decided against the document as the last fix leaves it.
 //!
 //! **A list's elements are fixed one by one into one change to the field.**
 //! Every selected `field/not-one-of` finding of one field composes into one
@@ -95,7 +90,6 @@
 //! fixes.
 
 mod forbidden;
-mod routes;
 mod synonyms;
 
 use std::collections::BTreeSet;
@@ -109,16 +103,17 @@ use norn_wire::{
     UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead, WriteTarget,
 };
 
-use super::{Claimed, Found, Planned, Reading, Repairing, Withheld, skip};
+use super::{Planned, Repairing, skip};
 use crate::applier::{Held, Standing, standing, verdict};
 use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::evidence::count_rule_work;
 use crate::planner::edit::edited;
 
-/// Whether `row` is a finding a declared fix may answer, so its document's
-/// bytes are read: a missing required field, a value outside a closed set, a
-/// forbidden field, or a misplaced document.
-pub(super) fn has_fix(row: &FindingRow) -> bool {
+/// Whether `row` is a finding whose document's bytes are read: one a declared
+/// fix may answer (a missing required field, a value outside a closed set, a
+/// forbidden field), or a misplaced document, whose skip notes a route its
+/// rules declare.
+pub(super) fn reads_document(row: &FindingRow) -> bool {
     matches!(
         row.kind,
         FindingKind::RequiredMissing
@@ -126,14 +121,6 @@ pub(super) fn has_fix(row: &FindingRow) -> bool {
             | FindingKind::Forbidden
             | FindingKind::Misplaced
     )
-}
-
-/// What a route is judged against beyond its own document: the vault, for
-/// what stands at its destination, and the destinations the batch's earlier
-/// routes took.
-pub(super) struct Routing<'r, R> {
-    pub(super) vault: &'r R,
-    pub(super) claimed: &'r mut Claimed,
 }
 
 /// Compose the declared fixes of `document` — one document's findings, in
@@ -149,13 +136,12 @@ pub(super) struct Routing<'r, R> {
 /// a kind no fix answers that a fix eliminated — is dropped. Each addition is
 /// judged against the state it composes onto as well ([`verdict`]), so a
 /// finding fixed or dropped never holds again.
-pub(super) fn compose<R: Reading>(
+pub(super) fn compose(
     document: &[FindingRow],
     before: &Arc<[u8]>,
     repairing: &Repairing<'_>,
-    mut routing: Routing<'_, R>,
     planned: &mut Planned,
-) -> Result<Vec<Option<SkippedFinding>>, R::Error> {
+) -> Vec<Option<SkippedFinding>> {
     let path = &document[0].path;
     // The before-state is judged once, however many fixes are made to it.
     let composing = Document {
@@ -224,33 +210,10 @@ pub(super) fn compose<R: Reading>(
             continue;
         };
         if row.kind == FindingKind::Misplaced {
-            let rules = held.rules.clone();
-            match routes::fix(
-                &composing,
-                &state,
-                row,
-                finding,
-                &rules,
-                next_id(planned),
-                &mut routing,
-            )? {
-                Ok(routes::Route::Moved(fix)) => state = push(planned, fix),
-                Ok(routes::Route::Withheld { skip, to }) => {
-                    decided[at] = Some(*skip);
-                    planned.withheld.push(Withheld {
-                        finding: row.id,
-                        to,
-                    });
-                }
-                Err(Unmade::Skipped(skip)) => decided[at] = Some(*skip),
-                Err(Unmade::ClockUnread(left)) => {
-                    unresolved.insert(at);
-                    planned.unresolved.push(*left);
-                }
-            }
+            decided[at] = Some(misplaced_skip(row, held, &composing));
             continue;
         }
-        let (true, Some(field)) = (has_fix(row), row.target.as_deref()) else {
+        let (true, Some(field)) = (reads_document(row), row.target.as_deref()) else {
             decided[at] = Some(super::skipped(row));
             continue;
         };
@@ -298,13 +261,8 @@ pub(super) fn compose<R: Reading>(
             decision.is_some() || !stands,
             "a finding fixed or dropped holds again on the composed document: {finding:?}"
         );
-        planned.found.push(Found {
-            finding: document[at].id,
-            at: state.at.clone(),
-            held: finding.clone(),
-        });
     }
-    Ok(decided)
+    decided
 }
 
 /// Record each skip of `skipped` against the row position it is for.
@@ -312,6 +270,38 @@ fn decided_skips(decided: &mut [Option<SkippedFinding>], skipped: Vec<(usize, Sk
     for (at, skip) in skipped {
         decided[at] = Some(skip);
     }
+}
+
+/// The skip of the misplaced finding `row`, which `held` is as the composed
+/// document holds it: no declared fix, with the value it judged, and where a
+/// rule it cites declares an `allowed_paths` route, a note that routes are not
+/// planned yet.
+///
+/// The route a rule declares is read and named here and moved by nothing until
+/// NORN-380, which plans routes with the whole plan's judgment of their link
+/// cascade (see the [module](self)).
+fn misplaced_skip(row: &FindingRow, held: &Held, document: &Document<'_>) -> SkippedFinding {
+    let routing: Vec<String> = held
+        .rules
+        .iter()
+        .filter(|name| {
+            document
+                .schema()
+                .rule(name)
+                .and_then(|rule| rule.allowed_paths())
+                .is_some_and(|allowed| allowed.route().is_some())
+        })
+        .map(|name| format!("`{name}`"))
+        .collect();
+    let skipped = super::skipped(row);
+    if routing.is_empty() {
+        return skipped;
+    }
+    skipped.with_note(format!(
+        "{} declare{} an `allowed_paths` route, and routes are planned by NORN-380",
+        routing.join(", "),
+        if routing.len() == 1 { "s" } else { "" },
+    ))
 }
 
 /// Add the operations of `fix` to `planned`, each numbered and cited for the
@@ -341,9 +331,8 @@ fn next_id(planned: &Planned) -> OperationId {
     OperationId::new(format!("repair-{}", taken + 1)).expect("a repair's operation id is not empty")
 }
 
-/// The positions of `document`'s rows in finding order: a misplaced
-/// document's route first, so every other fix is judged where it will stand,
-/// then kind, field, offending value, and identity.
+/// The positions of `document`'s rows in finding order: kind, field,
+/// offending value, and identity.
 ///
 /// **A value is compared whole**: as the finding `found` names for the row
 /// holds it, so two values sharing a head longer than a row carries compare
@@ -356,13 +345,7 @@ fn finding_order(document: &[FindingRow], found: &[Option<Held>]) -> Vec<usize> 
             .as_ref()
             .and_then(|held| held.value.as_deref())
             .or_else(|| row.value.as_ref().map(ValueHead::text));
-        (
-            row.kind != FindingKind::Misplaced,
-            row.kind.as_str(),
-            row.target.as_deref(),
-            value,
-            row.id,
-        )
+        (row.kind.as_str(), row.target.as_deref(), value, row.id)
     };
     order.sort_by(|&left, &right| key(left).cmp(&key(right)));
     order
@@ -464,10 +447,12 @@ impl Document<'_> {
     }
 
     /// The state `edits` compose `from` to, each set into the bytes the one
-    /// before left and the result judged where `from` stands
-    /// ([`Self::judged`]); or the skip of the finding `row` names,
-    /// `finding`, with `candidates`, where an edit cannot be set into the
-    /// document or the judgment refuses the result.
+    /// before left and the result judged where `from` stands against the
+    /// document's before-state and against `from`; or the skip of the finding
+    /// `fixing` names, with its candidates, where an edit cannot be set into
+    /// the document or the judgment refuses the result: a fix that brings in
+    /// required fields the document lacks, one that introduces any other
+    /// violation, or one after which the document still holds the finding.
     fn admit(
         &self,
         from: &State,
@@ -484,30 +469,6 @@ impl Document<'_> {
                 )
             })?;
         }
-        self.judged(
-            from,
-            &from.at,
-            composed,
-            fixing,
-            "the fix leaves it still standing",
-        )
-    }
-
-    /// The state the document holding `composed` at `at` is, judged there
-    /// against its before-state and against `from`, the state it was composed
-    /// from; or the skip of the finding `fixing` names, with its candidates,
-    /// for the reason the judgment gives: a fix that brings in required
-    /// fields the document lacks, one that introduces any other violation,
-    /// or one after which the document still holds the finding, noted as
-    /// `still`.
-    fn judged(
-        &self,
-        from: &State,
-        at: &DocumentPath,
-        composed: Arc<[u8]>,
-        fixing: Fixing<'_>,
-        still: &str,
-    ) -> Result<State, Box<SkippedFinding>> {
         let Fixing {
             row,
             finding,
@@ -516,12 +477,12 @@ impl Document<'_> {
         let verdict = verdict(
             &self.before,
             &from.standing,
-            at,
+            &from.at,
             &composed,
             self.repairing.declared,
             self.repairing.case,
         );
-        let state = State::of(at.clone(), composed, verdict.standing);
+        let state = State::of(from.at.clone(), composed, verdict.standing);
         let brought = brought_in(&verdict.introduced);
         if !brought.is_empty() {
             let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
@@ -550,7 +511,7 @@ impl Document<'_> {
             return Err(Box::new(
                 skip(row, SkipReason::JudgeWouldRefuse)
                     .with_candidates(candidates.clone())
-                    .with_note(still.to_string()),
+                    .with_note("the fix leaves it still standing"),
             ));
         }
         Ok(state)
@@ -854,7 +815,7 @@ mod tests {
     use norn_config::schema::{LocalTimestamp, NotALocalTimestamp, VaultSchema};
     use norn_wire::{CandidateHead, Severity};
 
-    use super::super::{Before, Destination, Planned, Reading, plan};
+    use super::super::{Before, Planned, Reading, plan};
     use super::*;
     use crate::clock::OneReading;
     use crate::derivation::Declared;
@@ -899,12 +860,10 @@ mod tests {
                 Ok(reading())
             };
             let one = OneReading::of(&clock);
-            let admitted = every_route(rows);
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
-                admitted: &admitted,
             };
             let reading = Read {
                 vault: self,
@@ -924,12 +883,10 @@ mod tests {
             let clock =
                 || -> Result<LocalTimestamp, NotALocalTimestamp> { Err(NotALocalTimestamp) };
             let one = OneReading::of(&clock);
-            let admitted = every_route(rows);
             let repairing = Repairing {
                 declared: &self.declared,
                 case: norn_wire::CaseFold::Exact,
                 clock: &one,
-                admitted: &admitted,
             };
             let reading = Read {
                 vault: self,
@@ -938,13 +895,6 @@ mod tests {
             let Ok(planned) = plan(rows, &repairing, &reading);
             planned
         }
-    }
-
-    /// Every row's id, so every route the rows name is admitted: the cases
-    /// here judge each document's own composition, and the judgment of the
-    /// whole plan that admits a route is the host's (`crate::apply`).
-    fn every_route(rows: &[FindingRow]) -> BTreeSet<u64> {
-        rows.iter().map(|row| row.id).collect()
     }
 
     /// The vault as a repair reads it, each document read noted in order.
@@ -961,39 +911,6 @@ mod tests {
             Ok(match self.vault.documents.get(path.as_str()) {
                 Some(bytes) => Before::Held(Arc::clone(bytes)),
                 None => Before::Unread,
-            })
-        }
-
-        /// A document's path is taken, and so is each folder above one; a
-        /// path beneath `.norn/` is closed.
-        fn destination(&self, path: &DocumentPath) -> Result<Destination, Self::Error> {
-            let spelled = path.as_str();
-            if spelled.starts_with(".norn/") {
-                return Ok(Destination::Closed("the vault's mechanism folder".into()));
-            }
-            let taken = self.vault.documents.keys().any(|held| {
-                held == spelled
-                    || held
-                        .strip_prefix(spelled)
-                        .is_some_and(|rest| rest.starts_with('/'))
-            });
-            Ok(if taken {
-                Destination::Taken
-            } else {
-                let normalizer =
-                    norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
-                let normalized = |spelled: &str| {
-                    normalizer
-                        .normalize(std::path::Path::new(spelled))
-                        .expect("a document path normalizes")
-                };
-                Destination::Free {
-                    at: normalized(spelled),
-                    folders: spelled
-                        .match_indices('/')
-                        .map(|(end, _)| normalized(&spelled[..end]))
-                        .collect(),
-                }
             })
         }
     }
@@ -1225,18 +1142,6 @@ mod tests {
             crate::evidence::rule_work_of(|| vault.plan(&[missing(1, "red/a.md", "area")]));
 
         assert_eq!(planned.operations, vec![set(1, "red/a.md", "area", "red")]);
-        assert_eq!(work.captures_bound, 1, "{work:?}");
-    }
-
-    /// **A route's path capture is bound and tallied the same way.**
-    #[test]
-    fn a_route_reading_a_capture_tallies_its_binding_on_the_rule_counters() {
-        let vault = Vault::of(AREAS, &[("work/a.md", "---\ntype: task\n---\n# A\n")]);
-
-        let (planned, work) =
-            crate::evidence::rule_work_of(|| vault.plan(&[misplaced(3, "work/a.md")]));
-
-        assert_eq!(planned.operations.len(), 1, "{planned:?}");
         assert_eq!(work.captures_bound, 1, "{work:?}");
     }
 
@@ -2087,266 +1992,45 @@ mod tests {
         )
     }
 
-    /// The operation `repair-<n>`, moving the document at `from` to `to`.
-    fn moving(n: usize, from: &str, to: &str) -> Operation {
-        Operation::new(OperationKind::move_document(
-            DocumentPath::new(from).expect("a document path"),
-            DocumentPath::new(to).expect("a document path"),
-        ))
-        .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
-    }
-
-    /// One rule placing a task in its area's `tasks/` folder, the area the
-    /// first segment of where it stands, and routing it there.
-    const AREAS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: '<area>/**'}\n    allowed_paths: {paths: ['*/tasks/**'], route: '{{path.area}}/tasks/'}\n";
-
-    /// **A route moves a misplaced document into its rule's route folder,
-    /// keeping its file name, a capture filled from where it stands**: one
-    /// `move_document`, cited at the declared level.
-    #[test]
-    fn a_route_moves_a_misplaced_document_to_its_route_folder_with_a_capture_filled() {
-        let vault = Vault::of(AREAS, &[("work/a.md", "---\ntype: task\n---\n# A\n")]);
-
-        let planned = vault.plan(&[misplaced(3, "work/a.md")]);
-
-        assert_eq!(
-            planned.operations,
-            vec![moving(1, "work/a.md", "work/tasks/a.md")]
-        );
-        assert_eq!(planned.citations, vec![citing(1, &[3])]);
-        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
-    }
-
-    /// **A route reading a capture its rule's `match.path` binds several ways
-    /// skips as an ambiguous capture**, noting two of the bindings.
-    #[test]
-    fn a_route_reading_a_capture_bound_several_ways_skips_as_ambiguous_capture() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: '**/<area>/**'}\n    allowed_paths: {paths: ['**/tasks/**'], route: '{{path.area}}/tasks/'}\n";
-        let vault = Vault::of(schema, &[("red/blue/a.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.plan(&[misplaced(3, "red/blue/a.md")]);
-
-        assert!(planned.operations.is_empty());
-        let [skipped] = planned.skipped.as_slice() else {
-            panic!("one skip: {:?}", planned.skipped);
-        };
-        assert_eq!(skipped.reason, SkipReason::AmbiguousCapture);
-        let note = skipped
-            .note
-            .as_deref()
-            .expect("the skip notes the bindings");
-        assert!(
-            note.contains("{area=red}") && note.contains("{area=blue}"),
-            "{note}"
-        );
-    }
-
     /// One rule placing a task in `tasks/` and routing it there.
     const TASKED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
 
-    /// **A route whose destination something stands at skips as destination
-    /// taken**, with its candidate, and moves nothing.
+    /// **A misplaced document whose rule declares a route is skipped as no
+    /// declared fix, noting the rule declares a route and routes are
+    /// NORN-380's**, naming only the rules that declare one: nothing is moved,
+    /// the document is read, and the clock is not.
     #[test]
-    fn a_route_whose_destination_is_taken_skips_as_destination_taken() {
-        let vault = Vault::of(
-            TASKED,
-            &[
-                ("loose/a.md", "---\ntype: task\n---\n"),
-                ("tasks/a.md", "---\ntype: task\n---\n"),
-            ],
+    fn a_misplaced_document_a_rule_routes_skips_noting_the_route_is_not_planned_yet() {
+        let schema = format!(
+            "{TASKED}  plain:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['tasks/**']}}\n"
         );
+        let vault = Vault::of(&schema, &[("loose/a.md", "---\ntype: task\n---\n")]);
+        let reads = Cell::new(0);
 
-        let planned = vault.plan(&[misplaced(3, "loose/a.md")]);
+        let (planned, read) = vault.planned(&[misplaced(1, "loose/a.md")], &reads);
 
         assert!(planned.operations.is_empty());
-        let [skipped] = planned.skipped.as_slice() else {
-            panic!("one skip: {:?}", planned.skipped);
-        };
-        assert_eq!(skipped.reason, SkipReason::DestinationTaken);
-        assert_eq!(skipped.candidates, Some(values(&[("tasks/a.md", "tasks")])));
-    }
-
-    /// **Two routes of one batch to one destination: the first in batch
-    /// order moves, and the later skips as destination taken.**
-    #[test]
-    fn two_routes_to_one_destination_the_later_skips_as_destination_taken() {
-        let vault = Vault::of(
-            TASKED,
-            &[
-                ("x/a.md", "---\ntype: task\n---\n"),
-                ("y/a.md", "---\ntype: task\n---\n"),
-            ],
-        );
-
-        let planned = vault.plan(&[misplaced(1, "x/a.md"), misplaced(2, "y/a.md")]);
-
-        assert_eq!(planned.operations, vec![moving(1, "x/a.md", "tasks/a.md")]);
+        assert!(planned.citations.is_empty());
         let [skipped] = planned.skipped.as_slice() else {
             panic!("one skip: {:?}", planned.skipped);
         };
         assert_eq!(
             (skipped.finding, skipped.reason),
-            (2, SkipReason::DestinationTaken)
+            (1, SkipReason::NoDeclaredFix)
         );
+        let note = skipped.note.as_deref().expect("the skip notes the route");
         assert!(
-            skipped
-                .note
-                .as_deref()
-                .is_some_and(|note| note.contains("an earlier route")),
-            "{skipped:?}"
+            note.contains("`tasks`") && note.contains("NORN-380") && !note.contains("plain"),
+            "{note}"
         );
-    }
-
-    /// **A route out of a rule's area drops that rule's selected
-    /// `required-missing` finding**: the inbox rule no longer selects the
-    /// document where the route takes it, so its `triage` is neither filled
-    /// nor skipped — whatever order the batch read the rows in.
-    #[test]
-    fn a_route_out_of_a_rules_area_drops_its_selected_required_missing_finding() {
-        let schema = "version: 1\nrules:\n  inbox:\n    match: {path: 'inbox/**'}\n    required:\n      triage: {default: later}\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
-        let vault = Vault::of(schema, &[("inbox/a.md", "---\ntype: task\n---\n")]);
-
-        for rows in [
-            [
-                misplaced(1, "inbox/a.md"),
-                missing(2, "inbox/a.md", "triage"),
-            ],
-            [
-                missing(2, "inbox/a.md", "triage"),
-                misplaced(1, "inbox/a.md"),
-            ],
-        ] {
-            let planned = vault.plan(&rows);
-
-            assert_eq!(
-                planned.operations,
-                vec![moving(1, "inbox/a.md", "tasks/a.md")]
-            );
-            assert_eq!(planned.citations, vec![citing(1, &[1])]);
-            assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
-        }
-    }
-
-    /// **A field fix after a route names the document where the route puts
-    /// it**, in plan order after the move, and is judged there.
-    #[test]
-    fn a_field_fix_after_a_route_names_the_document_at_its_destination() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
-        let vault = Vault::of(schema, &[("loose/a.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.plan(&[
-            missing(2, "loose/a.md", "status"),
-            misplaced(1, "loose/a.md"),
-        ]);
-
-        assert_eq!(
-            planned.operations,
-            vec![
-                moving(1, "loose/a.md", "tasks/a.md"),
-                set(2, "tasks/a.md", "status", "todo"),
-            ]
-        );
-        assert_eq!(planned.citations, vec![citing(1, &[1]), citing(2, &[2])]);
-    }
-
-    /// **A route the judge refuses at its destination skips as one the judge
-    /// would refuse**, with its candidate: the rule on `tasks/` forbids the
-    /// `scratch` the document holds.
-    #[test]
-    fn a_route_the_judge_refuses_at_its_destination_skips_as_judge_would_refuse() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  shelved:\n    match: {path: 'tasks/**'}\n    forbidden:\n      scratch:\n";
-        let vault = Vault::of(
-            schema,
-            &[("loose/a.md", "---\ntype: task\nscratch: x\n---\n")],
-        );
-
-        let planned = vault.plan(&[misplaced(1, "loose/a.md")]);
-
-        assert!(planned.operations.is_empty());
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
-                    .with_candidates(values(&[("tasks/a.md", "tasks")]))
-            ]
-        );
-    }
-
-    /// **A route that brings the document under a rule requiring a field
-    /// skips as bringing in required fields**, naming it and its default, and
-    /// carries the destination as its candidate as the route's other refusals
-    /// do.
-    #[test]
-    fn a_route_that_brings_in_a_rule_requiring_a_field_skips_as_brings_in_required_fields() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  tracked:\n    match: {path: 'tasks/**'}\n    required:\n      status: {default: todo}\n";
-        let vault = Vault::of(schema, &[("loose/a.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.plan(&[misplaced(1, "loose/a.md")]);
-
-        assert!(planned.operations.is_empty());
-        let fields = RequiredFieldHead::new(
-            [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
-            1,
-        )
-        .expect("a head");
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::BringsInRequiredFields)
-                    .with_candidates(values(&[("tasks/a.md", "tasks")]))
-                    .with_required_fields(fields)
-            ]
-        );
-    }
-
-    /// **A route to a place another of the document's placement rules does
-    /// not allow skips as one the judge would refuse**: the document would
-    /// still be misplaced there.
-    #[test]
-    fn a_route_to_a_place_still_misplaced_skips_as_judge_would_refuse() {
-        let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['a/**', 'b/**'], route: 'a/'}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['b/**']}\n";
-        let vault = Vault::of(schema, &[("c/x.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.plan(&[misplaced(1, "c/x.md")]);
-
-        assert!(planned.operations.is_empty());
-        let [skipped] = planned.skipped.as_slice() else {
-            panic!("one skip: {:?}", planned.skipped);
-        };
-        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
-        assert!(
-            skipped
-                .note
-                .as_deref()
-                .is_some_and(|note| note.contains("still stands")),
-            "{skipped:?}"
-        );
-    }
-
-    /// **Co-selecting rules routing a document to different folders skip it
-    /// as a tie, with each destination and its rule**; a rule declaring no
-    /// route proposes nothing.
-    #[test]
-    fn disagreeing_routes_skip_as_a_tie() {
-        let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['a/**', 'b/**'], route: 'a/'}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['a/**', 'b/**'], route: 'b/'}\n  c-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['a/**', 'b/**']}\n";
-        let vault = Vault::of(schema, &[("c/x.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.plan(&[misplaced(1, "c/x.md")]);
-
-        assert!(planned.operations.is_empty());
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::Tie)
-                    .with_candidates(values(&[("a/x.md", "a-rule"), ("b/x.md", "b-rule")]))
-            ]
-        );
+        assert_eq!(read, ["loose/a.md"]);
+        assert_eq!(reads.get(), 0);
     }
 
     /// **A placement rule declaring no route has no fix for a misplaced
-    /// document**, which is skipped as such.
+    /// document, and the skip says no more.**
     #[test]
-    fn a_misplaced_document_no_rule_routes_skips_as_no_declared_fix() {
+    fn a_misplaced_document_no_rule_routes_skips_as_no_declared_fix_with_no_note() {
         let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**']}\n";
         let vault = Vault::of(schema, &[("loose/a.md", "---\ntype: task\n---\n")]);
 
@@ -2358,79 +2042,29 @@ mod tests {
         );
     }
 
-    /// A rule stamping a task's `created` and `day` and routing it into the
-    /// day's folder of `log/`.
-    const LOGGED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n    allowed_paths: {paths: ['log/**'], route: 'log/{{date}}/'}\n";
-
-    /// **Every route and default a plan fills comes from one clock reading**,
-    /// across documents, the route filling the day's folder and the defaults
-    /// filled where the route puts the document, each noting it is the
-    /// repair's time.
+    /// **A misplaced document's skip does not hold back the document's other
+    /// fixes**, which compose where it stands.
     #[test]
-    fn every_route_and_default_a_plan_fills_comes_from_one_clock_reading() {
-        let vault = Vault::of(
-            LOGGED,
-            &[
-                ("a.md", "---\ntype: task\n---\n"),
-                ("b.md", "---\ntype: task\n---\n"),
-            ],
-        );
-        let reads = Cell::new(0);
+    fn a_misplaced_documents_skip_leaves_its_other_fixes_composed_where_it_stands() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
+        let vault = Vault::of(schema, &[("loose/a.md", "---\ntype: task\n---\n")]);
 
-        let (planned, _) = vault.planned(
-            &[
-                missing(1, "a.md", "created"),
-                missing(2, "a.md", "day"),
-                misplaced(3, "a.md"),
-                missing(4, "b.md", "created"),
-            ],
-            &reads,
-        );
+        let planned = vault.plan(&[
+            missing(2, "loose/a.md", "status"),
+            misplaced(1, "loose/a.md"),
+        ]);
 
-        assert_eq!(reads.get(), 1);
         assert_eq!(
             planned.operations,
-            vec![
-                moving(1, "a.md", "log/2026-10-01/a.md"),
-                set(
-                    2,
-                    "log/2026-10-01/a.md",
-                    "created",
-                    "2026-10-01T09:30:15+02:00"
-                ),
-                set(3, "log/2026-10-01/a.md", "day", "2026-10-01"),
-                set(4, "b.md", "created", "2026-10-01T09:30:15+02:00"),
-            ]
+            vec![set(1, "loose/a.md", "status", "todo")]
         );
-        for citation in &planned.citations {
-            let [cited] = citation.findings.as_slice() else {
-                panic!("one finding per fix: {citation:?}");
-            };
-            assert!(
-                cited
-                    .notes
-                    .iter()
-                    .any(|note| note.contains("the repair's time")),
-                "{cited:?}"
-            );
-        }
-    }
-
-    /// **A clock that gives no reading leaves a route reading it
-    /// unresolved**, the move to the route as the schema writes it, and the
-    /// document's other fixes are composed where it stands.
-    #[test]
-    fn a_clock_that_gives_no_reading_leaves_a_clock_route_unresolved() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['log/**'], route: 'log/{{date}}/'}\n";
-        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\n---\n")]);
-
-        let planned = vault.planned_unread(&[misplaced(1, "a.md"), missing(2, "a.md", "status")]);
-
-        assert_eq!(planned.operations, vec![set(2, "a.md", "status", "todo")]);
-        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
-        let [left] = planned.unresolved.as_slice() else {
-            panic!("one unresolved: {:?}", planned.unresolved);
+        assert_eq!(planned.citations, vec![citing(1, &[2])]);
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
         };
-        assert_eq!(left.operation, moving(1, "a.md", "log/{{date}}/a.md"));
+        assert_eq!(
+            (skipped.finding, skipped.reason),
+            (1, SkipReason::NoDeclaredFix)
+        );
     }
 }

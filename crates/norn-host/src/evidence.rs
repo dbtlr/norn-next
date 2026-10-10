@@ -264,7 +264,7 @@ pub struct EvidenceReading {
     /// so every count here is the sum of what each one paid.
     pub rule_work: RuleWork,
     /// Readings the jobs' plans took of the host's clock: at most one per
-    /// plan, and none for a plan no template, rule default or route of which
+    /// plan, and none for a plan no template or rule default of which
     /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
     pub clock_reads: u64,
 }
@@ -1248,7 +1248,7 @@ pub struct ReadReading {
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock the plans this host resolved on its read
     /// holds took, over every preview and repair: at most one per plan, and
-    /// none for a plan no template, rule default or route of which reads
+    /// none for a plan no template or rule default of which reads
     /// `{{now}}`, `{{date}}` or `{{time}}`.
     pub clock_reads: u64,
 }
