@@ -8,10 +8,10 @@
 //! that spells it, and that the vault a request carries is the one vault
 //! address the vocabulary has.
 //!
-//! The table holds all twenty-two verbs the registry declares, and the suite
+//! The table holds all twenty-four verbs the registry declares, and the suite
 //! holds the table equal to [`Verb::ALL`]: a verb minted without a row here is
 //! a verb no surface can render, and a row here naming a verb the registry
-//! does not hold spells a request nobody can make. The six write verbs answer
+//! does not hold spells a request nobody can make. The eight write verbs answer
 //! as `apply` does, so their rows share its report type.
 //!
 //! One verb carries its vault somewhere other than its params' own `vault`:
@@ -24,9 +24,9 @@ use norn_wire::{
     DescribeReport, DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport,
     GetParams, GetReport, InitParams, InitReport, ListParams, ListReport, MigrateParams,
     MigrateReport, MoveParams, NewParams, RegisterParams, RegisterReport, ReloadParams,
-    ReloadReport, ResolveParams, ResolveReport, RewriteWikilinkParams, SearchParams, SearchReport,
-    SetParams, StatusParams, StatusReport, UnregisterParams, UnregisterReport, ValidateParams,
-    ValidateReport, VaultSetParams, VaultSetReport, Verb,
+    ReloadReport, RepairParams, ResolveParams, ResolveReport, RewriteWikilinkParams, SearchParams,
+    SearchReport, SetParams, StatusParams, StatusReport, UnregisterParams, UnregisterReport,
+    ValidateParams, ValidateReport, VaultSetParams, VaultSetReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -190,6 +190,15 @@ fn verb_table() -> Vec<Spelling> {
             report_type: "ApplyReport",
             report_rows: None,
             params: schema_of::<RewriteWikilinkParams>(),
+            report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::Repair,
+            params_type: "RepairParams",
+            report_type: "ApplyReport",
+            report_rows: None,
+            params: schema_of::<RepairParams>(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {

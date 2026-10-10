@@ -401,6 +401,108 @@ fn a_batch_has_no_next_cursor_when_nothing_remains() {
     assert_eq!(batch.next, None);
 }
 
+/// How many findings `params` selects, as a validate's tally counts them:
+/// the independent account of what a first batch's count must equal.
+fn selected(store: &Validating, params: &RepairParams) -> u64 {
+    let mut tally = validating().summarized();
+    tally.predicates = params.predicates.clone();
+    tally.kinds = params.kinds.clone();
+    tally.severity = params.severity;
+    tally.rule = params.rule.clone();
+    match store
+        .snapshot()
+        .validate(&tally, &declared())
+        .expect("a tally")
+        .answer
+    {
+        norn_store::Validation::Summary { by_kind } => {
+            by_kind.iter().map(|tally| tally.count).sum()
+        }
+        other => panic!("a tally answered {other:?}"),
+    }
+}
+
+/// How many rows a validate's tally of everything hands back: one per kind
+/// and severity something stands under.
+fn tally_rows(store: &Validating) -> u64 {
+    store
+        .snapshot()
+        .validate(&validating().summarized(), &declared())
+        .expect("a tally")
+        .work
+        .rows_read
+}
+
+/// **A first batch counts exactly what remains after it; a continuation
+/// counts nothing.** At every limit and under every kind of narrowing the
+/// count is the selection's whole tally less the findings the batch holds,
+/// whether the limit lands between documents, inside one, or past the end, and
+/// a selection that matches nothing counts zero.
+#[test]
+fn a_first_batch_counts_what_remains_exactly_and_a_continuation_counts_nothing() {
+    let store = Validating::with_rules_under("batch-remaining", 3, StoredPathOrder::Sensitive);
+    let selections = [
+        repairing(),
+        repairing().with_kinds([FindingKind::UndeclaredTag]),
+        repairing().with_severity(Severity::Error),
+        repairing().with_rule("tasks"),
+        repairing().with_predicates([Predicate::path("notes/**")]),
+        repairing().with_predicates([Predicate::equal_to("stauts", "open")]),
+    ];
+    for params in &selections {
+        let total = selected(&store, params);
+        for limit in [1, 2, 3, 5, 1000] {
+            let first = store.batch(&params.clone().with_limit(limit));
+            assert_eq!(
+                first.remaining,
+                Some(total - first.rows.len() as u64),
+                "a limit of {limit} over {params:?}"
+            );
+            assert_eq!(
+                first.remaining == Some(0),
+                first.next.is_none(),
+                "nothing remains exactly when no cursor is minted: {params:?}, {limit}"
+            );
+            if let Some(next) = first.next {
+                let rest = store.batch(&params.clone().with_limit(limit).with_after(next));
+                assert_eq!(rest.remaining, None, "a continuation counts nothing");
+            }
+        }
+    }
+    assert!(selected(&store, &selections[5]) == 0);
+}
+
+/// **Only a first batch runs the count's statement**, a summary of the
+/// selection that the batch's plans explain like any other, and the rows it
+/// hands back and the steps it takes are counted into the batch's work.
+#[test]
+fn only_a_first_batch_runs_the_statement_that_counts() {
+    let store = Validating::new("batch-count-statement");
+    let tallies = |plans: &[ValidatePlan]| {
+        plans
+            .iter()
+            .filter(|plan| {
+                plan.statement == norn_store::ReadStatement::Validate(ValidateStatement::Summary)
+            })
+            .count()
+    };
+    let first = store.batch_plans(&repairing().with_limit(1));
+    assert_eq!(tallies(&first), 1, "a first batch counts once");
+    let next = store
+        .batch(&repairing().with_limit(1))
+        .next
+        .expect("more remain");
+    let continued = store.batch_plans(&repairing().with_limit(1).with_after(next));
+    assert_eq!(tallies(&continued), 0, "a continuation counts nothing");
+
+    let counted = store.batch(&repairing().with_limit(1000));
+    assert_eq!(
+        counted.work.rows_read,
+        7 + tally_rows(&store),
+        "the findings the batch read and the tallies the count read"
+    );
+}
+
 /// **A selection that matches nothing answers an empty batch and runs no
 /// merged statement.** A part on a key outside the field universe admits no
 /// finding and is reported, as a validate reports it.
@@ -1054,12 +1156,18 @@ fn batch_work(
 /// **A batch costs the batch, not the vault, on either root.** Beside 50 and
 /// then beside 500 more documents each with a warning standing over it, a
 /// batch of five — unnarrowed, by one kind, and by a rule — costs the same at
-/// both sizes on its first batch and on the batches that continue it into the
-/// bulk, sorts nothing and steps through no full scan. The merge reads each
-/// kind's seek as far as the batch needs and no further.
+/// both sizes on the batches that continue a first one into the bulk, sorts
+/// nothing and steps through no full scan. The merge reads each kind's seek as
+/// far as the batch needs and no further.
 ///
-/// Control: the kind index dropped on the larger vault, a batch reaches the
-/// whole range, and the bar fails.
+/// **A first batch also counts the selection**, whose cost is the findings the
+/// selection admits: a first batch costs the same at both sizes where the
+/// selection is narrowed to documents both hold, and costs more where the
+/// selection reaches the bulk.
+///
+/// Controls: the kind index dropped on the larger vault, a batch reaches the
+/// whole range, and the bar fails; and the first batch of an unnarrowed
+/// selection grows with the bulk it counts.
 #[test]
 fn a_batch_costs_the_batch_not_the_vault() {
     for order in ROOTS {
@@ -1072,8 +1180,14 @@ fn a_batch_costs_the_batch_not_the_vault() {
             repairing().with_predicates([Predicate::path("**/*.md")]),
             repairing().with_severity(Severity::Warning),
         ];
+        // Selections bounded to documents the two vaults share, so what a
+        // first batch counts is the same findings at both sizes.
+        let narrowed = [
+            repairing().with_predicates([Predicate::path("notes/**")]),
+            repairing().with_predicates([Predicate::path("a.md")]),
+        ];
         let judge = |large: &Validating, params: &RepairParams| {
-            for batches in [0, 1, 4] {
+            for batches in [1, 4] {
                 let (at_small, at_large) = (
                     batch_work(&small, params, 5, batches),
                     batch_work(large, params, 5, batches),
@@ -1092,6 +1206,27 @@ fn a_batch_costs_the_batch_not_the_vault() {
         for params in &broad {
             judge(&large, params);
         }
+        for params in &narrowed {
+            let (at_small, at_large) = (
+                batch_work(&small, params, 5, 0),
+                batch_work(&large, params, 5, 0),
+            );
+            assert_eq!(
+                at_small, at_large,
+                "the first batch of {params:?} grew with the vault under {order:?}"
+            );
+            assert_eq!((at_large.sorts, at_large.full_scan_steps), (0, 0));
+        }
+        // Control: the first batch counts the whole selection, bulk included.
+        let (at_small, at_large) = (
+            batch_work(&small, &broad[0], 5, 0),
+            batch_work(&large, &broad[0], 5, 0),
+        );
+        assert!(
+            at_large.vm_steps > at_small.vm_steps,
+            "a first batch that counts the bulk costs no more beside it under {order:?}: \
+             {at_small:?} against {at_large:?}"
+        );
 
         large.drop_index(KIND_INDEX);
         failure_of(&format!("{KIND_INDEX} dropped under {order:?}"), || {
@@ -1102,24 +1237,31 @@ fn a_batch_costs_the_batch_not_the_vault() {
 
 /// **A batch's counters read like a validate's**: the statements it ran, the
 /// rows its merged statements handed back — one past the limit where it
-/// reads on, and the probe's row — and the steps those took.
+/// reads on, and the probe's row — the tallies a first batch's count read,
+/// and the steps those took.
 #[test]
 fn a_batch_counts_its_work_as_a_validate_does() {
     let store = Validating::new("batch-counts");
+    let tallies = tally_rows(&store);
     let whole = store.batch(&repairing().with_limit(1000));
-    assert_eq!(whole.work.rows_read, 7, "a batch that reads everything");
+    assert_eq!(
+        whole.work.rows_read,
+        7 + tallies,
+        "a batch that reads everything, and counts"
+    );
     assert_eq!(whole.work.sorts, 0);
     assert!(whole.work.statements >= 3, "{:?}", whole.work);
     let limited = store.batch(&repairing().with_limit(4));
     assert_eq!(
-        limited.work.rows_read, 5,
-        "the limit and the row past it, which stands at another document"
+        limited.work.rows_read,
+        5 + tallies,
+        "the limit and the row past it, which stands at another document, and the count"
     );
     let inside = store.batch(&repairing().with_limit(1));
     assert_eq!(
         inside.work.rows_read,
-        2 + 2 + 1,
-        "the limit and the row past it, the tail of the document, then the probe's one"
+        2 + 2 + 1 + tallies,
+        "the limit and the row past it, the tail of the document, the probe's one, and the count"
     );
     assert!(inside.work.statements > limited.work.statements);
 }

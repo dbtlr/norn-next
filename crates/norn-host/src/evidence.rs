@@ -1027,6 +1027,8 @@ pub(crate) struct ReadEvidence {
     settle_rounds: AtomicU64,
     settle_expiries: AtomicU64,
     preview_link_judgments: LinkJudgmentAccount,
+    repair_batches: RepairBatchAccount,
+    planning_holds: PlanningHoldAccount,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -1186,6 +1188,12 @@ pub struct ReadReading {
     /// What the previews this host answered spent judging their plans' links
     /// on the store's resolution door, over every judgment each ran.
     pub preview_link_judgments: LinkJudgmentCost,
+    /// What the batch reads of the repairs this host planned reported of
+    /// themselves, over every repair.
+    pub repair_batches: RepairBatchCost,
+    /// What the read holds this host planned on ran on their snapshots, over
+    /// every preview and repair.
+    pub planning_holds: PlanningHoldCost,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -1228,6 +1236,10 @@ pub struct ReadsSince {
     pub settle_expiries: u64,
     /// What this window's previews spent judging their plans' links.
     pub preview_link_judgments: LinkJudgmentCost,
+    /// What this window's batch reads reported of themselves.
+    pub repair_batches: RepairBatchCost,
+    /// What this window's planning holds ran on their snapshots.
+    pub planning_holds: PlanningHoldCost,
 }
 
 impl ReadReading {
@@ -1257,6 +1269,8 @@ impl ReadReading {
             preview_link_judgments: self
                 .preview_link_judgments
                 .since(earlier.preview_link_judgments),
+            repair_batches: self.repair_batches.since(earlier.repair_batches),
+            planning_holds: self.planning_holds.since(earlier.planning_holds),
         }
     }
 }
@@ -1283,6 +1297,8 @@ impl ReadEvidence {
             settle_rounds: get(&self.settle_rounds),
             settle_expiries: get(&self.settle_expiries),
             preview_link_judgments: self.preview_link_judgments.read(),
+            repair_batches: self.repair_batches.read(),
+            planning_holds: self.planning_holds.read(),
         }
     }
 
@@ -1290,6 +1306,18 @@ impl ReadEvidence {
     /// preview answers, whatever it answered.
     pub(crate) fn count_preview_link_judgments(&self, cost: LinkJudgmentCost) {
         self.preview_link_judgments.add(cost);
+    }
+
+    /// Record what one repair's batch read reported of itself, whatever the
+    /// read answered.
+    pub(crate) fn count_repair_batch(&self, cost: RepairBatchCost) {
+        self.repair_batches.add(cost);
+    }
+
+    /// Record what one planning hold ran on its snapshot, where the hold is
+    /// given back, however the planning ended.
+    pub(crate) fn count_planning_hold(&self, cost: PlanningHoldCost) {
+        self.planning_holds.add(cost);
     }
 
     /// Record what one read's mint ran under the entry gate.
@@ -1562,6 +1590,185 @@ impl LinkJudgmentAccount {
             links_evaluated: get(&self.links_evaluated),
             keys_resolved: get(&self.keys_resolved),
             head_rows: get(&self.head_rows),
+            statements_executed: get(&self.statements_executed),
+            vm_steps: get(&self.vm_steps),
+            full_scan_steps: get(&self.full_scan_steps),
+        }
+    }
+}
+
+/// What the batch reads of the repairs a host planned reported of
+/// themselves, summed.
+///
+/// The snapshot work of a repair's read hold, the batch read's among it, is
+/// the planning holds' ([`PlanningHoldCost`]).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepairBatchCost {
+    /// Batches read: one per repair that reached its read.
+    pub batches: u64,
+    /// The statements the batches report running.
+    pub validate_statements: u64,
+    /// The rows the batches report reading.
+    pub validate_rows_read: u64,
+    /// The steps the batches report taking through a loop no constraint
+    /// bounds.
+    pub validate_full_scan_steps: u64,
+    /// The sorts the batches report running.
+    pub validate_sorts: u64,
+    /// The virtual-machine operations the batches report running.
+    pub validate_vm_steps: u64,
+}
+
+impl RepairBatchCost {
+    /// One batch read that reported `work`, none where it was refused.
+    pub(crate) fn of(work: Option<&norn_store::ValidateWork>) -> RepairBatchCost {
+        let work = work.copied().unwrap_or_default();
+        RepairBatchCost {
+            batches: 1,
+            validate_statements: work.statements,
+            validate_rows_read: work.rows_read,
+            validate_full_scan_steps: work.full_scan_steps,
+            validate_sorts: work.sorts,
+            validate_vm_steps: work.vm_steps,
+        }
+    }
+
+    /// What was spent between an earlier running total and this one.
+    #[must_use]
+    pub fn since(self, earlier: RepairBatchCost) -> RepairBatchCost {
+        RepairBatchCost {
+            batches: self.batches.saturating_sub(earlier.batches),
+            validate_statements: self
+                .validate_statements
+                .saturating_sub(earlier.validate_statements),
+            validate_rows_read: self
+                .validate_rows_read
+                .saturating_sub(earlier.validate_rows_read),
+            validate_full_scan_steps: self
+                .validate_full_scan_steps
+                .saturating_sub(earlier.validate_full_scan_steps),
+            validate_sorts: self.validate_sorts.saturating_sub(earlier.validate_sorts),
+            validate_vm_steps: self
+                .validate_vm_steps
+                .saturating_sub(earlier.validate_vm_steps),
+        }
+    }
+}
+
+/// A running total of [`RepairBatchCost`]s, added to from any thread.
+#[derive(Debug, Default)]
+struct RepairBatchAccount {
+    batches: AtomicU64,
+    validate_statements: AtomicU64,
+    validate_rows_read: AtomicU64,
+    validate_full_scan_steps: AtomicU64,
+    validate_sorts: AtomicU64,
+    validate_vm_steps: AtomicU64,
+}
+
+impl RepairBatchAccount {
+    fn add(&self, cost: RepairBatchCost) {
+        for (field, value) in [
+            (&self.batches, cost.batches),
+            (&self.validate_statements, cost.validate_statements),
+            (&self.validate_rows_read, cost.validate_rows_read),
+            (
+                &self.validate_full_scan_steps,
+                cost.validate_full_scan_steps,
+            ),
+            (&self.validate_sorts, cost.validate_sorts),
+            (&self.validate_vm_steps, cost.validate_vm_steps),
+        ] {
+            field.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> RepairBatchCost {
+        let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
+        RepairBatchCost {
+            batches: get(&self.batches),
+            validate_statements: get(&self.validate_statements),
+            validate_rows_read: get(&self.validate_rows_read),
+            validate_full_scan_steps: get(&self.validate_full_scan_steps),
+            validate_sorts: get(&self.validate_sorts),
+            validate_vm_steps: get(&self.validate_vm_steps),
+        }
+    }
+}
+
+/// What the read holds a host planned on ran on their snapshots, summed: the
+/// whole of each hold's snapshot counters when its planning is done, whoever
+/// ran the statements, as an apply job's snapshots are counted
+/// in the job's account.
+///
+/// **Counted where the hold is given back, not where a read is made.** A
+/// read added anywhere inside a preview's or a repair's planning moves the
+/// account, so a bar over a repair reads what the repair ran rather than what
+/// its batch read alone is thought to. The establishing statement is among
+/// the statements, and the link judgments the plan ran are among all three
+/// counts, as well as in [`LinkJudgmentCost`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PlanningHoldCost {
+    /// Holds planned on, one snapshot each.
+    pub holds: u64,
+    /// Statements the snapshots ran, as they counted them.
+    pub statements_executed: u64,
+    /// Virtual-machine steps those statements took.
+    pub vm_steps: u64,
+    /// Steps those statements took walking a table or an index end to end.
+    pub full_scan_steps: u64,
+}
+
+impl PlanningHoldCost {
+    /// One hold whose snapshot's counters read `counters`.
+    pub(crate) fn of(counters: norn_store::SnapshotCounters) -> PlanningHoldCost {
+        PlanningHoldCost {
+            holds: 1,
+            statements_executed: counters.statements_executed(),
+            vm_steps: counters.vm_steps(),
+            full_scan_steps: counters.full_scan_steps(),
+        }
+    }
+
+    /// What was spent between an earlier running total and this one.
+    #[must_use]
+    pub fn since(self, earlier: PlanningHoldCost) -> PlanningHoldCost {
+        PlanningHoldCost {
+            holds: self.holds.saturating_sub(earlier.holds),
+            statements_executed: self
+                .statements_executed
+                .saturating_sub(earlier.statements_executed),
+            vm_steps: self.vm_steps.saturating_sub(earlier.vm_steps),
+            full_scan_steps: self.full_scan_steps.saturating_sub(earlier.full_scan_steps),
+        }
+    }
+}
+
+/// A running total of [`PlanningHoldCost`]s, added to from any thread.
+#[derive(Debug, Default)]
+struct PlanningHoldAccount {
+    holds: AtomicU64,
+    statements_executed: AtomicU64,
+    vm_steps: AtomicU64,
+    full_scan_steps: AtomicU64,
+}
+
+impl PlanningHoldAccount {
+    fn add(&self, cost: PlanningHoldCost) {
+        for (field, value) in [
+            (&self.holds, cost.holds),
+            (&self.statements_executed, cost.statements_executed),
+            (&self.vm_steps, cost.vm_steps),
+            (&self.full_scan_steps, cost.full_scan_steps),
+        ] {
+            field.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> PlanningHoldCost {
+        let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
+        PlanningHoldCost {
+            holds: get(&self.holds),
             statements_executed: get(&self.statements_executed),
             vm_steps: get(&self.vm_steps),
             full_scan_steps: get(&self.full_scan_steps),

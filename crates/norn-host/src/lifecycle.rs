@@ -5834,6 +5834,18 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.count_preview_link_judgments(cost);
     }
 
+    /// Record what one repair's batch read reported of itself, in the read
+    /// account the repair's read hold is counted in.
+    pub(crate) fn count_repair_batch(&self, cost: crate::evidence::RepairBatchCost) {
+        self.shared.reads.count_repair_batch(cost);
+    }
+
+    /// Record what one planning hold ran on its snapshot, in the read account
+    /// the hold is counted in.
+    pub(crate) fn count_planning_hold(&self, cost: crate::evidence::PlanningHoldCost) {
+        self.shared.reads.count_planning_hold(cost);
+    }
+
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {

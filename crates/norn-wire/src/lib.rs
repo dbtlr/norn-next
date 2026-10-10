@@ -92,7 +92,7 @@
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
-//! The seven write verbs are spelled the same way, and all seven answer
+//! The eight write verbs are spelled the same way, and all eight answer
 //! [`ApplyReport`]. `apply` carries [`ApplyParams`] — an [`ApplyMode`] and a
 //! [`PlanDocument`]. A plan
 //! document is an [`AuthoredPlan`] of [`Operation`]s, each an
@@ -109,15 +109,16 @@
 //! operation fixes, each a [`CitedFinding`] at a [`Confidence`], and the
 //! [`SkippedFinding`]s it left alone, each for a [`SkipReason`] with the
 //! [`SkippedCandidates`] or [`RequiredFieldHead`] it chose between, and where
-//! the next batch continues. A repair is asked for by [`RepairParams`]. In a
+//! the next batch continues. A repair is asked for by [`RepairParams`] under the
+//! `repair` verb. In a
 //! resolved plan an operation that moves, removes or retargets documents
 //! carries its link cascade, one [`LinkRewrite`] per document, syntax and
 //! address among the links it changes, and a delete says what becomes of the
 //! links naming its document as its [`Backlinks`]. Either plan carries whether
 //! it is forced past the schema check. A frontmatter kind names its documents
 //! by a [`WriteTarget`] and writes an [`AuthoredValue`] — a [`FiniteFloat`] or
-//! a [`ValueMap`] among its shapes. The other write verbs each compile to an
-//! authored plan: `set` from [`SetParams`] of [`FieldChange`]s, `edit` from
+//! a [`ValueMap`] among its shapes. The other write verbs, bar `repair`, each
+//! compile to an authored plan: `set` from [`SetParams`] of [`FieldChange`]s, `edit` from
 //! [`EditParams`] of [`DocumentEdit`]s, `new` from [`NewParams`], `move` from
 //! [`MoveParams`] of a [`MoveSubject`] — a document or a folder, read from
 //! the source, or the [`IllegalMove`] two ends name — `delete` from
@@ -332,6 +333,7 @@
 //! [`ErrorDetail::apply_outcome_unknown`], [`ErrorDetail::plan_refused`],
 //! [`ErrorDetail::root_changed`], [`ErrorDetail::plan_interrupted`],
 //! [`ErrorDetail::write_failed`], [`ErrorDetail::plan_invalid`],
+//! [`ErrorDetail::unsatisfied`],
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],

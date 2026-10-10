@@ -34,7 +34,7 @@ pub use derivation::DERIVATION_VERSION;
 /// [`Host::recovery_demands`].
 #[cfg(feature = "induced-failure")]
 pub use evidence::{EvidenceReading, JobEvidence};
-pub use evidence::{LinkJudgmentCost, ReadReading, ReadsSince};
+pub use evidence::{LinkJudgmentCost, PlanningHoldCost, ReadReading, ReadsSince, RepairBatchCost};
 /// **What is running against an entry**, read by the harness that has to know
 /// the host stopped working before it measures one at rest. Behind the same
 /// feature as the rest of [`Host`]'s harness-reachable readers.

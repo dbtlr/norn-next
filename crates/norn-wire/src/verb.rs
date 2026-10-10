@@ -224,6 +224,9 @@ pub enum Verb {
     /// its own form, and
     /// saying of each wikilink left as written why.
     RewriteWikilink,
+    /// Plan the fixes a batch of a vault's findings calls for, previewed or
+    /// applied as one plan.
+    Repair,
     /// Write a starter schema for a registered vault that declares none.
     Init,
     /// Register a vault under a name.
@@ -253,7 +256,7 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 23] = [
+    pub const ALL: [Verb; 24] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
@@ -267,6 +270,7 @@ impl Verb {
         Verb::Move,
         Verb::Delete,
         Verb::RewriteWikilink,
+        Verb::Repair,
         Verb::Init,
         Verb::VaultRegister,
         Verb::VaultUnregister,
@@ -295,6 +299,7 @@ impl Verb {
             Verb::Move => "move",
             Verb::Delete => "delete",
             Verb::RewriteWikilink => "rewrite_wikilink",
+            Verb::Repair => "repair",
             Verb::Init => "init",
             Verb::VaultRegister => "vault_register",
             Verb::VaultUnregister => "vault_unregister",
@@ -333,6 +338,7 @@ impl Verb {
             | Verb::Move
             | Verb::Delete
             | Verb::RewriteWikilink
+            | Verb::Repair
             | Verb::Init
             | Verb::VaultReload
             | Verb::VaultMigrate => Addressing::Required,

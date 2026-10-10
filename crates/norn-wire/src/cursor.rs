@@ -321,10 +321,9 @@ pub enum CursorKey {
         /// everything before it.
         id: u64,
     },
-    // A dormant carrier at the host: Layer 5B repair (NORN-373), the planner
-    // and host handler that batch a repair, is the consuming layer. `norn-store`
-    // reads and mints this key in its repair batch read, but no repair verb
-    // calls that read until the handler lands.
+    // `norn-store` reads and mints this key in its repair batch read, which
+    // `Host::repair` (Layer 5B, NORN-373) calls: it passes the key a batch
+    // mints on as the continuation cursor of its plan's provenance.
     /// A repair's batch boundary: the path of the last document a batch
     /// covered. The next batch starts at the first document after it in path
     /// order. It is its own row type, so a finding cursor cannot continue a
@@ -417,10 +416,9 @@ impl CursorKey {
         }
     }
 
-    // A dormant carrier at the host: `norn-store`'s repair batch read mints
-    // this key when a batch ends with documents remaining, and the Layer 5B
-    // repair handler (NORN-373) is the consumer; no handler calls that read
-    // until that step lands.
+    // `norn-store`'s repair batch read mints this key when a batch ends with
+    // documents remaining, and `Host::repair` (Layer 5B, NORN-373) hands it to
+    // the caller as the plan's continuation cursor.
     /// A repair batch whose last document was the one at `path`.
     pub fn repair_document(path: impl Into<String>) -> Self {
         CursorKey::RepairDocument { path: path.into() }
@@ -476,10 +474,9 @@ pub enum PagedRows {
     Finding,
     /// One document's findings, as a get pages them.
     DocumentFinding,
-    // A dormant carrier at the host: Layer 5B repair (NORN-373) is the
-    // consuming layer. `norn-store` pages these rows in its repair batch read,
-    // and the refusals name a cursor of this row type; no handler reaches it
-    // yet.
+    // `norn-store` pages these rows in its repair batch read, which
+    // `Host::repair` (Layer 5B, NORN-373) calls, and the refusals name a
+    // cursor of this row type.
     /// Documents, as a repair batches them.
     RepairDocument,
     /// Facets, as a describe pages them.

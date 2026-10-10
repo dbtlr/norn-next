@@ -164,6 +164,12 @@
 //! and peaks higher. Where its own cascade lands, an earlier pass streamed
 //! it, so the file is opened twice.
 //!
+//! **A repair plans findings into operations first.** [`repair`] turns a
+//! batch of findings into the operations they call for, the findings each
+//! fixes and the findings it leaves alone; the operations then plan through
+//! the steps above like any authored plan, and the verb attaches the
+//! provenance to the plan they resolve to (`crate::apply`).
+//!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's
 //! operations through [`resolve::resolve`] for refuse-and-refresh — a
@@ -171,7 +177,9 @@
 //! again; the apply job plans an authored plan through
 //! [`expand::resolve_expanding`] inside the entry's claim over a
 //! [`view::TreeView`], matching on a snapshot it takes there; and a preview
-//! plans the same way on its one snapshot, taking no claim (`crate::apply`).
+//! plans the same way on its one snapshot, taking no claim, as does
+//! `Host::repair` on the snapshot of the hold it reads its batch on
+//! (`crate::apply`).
 
 pub(crate) mod cascade;
 pub(crate) mod compose;
@@ -182,6 +190,7 @@ pub(crate) mod forecast;
 pub(crate) mod lineage;
 pub(crate) mod links;
 pub(crate) mod order;
+pub(crate) mod repair;
 pub(crate) mod resolve;
 pub(crate) mod rule;
 pub(crate) mod view;

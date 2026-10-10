@@ -572,6 +572,7 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "request/part-not-taken",
             "request/cursor-not-taken",
             "request/plan-invalid",
+            "request/unsatisfied",
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
@@ -759,6 +760,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "request/part-not-taken",
             "request/cursor-not-taken",
             "request/plan-invalid",
+            "request/unsatisfied",
             "engine/not-enabled",
             "engine/unavailable",
             "engine/failed",
@@ -3769,6 +3771,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
         ("host/apply-not-run", vec!["code", "cause", "plan"]),
         ("host/apply-outcome-unknown", vec!["code", "plan"]),
         ("request/plan-invalid", vec!["code", "fault"]),
+        ("request/unsatisfied", vec!["code", "parts"]),
     ] {
         assert_eq!(
             property_names(branch(&schema, "code", code)),

@@ -166,6 +166,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::RequestPartNotTaken,
         ReasonCode::RequestCursorNotTaken,
         ReasonCode::RequestPlanInvalid,
+        ReasonCode::RequestUnsatisfied,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -284,6 +285,8 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::part_not_taken(RequestPart::Limit, Some(AnswerShape::Record)),
         ErrorDetail::part_not_taken(RequestPart::Cursor, Some(AnswerShape::Summary)),
         ErrorDetail::part_not_taken(RequestPart::unknown("a sort key"), None),
+        ErrorDetail::unsatisfied(unsatisfied_parts()),
+        ErrorDetail::unsatisfied(vec![Unsatisfied::unknown_predicate_key("stauts", vec![])]),
         ErrorDetail::cursor_not_taken(PagedRows::Tally, PagedRows::Document),
         ErrorDetail::cursor_not_taken(PagedRows::Document, PagedRows::Tally),
         ErrorDetail::cursor_not_taken(PagedRows::Hit, PagedRows::Finding),
@@ -1959,6 +1962,17 @@ fn a_request_refusal_crosses_as_the_shape_facts_it_names() {
             r#""cursor":{"row":"collection","of":"findings"},"paged":{"row":"document_finding"}}"#
         )
     );
+    assert_eq!(
+        wire(&ErrorDetail::unsatisfied(vec![
+            Unsatisfied::unknown_predicate_key("stauts", vec!["status".to_string()]),
+            Unsatisfied::bare_directory("docs"),
+        ])),
+        concat!(
+            r#"{"code":"request/unsatisfied","parts":["#,
+            r#"{"part":"unknown_predicate_key","key":"stauts","did_you_mean":["status"]},"#,
+            r#"{"part":"bare_directory","path":"docs"}]}"#
+        )
+    );
 }
 
 /// A failed read names which failure it was, and a declaration read under
@@ -2670,7 +2684,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds twenty-three verbs, and every one of them is the flat
+/// The registry holds twenty-four verbs, and every one of them is the flat
 /// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2688,6 +2702,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "move",
         "delete",
         "rewrite_wikilink",
+        "repair",
         "init",
         "vault_register",
         "vault_unregister",
@@ -2699,7 +2714,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_migrate",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 23);
+    assert_eq!(Verb::ALL.len(), 24);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2787,7 +2802,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 23);
+    assert_eq!(Verb::ALL.len(), 24);
     assert_eq!(
         addressed(Addressing::Required),
         [
@@ -2801,6 +2816,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
             "init",
             "move",
             "new",
+            "repair",
             "rewrite_wikilink",
             "search",
             "set",

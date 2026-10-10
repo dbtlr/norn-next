@@ -998,8 +998,10 @@ two documents, compared bytewise. The cursor a batch mints names the last docume
 covered, under no fingerprint, only where more remain, and is its own row type, so a
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
 plan bar with a negative control, and a work bar over two vault sizes holds that a batch no
-document part drives costs the findings it reads and steps through no full scan or sort. No
-verb pages through it yet: the host's repair verb (NORN-373) is the consuming layer.
+document part drives costs the findings it reads and steps through no full scan or sort. A
+first batch also counts the selection (see Mutation, `repair`), so its cost follows the findings the selection
+admits; the counter lane holds a repair narrowed to a path flat across vault sizes. The
+host's `repair` verb pages through it, one batch per request.
 
 **The field universe has a builder** as well: the describe builder answers the vault's content
 model, declared and observed, as a page of facets in `(kind, key)` order — the kinds in the
@@ -2663,6 +2665,8 @@ rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming on
 document, or every broken one naming one place, retargeted to another) each compile
 their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
+`Host::repair` is the one write verb that plans from findings rather than from a request's
+own changes, described below.
 `Host::init` writes a starter schema for a registered vault that declares none, through
 the same seam: a registration naming a `schema_source`, inside the vault or out, is answered
 `schema_elsewhere` with the source and nothing planned, and a schema standing at
@@ -2687,6 +2691,43 @@ empty schema's, so the schema-keyed rows are discarded and the whole vault is wa
 Unlike the other write verbs, `Host::init` answers synchronously rather than with a
 `PendingApply`, and a vault whose standing schema cannot be read answers the entry's
 untrusted refusal.
+**`repair` plans a batch of findings into one resolved plan.** `Host::repair` reads the
+next batch of the findings its request selects — validate's predicates, kinds, severity and
+rule — as whole documents in path order (the builder's repair batch), under one read hold.
+`limit` is a soft target, and a batch is never cut inside a document. The same hold plans the
+batch's findings into operations and resolves them on its snapshot as a preview does; the
+hold is then given back, and the resolved plan enters `Host::apply` as a resolved plan, so
+the applier judges and writes a repair as it does any plan and is not told it is one. A
+finding the plan makes no fix for is skipped with its reason: a document that does not read
+— a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
+does not decode, or a frontmatter block nothing read — is `unreadable`; an ambiguous link
+is `ambiguous_link`, with the candidate head its finding is filed with, which is the class
+at the snapshot the repair reads because link health is re-decided in every changeset;
+and a finding no rule declares a fix for is `no_declared_fix`,
+with the value it judged where it has one. The plan carries a provenance block recording
+what it was planned from: the write generation of the snapshot it read, the findings each
+operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
+batch covered, present exactly when more findings remain. A first batch, one request
+carrying no `after`, also carries `remaining`, the exact number of selected findings left
+after it. The store's batch read takes that count in the same call, as one more statement
+a validate's summary reads — the selection's tally less the findings the batch holds — so
+it is counted into the batch's work and explained with its plans, costs the findings the
+selection admits, and describes the batch's own snapshot; a continuation carries none and
+runs no such statement. A cursor that is no repair's is refused as a
+validate refuses a foreign cursor: `request/cursor-not-taken`. A selection holding parts
+the builder cannot apply as asked, such as a predicate on a key the vault does not hold, is
+refused in both modes as `request/unsatisfied`, naming every part as a read reports it
+in-band, before anything is planned: a read answers such a part and matches nothing, and a
+write goes no further than that nothing. The cursor names a document
+path and no finding, so it survives the findings behind it being derived again, and the
+continuation reads only the documents after that path. Provenance is a record, never
+checked when the plan is applied: a plan applies the same whatever its block says, and the
+fresh plan a refusal answers carries none, since it is planned from the operations the
+vault still owes, not from findings. A caller refused a repair plan runs the repair again
+with the `after` it sent. The batch's `moved` reading is not carried: a repair cursor names
+a path and the batch reads the state that stands now, so nothing in it is the caller's to
+act on, and the apply seam carries no such field. Its advisories are dropped as a `where`
+target's expansion drops the find's.
 `Host::vault_migrate` brings a registered vault's control files up to the versions this
 build reads, through the same seam. It reads the schema where the registration reads it —
 the default `.norn/schema.yaml` or the `schema_source`, inside the vault or out, where its
@@ -3148,8 +3189,8 @@ re-send where the evidence changed is refused again and one where it holds appli
 condition names no operation, so the fresh plan also carries the conditions of
 operations it dropped or left unresolved, and may refuse on evidence for an operation it
 no longer holds; the caller re-runs repair.
-The host serves `move` through `Host::move_path`, `delete` through `Host::delete` and
-`rewrite_wikilink` through `Host::rewrite_wikilink`.
+The host serves `move` through `Host::move_path`, `delete` through `Host::delete`,
+`rewrite_wikilink` through `Host::rewrite_wikilink` and `repair` through `Host::repair`.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
