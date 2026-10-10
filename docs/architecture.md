@@ -2712,8 +2712,35 @@ each replacing every occurrence of its value, and an element whose fix is skippe
 `field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter`
 of the new field to the old one's whole value, then a `remove_frontmatter` of the old field
 requiring it) as a rule declares. Each operation is numbered
-`repair-1`, `repair-2` and on in plan order and cited at the `declared` confidence with the
+`repair-1`, `repair-2` and on in plan order and cited at the confidence of its fix with the
 findings it fixes, and one writing a clock-filled value notes that it is the repair's time.
+**Derived fixes are built-in answers provably unique from the document and the declaration
+alone, made at the `derived` confidence.** A `field/shape-mismatch` finding is wrapped or
+unwrapped: a field declared a list holding a scalar is set to the one-item list of that
+scalar, its YAML type kept, and a field declared single holding a one-item list is set to its
+item; a list of any other length under single has no derived fix. A `field/type-mismatch`
+finding on a `boolean` field, for an element that is a string whose trimmed text lower-cases
+to exactly `true` or `false`, is written as the YAML boolean. A `field/not-one-of` finding on
+a field whose values compare as text is replaced by the one member of the combined closed set
+that folds equal to the offending value, a fold being Unicode lower case, the ends trimmed and
+each internal run of white space collapsed to one space: members that fold equal tie, and a
+word join or split (`inprogress` for `in progress`) is not a fold. A list's boolean or
+closed-set elements are fixed one by one into the same single `set_frontmatter` of the whole
+list as its synonyms are. Every derived fix is composed and judged on the composed state as a
+declared one is, so a wrap that brings out a type or closed-set violation is
+`judge_would_refuse` and one that brings in required fields is `brings_in_required_fields`.
+**The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
+or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
+pooled for a finding and the strongest level present decides. A derived fix the threshold
+does not admit is judged all the same, then skipped as `below_threshold` with the finding's
+value and `proposed`, the operation the plan would have held, in preview and apply alike. A
+declared fix counts even where it fails the combined constraint or the judge: it blocks the
+derived answer, and the finding skips with every candidate, the derived answer among them. Where a
+declared fix is made and the derived answer differs, the citation notes the derived answer.
+A `field/type-mismatch` finding that no derived fix answers on a `date`, `number` or
+`boolean` field is `excluded_class`, its note naming the class: date reformatting and number
+or yes/no coercion are fixes a repair never makes. Any other unfixed type mismatch is
+`no_declared_fix`.
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
 rule's own captures where the document stands and the plan's one clock reading — with the
@@ -2791,7 +2818,7 @@ ends, so a plan is resolved once and judged once more, whole, as the backstop ab
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
 defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
-candidate and its rule, `ambiguous_capture` where a default or a route reads a capture its
+candidate and its rule (members of a closed set that fold together tie with no rule), `ambiguous_capture` where a default or a route reads a capture its
 rule's `match.path` binds several ways, `destination_taken` and `respells_a_judged_link`
 for a route as above, `rename_onto_occupied_field` where a rename's field
 is already held, `brings_in_required_fields` naming each field
@@ -2799,7 +2826,8 @@ and its declared default where the fix brings in a rule requiring a field the do
 (a field whose rules declare differing defaults is named with none, and the skip's note says
 so),
 and `judge_would_refuse` with its candidates where it introduces any other violation, or
-where a route fills to no folder a document can be moved into. A
+where a route fills to no folder a document can be moved into, `below_threshold` and
+`excluded_class` as above. A
 finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
@@ -2810,7 +2838,7 @@ at the snapshot the repair reads because link health is re-decided in every chan
 and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
-resolution: each document holding a finding a declared fix may answer is read whole once,
+resolution: each document holding a finding a fix may answer is read whole once,
 beside resolution and never a second time, and so is each document holding a link a
 route's cascade may respell, which the cascade composes from the same bytes, judged only
 where its frontmatter holds that link, since the store records no link's place as body or
