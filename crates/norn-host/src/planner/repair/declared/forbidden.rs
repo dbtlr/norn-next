@@ -122,6 +122,7 @@ pub(super) fn fix(
     Ok(Fix {
         operations: edits,
         cited: vec![cited(row, Confidence::Declared, Vec::new())],
+        conditions: Vec::new(),
         state: composed,
     })
 }

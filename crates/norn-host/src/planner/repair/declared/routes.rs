@@ -198,6 +198,7 @@ pub(super) fn route<R: Reading>(
         moved: Made::Fixed {
             operations: vec![OperationKind::move_document(state.at.clone(), to.clone())],
             cited: vec![cited(row, &to, clocked)],
+            conditions: Vec::new(),
         },
         to,
         place,

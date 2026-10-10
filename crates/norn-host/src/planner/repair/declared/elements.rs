@@ -16,7 +16,8 @@
 
 use norn_config::schema::VaultSchema;
 use norn_wire::{
-    AuthoredValue, Confidence, FindingRow, SkipReason, SkippedCandidates, SkippedFinding,
+    AuthoredValue, Confidence, FindingRow, PlanCondition, SkipReason, SkippedCandidates,
+    SkippedFinding,
 };
 
 use super::{Document, Fix, Fixing, State, cited, field_of, skip};
@@ -40,11 +41,13 @@ pub(super) struct Element<'e> {
 }
 
 /// One offending element a kind's proposals are asked for: its row, the
-/// finding as the composed state holds it, and the offending value whole.
+/// finding as the composed state holds it, the offending value whole, and
+/// whether the field holds it as a string.
 pub(super) struct Offending<'o> {
     pub(super) row: &'o FindingRow,
     pub(super) held: &'o Held,
     pub(super) text: &'o str,
+    pub(super) string: bool,
 }
 
 /// What a kind makes of one offending element.
@@ -66,6 +69,8 @@ pub(super) struct Replacement {
     pub(super) candidates: SkippedCandidates,
     /// Words about the fix, carried by the citation.
     pub(super) notes: Vec<String>,
+    /// The address resolutions the plan records if the fix is made.
+    pub(super) conditions: Vec<PlanCondition>,
 }
 
 /// Fix the `field` of the document from `state`, for `elements` — the
@@ -97,6 +102,7 @@ pub(super) fn fix_field(
     };
     let mut current = state.clone();
     let mut cites = Vec::new();
+    let mut conditions = Vec::new();
     for &Element { at, row, finding } in elements {
         let Some(held) = current.holding(finding) else {
             continue;
@@ -109,6 +115,7 @@ pub(super) fn fix_field(
             row,
             held,
             text: &offending,
+            string: holds_string(&working, schema, field, &offending),
         }) {
             Proposed::Skipped(skip) => {
                 skipped.push((at, *skip));
@@ -147,6 +154,7 @@ pub(super) fn fix_field(
                 working = replaced;
                 current = next;
                 cites.push(cited(row, replacement.level, replacement.notes));
+                conditions.extend(replacement.conditions);
             }
             Err(skip) => skipped.push((at, *skip)),
         }
@@ -167,6 +175,7 @@ pub(super) fn fix_field(
         fix: Some(Fix {
             operations: vec![set],
             cited: cites,
+            conditions,
             state: current,
         }),
         skipped,
@@ -196,6 +205,16 @@ pub(super) fn same_member(
     match (left.scalar_text(), right.scalar_text()) {
         (Some(left), Some(right)) => same_value(schema, field, &left, &right),
         _ => left == right,
+    }
+}
+
+/// Whether `value`, a field's value, holds the string `offending` as an
+/// element, or is it: a number or a boolean spelled the same is none.
+fn holds_string(value: &AuthoredValue, schema: &VaultSchema, field: &str, offending: &str) -> bool {
+    let is_it = |element: &AuthoredValue| matches!(element, AuthoredValue::String(text) if same_value(schema, field, text, offending));
+    match value {
+        AuthoredValue::List(elements) => elements.iter().any(is_it),
+        scalar => is_it(scalar),
     }
 }
 

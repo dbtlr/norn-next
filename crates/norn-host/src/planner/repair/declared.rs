@@ -117,6 +117,7 @@
 //! stands, and never blocks its neighbours'. The one operation cites every
 //! finding it fixes, each at the level of its own fix.
 
+mod bare_link;
 mod closed_set;
 mod derived;
 mod elements;
@@ -133,15 +134,36 @@ use norn_config::schema::{
 };
 use norn_wire::{
     AuthoredValue, Captures, Citation, CitedFinding, Confidence, DocumentPath, FindingKind,
-    FindingRow, Operation, OperationId, OperationKind, RequiredField, RequiredFieldHead,
-    SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding, UnresolvedOperation,
-    UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead, WriteTarget,
+    FindingRow, Operation, OperationId, OperationKind, PlanCondition, RequiredField,
+    RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding,
+    UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead,
+    WriteTarget,
 };
 
 #[cfg(test)]
 pub(crate) use respells::blinded;
 pub(super) use respells::respelling;
 pub(super) use routes::colliding;
+
+/// The plan the batch's routes settle to as the vault's documents see it: a
+/// document gone from where each route that passed moves it from, and
+/// standing where it lands, as the applier draws every target of a plan at
+/// its after-state alone. A link fix is resolved over it.
+pub(super) fn settled(
+    drafts: &[Draft<'_>],
+    refused: &std::collections::BTreeMap<usize, SkippedFinding>,
+) -> PathOverlay {
+    crate::planner::links::moved_overlay(
+        drafts
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !refused.contains_key(at))
+            .filter_map(|(_, draft)| draft.passed())
+            .map(|(passed, _)| (&passed.from, &passed.to)),
+    )
+}
+
+use norn_store::PathOverlay;
 
 use super::{Before, Claim, Planned, Reading, Repairing, skip};
 use crate::applier::{Held, Standing, standing, verdict};
@@ -160,10 +182,10 @@ pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
         | FindingKind::NotOneOf
         | FindingKind::Forbidden
         | FindingKind::ShapeMismatch => true,
-        FindingKind::TypeMismatch => row
-            .target
-            .as_deref()
-            .is_some_and(|field| derived::is_boolean(repairing.declared.schema(), field)),
+        FindingKind::TypeMismatch => row.target.as_deref().is_some_and(|field| {
+            derived::is_boolean(repairing.declared.schema(), field)
+                || bare_link::is_link_mismatch(repairing.declared.schema(), row)
+        }),
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
     }
@@ -284,16 +306,24 @@ impl Draft<'_> {
     }
 
     /// Add the draft to `planned`, its route skipped as `refused` says where
-    /// the batch's judgment of its routes together refused it: the
+    /// the batch's judgment of its routes together refused it, and its link
+    /// fixes composed last, resolved with the `settled` routes as the plan's
+    /// moves and read through `vault`: the
     /// operations of the composition its route's fate decides, numbered on
     /// from the plan's, each cited for the findings it fixes, its skipped
     /// findings settled against the state that composition leaves, and what
     /// the plan claims of each finding.
-    pub(super) fn emit(self, refused: Option<SkippedFinding>, planned: &mut Planned) {
+    pub(super) fn emit<R: Reading>(
+        self,
+        refused: Option<SkippedFinding>,
+        planned: &mut Planned,
+        settled: &PathOverlay,
+        vault: &R,
+    ) -> Result<(), R::Error> {
         let compositions = match self.drafted {
             Drafted::Alone(decided) => {
                 planned.skipped.extend(decided);
-                return;
+                return Ok(());
             }
             Drafted::Composed(compositions) => *compositions,
         };
@@ -325,6 +355,7 @@ impl Draft<'_> {
                 }
             }
         }
+        reckoned.link_fixes(&mut composed, settled, vault)?;
         let claims = reckoned.settle(&mut composed);
         for made in composed.made {
             push(planned, made);
@@ -333,6 +364,7 @@ impl Draft<'_> {
             .skipped
             .extend(composed.decided.into_iter().flatten());
         planned.claims.extend(claims);
+        Ok(())
     }
 }
 
@@ -378,6 +410,8 @@ enum Made {
     Fixed {
         operations: Vec<OperationKind>,
         cited: Vec<CitedFinding>,
+        /// The address resolutions the fix records.
+        conditions: Vec<PlanCondition>,
     },
     /// The operation a fix would have been, which reads a clock that gives
     /// no reading, and why it does not resolve.
@@ -427,6 +461,32 @@ impl<'d> Reckoned<'d> {
         }
     }
 
+    /// The selected findings of the field the row at position `first` of the
+    /// finding order is about, which the order keeps together: they are one
+    /// list's elements. The elements the before-state holds a finding for,
+    /// and how many rows after `first` the run has.
+    fn field_run(&self, first: usize) -> (Vec<elements::Element<'_>>, usize) {
+        let document = self.rows;
+        let row = &document[self.order[first]];
+        let siblings = self.order[first + 1..]
+            .iter()
+            .take_while(|&&other| {
+                document[other].kind == row.kind && document[other].target == row.target
+            })
+            .count();
+        let rows = self.order[first..=first + siblings]
+            .iter()
+            .filter_map(|&at| {
+                Some(elements::Element {
+                    at,
+                    row: &document[at],
+                    finding: self.found[at].as_ref()?,
+                })
+            })
+            .collect();
+        (rows, siblings)
+    }
+
     /// The position of the selected misplaced finding the document holds as
     /// it stands, where it holds one: the finding its route answers.
     fn misplaced(&self) -> Option<usize> {
@@ -462,27 +522,15 @@ impl<'d> Reckoned<'d> {
                 decided[at] = Some(super::skipped(row));
                 continue;
             }
+            // A link fix's answer rests on the batch's settled routes, so
+            // it is composed last, once they are settled ([`bare_link`]).
+            if bare_link::is_link_mismatch(self.document.schema(), row) {
+                continue;
+            }
             if let Some(field) = row.target.as_deref()
                 && self.fixed_by_elements(row.kind, field)
             {
-                // The finding order keeps a field's offending values
-                // together: they are one list's elements.
-                let siblings = order[next..]
-                    .iter()
-                    .take_while(|&&other| {
-                        document[other].kind == row.kind && document[other].target == row.target
-                    })
-                    .count();
-                let rows: Vec<elements::Element<'_>> = order[next - 1..=next + siblings - 1]
-                    .iter()
-                    .filter_map(|&at| {
-                        Some(elements::Element {
-                            at,
-                            row: &document[at],
-                            finding: self.found[at].as_ref()?,
-                        })
-                    })
-                    .collect();
+                let (rows, siblings) = self.field_run(next - 1);
                 next += siblings;
                 let mapped = match row.kind {
                     FindingKind::NotOneOf => {
@@ -625,7 +673,12 @@ fn decided_skips(decided: &mut [Option<SkippedFinding>], skipped: Vec<(usize, Sk
 /// or the operation left unresolved, numbered in its place.
 fn push(planned: &mut Planned, made: Made) {
     match made {
-        Made::Fixed { operations, cited } => {
+        Made::Fixed {
+            operations,
+            cited,
+            conditions,
+        } => {
+            planned.conditions.extend(conditions);
             let mut earlier: Option<OperationId> = None;
             for kind in operations {
                 let id = next_id(planned);
@@ -906,6 +959,9 @@ enum Unmade {
 struct Fix {
     operations: Vec<OperationKind>,
     cited: Vec<CitedFinding>,
+    /// The address resolutions the fix records: what each link it writes
+    /// resolves to once the plan has landed.
+    conditions: Vec<PlanCondition>,
     state: State,
 }
 
@@ -915,6 +971,7 @@ impl Fix {
         made.push(Made::Fixed {
             operations: self.operations,
             cited: self.cited,
+            conditions: self.conditions,
         });
         self.state
     }
@@ -1109,6 +1166,7 @@ impl Composing<'_> {
         Ok(Fix {
             operations: vec![set],
             cited: vec![cited(self.row, Confidence::Declared, notes)],
+            conditions: Vec::new(),
             state,
         })
     }
@@ -1387,6 +1445,15 @@ mod tests {
             each: &mut dyn FnMut(norn_store::LinkChange),
         ) -> Result<(), Self::Error> {
             self.over.links(overlay, probed, each)
+        }
+
+        fn naming(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            holder: &DocumentPath,
+            address: &str,
+        ) -> Result<crate::planner::repair::Naming, Self::Error> {
+            self.over.naming(overlay, holder, address)
         }
     }
 

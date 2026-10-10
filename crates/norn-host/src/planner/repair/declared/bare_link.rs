@@ -1,0 +1,627 @@
+//! A bare value made a link: the derived fix of a `field/type-mismatch` on a
+//! field declared `link` whose offending element is a bare value, such as
+//! `note` where `[[note]]` is meant.
+//!
+//! **A value qualifies only where `[[value]]` reads back as exactly one plain
+//! wikilink.** The element is a non-empty string with no surrounding white
+//! space and no `#` fragment, `|` alias, `[` or `]`, or line break, and
+//! `[[value]]` is, to the `link` reader ([`link_key`]) and the text layer, one
+//! wikilink of that address and nothing else. Any other value has no
+//! declared fix: a repair never respells a value to make it qualify.
+//!
+//! **The answer rests on the link's resolution, so the fix is decided last.**
+//! A route of the batch moves its target, so the path a link resolves to, and
+//! whether a path-qualified address still names a document, depend on the
+//! batch's settled routes. A document's link fixes are therefore composed
+//! after all its other fixes — at its route's destination where its route
+//! stands — once every route of the batch is settled
+//! ([`Reckoned::link_fixes`]): an exception to finding order. Each is
+//! resolved over the plan the settled routes make ([`Reading::naming`]), by
+//! the one probe the applier makes again of an address resolution
+//! ([`crate::planner::links::resolved_address`]), once per distinct element.
+//!
+//! - One document: the element is written as `[[value]]`, a derived fix, and
+//!   the plan records the address resolution the link has at its after-state:
+//!   the holder where it stands then, the wikilink, the address written, and
+//!   the one document's path then. It is the only fix of a repair that records
+//!   one; a fix that re-shapes or re-cases a value already a link rests on
+//!   no resolution.
+//! - Several documents: [`SkipReason::AmbiguousLink`], naming the documents
+//!   the address could name.
+//! - None: [`SkipReason::NoDeclaredFix`], the note saying the link would
+//!   resolve to no document.
+//!
+//! A list's elements are written into one write of the field
+//! ([`elements`]), and an element left standing never blocks its neighbours'.
+
+use std::cell::RefCell;
+
+use norn_config::schema::typed::link_key;
+use norn_config::schema::{FieldType, VaultSchema};
+use norn_store::PathOverlay;
+use norn_wire::{
+    AuthoredValue, Confidence, FindingKind, FindingRow, LinkFamily, LinkKey, PlanCondition,
+    Resolves, SkipReason, SkippedCandidates,
+};
+
+use super::elements::{self, Offending, Proposed, Replacement};
+use super::{Composed, Reckoned, decided_skips, derived, skip};
+use crate::planner::repair::Reading;
+
+/// Whether `row` is a `field/type-mismatch` on a field declared `link`.
+pub(super) fn is_link_mismatch(schema: &VaultSchema, row: &FindingRow) -> bool {
+    row.kind == FindingKind::TypeMismatch
+        && row
+            .target
+            .as_deref()
+            .is_some_and(|field| schema.declared_type(field) == FieldType::Link)
+}
+
+/// The wikilink address `value` is, written as `[[value]]`, where that reads
+/// back as exactly one plain wikilink of that address; `None` for any other
+/// value.
+fn bare_address(value: &str) -> Option<&str> {
+    if value.is_empty() || value != value.trim() || value.contains(['#', '|', '[', ']', '\n', '\r'])
+    {
+        return None;
+    }
+    let written = format!("[[{value}]]");
+    let [link] = norn_text::parse_wikilinks_in_text(&written)
+        .try_into()
+        .ok()?;
+    let protocol = link
+        .protocol
+        .as_deref()
+        .map_or_else(String::new, |scheme| format!("{scheme}://"));
+    let plain = link.family == norn_text::LinkFamily::Wikilink
+        && !link.embed
+        && link.raw == written
+        && link.title.is_none()
+        && link.anchor.is_none()
+        && link.block_ref.is_none()
+        && format!("{protocol}{}", link.target) == value;
+    (plain && link_key(&written).as_deref() == Some(written.as_str())).then_some(value)
+}
+
+/// What the document standing at `holder` makes of the offending element
+/// `offending` of a link field, resolved over the `settled` plan.
+fn propose<R: Reading>(
+    holder: &norn_wire::DocumentPath,
+    settled: &PathOverlay,
+    vault: &R,
+    offending: &Offending<'_>,
+) -> Result<Proposed, R::Error> {
+    let row = offending.row;
+    let Some(address) = offending
+        .string
+        .then(|| bare_address(offending.text))
+        .flatten()
+    else {
+        return Ok(Proposed::Skipped(Box::new(
+            crate::planner::repair::skipped(row),
+        )));
+    };
+    let naming = vault.naming(settled, holder, address)?;
+    Ok(match naming.resolves {
+        Resolves::One { path } => {
+            let member = AuthoredValue::string(format!("[[{address}]]"));
+            Proposed::Replace(Replacement {
+                candidates: derived::candidate_of(&member),
+                notes: vec![format!("`[[{address}]]` resolves to `{path}`")],
+                conditions: vec![PlanCondition::address_resolution(
+                    LinkKey::new(holder.clone(), LinkFamily::Wikilink, address),
+                    Resolves::one(path),
+                )],
+                member,
+                level: Confidence::Derived,
+            })
+        }
+        Resolves::Several {} => {
+            let skipped = skip(row, SkipReason::AmbiguousLink);
+            Proposed::Skipped(Box::new(match naming.candidates {
+                Some(head) => skipped.with_candidates(SkippedCandidates::documents(head)),
+                None => skipped,
+            }))
+        }
+        Resolves::None {} => Proposed::Skipped(Box::new(
+            skip(row, SkipReason::NoDeclaredFix)
+                .with_note(format!("`[[{address}]]` would resolve to no document")),
+        )),
+    })
+}
+
+impl Reckoned<'_> {
+    /// Compose the document's link fixes onto `composed`, last: its selected
+    /// `field/type-mismatch` findings on link fields, in finding order, each
+    /// field's elements into one write of it, resolved over the `settled`
+    /// routes through `vault`.
+    pub(super) fn link_fixes<R: Reading>(
+        &self,
+        composed: &mut Composed,
+        settled: &PathOverlay,
+        vault: &R,
+    ) -> Result<(), R::Error> {
+        let mut next = 0;
+        while let Some(&at) = self.order.get(next) {
+            next += 1;
+            let row = &self.rows[at];
+            let Some(field) = row
+                .target
+                .as_deref()
+                .filter(|_| is_link_mismatch(self.document.schema(), row))
+            else {
+                continue;
+            };
+            let (rows, siblings) = self.field_run(next - 1);
+            next += siblings;
+            let holder = composed.state.at.clone();
+            let failure: RefCell<Option<R::Error>> = RefCell::new(None);
+            let mapped = elements::fix_field(
+                &self.document,
+                &composed.state,
+                field,
+                &rows,
+                &mut |offending| match propose(&holder, settled, vault, offending) {
+                    Ok(proposed) => proposed,
+                    Err(error) => {
+                        failure.borrow_mut().get_or_insert(error);
+                        Proposed::Skipped(Box::new(crate::planner::repair::skipped(offending.row)))
+                    }
+                },
+            );
+            if let Some(error) = failure.into_inner() {
+                return Err(error);
+            }
+            decided_skips(&mut composed.decided, mapped.skipped);
+            if let Some(fix) = mapped.fix {
+                composed.state = fix.made(&mut composed.made);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree each case plans over.
+mod tests {
+    use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
+    use norn_testkit::scratch::Scratch;
+    use norn_wire::{
+        AuthoredValue, CandidateHead, Confidence, DocumentPath, FindingRow, LinkFamily, LinkKey,
+        OperationKind, PlanCondition, Resolves, RuleSet, Severity, SkipReason, SkippedCandidates,
+        WriteTarget,
+    };
+
+    use super::*;
+    use crate::clock::OneReading;
+    use crate::derivation::Declared;
+    use crate::planner::control::SchemaPlace;
+    use crate::planner::links::testing::TreeStore;
+    use crate::planner::repair::{Over, Planned, Repairing, plan};
+    use crate::planner::view::TreeView;
+
+    /// The rule set every misplaced row cites.
+    const RULE_SET: u64 = 1;
+
+    /// The finding `id`: `value`, an element of `field` of `at`, is no link.
+    fn mismatch(id: u64, at: &str, field: &str, value: &str) -> FindingRow {
+        FindingRow::new(
+            id,
+            FindingKind::TypeMismatch,
+            Severity::Warning,
+            DocumentPath::new(at).expect("a document path"),
+            Some(field.to_string()),
+            None,
+            CandidateHead::new([], 0).expect("an empty head"),
+            None,
+            "a finding",
+            1,
+        )
+        .with_value(norn_store::value_head(value))
+    }
+
+    /// The finding `id`: the document at `at` is misplaced.
+    fn misplaced(id: u64, at: &str) -> FindingRow {
+        FindingRow::new(
+            id,
+            FindingKind::Misplaced,
+            Severity::Warning,
+            DocumentPath::new(at).expect("a document path"),
+            None,
+            None,
+            CandidateHead::new([], 0).expect("an empty head"),
+            None,
+            "a finding",
+            1,
+        )
+        .citing(RULE_SET)
+    }
+
+    /// `rows` planned over `documents` written to a tree on disk, whose links
+    /// a store derived, under `schema` at `threshold`.
+    fn planned_at(
+        schema: &str,
+        documents: &[(&str, &str)],
+        rows: &[FindingRow],
+        threshold: Confidence,
+    ) -> Planned {
+        let scratch = Scratch::new("repair-bare-link");
+        for (path, text) in documents {
+            let at = scratch.join(path);
+            std::fs::create_dir_all(at.parent().expect("a parent")).expect("a folder");
+            std::fs::write(at, text).expect("a document");
+        }
+        let declared = Declared::pinned(
+            norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("a schema"),
+            "a fingerprint",
+        );
+        let names: Vec<String> = declared
+            .schema()
+            .rules()
+            .map(|rule| rule.name().to_string())
+            .collect();
+        let rule_sets: Vec<RuleSet> = RuleSet::new(RULE_SET, names).into_iter().collect();
+        let clock = || -> Result<LocalTimestamp, NotALocalTimestamp> {
+            panic!("no fix here reads the clock")
+        };
+        let one = OneReading::of(&clock);
+        let repairing = Repairing {
+            declared: &declared,
+            case: norn_wire::CaseFold::Exact,
+            clock: &one,
+            rule_sets: &rule_sets,
+            threshold,
+        };
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a view");
+        let store = TreeStore::over(scratch.root());
+        let index = store.index();
+        let reading = Over {
+            view: &view,
+            index: &index,
+        };
+        match plan(rows, &repairing, &reading) {
+            Ok(planned) => planned,
+            Err(_) => panic!("the tree reads"),
+        }
+    }
+
+    /// [`planned_at`] the default threshold.
+    fn planned(schema: &str, documents: &[(&str, &str)], rows: &[FindingRow]) -> Planned {
+        planned_at(schema, documents, rows, Confidence::DEFAULT_THRESHOLD)
+    }
+
+    const LINKED: &str =
+        "version: 1\nfields:\n  up: {type: link}\n  ups: {type: link, shape: list}\n";
+
+    /// The condition recording that `address`, written in `holder`, resolves
+    /// to the document at `target`.
+    fn resolving(holder: &str, address: &str, target: &str) -> PlanCondition {
+        PlanCondition::address_resolution(
+            LinkKey::new(
+                DocumentPath::new(holder).expect("a path"),
+                LinkFamily::Wikilink,
+                address,
+            ),
+            Resolves::one(DocumentPath::new(target).expect("a path")),
+        )
+    }
+
+    /// The operation setting `field` of `at` to the string `value`.
+    fn setting(at: &str, field: &str, value: AuthoredValue) -> OperationKind {
+        OperationKind::set_frontmatter(
+            WriteTarget::path(DocumentPath::new(at).expect("a path")),
+            field,
+            value,
+        )
+    }
+
+    fn kinds(planned: &Planned) -> Vec<OperationKind> {
+        planned
+            .operations
+            .iter()
+            .map(|operation| operation.kind.clone())
+            .collect()
+    }
+
+    fn reasons(planned: &Planned) -> Vec<(u64, SkipReason)> {
+        planned
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.finding, skipped.reason))
+            .collect()
+    }
+
+    /// **A bare value resolving to exactly one document is written as a link
+    /// at the derived level, and the plan records the resolution of the
+    /// address it wrote** from the holder where it stands.
+    #[test]
+    fn a_bare_value_resolving_to_one_document_is_written_as_a_link_with_its_condition() {
+        let planned = planned(
+            LINKED,
+            &[("a.md", "---\nup: b\n---\n# A\n"), ("b.md", "# B\n")],
+            &[mismatch(1, "a.md", "up", "b")],
+        );
+
+        assert_eq!(
+            kinds(&planned),
+            vec![setting("a.md", "up", AuthoredValue::string("[[b]]"))]
+        );
+        assert_eq!(planned.conditions, vec![resolving("a.md", "b", "b.md")]);
+        let [citation] = planned.citations.as_slice() else {
+            panic!("one citation: {:?}", planned.citations);
+        };
+        let [cited] = citation.findings.as_slice() else {
+            panic!("one finding: {citation:?}");
+        };
+        assert_eq!((cited.finding, cited.confidence), (1, Confidence::Derived));
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A list's element is written as a link into the one write of the
+    /// field, and a neighbour that resolves to nothing stays reported.**
+    #[test]
+    fn a_list_element_resolving_uniquely_is_written_and_a_neighbour_resolving_to_nothing_stays() {
+        let planned = planned(
+            LINKED,
+            &[
+                ("a.md", "---\nups: [b, ghost]\n---\n# A\n"),
+                ("b.md", "# B\n"),
+            ],
+            &[
+                mismatch(1, "a.md", "ups", "b"),
+                mismatch(2, "a.md", "ups", "ghost"),
+            ],
+        );
+
+        assert_eq!(
+            kinds(&planned),
+            vec![setting(
+                "a.md",
+                "ups",
+                AuthoredValue::List(vec![
+                    AuthoredValue::string("[[b]]"),
+                    AuthoredValue::string("ghost")
+                ])
+            )]
+        );
+        assert_eq!(planned.conditions, vec![resolving("a.md", "b", "b.md")]);
+        assert_eq!(reasons(&planned), vec![(2, SkipReason::NoDeclaredFix)]);
+        let note = planned.skipped[0].note.as_deref().unwrap_or_default();
+        assert!(note.contains("no document"), "{note}");
+    }
+
+    /// **A value naming several documents is skipped as an ambiguous link,
+    /// naming the documents it could name**; nothing is written or recorded.
+    #[test]
+    fn a_value_naming_several_documents_skips_as_ambiguous_with_its_candidates() {
+        let planned = planned(
+            LINKED,
+            &[
+                ("a.md", "---\nup: b\n---\n# A\n"),
+                ("x/b.md", "# X\n"),
+                ("y/b.md", "# Y\n"),
+            ],
+            &[mismatch(1, "a.md", "up", "b")],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::AmbiguousLink)]);
+        let Some(SkippedCandidates::Documents { head, .. }) = &planned.skipped[0].candidates else {
+            panic!("candidates: {:?}", planned.skipped);
+        };
+        let mut named: Vec<&str> = head
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect();
+        named.sort_unstable();
+        assert_eq!(named, vec!["x/b.md", "y/b.md"]);
+    }
+
+    /// **A value resolving to no document has no declared fix**, and the note
+    /// says the link would resolve to none.
+    #[test]
+    fn a_value_resolving_to_no_document_has_no_declared_fix() {
+        let planned = planned(
+            LINKED,
+            &[("a.md", "---\nup: ghost\n---\n# A\n")],
+            &[mismatch(1, "a.md", "up", "ghost")],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **A value that does not read back as exactly one plain wikilink is
+    /// never made a link**: a fragment, an alias, a bracket, surrounding space
+    /// and nothing at all, and a number that is no string, are left with no
+    /// declared fix though a document of the same name stands.
+    #[test]
+    fn a_value_that_is_no_plain_wikilink_stays_with_no_declared_fix() {
+        let schema = "version: 1\nfields:\n  f1: {type: link}\n  f2: {type: link}\n  f3: {type: link}\n  f4: {type: link}\n  f5: {type: link}\n  f6: {type: link}\n";
+        let planned = planned(
+            schema,
+            &[
+                (
+                    "a.md",
+                    "---\nf1: \"b#h\"\nf2: \"b|c\"\nf3: \"[b]\"\nf4: \" b\"\nf5: \"\"\nf6: 3\n---\n",
+                ),
+                ("b.md", "# B\n"),
+                ("c.md", "# C\n"),
+                ("3.md", "# 3\n"),
+            ],
+            &[
+                mismatch(1, "a.md", "f1", "b#h"),
+                mismatch(2, "a.md", "f2", "b|c"),
+                mismatch(3, "a.md", "f3", "[b]"),
+                mismatch(4, "a.md", "f4", " b"),
+                mismatch(5, "a.md", "f5", ""),
+                mismatch(6, "a.md", "f6", "3"),
+            ],
+        );
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert!(planned.conditions.is_empty());
+        assert_eq!(
+            reasons(&planned),
+            (1..=6)
+                .map(|id| (id, SkipReason::NoDeclaredFix))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **A link fix under a threshold that does not admit the derived level is
+    /// skipped as below it, carrying the operation the plan would have held
+    /// and recording no condition.**
+    #[test]
+    fn a_link_fix_below_the_threshold_skips_with_its_proposed_operation_and_records_nothing() {
+        let planned = planned_at(
+            LINKED,
+            &[("a.md", "---\nup: b\n---\n# A\n"), ("b.md", "# B\n")],
+            &[mismatch(1, "a.md", "up", "b")],
+            Confidence::Declared,
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::BelowThreshold)]);
+        let proposed = planned.skipped[0].proposed.as_ref().expect("a proposal");
+        assert_eq!(
+            proposed.kind,
+            setting("a.md", "up", AuthoredValue::string("[[b]]"))
+        );
+    }
+
+    const ROUTED: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";
+
+    /// **A same-batch route moving the target is what the link resolves
+    /// to**: the condition records the path the target lands at.
+    #[test]
+    fn a_same_batch_route_moving_the_target_records_the_moved_path() {
+        let planned = planned(
+            ROUTED,
+            &[
+                ("a.md", "---\nup: b\n---\n# A\n"),
+                ("loose/b.md", "---\ntype: task\n---\n# B\n"),
+            ],
+            &[mismatch(1, "a.md", "up", "b"), misplaced(2, "loose/b.md")],
+        );
+
+        assert_eq!(
+            planned.conditions,
+            vec![resolving("a.md", "b", "tasks/b.md")]
+        );
+        assert!(
+            kinds(&planned).contains(&setting("a.md", "up", AuthoredValue::string("[[b]]"))),
+            "{:?}",
+            planned.operations
+        );
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A holder a route moves is recorded and written where it lands.**
+    #[test]
+    fn a_holder_a_route_moves_is_written_and_recorded_at_its_destination() {
+        let planned = planned(
+            ROUTED,
+            &[
+                ("loose/a.md", "---\ntype: task\nup: b\n---\n# A\n"),
+                ("b.md", "# B\n"),
+            ],
+            &[
+                mismatch(1, "loose/a.md", "up", "b"),
+                misplaced(2, "loose/a.md"),
+            ],
+        );
+
+        assert_eq!(
+            planned.conditions,
+            vec![resolving("tasks/a.md", "b", "b.md")]
+        );
+        assert!(
+            kinds(&planned).contains(&setting("tasks/a.md", "up", AuthoredValue::string("[[b]]"))),
+            "{:?}",
+            planned.operations
+        );
+    }
+
+    /// **A path-qualified value a same-batch route breaks is not written**:
+    /// `loose/b` names the document before the route moves it and none after.
+    #[test]
+    fn a_path_qualified_value_a_same_batch_route_breaks_is_skipped() {
+        let documents = [
+            ("a.md", "---\nup: loose/b\n---\n# A\n"),
+            ("loose/b.md", "---\ntype: task\n---\n# B\n"),
+        ];
+
+        let unrouted = planned(ROUTED, &documents, &[mismatch(1, "a.md", "up", "loose/b")]);
+        assert_eq!(
+            unrouted.conditions,
+            vec![resolving("a.md", "loose/b", "loose/b.md")]
+        );
+
+        let routed = planned(
+            ROUTED,
+            &documents,
+            &[
+                mismatch(1, "a.md", "up", "loose/b"),
+                misplaced(2, "loose/b.md"),
+            ],
+        );
+        assert!(routed.conditions.is_empty(), "{:?}", routed.conditions);
+        assert_eq!(reasons(&routed), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **A link fix the judge refuses on the composed state skips as one it
+    /// would refuse**: `[[b]]` brings the document under a rule forbidding
+    /// the `scratch` it holds. Nothing is recorded.
+    #[test]
+    fn a_link_fix_the_judge_refuses_skips_as_judge_would_refuse() {
+        let schema = "version: 1\nfields:\n  up: {type: link}\nrules:\n  linked:\n    match: {frontmatter: {up: '[[b]]'}}\n    forbidden:\n      scratch:\n";
+        let planned = planned(
+            schema,
+            &[
+                ("a.md", "---\nup: b\nscratch: x\n---\n# A\n"),
+                ("b.md", "# B\n"),
+            ],
+            &[mismatch(1, "a.md", "up", "b")],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
+    }
+
+    /// **Only a link fix records a condition**: a document wrapped, folded
+    /// and linked in one plan records the link's alone.
+    #[test]
+    fn no_other_fix_records_a_condition() {
+        let schema =
+            "version: 1\nfields:\n  up: {type: link}\n  ranks: {type: number, shape: list}\n";
+        let planned = planned(
+            schema,
+            &[("a.md", "---\nup: b\nranks: 3\n---\n"), ("b.md", "# B\n")],
+            &[
+                mismatch(1, "a.md", "up", "b"),
+                FindingRow::new(
+                    2,
+                    FindingKind::ShapeMismatch,
+                    Severity::Warning,
+                    DocumentPath::new("a.md").expect("a path"),
+                    Some("ranks".to_string()),
+                    None,
+                    CandidateHead::new([], 0).expect("an empty head"),
+                    None,
+                    "a finding",
+                    1,
+                )
+                .with_value(norn_store::value_head("3")),
+            ],
+        );
+
+        assert_eq!(planned.operations.len(), 2, "{:?}", planned.operations);
+        assert_eq!(planned.conditions, vec![resolving("a.md", "b", "b.md")]);
+    }
+}

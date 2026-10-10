@@ -92,10 +92,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
-use norn_store::{LinkChange, PathOverlay, ProbedLink};
+use norn_store::{LinkChange, PathOverlay, PlanSide, ProbedLink};
 use norn_wire::{
-    CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, Operation, RuleSet,
-    SkipReason, SkippedCandidates, SkippedFinding, UnresolvedOperation,
+    CandidateHead, CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, LinkKey,
+    Operation, PlanCondition, Resolves, RuleSet, SkipReason, SkippedCandidates, SkippedFinding,
+    UnresolvedOperation,
 };
 
 use crate::applier::Held;
@@ -117,6 +118,11 @@ pub(crate) struct Planned {
     /// the clock gives no reading, numbered in the operations' sequence. The
     /// repair is refused where there is any, as a creation is.
     pub(crate) unresolved: Vec<UnresolvedOperation>,
+    /// The address resolutions the plan records, in plan order: the
+    /// resolution each link a fix writes has at the plan's after-state. The
+    /// host puts them on the resolved plan beside the conditions its
+    /// operations resolve to.
+    pub(crate) conditions: Vec<PlanCondition>,
     /// What the plan claims of every selected finding the judgment of its
     /// document's bytes names, in batch order: where the document stands
     /// once the plan lands, and whether the finding still stands there. The
@@ -143,6 +149,13 @@ pub(crate) struct Claim {
     pub(crate) at: DocumentPath,
     pub(crate) held: Held,
     pub(crate) standing: bool,
+}
+
+/// What a written address resolves to once a plan has landed: the
+/// resolution, and, where it is several documents, the head of them.
+pub(crate) struct Naming {
+    pub(crate) resolves: Resolves,
+    pub(crate) candidates: Option<CandidateHead>,
 }
 
 /// What a repair plans under: the declaration the applier judges its result
@@ -225,6 +238,18 @@ pub(crate) trait Reading {
         probed: &[ProbedLink],
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), Self::Error>;
+
+    /// What the wikilink address `address`, written in the document standing
+    /// at `holder` once the plan `overlay` describes has landed, resolves
+    /// to: the probe the applier makes again of an address resolution a
+    /// repair records, and, where several documents are named, the head of
+    /// them.
+    fn naming(
+        &self,
+        overlay: &PathOverlay,
+        holder: &DocumentPath,
+        address: &str,
+    ) -> Result<Naming, Self::Error>;
 }
 
 /// The vault `view` reads, with its links judged on `index`: what the host's
@@ -315,6 +340,31 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
             .changes(overlay, probed, each)
             .map_err(Unread::Index)
     }
+
+    fn naming(
+        &self,
+        overlay: &PathOverlay,
+        holder: &DocumentPath,
+        address: &str,
+    ) -> Result<Naming, Self::Error> {
+        let link = LinkKey::new(holder.clone(), norn_wire::LinkFamily::Wikilink, address);
+        let resolves = crate::planner::links::resolved_address(self.index, overlay, &link)
+            .map_err(Unread::Index)?
+            .unwrap_or_else(Resolves::none);
+        let candidates = match resolves {
+            Resolves::Several {} => {
+                self.index
+                    .target(overlay, address, PlanSide::After)
+                    .map_err(Unread::Index)?
+                    .candidates
+            }
+            Resolves::One { .. } | Resolves::None {} => None,
+        };
+        Ok(Naming {
+            resolves,
+            candidates,
+        })
+    }
 }
 
 /// Plan the findings `rows`, a repair batch's, in the order it read them,
@@ -347,9 +397,12 @@ pub(crate) fn plan<R: Reading>(
     let mut refused: BTreeMap<usize, SkippedFinding> =
         declared::respelling(&drafts, repairing, vault)?;
     refused.extend(declared::colliding(&drafts, &refused));
+    // The routes are settled: a link fix, composed last, is resolved with
+    // them as the plan's moves.
+    let settled = declared::settled(&drafts, &refused);
     let mut planned = Planned::default();
     for (at, draft) in drafts.into_iter().enumerate() {
-        draft.emit(refused.remove(&at), &mut planned);
+        draft.emit(refused.remove(&at), &mut planned, &settled, vault)?;
     }
     Ok(planned)
 }
@@ -483,6 +536,15 @@ mod tests {
             _: &mut dyn FnMut(LinkChange),
         ) -> Result<(), Self::Error> {
             panic!("a plan of no fix read the link index")
+        }
+
+        fn naming(
+            &self,
+            _: &PathOverlay,
+            _: &DocumentPath,
+            address: &str,
+        ) -> Result<Naming, Self::Error> {
+            panic!("a plan of no fix resolved `{address}`")
         }
     }
 

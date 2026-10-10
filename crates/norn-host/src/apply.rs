@@ -267,6 +267,9 @@ where
     let mut resolution =
         resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
     resolution.unresolved.extend(planned.unresolved);
+    // The address resolutions the fixes record are checked at the plan's
+    // after-state; no operation resolves to them.
+    resolution.plan.conditions.extend(planned.conditions);
     let resolution = fully_resolved(resolution)?;
     Ok(Repaired {
         plan: resolution.plan,
