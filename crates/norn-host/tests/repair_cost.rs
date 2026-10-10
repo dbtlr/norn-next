@@ -11,7 +11,10 @@
 //! rule reads by value — adds its links once, not once per route. Routes
 //! whose documents all share one file stem, which as many holders link by
 //! that stem, add each link once too: the class the stem names holds every
-//! moved document, and its members are read once, not once per link.
+//! moved document, and its members are read once, not once per link —
+//! whether a link is held under that one key, or under two as a dotted stem
+//! and a link written with its extension are, and whether links naming two
+//! such classes are taken in turn.
 //!
 //! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
 //! It records each case's best of three previews and holds 800 routes to
@@ -29,7 +32,8 @@ use std::time::{Duration, Instant};
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    ApplyMode, ApplyReport, OperationKind, Predicate, RepairParams, ResolvedPlan, VaultAddress,
+    ApplyMode, ApplyReport, FindingKind, OperationKind, Predicate, RepairParams, ResolvedPlan,
+    VaultAddress,
 };
 
 /// Where every routed document and the hub stand.
@@ -123,12 +127,14 @@ fn previewing(routes: usize, hub: Hub) -> Duration {
 
 /// The best of three previews of the repair of every misplaced task in
 /// `vault`'s `zz-repair/`, `routes` of them, each plan holding a move per
-/// route and passing `check`.
+/// route and passing `check`. Only misplaced findings are selected, so a
+/// task's own ambiguous links fill no place in the batch.
 fn best_of_three(vault: &attach::Vault, routes: usize, check: &dyn Fn(&ResolvedPlan)) -> Duration {
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
     let request = RepairParams::new(VaultAddress::name(vault.name().clone()), ApplyMode::Preview)
         .with_predicates([Predicate::path(format!("{FOLDER}**"))])
+        .with_kinds([FindingKind::Misplaced])
         .with_limit(u32::try_from(routes).expect("a page") + 1);
     let mut best = Duration::MAX;
     for _ in 0..3 {
@@ -148,7 +154,16 @@ fn best_of_three(vault: &attach::Vault, routes: usize, check: &dyn Fn(&ResolvedP
             .iter()
             .filter(|operation| matches!(operation.kind, OperationKind::MoveDocument { .. }))
             .count();
-        assert_eq!(moves, routes, "every route is planned");
+        assert_eq!(
+            moves,
+            routes,
+            "every route is planned; the first skips: {:?}",
+            plan.provenance.as_ref().map(|provenance| provenance
+                .skipped
+                .iter()
+                .take(3)
+                .collect::<Vec<_>>())
+        );
         check(&plan);
     }
     best
@@ -158,61 +173,109 @@ fn best_of_three(vault: &attach::Vault, routes: usize, check: &dyn Fn(&ResolvedP
 /// area its `match.path` captures.
 const AREAS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
 
-/// The best of three previews of the repair of `routes` misplaced tasks all
-/// named `t.md`, one per area, beside as many documents outside the
-/// selection each linking the stem `[[t]]` from its frontmatter and its body:
-/// every moved document is a member of the one class the stem names, and so
-/// is every link's resolution.
-fn previewing_one_stem(routes: usize) -> Duration {
+/// How the routed documents share a class, one per area, and how as many
+/// documents outside the selection link it, each from its frontmatter and
+/// its body.
+#[derive(Clone, Copy, Debug)]
+enum Shared {
+    /// Every task `t.md`, every holder linking the stem `[[t]]`.
+    Stem,
+    /// Every task `t.v.md`, every holder linking `[[t.v]]`: a dotted stem,
+    /// held under the classes of both its reductions, `t.v` and `t`.
+    DottedStem,
+    /// Every task `t.md`, every holder linking `[[t.md]]`: written with its
+    /// extension, so held under two keys as a dotted stem is.
+    Extension,
+    /// Tasks `t.md` and `u.md` in turn, each holder linking its area's stem,
+    /// and each task linking its own stem 256 times in its body: links
+    /// naming two classes, taken a chunk of each in turn.
+    TwoStemsInTurn,
+}
+
+impl Shared {
+    /// The file stem the task of area `at` is named by, and the address its
+    /// links are written with.
+    fn named(self, at: usize) -> (&'static str, &'static str) {
+        match self {
+            Shared::Stem => ("t", "t"),
+            Shared::DottedStem => ("t.v", "t.v"),
+            Shared::Extension => ("t", "t.md"),
+            Shared::TwoStemsInTurn if at % 2 == 0 => ("t", "t"),
+            Shared::TwoStemsInTurn => ("u", "u"),
+        }
+    }
+}
+
+/// The best of three previews of the repair of `routes` misplaced tasks, one
+/// per area, sharing a class as `shared` says: every moved document of a
+/// stem is a member of the one class its links name, and so is every such
+/// link's resolution.
+fn previewing_shared(routes: usize, shared: Shared) -> Duration {
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
-        &format!("repair-cost-stem-{routes}"),
+        &format!("repair-cost-{shared:?}-{routes}"),
     )
     .expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
     std::fs::write(vault.path().join(".norn/schema.yaml"), AREAS).expect("the schema");
     for at in 0..routes {
-        let task = vault.path().join(format!("{FOLDER}a{at:04}/t.md"));
+        let (stem, address) = shared.named(at);
+        let task = vault.path().join(format!("{FOLDER}a{at:04}/{stem}.md"));
         std::fs::create_dir_all(task.parent().expect("an area")).expect("the area");
-        std::fs::write(task, "---\ntype: task\n---\n# T\n").expect("a task");
+        let body = match shared {
+            Shared::TwoStemsInTurn => format!("[[{address}]]\n").repeat(256),
+            _ => String::new(),
+        };
+        std::fs::write(task, format!("---\ntype: task\n---\n# T\n{body}")).expect("a task");
         let holder = vault.path().join(format!("zz-holders/h{at:04}.md"));
         std::fs::create_dir_all(holder.parent().expect("the holders")).expect("the holders");
-        std::fs::write(holder, "---\nsee: \"[[t]]\"\n---\nSee [[t]].\n").expect("a holder");
+        std::fs::write(
+            holder,
+            format!("---\nsee: \"[[{address}]]\"\n---\nSee [[{address}]].\n"),
+        )
+        .expect("a holder");
     }
     best_of_three(&vault, routes, &|_| {})
 }
 
-/// **A repair of routes sharing one file stem previews in time linear in
-/// its routes and the links they touch**: every moved document is a member
-/// of the class `[[t]]` names, and every holder's links resolve against it,
+/// **A repair of routes sharing a file stem previews in time linear in its
+/// routes and the links they touch**: every moved document is a member of
+/// the class its stem names, and every holder's links resolve against it,
 /// so a cost that read the class once per link would grow with the square
-/// of the routes. 200, 400 and 800 routes, each doubling within 2.5 times.
+/// of the routes — whether the links are held under one key (`[[t]]`) or
+/// two (`[[t.v]]`, `[[t.md]]`), and whether links naming two such classes
+/// are taken in turn. 200, 400 and 800 routes of each shape, each doubling
+/// within 2.5 times.
 #[test]
 #[ignore = "soak-lane case: a clock of a repair's routes sharing a stem"]
 fn a_repair_of_routes_sharing_a_stem_previews_in_time_linear_in_routes_and_links_touched() {
-    let readings: Vec<(usize, Duration)> = [200, 400, 800]
-        .into_iter()
-        .map(|routes| (routes, previewing_one_stem(routes)))
-        .collect();
-    let ratios: Vec<f64> = readings
-        .windows(2)
-        .map(|pair| pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64())
-        .collect();
-    let mut recorded: Vec<(String, String)> = readings
-        .iter()
-        .map(|(routes, took)| {
+    let shapes = [
+        Shared::Stem,
+        Shared::DottedStem,
+        Shared::Extension,
+        Shared::TwoStemsInTurn,
+    ];
+    let mut recorded: Vec<(String, String)> = Vec::new();
+    let mut grown: Vec<(Shared, Vec<(usize, Duration)>)> = Vec::new();
+    for shared in shapes {
+        let readings: Vec<(usize, Duration)> = [200, 400, 800]
+            .into_iter()
+            .map(|routes| (routes, previewing_shared(routes, shared)))
+            .collect();
+        recorded.extend(
+            readings.iter().map(|(routes, took)| {
+                (format!("{routes} routes, {shared:?}"), format!("{took:?}"))
+            }),
+        );
+        recorded.extend(readings.windows(2).map(|pair| {
+            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
             (
-                format!("{routes} routes sharing a stem"),
-                format!("{took:?}"),
+                format!("{} over {}, {shared:?}", pair[1].0, pair[0].0),
+                format!("{ratio:.2}"),
             )
-        })
-        .collect();
-    recorded.extend(readings.windows(2).zip(&ratios).map(|(pair, ratio)| {
-        (
-            format!("{} over {}", pair[1].0, pair[0].0),
-            format!("{ratio:.2}"),
-        )
-    }));
+        }));
+        grown.push((shared, readings));
+    }
     norn_testkit::readings::record(
         "a repair's preview of routes sharing a stem, best of three",
         &recorded
@@ -220,8 +283,14 @@ fn a_repair_of_routes_sharing_a_stem_previews_in_time_linear_in_routes_and_links
             .map(|(label, value)| (label.as_str(), value.clone()))
             .collect::<Vec<_>>(),
     );
-    for ratio in ratios {
-        assert!(ratio <= 2.5, "grows faster than linear: {readings:?}");
+    for (shared, readings) in grown {
+        for pair in readings.windows(2) {
+            let ratio = pair[1].1.as_secs_f64() / pair[0].1.as_secs_f64();
+            assert!(
+                ratio <= 2.5,
+                "{shared:?} grows faster than linear: {readings:?}"
+            );
+        }
     }
 }
 
