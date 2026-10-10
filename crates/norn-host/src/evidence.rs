@@ -100,6 +100,7 @@ pub struct JobEvidence {
     /// What the jobs' rule judgments paid, summed: one total of several
     /// counts, folded whole under its lock when a job ends.
     rule_work: Mutex<RuleWork>,
+    clock_reads: AtomicU64,
     /// The file each counted read of every job read, in the order the jobs
     /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
     /// ran: nothing is kept while none is.
@@ -260,6 +261,10 @@ pub struct EvidenceReading {
     /// folded when the job ends. Each reads the one document and the schema,
     /// so every count here is the sum of what each one paid.
     pub rule_work: RuleWork,
+    /// Readings the jobs' plans took of the host's clock: at most one per
+    /// plan, and none for a plan no template or rule default of which reads
+    /// `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
+    pub clock_reads: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -338,6 +343,7 @@ impl EvidenceReading {
                 .apply_full_scan_steps
                 .saturating_sub(earlier.apply_full_scan_steps),
             rule_work: rule_work_since(self.rule_work, earlier.rule_work),
+            clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
         }
     }
 }
@@ -437,6 +443,7 @@ impl JobEvidence {
                 .rule_work
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
+            clock_reads: get(&self.clock_reads),
         }
     }
 
@@ -538,6 +545,8 @@ impl JobEvidence {
             .unwrap_or_else(PoisonError::into_inner);
         *rule_work = rule_work.plus(judged);
         drop(rule_work);
+        self.clock_reads
+            .fetch_add(take_clock_reads(), Ordering::Relaxed);
 
         let changesets = take_changeset_tally();
         self.changesets_applied
@@ -573,6 +582,7 @@ impl JobEvidence {
         let _ = take_changeset_tally();
         let _ = take_documents_derived();
         let _ = take_rule_work();
+        let _ = take_clock_reads();
         Attribution {
             account: Arc::clone(self),
             window: Some(window),
@@ -749,6 +759,35 @@ pub(crate) fn count_rule_work(work: RuleWork) {
 
 fn take_rule_work() -> RuleWork {
     RULE_WORK.with(|cell| cell.replace(RuleWork::NONE))
+}
+
+thread_local! {
+    static CLOCK_READS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Record that one reading of the host's clock was taken: the one seam every
+/// plan reads the clock through ([`crate::clock::local_now`]) calls it.
+///
+/// Tallied on the thread that planned, and folded into the account of whoever
+/// that thread planned for: the job's, when a job ends, as a changeset is; the
+/// read account's, where a request plans on a read hold
+/// ([`clock_reads_of`]).
+pub(crate) fn count_clock_read() {
+    CLOCK_READS.with(|cell| cell.set(cell.get() + 1));
+}
+
+fn take_clock_reads() -> u64 {
+    CLOCK_READS.with(|cell| cell.replace(0))
+}
+
+/// What `run` returns, and how many readings of the clock it took on this
+/// thread. A tally standing on the thread before `run`, a job's still open,
+/// stands again after it, untouched.
+pub(crate) fn clock_reads_of<T>(run: impl FnOnce() -> T) -> (T, u64) {
+    let standing = take_clock_reads();
+    let ran = run();
+    let read = CLOCK_READS.with(|cell| cell.replace(standing));
+    (ran, read)
 }
 
 #[cfg(test)]
@@ -1029,6 +1068,7 @@ pub(crate) struct ReadEvidence {
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
     planning_holds: PlanningHoldAccount,
+    clock_reads: AtomicU64,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -1194,6 +1234,11 @@ pub struct ReadReading {
     /// What the read holds this host planned on ran on their snapshots, over
     /// every preview and repair.
     pub planning_holds: PlanningHoldCost,
+    /// Readings of the host's clock the plans this host resolved on its read
+    /// holds took, over every preview and repair: at most one per plan, and
+    /// none for a plan no template, rule default or route of which reads
+    /// `{{now}}`, `{{date}}` or `{{time}}`.
+    pub clock_reads: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -1240,6 +1285,8 @@ pub struct ReadsSince {
     pub repair_batches: RepairBatchCost,
     /// What this window's planning holds ran on their snapshots.
     pub planning_holds: PlanningHoldCost,
+    /// Readings of the host's clock this window's plans took.
+    pub clock_reads: u64,
 }
 
 impl ReadReading {
@@ -1271,6 +1318,7 @@ impl ReadReading {
                 .since(earlier.preview_link_judgments),
             repair_batches: self.repair_batches.since(earlier.repair_batches),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
+            clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
         }
     }
 }
@@ -1299,6 +1347,7 @@ impl ReadEvidence {
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
             planning_holds: self.planning_holds.read(),
+            clock_reads: get(&self.clock_reads),
         }
     }
 
@@ -1318,6 +1367,12 @@ impl ReadEvidence {
     /// given back, however the planning ended.
     pub(crate) fn count_planning_hold(&self, cost: PlanningHoldCost) {
         self.planning_holds.add(cost);
+    }
+
+    /// Record `reads` readings of the clock one planning hold's plan took,
+    /// where the hold is given back.
+    pub(crate) fn count_clock_reads(&self, reads: u64) {
+        self.clock_reads.fetch_add(reads, Ordering::Relaxed);
     }
 
     /// Record what one read's mint ran under the entry gate.

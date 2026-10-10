@@ -790,9 +790,10 @@ where
     /// a read withdraws it. This is the one way a request plans on a read
     /// hold, so a preview and a repair count one account.
     ///
-    /// What the plan's link judgments cost, and what the hold's snapshot ran
-    /// whoever ran it, are the read account's, however `plan` ended. The hold
-    /// is given back when this returns.
+    /// What the plan's link judgments cost, what the hold's snapshot ran
+    /// whoever ran it, and the readings of the clock its plan took, are the
+    /// read account's, however `plan` ended. The hold is given back when this
+    /// returns.
     fn planning_on_hold<T>(
         &self,
         name: &VaultName,
@@ -815,9 +816,11 @@ where
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let planned = plan(ground, &snapshot, &refused);
+        let (planned, clock_reads) =
+            crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused));
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
         self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
+        self.count_clock_reads(clock_reads);
         Ok((reading, planned?))
     }
 

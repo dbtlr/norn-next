@@ -5846,6 +5846,12 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.count_planning_hold(cost);
     }
 
+    /// Record `reads` readings of the clock one planning hold's plan took, in
+    /// the read account the hold is counted in.
+    pub(crate) fn count_clock_reads(&self, reads: u64) {
+        self.shared.reads.count_clock_reads(reads);
+    }
+
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {

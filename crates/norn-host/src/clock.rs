@@ -24,7 +24,12 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 /// first time a creation by rule, or a rule default reading a clock token that
 /// is proposed for a field or compared with a filled value, asks, and fills
 /// every template and default of the plan from that one reading.
+///
+/// **The one seam the host reads the clock through, and counted**: each call
+/// is one reading, tallied on the account the planning thread works for
+/// ([`crate::evidence::count_clock_read`]), so a bar can hold a plan to one.
 pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
+    crate::evidence::count_clock_read();
     local_timestamp(Timestamp::now(), &TimeZone::system())
 }
 
