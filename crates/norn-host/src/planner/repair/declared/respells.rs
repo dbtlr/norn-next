@@ -59,8 +59,10 @@ use std::sync::Arc;
 
 use norn_config::schema::{FieldType, RuleWork, VaultSchema};
 use norn_fs::NormalizedPath;
-use norn_store::{LinkFamily, PathOverlay, ProbedLink};
-use norn_wire::{AuthoredValue, DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding};
+use norn_store::{AmbiguityIgnore, LinkFamily, PathOverlay, ProbedLink, StoredPathOrder};
+use norn_wire::{
+    AuthoredValue, CaseFold, DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding,
+};
 
 use super::{Draft, State};
 use crate::applier::standing;
@@ -232,23 +234,28 @@ pub(crate) fn blinded<T>(run: impl FnOnce() -> T) -> T {
 }
 
 /// The stems whose bare wikilinks a route of `routes` may respell: the file
-/// stem of each routed document whose origin and destination differ in
-/// whether the schema's ambiguity-ignore set keeps them out of a stem's
-/// documents, folded as [`stem_of`] folds one.
+/// stem of each routed document a bare link names at its origin and not at
+/// its destination, or the other way about, as the store's own
+/// ambiguity-ignore rule reads the schema's set
+/// ([`AmbiguityIgnore::admits`] for a one-segment target), folded as
+/// [`stem_of`] folds one.
 fn crossing_stems(
     routes: &[(usize, &super::routes::Passed)],
     schema: &VaultSchema,
     repairing: &Repairing<'_>,
 ) -> BTreeSet<String> {
-    let ignored = |path: &DocumentPath| {
-        schema
-            .ambiguity_ignore()
-            .iter()
-            .any(|glob| glob.matches(path.as_str(), repairing.case))
+    if schema.ambiguity_ignore().is_empty() {
+        return BTreeSet::new();
+    }
+    let ignore = AmbiguityIgnore::new(schema.ambiguity_ignore().iter().cloned());
+    let order = match repairing.case {
+        CaseFold::Exact => StoredPathOrder::Sensitive,
+        CaseFold::Ascii => StoredPathOrder::AsciiCaseInsensitive,
     };
+    let named_bare = |path: &DocumentPath| ignore.admits(path.as_str(), 1, order);
     routes
         .iter()
-        .filter(|(_, passed)| ignored(&passed.from) != ignored(&passed.to))
+        .filter(|(_, passed)| named_bare(&passed.from) != named_bare(&passed.to))
         .filter_map(|(_, passed)| passed.to.as_str().rsplit('/').next().map(stem_of))
         .collect()
 }
@@ -675,6 +682,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             [SkipReason::RespellsAJudgedLink]
         );
+    }
+
+    /// **Whether a route carries a stem across the ambiguity-ignore set is
+    /// the store's own rule**: a glob naming a folder keeps everything
+    /// beneath it out of a stem's documents, a glob naming a folder one
+    /// level down keeps out what stands deeper, and a document at the root
+    /// is its whole place, so a bare link names it whatever glob matches it.
+    /// Each route here carries `[[a]]`'s document out of what the stem
+    /// counts, so the hub's closed `up` would no longer name it.
+    #[test]
+    fn a_bare_stem_crossing_the_ambiguity_ignore_set_is_read_by_the_stores_rule() {
+        let cases: [(&str, &str, &str, (&str, &str)); 3] = [
+            ("a folder's own glob", "archive", "archive/", TASK),
+            ("a one-level glob", "archive/*", "archive/old/", TASK),
+            (
+                "a root document",
+                "**/a.md",
+                "tasks/",
+                ("a.md", "---\ntype: task\n---\n# A\n"),
+            ),
+        ];
+        for (case, ignored, route, task) in cases {
+            let schema = format!(
+                "version: 1\npaths:\n  ambiguity_ignore: ['{ignored}']\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['{route}**'], route: '{route}'}}\n{CLOSED_UP}"
+            );
+
+            let planned = planned(
+                &schema,
+                &[task, ("h.md", "---\ntype: hub\nup: \"[[a]]\"\n---\n")],
+                &[task.0],
+            );
+
+            assert!(planned.operations.is_empty(), "{case}: {planned:?}");
+            assert_eq!(
+                planned
+                    .skipped
+                    .iter()
+                    .map(|skip| skip.reason)
+                    .collect::<Vec<_>>(),
+                [SkipReason::RespellsAJudgedLink],
+                "{case}"
+            );
+        }
     }
 
     /// **A body-only backlink never skips the route**, however the holder's
