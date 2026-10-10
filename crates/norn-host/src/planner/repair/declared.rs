@@ -177,7 +177,7 @@ pub(super) fn compose<R: Reading>(
     // The rows whose fix reads a clock that gives no reading: neither fixed
     // nor skipped, and still held.
     let mut unresolved = BTreeSet::new();
-    let order = finding_order(document);
+    let order = finding_order(document, &found);
     let mut next = 0;
     while let Some(&at) = order.get(next) {
         next += 1;
@@ -332,20 +332,27 @@ fn next_id(planned: &Planned) -> OperationId {
 /// The positions of `document`'s rows in finding order: a misplaced
 /// document's route first, so every other fix is judged where it will stand,
 /// then kind, field, offending value, and identity.
-fn finding_order(document: &[FindingRow]) -> Vec<usize> {
+///
+/// **A value is compared whole**: as the finding `found` names for the row
+/// holds it, so two values sharing a head longer than a row carries compare
+/// by what follows; a row naming no held finding, by its head.
+fn finding_order(document: &[FindingRow], found: &[Option<Held>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..document.len()).collect();
-    order.sort_by(|&left, &right| {
-        let key = |row: &FindingRow| {
-            (
-                row.kind != FindingKind::Misplaced,
-                row.kind.as_str(),
-                row.target.clone(),
-                row.value.as_ref().map(|value| value.text().to_string()),
-                row.id,
-            )
-        };
-        key(&document[left]).cmp(&key(&document[right]))
-    });
+    let key = |at: usize| {
+        let row = &document[at];
+        let value = found[at]
+            .as_ref()
+            .and_then(|held| held.value.as_deref())
+            .or_else(|| row.value.as_ref().map(ValueHead::text));
+        (
+            row.kind != FindingKind::Misplaced,
+            row.kind.as_str(),
+            row.target.as_deref(),
+            value,
+            row.id,
+        )
+    };
+    order.sort_by(|&left, &right| key(left).cmp(&key(right)));
     order
 }
 
@@ -1623,6 +1630,35 @@ mod tests {
                     .with_candidates(values(&[("a", "a-rule")]))
             ]
         );
+    }
+
+    /// **Elements whose heads agree compose in the order of their whole
+    /// values**: the case above with every value 300 bytes of `v` before its
+    /// letter, so the heads the rows carry are cut short alike and only the
+    /// whole values tell `a` from `x`; by head and then id, `x` would go
+    /// first and both would be fixed.
+    #[test]
+    fn elements_whose_heads_agree_compose_in_whole_value_order() {
+        let prefix = "v".repeat(300);
+        let [a, b, c, x] = ["a", "b", "c", "x"].map(|letter| format!("{prefix}{letter}"));
+        let schema = format!(
+            "version: 1\nfields:\n  color: {{type: text, shape: list}}\nrules:\n  a-rule:\n    match: {{frontmatter: {{type: task}}}}\n    one_of:\n      color: {{values: ['{a}', '{b}'], synonyms: {{'{x}': '{a}'}}}}\n  b-rule:\n    match: {{frontmatter: {{type: task}}}}\n    one_of:\n      color: {{values: ['{b}', '{c}'], synonyms: {{'{a}': '{b}'}}}}\n"
+        );
+        let document = format!("---\ntype: task\ncolor: ['{a}', '{x}']\n---\n");
+        let vault = Vault::of(&schema, &[("a.md", &document)]);
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "color", &x),
+            offending(2, NOT_ONE_OF, "a.md", "color", &a),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "color", list(&[&b, &x]))]
+        );
+        assert_eq!(planned.citations, vec![citing_values(1, &[(2, &a)])]);
+        assert_eq!(planned.skipped.len(), 1);
+        assert_eq!(planned.skipped[0].finding, 1);
     }
 
     /// **A repeated offending element is one finding whose fix rewrites
