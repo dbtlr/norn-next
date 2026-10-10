@@ -108,6 +108,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{
@@ -494,6 +495,9 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     // Each delete a link naming its document contradicts.
     let mut named: BTreeSet<usize> = BTreeSet::new();
+    // Whether a cascade follows a place an ambiguous link could name, read
+    // once per key's list of places.
+    let mut among_followed = AmongFollowed::default();
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
@@ -540,12 +544,12 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                     normalizer,
                 )
             });
+        // Links held under one key share its places, so the places are read
+        // once per key, however many documents the key names and however
+        // the links of several keys interleave.
         let ambiguous_among_moved = unwritten
             && matches!(change.before, Resolves::Several {})
-            && change
-                .before_targets
-                .iter()
-                .any(|target| followed(target.as_str()));
+            && among_followed.any(change.before_targets.lists(), &followed);
         let held = judged.entry(entry).or_insert_with(|| Judged {
             key,
             address: change.address,
@@ -1117,6 +1121,38 @@ pub(crate) fn reaching(
     })
 }
 
+/// Whether a cascade follows any place a link could name before the plan
+/// ([`LinkChange::before_targets`]), remembered per list of places: a key's
+/// list is one allocation for every link held under it in a judgment, so each
+/// key's places are read once, however many links hold the key and however
+/// the links of several keys interleave. What it keeps is one answer per
+/// key whose list was read, each list held so no other takes its address.
+#[derive(Default)]
+struct AmongFollowed {
+    read: BTreeMap<usize, (Arc<[norn_store::DocumentPath]>, bool)>,
+}
+
+impl AmongFollowed {
+    /// Whether `followed` holds of a place one of `lists` names, each list
+    /// read once over this memo's life.
+    fn any(
+        &mut self,
+        lists: &[Arc<[norn_store::DocumentPath]>],
+        followed: &impl Fn(&str) -> bool,
+    ) -> bool {
+        let mut among = false;
+        for list in lists {
+            let at = Arc::as_ptr(list).cast::<norn_store::DocumentPath>() as usize;
+            let (_, follows) = self.read.entry(at).or_insert_with(|| {
+                let follows = list.iter().any(|place| followed(place.as_str()));
+                (Arc::clone(list), follows)
+            });
+            among |= *follows;
+        }
+        among
+    }
+}
+
 /// What a link named before the plan, as [`decider`] reads it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Named<'a> {
@@ -1125,7 +1161,7 @@ pub(crate) enum Named<'a> {
     /// No document, the link broken as link health judges it; it could name
     /// a document standing at each of these places the plan reaches
     /// ([`LinkChange::before_targets`]).
-    Broken(&'a [norn_store::DocumentPath]),
+    Broken(&'a norn_store::BeforeTargets),
     /// Several documents, or no document without the link breaking.
     Other,
 }
@@ -1882,7 +1918,7 @@ mod tests {
     };
 
     use super::testing::{EmptyStore, Untouched, vault};
-    use super::{ChangeSet, Judged, Target, change_set};
+    use super::{AmongFollowed, ChangeSet, Judged, Target, change_set};
     use crate::planner::compose::content_hash;
     use crate::planner::lineage::Lineage;
     use crate::planner::resolve::resolve;
@@ -1890,6 +1926,41 @@ mod tests {
 
     fn path(text: &str) -> DocumentPath {
         DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// **Whether a cascade follows a place an ambiguous link could name is
+    /// read once per key's list of places**, however the links of two keys
+    /// interleave: links alternating between a stem's list and another's,
+    /// and one link holding both, read each list's places once.
+    #[test]
+    fn a_keys_places_are_read_once_however_links_of_two_keys_interleave() {
+        let list = |stem: &str| -> std::sync::Arc<[norn_store::DocumentPath]> {
+            (0..10)
+                .map(|at| {
+                    norn_store::DocumentPath::new(&format!("a/{at:02}/{stem}.md"))
+                        .expect("a legal document path")
+                })
+                .collect()
+        };
+        let (t, u) = (list("t"), list("u"));
+        let read = std::cell::Cell::new(0usize);
+        let followed = |place: &str| {
+            read.set(read.get() + 1);
+            place == "a/09/u.md"
+        };
+        let mut among = AmongFollowed::default();
+
+        let mut answers = Vec::new();
+        for _ in 0..50 {
+            answers.push(among.any(std::slice::from_ref(&t), &followed));
+            answers.push(among.any(std::slice::from_ref(&u), &followed));
+        }
+        answers.push(among.any(&[t.clone(), u.clone()], &followed));
+
+        assert_eq!(read.get(), 20, "each list's places, read once");
+        assert!(answers.iter().step_by(2).take(50).all(|among| !among));
+        assert!(answers.iter().skip(1).step_by(2).all(|among| *among));
+        assert_eq!(answers.last(), Some(&true), "a link holding both keys");
     }
 
     fn key(holder: &str, address: &str) -> LinkKey {

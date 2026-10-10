@@ -10,10 +10,11 @@
 //! their own: a missing required field filled from its rule default, a value
 //! outside a closed set replaced by its synonym's member (a list's elements
 //! one by one into one change), a forbidden field removed or renamed, and
-//! each reason such a fix is skipped for; a misplaced document is skipped with
-//! a note of the route its rule declares until routes are planned (NORN-380);
-//! and over a schema declaring every kind of fix, that the validator flags
-//! nothing a repair wrote.
+//! each reason such a fix is skipped for; a misplaced document moved into the
+//! folder its rule's route names, its move's link cascade with it, and each
+//! reason such a route is skipped for, a cascade that may respell a link a
+//! rule reads by value among them; and over a schema declaring every kind of
+//! fix, that the validator flags nothing a repair wrote.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -1578,15 +1579,20 @@ fn rules_that_remove_and_rename_a_forbidden_field_skip_it_as_a_tie() {
 /// One rule stamping each task it requires `created` of with the clock.
 const STAMPED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n";
 
-/// **Every default a repair plan fills comes from one clock reading**: five
-/// clock defaults across three documents read the host's clock once, read off
-/// its read account, in both modes, and write one instant and one day, each
-/// noting it is the repair's time.
+/// [`STAMPED`], its rule also routing each task into the day's folder of
+/// `log/`.
+const STAMPED_AND_ROUTED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n    allowed_paths: {paths: ['zz-repair/log/**'], route: 'zz-repair/log/{{date}}/'}\n";
+
+/// **Every route and default a repair plan fills comes from one clock
+/// reading**: three clock routes and five clock defaults across three
+/// documents read the host's clock once, read off its read account, in both
+/// modes, and write one instant — each route's folder the day each `day`
+/// default writes — each noting it is the repair's time.
 #[test]
-fn every_default_a_repair_plan_fills_comes_from_one_clock_reading() {
+fn every_route_and_default_a_repair_plan_fills_comes_from_one_clock_reading() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-one-clock-reading",
-        STAMPED,
+        STAMPED_AND_ROUTED,
         &[
             ("a.md", b"---\ntype: task\n---\n"),
             ("b.md", b"---\ntype: task\ncreated: then\n---\n"),
@@ -1598,30 +1604,36 @@ fn every_default_a_repair_plan_fills_comes_from_one_clock_reading() {
     let account = host.read_evidence();
     let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
     assert_eq!(host.read_evidence().since(account).clock_reads, 1);
-    assert_eq!(plan.operations.len(), 5, "{:?}", plan.operations);
-    let written_as = |wanted: &str| -> BTreeSet<String> {
-        plan.operations
-            .iter()
-            .filter_map(|operation| match &operation.kind {
-                OperationKind::SetFrontmatter { field, value, .. } if field == wanted => {
-                    Some(format!("{value:?}"))
-                }
-                _ => None,
-            })
-            .collect()
-    };
-    assert_eq!(
-        written_as("day").len(),
-        1,
-        "one day: {:?}",
-        written_as("day")
-    );
-    assert_eq!(
-        written_as("created").len(),
-        1,
-        "one instant: {:?}",
-        written_as("created")
-    );
+    assert_eq!(plan.operations.len(), 8, "{:?}", plan.operations);
+    let days: BTreeSet<String> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::MoveDocument { to, .. } => Some(
+                to.as_str()
+                    .split('/')
+                    .nth(2)
+                    .expect("a day's folder")
+                    .to_string(),
+            ),
+            OperationKind::SetFrontmatter { field, value, .. } if field == "day" => {
+                Some(value.scalar_text().expect("a day"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(days.len(), 1, "one day: {days:?}");
+    let created: BTreeSet<String> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::SetFrontmatter { field, value, .. } if field == "created" => {
+                Some(format!("{value:?}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "one instant: {created:?}");
     for citation in &provenance(&plan).citations {
         assert!(
             citation.findings[0]
@@ -1790,17 +1802,31 @@ fn misplaced_of(host: &attach::ServingHost, vault: &attach::Vault, name: &str) -
     *id
 }
 
-/// One rule placing a task in `tasks/` beneath [`FOLDER`] and declaring a
-/// route there, which a repair does not plan yet (NORN-380).
+/// Whether a document stands at `name` beneath [`FOLDER`].
+fn stands(vault: &attach::Vault, name: &str) -> bool {
+    vault.path().join(FOLDER).join(name).exists()
+}
+
+/// The kinds of `plan`'s operations, in plan order, without their cascades.
+fn kinds(plan: &ResolvedPlan) -> Vec<OperationKind> {
+    plan.operations
+        .iter()
+        .map(|operation| operation.kind.clone())
+        .collect()
+}
+
+/// One rule placing a task in `tasks/` beneath [`FOLDER`] and routing it
+/// there.
 const TASKED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
 
 /// One rule declaring every kind of fix a repair applies: a plain default
 /// (`status`), a default filled from a capture (`area`) and one from the
 /// clock (`created`), a synonym on a scalar (`status`) and on a list
 /// (`labels`), a forbidden field removed (`scratch`), one renamed
-/// (`due_date`), and one with no fix (`legacy`); and a route into the area's
-/// `tasks/` folder, which a repair does not plan yet (NORN-380) and skips.
-const EVERY_FIX: &str = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    required:\n      status: {default: todo}\n      area: {default: '{{path.area}}'}\n      created: {default: '{{date}}'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n      labels: {values: [red, blue], synonyms: {crimson: red}}\n    forbidden:\n      scratch: remove\n      due_date: {rename_to: due}\n      legacy:\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+/// (`due_date`), one with no fix (`legacy`), and a route into the area's
+/// `tasks/` folder; and a rule forbidding `noisy` there, so a route can be
+/// refused.
+const EVERY_FIX: &str = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    required:\n      status: {default: todo}\n      area: {default: '{{path.area}}'}\n      created: {default: '{{date}}'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n      labels: {values: [red, blue], synonyms: {crimson: red}}\n    forbidden:\n      scratch: remove\n      due_date: {rename_to: due}\n      legacy:\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n  quiet:\n    match: {path: 'zz-repair/home/tasks/**'}\n    forbidden:\n      noisy:\n";
 
 /// A finding as the validator reports it, apart from its identity: where it
 /// stands, its kind, its field and the value it judged.
@@ -1819,13 +1845,12 @@ fn reported(row: &norn_wire::FindingRow, path: &str) -> Reported {
 /// **A configured repair never writes what the validator flags.** Over a
 /// schema declaring every kind of fix — a default, a templated default, a
 /// synonym on a scalar and on a list, a forbidden field removed and one
-/// renamed — and a route, a repair applies, and a validate afterwards reports
-/// no finding on any field or path the repair wrote but the ones it skipped,
-/// each still standing as it stood: what is skipped is skipped, not written.
-/// A misplaced document whose rule declares a route is one of those skips: it
-/// is skipped as having no declared fix, noting routes are NORN-380's, and
-/// nothing the route would have moved is written. NORN-380 extends this test
-/// with the route's move.
+/// renamed, and a route — a repair applies, and a validate afterwards
+/// reports no finding on any field or path the repair wrote but the ones it
+/// skipped, each still standing as it stood where the plan's moves left it:
+/// what is skipped is skipped, not written. Each moved document's fixes are
+/// written where it lands, and a document whose route the judge refuses at
+/// its destination (`noisy` in `home/tasks/`) stays, its finding skipped.
 #[test]
 fn a_configured_repair_never_writes_what_the_validator_flags() {
     let (_sandbox, vault, host) = a_vault_under(
@@ -1838,6 +1863,7 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
             ),
             ("home/b.md", b"---\ntype: task\n---\n# B\n"),
             ("work/tasks/c.md", b"---\ntype: task\nstatus: complete\narea: work\ncreated: '2026-01-01'\n---\n# C\n"),
+            ("home/d.md", b"---\ntype: task\nnoisy: yes\nstatus: todo\narea: home\ncreated: '2026-01-01'\n---\n# D\n"),
         ],
     );
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -1854,11 +1880,16 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
     };
     assert_eq!(changeset, ChangesetOutcome::Committed);
 
-    // Every kind of fix but a route was made: the defaults, both synonyms,
+    // Every kind of fix was made: two routes, the defaults, both synonyms,
     // the removal and the rename.
+    let mut moved: BTreeMap<String, String> = BTreeMap::new();
     let mut wrote: BTreeSet<(String, Option<String>)> = BTreeSet::new();
     for operation in &plan.operations {
         match &operation.kind {
+            OperationKind::MoveDocument { from, to } => {
+                moved.insert(from.as_str().to_string(), to.as_str().to_string());
+                wrote.insert((to.as_str().to_string(), None));
+            }
             OperationKind::SetFrontmatter {
                 target: WriteTarget::Path(at),
                 field,
@@ -1874,15 +1905,22 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
         }
     }
     let to = |name: &str| format!("{FOLDER}{name}");
+    assert_eq!(
+        moved,
+        BTreeMap::from([
+            (to("home/b.md"), to("home/tasks/b.md")),
+            (to("work/a.md"), to("work/tasks/a.md")),
+        ])
+    );
     for (name, field) in [
-        ("work/a.md", "status"),
-        ("work/a.md", "labels"),
-        ("work/a.md", "scratch"),
-        ("work/a.md", "due"),
-        ("work/a.md", "due_date"),
-        ("work/a.md", "area"),
-        ("work/a.md", "created"),
-        ("home/b.md", "status"),
+        ("work/tasks/a.md", "status"),
+        ("work/tasks/a.md", "labels"),
+        ("work/tasks/a.md", "scratch"),
+        ("work/tasks/a.md", "due"),
+        ("work/tasks/a.md", "due_date"),
+        ("work/tasks/a.md", "area"),
+        ("work/tasks/a.md", "created"),
+        ("home/tasks/b.md", "status"),
         ("work/tasks/c.md", "status"),
     ] {
         assert!(
@@ -1891,25 +1929,33 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
         );
     }
 
-    // What was skipped, where it stands.
+    // What was skipped, where it stands after the plan's moves.
     let skipped: BTreeSet<Reported> = provenance(&plan)
         .skipped
         .iter()
         .map(|skipped| {
             let row = &before[&skipped.finding];
-            reported(row, row.path.as_str())
+            let path = moved
+                .get(row.path.as_str())
+                .cloned()
+                .unwrap_or_else(|| row.path.as_str().to_string());
+            reported(row, &path)
         })
         .collect();
     let expected_skips: BTreeSet<Reported> = [
         (
-            "work/a.md",
+            "work/tasks/a.md",
             "field/not-one-of",
             Some("labels"),
             Some("bogus"),
         ),
-        ("work/a.md", "field/forbidden", Some("legacy"), Some("old")),
-        ("work/a.md", "document/misplaced", None, None),
-        ("home/b.md", "document/misplaced", None, None),
+        (
+            "work/tasks/a.md",
+            "field/forbidden",
+            Some("legacy"),
+            Some("old"),
+        ),
+        ("home/d.md", "document/misplaced", None, None),
     ]
     .into_iter()
     .map(|(name, kind, field, value)| {
@@ -1922,28 +1968,6 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
     })
     .collect();
     assert_eq!(skipped, expected_skips);
-
-    // A misplaced document whose rule declares a route is skipped as having
-    // no declared fix, the note naming the rule and NORN-380, and nothing the
-    // route would have moved is written.
-    for skip in provenance(&plan)
-        .skipped
-        .iter()
-        .filter(|skip| before[&skip.finding].kind == FindingKind::Misplaced)
-    {
-        assert_eq!(skip.reason, SkipReason::NoDeclaredFix, "{skip:?}");
-        let note = skip.note.as_deref().expect("the skip notes the route");
-        assert!(
-            note.contains("`tasks`") && note.contains("NORN-380"),
-            "{note}"
-        );
-    }
-    for name in ["work/a.md", "home/b.md"] {
-        assert!(vault.path().join(FOLDER).join(name).exists(), "{name}");
-    }
-    for name in ["work/tasks/a.md", "home/tasks/b.md"] {
-        assert!(!vault.path().join(FOLDER).join(name).exists(), "{name}");
-    }
 
     // The validator flags nothing the repair wrote: every finding standing
     // after it is one it skipped, unchanged, and every one it skipped still
@@ -1967,46 +1991,10 @@ fn a_configured_repair_never_writes_what_the_validator_flags() {
         "a skipped finding no longer stands as it stood"
     );
     assert!(
-        written(&vault, "work/a.md").contains("labels: [red, bogus]"),
+        written(&vault, "work/tasks/a.md").contains("labels: [red, bogus]"),
         "{}",
-        written(&vault, "work/a.md")
+        written(&vault, "work/tasks/a.md")
     );
-}
-
-/// **A misplaced document whose rule declares a route is skipped as having no
-/// declared fix, noting the rule declares a route and routes are NORN-380's**:
-/// nothing is moved, the apply writes nothing, and the clock is not read.
-#[test]
-fn a_misplaced_document_is_skipped_noting_the_route_its_rule_declares() {
-    let (_sandbox, vault, host) = a_vault_under(
-        "host-repair-misplaced-skipped",
-        TASKED,
-        &[("loose/a.md", b"---\ntype: task\n---\n")],
-    );
-    let _lease = attach::attach_and_wait(&host, vault.name());
-    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
-    let account = host.read_evidence();
-
-    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
-
-    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
-    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
-    let [skipped] = provenance(&plan).skipped.as_slice() else {
-        panic!("one skip: {:?}", provenance(&plan).skipped);
-    };
-    assert_eq!(
-        (skipped.finding, skipped.reason),
-        (misplaced, SkipReason::NoDeclaredFix)
-    );
-    let note = skipped.note.as_deref().expect("the skip notes the route");
-    assert!(
-        note.contains("`tasks`") && note.contains("NORN-380"),
-        "{note}"
-    );
-
-    let before = tree_bytes(vault.path());
-    planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)));
-    assert_eq!(tree_bytes(vault.path()), before, "a skip wrote");
 }
 
 /// **A misplaced document whose rules declare no route is skipped as having no
@@ -2027,11 +2015,795 @@ fn a_misplaced_document_no_rule_routes_is_skipped_with_no_note() {
     );
 }
 
+/// One rule placing a task in its area's `tasks/` folder, the area the
+/// segment beneath [`FOLDER`] it stands in, and routing it there.
+const AREAS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+
+/// **A route moves a misplaced document into its rule's route folder,
+/// keeping its file name, a capture filled from where it stands**: the
+/// preview's plan is one move cited at the declared level, its apply moves
+/// the document, and the finding no longer stands.
+#[test]
+fn a_route_moves_a_misplaced_document_to_its_route_folder_with_a_capture_filled() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route",
+        AREAS,
+        &[("work/a.md", b"---\ntype: task\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "work/a.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("work/a.md"),
+            at("work/tasks/a.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[misplaced])]);
+    assert!(provenance(&plan).skipped.is_empty());
+
+    let ApplyReport::Applied { changeset, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert!(!stands(&vault, "work/a.md"));
+    assert_eq!(
+        written(&vault, "work/tasks/a.md"),
+        "---\ntype: task\n---\n# A\n"
+    );
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **A route reading a capture its rule's `match.path` binds several ways
+/// skips as an ambiguous capture**, noting two of the bindings, and moves
+/// nothing.
+#[test]
+fn a_route_reading_a_capture_bound_several_ways_skips_as_ambiguous_capture() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/**/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/**/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-ambiguous-capture",
+        schema,
+        &[("red/blue/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "red/blue/a.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty());
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (misplaced, SkipReason::AmbiguousCapture)
+    );
+    assert!(
+        note.contains("{area=red}") && note.contains("{area=blue}"),
+        "{note}"
+    );
+}
+
+/// **Co-selecting rules routing a document to different folders skip it as
+/// a tie**, with each destination and its rule.
+#[test]
+fn disagreeing_routes_skip_as_a_tie() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/a/**', 'zz-repair/b/**'], route: 'zz-repair/a/'}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/a/**', 'zz-repair/b/**'], route: 'zz-repair/b/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-tie",
+        schema,
+        &[("c/x.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "c/x.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(misplaced, SkipReason::Tie).with_candidates(candidates(&[
+                ("zz-repair/a/x.md", "a-rule"),
+                ("zz-repair/b/x.md", "b-rule")
+            ]))
+        ]
+    );
+}
+
+/// **A route whose destination is taken skips as destination taken, and of
+/// two routes of one batch to one destination the first in batch order
+/// moves and the later skips as destination taken**: `loose/b.md` would
+/// land on the `tasks/b.md` that stands, and `x/a.md` and `y/a.md` both
+/// route to `tasks/a.md`.
+#[test]
+fn a_taken_destination_and_the_later_of_two_routes_to_one_skip_as_destination_taken() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-taken",
+        TASKED,
+        &[
+            ("loose/b.md", b"---\ntype: task\n---\n# Loose\n"),
+            ("tasks/b.md", b"---\ntype: task\n---\n# Placed\n"),
+            ("x/a.md", b"---\ntype: task\n---\n# X\n"),
+            ("y/a.md", b"---\ntype: task\n---\n# Y\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let loose = misplaced_of(&host, &vault, "loose/b.md");
+    let y = misplaced_of(&host, &vault, "y/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(at("x/a.md"), at("tasks/a.md"))]
+    );
+    let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.finding, skipped.reason))
+        .collect();
+    assert_eq!(
+        skipped,
+        [
+            (loose, SkipReason::DestinationTaken),
+            (y, SkipReason::DestinationTaken)
+        ]
+    );
+    assert_eq!(
+        written(&vault, "tasks/b.md"),
+        "---\ntype: task\n---\n# Placed\n"
+    );
+    assert_eq!(written(&vault, "tasks/a.md"), "---\ntype: task\n---\n# X\n");
+    assert!(stands(&vault, "loose/b.md") && stands(&vault, "y/a.md"));
+}
+
+/// A rule routing a `p` into `tasks/`, and one routing a `q` standing in
+/// `q/<area>/` into `tasks/<area>/`, so one route's destination can be a
+/// folder another names as a document.
+const NESTED_ROUTES: &str = "version: 1\nrules:\n  ps:\n    match: {frontmatter: {type: p}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  qs:\n    match: {frontmatter: {type: q}, path: 'zz-repair/q/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/{{path.area}}/'}\n";
+
+/// A case of [`NESTED_ROUTES`]: its label, its documents, the document the
+/// plan moves, and the document whose route skips.
+type Nested<'a> = (&'a str, &'a [(&'a str, &'a [u8])], &'a str, &'a str);
+
+/// **A route whose destination lies above or beneath another route's of the
+/// batch, or beneath a document that stands, skips as destination taken**,
+/// in either batch order, and the earlier route moves: `tasks/a.md` and
+/// `tasks/a.md/x.md` cannot both be documents.
+#[test]
+fn a_route_above_or_beneath_another_destination_skips_as_destination_taken() {
+    let cases: [Nested<'_>; 3] = [
+        (
+            "host-repair-route-above-a-claimed-destination",
+            &[
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+                ("r/a.md", b"---\ntype: p\n---\n"),
+            ],
+            "q/a.md/x.md",
+            "r/a.md",
+        ),
+        (
+            "host-repair-route-beneath-a-claimed-destination",
+            &[
+                ("b/a.md", b"---\ntype: p\n---\n"),
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+            ],
+            "b/a.md",
+            "q/a.md/x.md",
+        ),
+        (
+            "host-repair-route-beneath-a-standing-document",
+            &[
+                ("q/a.md/x.md", b"---\ntype: q\n---\n"),
+                ("tasks/a.md", b"---\ntype: p\n---\n"),
+            ],
+            "",
+            "q/a.md/x.md",
+        ),
+    ];
+    for (label, documents, moves, taken) in cases {
+        let (_sandbox, vault, host) = a_vault_under(label, NESTED_ROUTES, documents);
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let skipped_route = misplaced_of(&host, &vault, taken);
+
+        let plan = applied_leaving_only_its_skips(&host, &vault);
+
+        let moved: Vec<String> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match &operation.kind {
+                OperationKind::MoveDocument { from, .. } => Some(from.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<String> = if moves.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("{FOLDER}{moves}")]
+        };
+        assert_eq!(moved, expected, "{label}");
+        let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.finding, skipped.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [(skipped_route, SkipReason::DestinationTaken)],
+            "{label}"
+        );
+    }
+}
+
+/// A rule routing a task into its area's `tasks/` folder by the area as it
+/// is spelled, and one routing a note there by its area slugged.
+const FILLED_ROUTES: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n  notes:\n    match: {frontmatter: {type: note}, path: 'zz-repair/<area>/**'}\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area|slug}}/tasks/'}\n";
+
+/// **A route that fills to no folder a document can be moved into skips as
+/// one the judge would refuse, noting the route and why**, rather than
+/// moving or failing: a capture holding `:`, which no route writes, and one
+/// slugging to nothing, which would leave its segment empty.
+#[test]
+fn a_route_filling_to_no_folder_skips_as_judge_would_refuse() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unfillable",
+        FILLED_ROUTES,
+        &[
+            ("a:b/a.md", b"---\ntype: task\n---\n"),
+            ("!!!/n.md", b"---\ntype: note\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let colon = misplaced_of(&host, &vault, "a:b/a.md");
+    let empty = misplaced_of(&host, &vault, "!!!/n.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let skipped: BTreeMap<u64, (SkipReason, String)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| {
+            (
+                skipped.finding,
+                (
+                    skipped.reason,
+                    skipped.note.clone().expect("the skip carries a note"),
+                ),
+            )
+        })
+        .collect();
+    let (reason, note) = &skipped[&colon];
+    assert_eq!(*reason, SkipReason::JudgeWouldRefuse);
+    assert!(
+        note.contains("zz-repair/{{path.area}}/tasks/") && note.contains(':'),
+        "{note}"
+    );
+    let (reason, note) = &skipped[&empty];
+    assert_eq!(*reason, SkipReason::JudgeWouldRefuse);
+    assert!(note.contains("{{path.area|slug}}"), "{note}");
+}
+
+/// **A route the judge refuses at its destination skips as one the judge
+/// would refuse**, with its candidate, and nothing moves: the rule on
+/// `tasks/` forbids the `scratch` the document holds. **One bringing the
+/// document under a rule requiring fields it lacks skips as bringing in
+/// required fields, naming each field and its declared default.**
+#[test]
+fn a_route_the_judge_refuses_at_its_destination_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  shelved:\n    match: {path: 'zz-repair/tasks/**'}\n    forbidden:\n      scratch:\n  owned:\n    match: {path: 'zz-repair/tasks/**', frontmatter: {kind: owned}}\n    required:\n      owner: {default: me}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-refused",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\nscratch: x\n---\n"),
+            ("loose/b.md", b"---\ntype: task\nkind: owned\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let refused_route = misplaced_of(&host, &vault, "loose/a.md");
+    let owned = misplaced_of(&host, &vault, "loose/b.md");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let fields = RequiredFieldHead::new(
+        [RequiredField::new("owner").with_default(norn_store::value_head("me"))],
+        1,
+    )
+    .expect("a head");
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(refused_route, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")])),
+            SkippedFinding::new(owned, SkipReason::BringsInRequiredFields)
+                .with_required_fields(fields)
+                .with_candidates(candidates(&[("zz-repair/tasks/b.md", "tasks")])),
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a refused route wrote");
+}
+
+/// **A route out of a rule's area drops that rule's selected
+/// `required-missing` finding**: the inbox rule would fill `triage`, but it
+/// does not select the document where the route takes it, so the finding is
+/// in neither the operations nor the skipped findings, and no `triage` is
+/// written.
+#[test]
+fn a_route_out_of_a_rules_area_drops_its_selected_required_missing_finding() {
+    let schema = "version: 1\nrules:\n  inbox:\n    match: {path: 'zz-repair/inbox/**'}\n    required:\n      triage: {default: later}\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-drops",
+        schema,
+        &[("inbox/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "inbox/a.md");
+    let kinds_selected: BTreeSet<&str> = findings_beneath(&host, &vault)
+        .iter()
+        .map(|row| row.kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds_selected,
+        BTreeSet::from(["document/misplaced", "field/required-missing"]),
+        "both findings are selected"
+    );
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("inbox/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[misplaced])]);
+    assert!(provenance(&plan).skipped.is_empty());
+    assert_eq!(written(&vault, "tasks/a.md"), "---\ntype: task\n---\n");
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **A route's move rewrites every link the text layer can respell, and
+/// every other link is listed with the reason a Layer 4 move's forecast
+/// gives it; an unrespellable link never holds the route back.** The
+/// holder's Markdown link to the moved document is respelled; its
+/// frontmatter wikilink in a flow sequence has no bytes of its own to
+/// respell, so the repair's preview forecasts it skipped as unplaced, as a
+/// `move` of the document forecasts it, and the apply leaves it as written.
+#[test]
+fn a_routes_move_rewrites_every_respellable_link_and_lists_the_rest_as_a_move_forecasts_them() {
+    let holder = "---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\nUp: [a](loose/a.md)\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-cascade",
+        TASKED,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("h.md", holder.as_bytes()),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let ApplyReport::Previewed { plan, forecast, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)))
+    else {
+        panic!("a preview answers a preview");
+    };
+    let [route] = plan.operations.as_slice() else {
+        panic!("one route: {:?}", plan.operations);
+    };
+    assert_eq!(
+        route.kind,
+        OperationKind::move_document(at("loose/a.md"), at("tasks/a.md"))
+    );
+    assert!(
+        !route.cascade.is_empty(),
+        "the route's move carries its cascade"
+    );
+    let unplaced = norn_wire::LinkAdvisory::skipped_unplaced(norn_wire::LinkKey::new(
+        at("h.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "zz-repair/loose/a",
+    ));
+    assert_eq!(forecast.links, vec![unplaced]);
+
+    // The same move, asked of `move`, forecasts the same links.
+    let ApplyReport::Previewed {
+        forecast: moved, ..
+    } = planned(host.move_path(norn_wire::MoveParams::new(
+        address(&vault),
+        ApplyMode::Preview,
+        norn_wire::MoveSubject::document(at("loose/a.md"), at("tasks/a.md")),
+    )))
+    else {
+        panic!("a preview answers a preview");
+    };
+    assert_eq!(moved.links, forecast.links);
+
+    planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)));
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\nUp: [a](tasks/a.md)\n"
+    );
+    assert!(stands(&vault, "tasks/a.md"));
+}
+
+/// **An unrespellable link never holds a route back, even in a field a rule
+/// reads by value**: the hub's closed `up` holds the link to the moved
+/// document in a flow list, which no cascade can respell, so the route moves
+/// and its forecast advises on the link as unplaced, as a `move` of the
+/// document forecasts it.
+#[test]
+fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
+    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unplaced-judged",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: [\"[[zz-repair/loose/a]]\"]\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let unplaced = norn_wire::LinkAdvisory::skipped_unplaced(norn_wire::LinkKey::new(
+        at("h.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "zz-repair/loose/a",
+    ));
+    let ApplyReport::Previewed {
+        forecast: moved, ..
+    } = planned(host.move_path(norn_wire::MoveParams::new(
+        address(&vault),
+        ApplyMode::Preview,
+        norn_wire::MoveSubject::document(at("loose/a.md"), at("tasks/a.md")),
+    )))
+    else {
+        panic!("a preview answers a preview");
+    };
+    assert_eq!(moved.links, std::slice::from_ref(&unplaced));
+
+    let ApplyReport::Previewed { plan, forecast, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)))
+    else {
+        panic!("a preview answers a preview");
+    };
+
+    assert_eq!(
+        kinds(&plan),
+        [OperationKind::move_document(
+            at("loose/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty(), "{plan:?}");
+    assert_eq!(forecast.links, [unplaced]);
+}
+
+/// **A holder is judged at the state its own fixes compose where it
+/// stands**: the hub reads `up` by value only once its own default fills
+/// `phase`, which brings it under the rule limiting `up`, so the route that
+/// would respell `up` skips while the hub's default is filled.
+#[test]
+fn a_holders_own_fix_bringing_its_field_under_a_rule_reading_it_by_value_skips_the_route() {
+    let schema = format!(
+        "{TASKED}  hubs:\n    match: {{frontmatter: {{type: hub}}}}\n    required:\n      phase: {{default: judged}}\n  judged:\n    match: {{frontmatter: {{phase: judged}}}}\n    max_length:\n      up: 100\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-holder-own-fix",
+        &schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: '[[zz-repair/loose/a]]'\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(kinds(&plan), [setting(1, "h.md", "phase", "judged").kind]);
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
+}
+
+/// **A route its respell check skips claims no destination**: `x/a.md`'s
+/// route would respell the hub's limited `up`, so it skips, and `y/a.md`'s
+/// route to the same destination moves.
+#[test]
+fn a_route_its_respell_check_skips_claims_no_destination() {
+    let schema = format!(
+        "{TASKED}  hubs:\n    match: {{frontmatter: {{type: hub}}}}\n    max_length:\n      up: 100\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-skipped-claims-none",
+        &schema,
+        &[
+            ("x/a.md", b"---\ntype: task\n---\n"),
+            ("y/a.md", b"---\ntype: task\n---\n"),
+            ("h.md", b"---\ntype: hub\nup: '[[zz-repair/x/a]]'\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        [OperationKind::move_document(at("y/a.md"), at("tasks/a.md"))]
+    );
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
+}
+
+/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
+/// link field over the link to `loose/a.md` as it is written now.
+const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+
+/// **A route whose cascade may respell a frontmatter link in a field a rule
+/// reads by value skips as respelling a judged link**, with its destination,
+/// noting the holder and the field, and the plan stays applicable: moving
+/// `loose/a.md` would respell the hub's closed `up`, so nothing moves and
+/// the hub stands as written.
+#[test]
+fn a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-respells-a-judged-link",
+        CLOSED_UP,
+        &[
+            ("loose/a.md", b"---\ntype: task\nstatus: todo\n---\n# A\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(misplaced, SkipReason::RespellsAJudgedLink)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("`up`"),
+        "{note}"
+    );
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n"
+    );
+}
+
+/// **A route whose cascade may respell the moved document's own judged link
+/// skips**, noting the document and the field.
+#[test]
+fn a_route_whose_cascade_may_respell_the_moved_documents_own_judged_link_skips() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    one_of:\n      me: {values: ['[[zz-repair/loose/a]]', '[[zz-repair/tasks/a]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-self-respell",
+        schema,
+        &[(
+            "loose/a.md",
+            b"---\ntype: task\nme: \"[[zz-repair/loose/a]]\"\n---\n# A\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (misplaced, SkipReason::RespellsAJudgedLink)
+    );
+    assert!(
+        note.contains("zz-repair/loose/a.md") && note.contains("`me`"),
+        "{note}"
+    );
+    assert!(stands(&vault, "loose/a.md"));
+}
+
+/// **A route its respell check skips leaves the batch's other fixes
+/// applied**: the routed document's own default is filled where it stands,
+/// since it no longer moves, and another document's default is filled as
+/// before; only the route's finding stands after.
+#[test]
+fn a_route_its_respell_check_skips_leaves_the_batchs_other_fixes_applied() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-respell-skipped-others-stand",
+        CLOSED_UP,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+            ),
+            ("tasks/c.md", b"---\ntype: task\n---\n# C\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "loose/a.md", "status", "todo"),
+            setting(2, "tasks/c.md", "status", "todo"),
+        ]
+    );
+    let (skipped, _) = the_one_skip(&plan);
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (misplaced, SkipReason::RespellsAJudgedLink)
+    );
+    assert_eq!(
+        written(&vault, "loose/a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+}
+
+/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
+/// link field over the link to `loose/a.md` as it is written now.
+const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+
+/// **Of two routes whose cascades rewrite one hub, only the one respelling a
+/// judged link skips, and the other's cascade lands**: moving `loose/a.md`
+/// would respell the hub's closed `up`, moving `loose/b.md` respells its
+/// open `down` and its body's links, so `b` moves, the hub respelled, and
+/// `a` skips, noting the hub and `up`; a bare backlink in the closed field
+/// holds no route back.
+#[test]
+fn of_two_routes_rewriting_one_hub_only_the_one_respelling_a_judged_link_skips() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-two-routes-one-hub",
+        HUB_UP,
+        &[
+            (
+                "h.md",
+                b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[zz-repair/loose/b]]\"\n---\nSee [[zz-repair/loose/b]] and [b](loose/b.md).\n",
+            ),
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("loose/b.md", b"---\ntype: task\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = misplaced_of(&host, &vault, "loose/a.md");
+    let b = misplaced_of(&host, &vault, "loose/b.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/b.md"),
+            at("tasks/b.md")
+        )]
+    );
+    assert_eq!(provenance(&plan).citations, vec![citing(1, &[b])]);
+    let (skipped, note) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(a, SkipReason::RespellsAJudgedLink)
+            .with_candidates(candidates(&[("zz-repair/tasks/a.md", "tasks")]))
+    );
+    assert!(
+        note.contains("zz-repair/h.md") && note.contains("`up`"),
+        "{note}"
+    );
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[tasks/b]]\"\n---\nSee [[tasks/b]] and [b](tasks/b.md).\n"
+    );
+}
+
+/// **A preview's route plan lands through `apply`**: the resolved plan a
+/// repair's preview answers — two routes, their cascades, and a routed
+/// document's fix where it lands — applies as sent, and leaves no finding.
+/// (A preview and an apply of one repair plan the same operations wherever a
+/// case holds the repair to what it guarantees, the routes' cases here
+/// among them.)
+#[test]
+fn a_previews_route_plan_lands_through_apply() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-preview-applies",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("loose/b.md", b"---\ntype: task\nstatus: done\n---\n# B\n"),
+            (
+                "h.md",
+                b"---\nsee: \"[[zz-repair/loose/a]]\"\n---\nUp [[zz-repair/loose/b]]\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        kinds(&preview),
+        vec![
+            OperationKind::move_document(at("loose/a.md"), at("tasks/a.md")),
+            OperationKind::set_frontmatter(
+                WriteTarget::path(at("tasks/a.md")),
+                "status",
+                AuthoredValue::string("todo"),
+            ),
+            OperationKind::move_document(at("loose/b.md"), at("tasks/b.md")),
+        ]
+    );
+
+    let ApplyReport::Applied { changeset, .. } = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(preview),
+    ))) else {
+        panic!("the preview's plan applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        written(&vault, "tasks/a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\nsee: \"[[tasks/a]]\"\n---\nUp [[tasks/b]]\n"
+    );
+    assert!(!stands(&vault, "loose/a.md") && !stands(&vault, "loose/b.md"));
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **A repair plan routing by no route that reads the clock reads it not at
+/// all.**
+#[test]
+fn a_repair_plan_routing_by_no_clock_route_reads_no_clock() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-no-clock-reading",
+        TASKED,
+        &[("loose/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
+}
+
 /// Apply the repair of every document beneath [`FOLDER`], and hold it to
 /// what a configured repair guarantees: it answers a preview and an apply
 /// alike, its apply commits, every finding standing after it is one it
-/// skipped, and every finding it fixed or dropped no longer stands. The
-/// applied plan.
+/// skipped, standing where the plan's moves left it, and every finding it
+/// fixed or dropped no longer stands. The applied plan.
 fn applied_leaving_only_its_skips(
     host: &attach::ServingHost,
     vault: &attach::Vault,
@@ -2052,7 +2824,23 @@ fn applied_leaving_only_its_skips(
         preview.operations, plan.operations,
         "preview and apply differ"
     );
-    let standing_at = |row: &norn_wire::FindingRow| reported(row, row.path.as_str());
+    let moved: BTreeMap<String, String> = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.kind {
+            OperationKind::MoveDocument { from, to } => {
+                Some((from.as_str().to_string(), to.as_str().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let standing_at = |row: &norn_wire::FindingRow| {
+        let path = moved
+            .get(row.path.as_str())
+            .cloned()
+            .unwrap_or_else(|| row.path.as_str().to_string());
+        reported(row, &path)
+    };
     let skipped: BTreeSet<Reported> = provenance(&plan)
         .skipped
         .iter()

@@ -112,9 +112,11 @@ pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 use schema::Citations;
-pub(crate) use schema::{Held, Standing, standing, verdict};
+pub(crate) use schema::{Held, Holdings, Standing, standing, verdict};
 pub(crate) use stage::Links;
 use stage::Stop;
+#[cfg(test)]
+pub(crate) use stage::kernel_refusing;
 
 /// Where a publication is recorded so the watcher's echo of it is known as
 /// the applier's own.
@@ -431,7 +433,87 @@ pub(crate) fn preview(
     schema: &SchemaPlace,
     declared: &Declared,
     links: Links<'_>,
-) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
+) -> Previewed {
+    previewing(
+        plan,
+        anchor,
+        root,
+        (exclusions, schema),
+        declared,
+        links,
+        None,
+    )
+}
+
+/// [`preview`] the resolved `plan`, and judge its schema whole by the same
+/// one check: the preview's answer, and, where the schema is the one thing
+/// left to stop the plan, what the check concludes of it — the violations
+/// it introduces and every finding each document it writes holds
+/// ([`Whole`]).
+///
+/// **One check serves both**, so the answer is exactly [`preview`]'s. Where
+/// another check stops the plan first — drift, a failed condition, a shape
+/// that is not what its operations do, a link whose resolution moved, a vault
+/// or a snapshot that does not read — or the kernel's judgment of its targets
+/// stops a plan the schema passed, or its forecast does not read, no
+/// judgment is answered, and the answer is that cause, as an apply or a
+/// preview of the plan answers it: the judgment is answered only beside the
+/// preview it completes.
+///
+/// A repair reads it (`crate::apply`'s repair) to hold the plan it planned
+/// to the plan's own claims, its preview answering from the same check.
+pub(crate) fn preview_judged(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    exclusions: &[PathBuf],
+    schema: &SchemaPlace,
+    declared: &Declared,
+    links: Links<'_>,
+) -> (Previewed, Option<Whole>) {
+    let mut whole = None;
+    let answer = previewing(
+        plan,
+        anchor,
+        root,
+        (exclusions, schema),
+        declared,
+        links,
+        Some(&mut whole),
+    );
+    (answer, whole)
+}
+
+/// What a preview of a resolved plan answers: the same plan and its
+/// forecast, or the outcome an apply of it would end in.
+pub(crate) type Previewed = Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>>;
+
+/// What the applier's check concludes of a plan's schema: the violations it
+/// introduces, and every finding each document it writes holds
+/// ([`preview_judged`]).
+#[derive(Debug, Default)]
+pub(crate) struct Whole {
+    /// The violations the plan introduces, each citing its rules by this
+    /// judgment's own numbering.
+    pub(crate) introduced: Vec<SchemaViolation>,
+    /// Every finding each document the plan writes holds, by the path it is
+    /// written at.
+    pub(crate) holdings: Holdings,
+    /// The rule sets the violations cite.
+    pub(crate) rule_sets: Vec<norn_wire::RuleSet>,
+}
+
+/// [`preview`] `plan`, and where `whole` asks, keep what its check concludes
+/// of its schema there ([`preview_judged`]).
+fn previewing(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    (exclusions, schema): (&[PathBuf], &SchemaPlace),
+    declared: &Declared,
+    links: Links<'_>,
+    whole: Option<&mut Option<Whole>>,
+) -> Previewed {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
         return Err(Box::new(ApplyOutcome::RootChanged {
@@ -450,23 +532,57 @@ pub(crate) fn preview(
         schema,
     };
     let mut citations = Citations::default();
-    let stop = match stage::check(&plan, &view, declared, links, &mut citations) {
+    let mut judged = None;
+    let checked = stage::check_judging(
+        &plan,
+        &view,
+        declared,
+        links,
+        &mut citations,
+        whole.is_some().then_some(&mut judged),
+    );
+    let stop = match checked {
         Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
             Ok(()) => {
                 let cited = citations.cited_by(&checked.forced);
-                return match forecast(&plan.transitions, &view) {
-                    Ok(forecast) => Ok((
-                        plan,
-                        forecast
-                            .with_forced(checked.forced, cited)
-                            .with_links(checked.links),
-                    )),
-                    Err(error) => Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
+                let forecasted =
+                    forecast(&plan.transitions, &view).map_err(|error| error.to_string());
+                #[cfg(test)]
+                let forecasted = match FORECAST_FAILS.with(std::cell::Cell::get) {
+                    true => Err("the forecast failed, as a case asked".to_string()),
+                    false => forecasted,
+                };
+                return match forecasted {
+                    // The judgment is answered only beside the answer it
+                    // judged: a forecast that fails answers the write that
+                    // failed, which the schema did not stop.
+                    Ok(forecast) => {
+                        if let Some(whole) = whole {
+                            *whole = judged;
+                        }
+                        Ok((
+                            plan,
+                            forecast
+                                .with_forced(checked.forced, cited)
+                                .with_links(checked.links),
+                        ))
+                    }
+                    Err(error) => Err(Box::new(write_failed(plan, error, Vec::new()))),
                 };
             }
+            // The kernel stops the plan after the schema passed it: the
+            // schema is not what stops it, so its judgment is not answered.
             Err(stop) => stop,
         },
-        Err(unfit) => Stop::from(unfit),
+        Err(unfit) => {
+            // Where the schema alone refuses the plan, the check reached it
+            // with nothing else stopping the plan and set `judged`; any
+            // other stop left it `None`.
+            if let Some(whole) = whole {
+                *whole = judged;
+            }
+            Stop::from(unfit)
+        }
     };
     Err(Box::new(match stop {
         Stop::Refused(checks) => {
@@ -480,6 +596,24 @@ pub(crate) fn preview(
             healing: Vec::new(),
         },
     }))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a preview's forecast fails on this thread, as a vault that
+    /// stops reading after the check passed the plan would make it: a stop
+    /// after the schema judgment, which a repair's guard must answer as the
+    /// applier answers it.
+    static FORECAST_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `run`, with every preview's forecast on this thread failing.
+#[cfg(test)]
+pub(crate) fn forecast_failing<T>(run: impl FnOnce() -> T) -> T {
+    FORECAST_FAILS.with(|fails| fails.set(true));
+    let ran = run();
+    FORECAST_FAILS.with(|fails| fails.set(false));
+    ran
 }
 
 /// The answer when the root at `anchor` the plan was judged under is no

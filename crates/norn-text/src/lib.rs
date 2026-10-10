@@ -152,7 +152,7 @@ mod value;
 
 pub use body::BodyScan;
 pub use diagnostic::{Diagnostic, DiagnosticCode};
-pub use document::{Document, EditError, FieldText, TAGS_FIELD, frontmatter_reads_back};
+pub use document::{Document, EditError, FieldLink, FieldText, TAGS_FIELD, frontmatter_reads_back};
 pub use frontmatter::{
     BlockRefusal, FRONTMATTER_MAX_BYTES, Field, RenderError, ScalarContext, SplitRefusal,
     ValueStyle, opens_frontmatter, render_document,

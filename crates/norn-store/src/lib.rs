@@ -161,7 +161,7 @@ pub use find::{
 pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
 pub use hash::value_head;
 pub use health::resolution::{
-    LinkChange, PathOverlay, PlanSide, ProbedLink, ResolutionWork, TargetNaming,
+    BeforeTargets, LinkChange, PathOverlay, PlanSide, ProbedLink, ResolutionWork, TargetNaming,
 };
 pub use health::run::ResolutionStatement;
 pub use health::{KeySummaries, LinkSelection};

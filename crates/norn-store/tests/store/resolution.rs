@@ -662,6 +662,274 @@ fn a_hubs_in_links_resolve_one_key_once() {
     });
 }
 
+/// **A link's judgment reads the targets its key could name once per key,
+/// never once per link**: a plan moving every document of one stem, `t`,
+/// from `a/NNNN/` to `b/NNNN/` gives that stem's key twice as many targets as
+/// it moves documents, and the links held under it read them once however
+/// many documents hold one, so judging ten times the links reads no more
+/// targets.
+#[test]
+fn a_stems_targets_are_read_once_however_many_links_its_key_holds() {
+    const MOVED: usize = 40;
+    let targets_read = |holders: usize| {
+        let mut vault = Vault::new(&format!("resolution-stem-{holders}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED).map(|at| format!("a/{at:04}/t.md")).collect();
+        let held: Vec<String> = (0..holders).map(|at| format!("h/{at:04}.md")).collect();
+        let mut documents: Vec<(&str, &str)> =
+            moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().map(|at| (at.as_str(), "[[t]]\n")));
+        vault.write(&documents);
+        let plan = (0..MOVED).fold(PathOverlay::new(), |overlay, at| {
+            overlay
+                .with(path(&format!("a/{at:04}/t.md")), true, false)
+                .with(path(&format!("b/{at:04}/t.md")), false, true)
+        });
+        assert_eq!(plan.len(), 2 * MOVED);
+        let (judged_links, work) = vault.judge(&plan, &[]);
+        assert_eq!(judged_links.len(), holders);
+        assert!(
+            judged_links
+                .iter()
+                .all(|(_, _, before, after)| before == "several" && after == "several")
+        );
+        assert_eq!(work.links_evaluated, holders as u64);
+        work.targets_read
+    };
+
+    let few = targets_read(10);
+    let many = targets_read(100);
+
+    assert_eq!(few, many);
+    assert_eq!(few, 2 * MOVED as u64, "the stem's targets, each read once");
+}
+
+/// **A key's targets are read once per judgment however its links
+/// interleave with another key's**: a plan moving every document of two
+/// stems, `t` and `u`, gives each stem's key its targets, and links naming
+/// one stem then the other, a chunk of each in turn, read each stem's
+/// targets and its head once, so four times the links read no more.
+#[test]
+fn two_stems_links_taken_in_turn_read_each_stems_targets_once() {
+    const MOVED: usize = 40;
+    // A chunk of the judgment's links, so each block is a chunk of its own.
+    const BLOCK: usize = 256;
+    let work = |blocks: usize| {
+        let mut vault = Vault::new(&format!("resolution-turns-{blocks}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED)
+            .map(|at| {
+                format!(
+                    "a/{at:04}/{}.md",
+                    if at.is_multiple_of(2) { "t" } else { "u" }
+                )
+            })
+            .collect();
+        vault.write(
+            &moved
+                .iter()
+                .map(|at| (at.as_str(), "a task\n"))
+                .collect::<Vec<_>>(),
+        );
+        let plan = moved.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let probes: Vec<ProbedLink> = (0..blocks)
+            .flat_map(|block| {
+                let stem = if block.is_multiple_of(2) { "t" } else { "u" };
+                let holder = format!("h/{block:04}.md");
+                std::iter::repeat_n(
+                    probed(&holder, &holder, &format!("[[{stem}]]\n"), true),
+                    BLOCK,
+                )
+            })
+            .collect();
+        let (judged_links, work) = vault.judge(&plan, &probes);
+        assert_eq!(judged_links.len(), blocks * BLOCK);
+        assert!(
+            judged_links
+                .iter()
+                .all(|(_, _, before, after)| before == "several" && after == "several")
+        );
+        (work.targets_read, work.head_rows, work.keys_resolved)
+    };
+
+    let few = work(2);
+    let many = work(8);
+
+    assert_eq!(few, many, "(targets read, head rows, keys resolved)");
+    assert_eq!(few.0, 2 * MOVED as u64, "each stem's targets, read once");
+}
+
+/// **What a judgment keeps between chunks costs each chunk its own keys,
+/// never the keys kept for the whole judgment**: a plan moving `n` documents
+/// of `n` stems keeps every stem's key until the judgment ends, and each
+/// chunk's end drops only the keys the next chunk will not reuse — those no
+/// target or reached place could name — so the keys it visits to drop them
+/// grow as the links do. Written links naming the stems and links naming no
+/// target are taken in turn, and as many documents link each stem; twice
+/// the routes visit twice the keys.
+#[test]
+fn a_chunks_cache_upkeep_visits_its_own_keys_never_the_keys_kept_for_the_judgment() {
+    let work = |moved: usize| {
+        let mut vault = Vault::new(&format!("resolution-upkeep-{moved}"), Sensitive);
+        let origins: Vec<String> = (0..moved)
+            .map(|at| format!("a/{at:04}/t{at:04}.md"))
+            .collect();
+        let held: Vec<(String, String)> = (0..moved)
+            .map(|at| (format!("h/{at:04}.md"), format!("[[t{at:04}]]\n")))
+            .collect();
+        let mut documents: Vec<(&str, &str)> =
+            origins.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().map(|(at, body)| (at.as_str(), body.as_str())));
+        vault.write(&documents);
+        let plan = origins.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let probes: Vec<ProbedLink> = (0..moved)
+            .flat_map(|at| {
+                let holder = format!("p/{at:04}.md");
+                [
+                    probed(&holder, &holder, &format!("[[t{at:04}]]\n"), true),
+                    probed(&holder, &holder, &format!("[[n{at:04}]]\n"), true),
+                ]
+            })
+            .collect();
+        let (judged_links, work) = vault.judge(&plan, &probes);
+        assert_eq!(judged_links.len(), 3 * moved);
+        (work.keys_swept, work.links_evaluated)
+    };
+
+    let few = work(200);
+    let many = work(400);
+
+    assert_eq!(many.1, 2 * few.1, "twice the links judged");
+    assert!(
+        // Two chunks of 256 links, where the halves split a chunk apart.
+        many.0 <= 2 * few.0 + 512,
+        "the keys swept grow as the links do: {few:?} then {many:?}"
+    );
+    assert!(
+        many.0 <= 2 * many.1,
+        "each chunk visits its own keys and the chunk before's: {many:?}"
+    );
+}
+
+/// **A link held under several keys reads each key's places once per key,
+/// never once per link**: a plan moving every `t.v.md` and every `t.md` of
+/// `a/NNNN/` to `b/NNNN/` gives `[[t.v]]` both of its reductions' targets,
+/// and `[[t.md]]` the stem's, so each holder's link could name a moved
+/// document under two keys; ten times the holders read no more places, every
+/// link holding a key shares that key's one list, and every link still names
+/// each moved document its keys could name.
+#[test]
+fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_them() {
+    const MOVED: usize = 40;
+    let work = |holders: usize| {
+        let mut vault = Vault::new(&format!("resolution-reductions-{holders}"), Sensitive);
+        let moved: Vec<String> = (0..MOVED)
+            .map(|at| {
+                format!(
+                    "a/{at:04}/{}.md",
+                    if at.is_multiple_of(2) { "t.v" } else { "t" }
+                )
+            })
+            .collect();
+        let held: Vec<String> = (0..holders).map(|at| format!("h/{at:04}.md")).collect();
+        let mut documents: Vec<(&str, &str)> =
+            moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
+        documents.extend(held.iter().enumerate().map(|(at, holder)| {
+            let body = if at.is_multiple_of(2) {
+                "[[t.v]]\n"
+            } else {
+                "[[t.md]]\n"
+            };
+            (holder.as_str(), body)
+        }));
+        vault.write(&documents);
+        let plan = moved.iter().fold(PathOverlay::new(), |overlay, origin| {
+            overlay.with(path(origin), true, false).with(
+                path(&origin.replacen("a/", "b/", 1)),
+                false,
+                true,
+            )
+        });
+        let snapshot = vault.snapshot();
+        let mut named: BTreeMap<String, BTreeSet<Vec<String>>> = BTreeMap::new();
+        let mut lists: Vec<std::sync::Arc<[norn_store::DocumentPath]>> = Vec::new();
+        let work = snapshot
+            .resolution_changes(&plan, &[], &declared(), |change| {
+                for list in change.before_targets.lists() {
+                    if !lists.iter().any(|seen| std::sync::Arc::ptr_eq(seen, list)) {
+                        lists.push(std::sync::Arc::clone(list));
+                    }
+                }
+                let mut places: Vec<String> = change
+                    .before_targets
+                    .iter()
+                    .map(|place| place.as_str().to_string())
+                    .collect();
+                places.sort();
+                named
+                    .entry(change.link.target.clone())
+                    .or_default()
+                    .insert(places);
+            })
+            .expect("a judgment");
+        assert_eq!(work.links_evaluated, holders as u64);
+        let mut stems = moved.clone();
+        stems.sort();
+        let stem: Vec<String> = stems
+            .iter()
+            .filter(|at| at.ends_with("/t.md"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            named,
+            BTreeMap::from([
+                ("t.md".to_string(), BTreeSet::from([stem])),
+                ("t.v".to_string(), BTreeSet::from([stems])),
+            ]),
+            "each link names every moved document its keys could name"
+        );
+        assert_eq!(
+            lists.len(),
+            2,
+            "one shared list per key that could name a moved document, however many links"
+        );
+        work.targets_read
+    };
+
+    let few = work(10);
+    let many = work(100);
+
+    assert_eq!(few, many);
+}
+
+/// **An overlay holds each path once, as it was listed last**: listing a
+/// file again replaces what the overlay said of it rather than adding it, so
+/// building an overlay costs a keyed lookup per file listed.
+#[test]
+fn an_overlay_holds_each_path_once_as_listed_last() {
+    both_orders("resolution-overlay-once", |mut vault| {
+        vault.write(&[("b.md", "[[a]]\n")]);
+        let plan =
+            PathOverlay::new()
+                .with(path("a.md"), true, false)
+                .with(path("a.md"), false, true);
+
+        assert_eq!(plan.len(), 1);
+        let (judged_links, _) = vault.judge(&plan, &[]);
+        assert_eq!(judged_links, [judged("b.md", "a", "none", "one:a.md")]);
+    });
+}
+
 /// What judging a plan that creates `new/index.md` cost over `vault` holding
 /// `members` documents `{place}/aNNNN/index.md` beside `zz/index.md` and
 /// `holder.md` linking `[[index]]`: the links it judged, its work, and the

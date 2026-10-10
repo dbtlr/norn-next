@@ -152,10 +152,10 @@
 //! selected missing field from the defaults its contributing rules declare
 //! (`norn-host`'s `planner::repair::declared`), replaces an offending value
 //! by the member a `one_of`'s synonym maps it to, and removes or renames a
-//! forbidden field as the rule declares. **A dormant carrier beyond that:**
-//! a rule's `allowed_paths` route, which repair will move a misplaced document
-//! along once NORN-380 plans routes, is read and filled ([`Rule::fill_route`])
-//! and not yet reached by any caller. A rule's declaration reaches `norn-host` too: it reads each rule's accessors into
+//! forbidden field as the rule declares, and moves a misplaced document into
+//! the folder its rule's `allowed_paths` route names, the route filled for
+//! the document's path ([`Rule::fill_route`]). A rule's declaration reaches
+//! `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
 //!
@@ -205,8 +205,8 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// `norn-host` reads its accessors into the declaration `describe`'s rule
 /// facet reports, and repair reads the defaults its required fields declare,
 /// the synonyms its `one_of` maps, the fix it declares for a forbidden field
-/// and, once NORN-380 plans routes, the route its `allowed_paths` sends a
-/// misplaced document along (see [`Rule::fill_route`]).
+/// and the route its `allowed_paths` sends a misplaced document along (see
+/// [`Rule::fill_route`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -560,8 +560,7 @@ impl Route {
     /// filled path as a document path too.
     ///
     /// Read through [`Rule::fill_route`], which fills a misplaced document's
-    /// destination as [`Rule::fill_default`] fills a rule default. A dormant
-    /// carrier: NORN-380, which plans routes, is the consuming step.
+    /// destination as [`Rule::fill_default`] fills a rule default.
     fn fill(&self, at: Option<LocalTimestamp>, captures: Captures) -> Result<String, FillError> {
         super::creation::fill_path(
             self.template.parts(),

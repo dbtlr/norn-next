@@ -2695,9 +2695,12 @@ untrusted refusal.
 next batch of the findings its request selects — validate's predicates, kinds, severity and
 rule — as whole documents in path order (the builder's repair batch), under one read hold.
 `limit` is a soft target, and a batch is never cut inside a document. The same hold plans the
-batch's findings into operations and resolves them on its snapshot as a preview does; the
-hold is then given back, and the resolved plan enters `Host::apply` as a resolved plan, so
-the applier judges and writes a repair as it does any plan and is not told it is one. A
+batch's findings into operations, resolves them on its snapshot as a preview does, and
+judges the resolved plan by the applier's own preview judgment, once: a preview answers
+that judgment on the hold, as a preview of the same resolved plan sent to `Host::apply`
+answers it, and an apply gives the hold back and enters `Host::apply` with the resolved
+plan, so the applier judges and writes a repair as it does any plan and is not told it is
+one. A
 selected finding has a declared fix where a rule the composed document's judgment cites
 declares one for it. A `field/required-missing` finding fills from the default the rules
 requiring the field declare, filled from the rule's own captures and the plan's one clock
@@ -2711,13 +2714,67 @@ of the new field to the old one's whole value, then a `remove_frontmatter` of th
 requiring it) as a rule declares. Each operation is numbered
 `repair-1`, `repair-2` and on in plan order and cited at the `declared` confidence with the
 findings it fixes, and one writing a clock-filled value notes that it is the repair's time.
-**A `document/misplaced` finding is skipped until routes are planned (NORN-380).** A rule's
-`allowed_paths` route moves a document with a link cascade that rewrites documents no
-judgment of one document's own fixes sees, so it is judged with the whole plan; that design
-is NORN-380's. Until it lands the finding is `no_declared_fix` with the value it judged where
-it has one, and where a rule its row's rule set cites declares a route, the skip's note says so and
-that routes are planned by NORN-380; the note is decided from the batch's rule sets, so the
-document is not read for it. A document's fixes compose in finding order — kind,
+**A `document/misplaced` finding is moved along its rules' route.** The placement rules
+its finding cites each propose their `allowed_paths` route, filled as a default is — the
+rule's own captures where the document stands and the plan's one clock reading — with the
+document's file name after it, as a document made there is spelled, each folder above it
+that stands spelled as its parent lists it. Candidates agree as one place under the root's
+case rule. The route composes first: one `move_document`, judged where the document lands by
+the applier's one judge against its before-state, so `match.path`, `exclude.path` and
+`allowed_paths` read the destination; then the document's other fixes compose after it
+there, addressed at the destination, so a route out of a rule's area drops that rule's
+selected findings. The document's fixes are composed where it stands too, and a route
+skipped later leaves the document with those. A misplaced finding no rule its row's rule set
+cites routes is `no_declared_fix`, decided from the batch's rule sets, so the document is
+not read for it. **A route's link cascade is judged by construction.** The move carries the
+cascade the one planner generates for any move, written by the plan's one resolution: every
+link the text layer can respell is rewritten, and every other is listed on the forecast with
+the reason a Layer 4 move's forecast gives it, so an unrespellable link never holds a route
+back. That holds however many links a route leaves broken: a holder whose frontmatter block
+stands near the 16 KiB bound the text layer reads may take only some of its respellings
+before the block would pass the bound, and every link past that point is left as written,
+broken once its document moves, and advised on — a repair moving 888 documents a hub lists in
+a frontmatter block that close to the bound respells 22 of its links and leaves 866 broken. The cascade rewrites documents no judgment of the moved document sees, but the schema
+judge reads a document's path, its frontmatter and its body's tags, a body link's rewrite
+never changes a tag (the text layer proves each rewrite by reading it back), and a
+frontmatter Markdown link is no link; so a cascade changes a judgment only where it
+respells a frontmatter wikilink in a field a rule reads by value — a `match.frontmatter`
+key of any rule, the tags field, a field declared a type other than text or link, or a
+field whose combined constraint holds a closed set, a length limit or a forbiddance, or on
+which a finding stands, at any state its holder may end in: its before-state, its fixes
+composed where it stands, and its route and fixes composed where that route lands. A
+frontmatter wikilink may be respelled where it resolves before the plan to exactly a routed
+document and is not a bare single-segment stem, which keeps naming the document since a
+route keeps its file name, unless a route of the batch carries a document of that stem
+across the ambiguity-ignore set, as the store's own rule reads it; and where the text layer
+can place it, since a link with no bytes a rewrite can write over is left as written by
+every cascade. A placed link for which no spelling of the destination reads back still
+counts as one that may be respelled, which keeps the check local. A route whose cascade may so respell a link is skipped as
+`respells_a_judged_link`, naming the holder and the field; no other route's cascade is
+judged in planning. The batch's routes are read together, through one batched read of the
+resolution door over an overlay of every route and the routed documents' own frontmatter
+links probed beside the links the store holds, and each holder of such a link read and
+judged once, so the check costs the links under the routed documents' keys and is the same
+whatever order the routes are made in. That cost, and the plan's one resolution's, rests on
+the resolution door reading what each key could name once per judgment, however many links
+hold the key and however they interleave with other keys' links, and on each chunk of links
+paying upkeep for its own keys only, never for the keys the overlay names (below). So routes
+cost what their links touch: where their documents share one class — a stem, a dotted stem,
+links written with the extension — not the class once per link, and where each names a class
+of its own, not every route's keys once per chunk. Destinations are then claimed in batch order: a
+destination something stands at — a document a route of the batch moves away included — or
+beneath a document that stands, or at, above or beneath an earlier route's destination, is
+`destination_taken`; a skipped route claims none. **The resolved plan is held to its
+planning's claims.** What the planning claims of every selected finding its document's
+judgment names — fixed, dropped, or still standing where the document ends — is compared
+with the applier's judgment of the resolved plan, cascades and all; a plan that introduces
+a violation, still holds a finding an operation cites or the planning dropped, or no longer
+holds one it left standing on a document it writes, is refused as `vault/plan-refused`
+with a note naming the repair defect. A judgment another check stops first — drift since
+planning, a failed condition, a vault that does not read — answers as the applier answers
+it, and so does a plan the schema passed that the write kernel's judgment of its targets
+then stops, or whose forecast does not read: the judgment is held to the claims only beside
+the preview it completes. A document's fixes compose in finding order — kind,
 field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
@@ -2727,18 +2784,22 @@ holds its finding is no fix. Every selected finding the judgment of a document's
 concludes — a rule's, an undeclared tag, one about the document whole — is decided against
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
-and a removal taking a tag with it drops the tag's. Each fix is judged where its document
-stands, so a plan is resolved once and not judged again in planning. A fix
+and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
+judgment, so a broken or ambiguous link another route's move resolves stays skipped as its
+row reads. Each fix is judged where its document
+ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
-defaults disagree and `tie` where synonyms or forbidden fixes do, each with every
-candidate and its rule, `ambiguous_capture` where a default reads a capture its
-rule's `match.path` binds several ways, `rename_onto_occupied_field` where a rename's field
+defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
+candidate and its rule, `ambiguous_capture` where a default or a route reads a capture its
+rule's `match.path` binds several ways, `destination_taken` and `respells_a_judged_link`
+for a route as above, `rename_onto_occupied_field` where a rename's field
 is already held, `brings_in_required_fields` naming each field
 and its declared default where the fix brings in a rule requiring a field the document lacks
 (a field whose rules declare differing defaults is named with none, and the skip's note says
 so),
-and `judge_would_refuse` with its candidates where it introduces any other violation. A
+and `judge_would_refuse` with its candidates where it introduces any other violation, or
+where a route fills to no folder a document can be moved into. A
 finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
@@ -2750,8 +2811,12 @@ and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
 resolution: each document holding a finding a declared fix may answer is read whole once,
-beside resolution and never a second time; a document holding no such finding is not read. Those bytes stay held for the batch's
-planning, so the planning heap grows with the bytes of the batch's fixed documents. The plan carries a provenance block recording
+beside resolution and never a second time, and so is each document holding a link a
+route's cascade may respell, which the cascade composes from the same bytes, judged only
+where its frontmatter holds that link, since the store records no link's place as body or
+frontmatter; a document holding no such finding or link is not read. Those bytes stay held for the batch's
+planning, so the planning heap grows with the bytes of the batch's fixed documents and of
+those holders. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request
@@ -2892,10 +2957,10 @@ needs it — any creation by rule, whose target and templates may read it, and a
 reading `{{now}}`, `{{date}}` or `{{time}}` that is proposed for a field or compared with a
 filled value, even where the field then conflicts — and every template and default of the plan
 fills from that reading; a creation needing no reading never fails on an unreadable clock.
-A repair plan's rule defaults and the planning its operations resolve through
-share one reading, taken the first time a default it fills reads a clock token; a
-clock that gives no reading leaves each such default's operation unresolved, and the repair
-is refused as a creation is. Every reading goes
+A repair plan's rule defaults, its routes and the planning its operations resolve through
+share one reading, taken the first time a default or a route it fills reads a clock token;
+a clock that gives no reading leaves each such default's or route's operation unresolved,
+and the repair is refused as a creation is. Every reading goes
 through one counted seam, tallied as `clock_reads` on the account the planning thread works
 for: the read account for a preview's or a repair's planning hold, the job account for an
 apply's planning.
@@ -3216,7 +3281,16 @@ a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
 and a head seeks the members its class admits, never the ones the ambiguity-ignore set keeps
-out. A
+out. A key that could name a target or a place the plan reaches is resolved once per
+judgment, its targets read off the overlay then, and held until the judgment ends — no more
+such keys than the overlay names — so links naming two classes in turn read each class
+once; any other key's head is two rows and is held only while consecutive chunks hold it.
+The keys held for the judgment are held apart from the others, and each chunk's end sweeps
+only the others — the last chunk's keys and its own — so what a chunk pays to drop what the
+next will not reuse follows its own links, never the keys the overlay names.
+A link held under several keys hands back each key's shared list of the places it could
+name rather than a merge of them, and the change set reads each list once, so no link costs
+more than its keys, however many documents a key could name. A
 plan that changes no document's presence, deletes no document, writes no link and carries
 no wikilink rewrite records nothing and reads no snapshot; a delete is read even where the
 plan refills its path, since the document there is then replaced with every presence as it

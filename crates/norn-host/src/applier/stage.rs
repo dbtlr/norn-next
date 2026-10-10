@@ -273,6 +273,28 @@ pub(super) fn check<V: VaultView>(
 where
     V::Error: std::fmt::Display,
 {
+    check_judging(plan, view, declared, links, citations, None)
+}
+
+/// [`check`] `plan`, setting `judged` to what its schema judgment concludes
+/// where the check reaches the schema with nothing else stopping the plan:
+/// the one judgment, asked for the violations a plan introduces and what
+/// each document it writes holds ([`super::preview_judged`]). **This is the
+/// one place that says the schema was reached**: where another check stopped
+/// the plan first — drift, a condition, a shape that is not what its
+/// operations do, a link whose resolution moved, a vault or a snapshot that
+/// does not read — `judged` is left `None`.
+pub(super) fn check_judging<V: VaultView>(
+    plan: &ResolvedPlan,
+    view: &V,
+    declared: &Declared,
+    links: Links<'_>,
+    citations: &mut Citations,
+    judged: Option<&mut Option<super::Whole>>,
+) -> Result<Checked, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
     // before it could pass unread; so is a creation by rule, which names no
@@ -419,7 +441,15 @@ where
         normalizer,
         declared,
     };
-    let violations = schema.violations(&units, &contents, &carried, citations);
+    let mut holdings = schema::Holdings::new();
+    let violations = schema.violations(&units, &contents, &carried, citations, &mut holdings);
+    if let (Some(judged), true) = (judged, checks.is_empty()) {
+        *judged = Some(super::Whole {
+            introduced: violations.clone(),
+            holdings,
+            rule_sets: citations.cited_by(&violations),
+        });
+    }
     let forced = if plan.force {
         violations
     } else {
@@ -813,12 +843,19 @@ impl Judging<'_> {
     /// identity the destination introduces refuses, a changed combined
     /// constraint included. Where no rule reads a place, nothing is judged
     /// again.
+    ///
+    /// **What each written result holds is kept in `holdings`**: every
+    /// finding its judgment concludes, by the path it is written at — for a
+    /// carried document, those its frontmatter block's judgment concludes
+    /// where it lands, a rule's and a field declaration's, the rest being
+    /// the moved bytes' own wherever they stand.
     fn violations(
         &self,
         units: &[Unit],
         contents: &[Option<Written>],
         carried: &[Option<CarriedReading>],
         citations: &mut Citations,
+        holdings: &mut schema::Holdings,
     ) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
         let case = crate::stored_path_order(self.normalizer.case_sensitivity()).glob_case();
@@ -838,6 +875,7 @@ impl Judging<'_> {
                         let path = &self.plan.transitions[written].path;
                         let before = schema::judge_block(source, block, self.declared, case);
                         let after = schema::judge_block(path, block, self.declared, case);
+                        holdings.insert(path.clone(), schema::Holding::of_block(&after));
                         checks.extend(schema::introduced(path, after, &[before], citations));
                     }
                     continue;
@@ -876,6 +914,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared, case);
+            holdings.insert(path.clone(), schema::Holding::of_whole(&after));
             checks.extend(schema::introduced(path, after, &before, citations));
         }
         checks
@@ -921,6 +960,12 @@ pub(super) fn judge(
     normalizer: &PathNormalizer,
     checked: &Checked,
 ) -> Result<(), Stop> {
+    #[cfg(test)]
+    if KERNEL_REFUSES.with(std::cell::Cell::get) {
+        return Err(Stop::Failed(
+            "the kernel refused, as a case asked".to_string(),
+        ));
+    }
     let order = publication_order(
         plan,
         &checked.units,
@@ -939,6 +984,24 @@ pub(super) fn judge(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether [`judge`] stops every plan as a kernel refusal would: a stop
+    /// after the schema judgment, which a repair's guard must answer as the
+    /// applier answers it.
+    static KERNEL_REFUSES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `run`, with [`judge`] stopping every plan on this thread as the kernel
+/// refusing a target would.
+#[cfg(test)]
+pub(crate) fn kernel_refusing<T>(run: impl FnOnce() -> T) -> T {
+    KERNEL_REFUSES.with(|refuses| refuses.set(true));
+    let ran = run();
+    KERNEL_REFUSES.with(|refuses| refuses.set(false));
+    ran
 }
 
 /// Hand `unit`, with `content`, to the kernel through `kernel` — staging it,

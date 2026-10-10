@@ -52,6 +52,7 @@
 //! stands and cannot be read.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,8 +64,8 @@ use norn_store::{
 };
 use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
-    DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, MoveParams,
-    NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
+    DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, Forecast,
+    MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
     RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
     UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
@@ -86,7 +87,7 @@ use crate::planner::links::LinkIndex;
 use crate::planner::repair;
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::rule::Rules;
-use crate::planner::view::{Body, Entry, Remembered, TreeView, VaultView};
+use crate::planner::view::{Remembered, TreeView, VaultView};
 use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
@@ -190,33 +191,6 @@ fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, Erro
         .map_err(|error| unreadable(name, error))
 }
 
-/// What a repair reads of the vault, through the view its plan resolves on.
-struct RepairReading<'v, V>(&'v V);
-
-impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
-    type Error = V::Error;
-
-    /// The bytes of the document at `path` as the view reads it whole, or
-    /// that no document whose bytes can be read stands there: what a repair
-    /// composes a document's fixes onto.
-    fn before(&self, path: &DocumentPath) -> Result<repair::Before, V::Error> {
-        let Ok(at) = self
-            .0
-            .normalizer()
-            .normalize(std::path::Path::new(path.as_str()))
-        else {
-            return Ok(repair::Before::Unread);
-        };
-        Ok(match self.0.entry(&at)? {
-            Entry::Document {
-                body: Body::Held(bytes),
-                ..
-            } => repair::Before::Held(bytes),
-            _ => repair::Before::Unread,
-        })
-    }
-}
-
 /// A repair batch's findings: its rows, and the rule sets they cite.
 #[derive(Clone, Copy)]
 struct Findings<'b> {
@@ -224,21 +198,37 @@ struct Findings<'b> {
     rule_sets: &'b [RuleSet],
 }
 
+/// What a repair batch plans to: the resolved plan, its forecast, the
+/// findings it skips, the findings each operation fixes, and what it claims
+/// of every finding the judgment of its document's bytes names.
+#[derive(Debug)]
+pub(crate) struct Repaired {
+    pub(crate) plan: ResolvedPlan,
+    pub(crate) forecast: Forecast,
+    pub(crate) skipped: Vec<SkippedFinding>,
+    pub(crate) citations: Vec<Citation>,
+    pub(crate) claims: Vec<repair::Claim>,
+}
+
 /// The resolved plan of the repair of the batch `batch`, under
 /// `ground`'s declaration, with the findings it skips and the findings each
-/// operation fixes: each fix composed onto the bytes `view` reads, its clock
-/// read once through `clock`, and the plan it makes resolved on `snapshot`.
+/// operation fixes: each fix composed onto the bytes `view` reads, each
+/// route's destination read there and the links its cascade may respell
+/// read on `snapshot`, its clock read once through `clock`, and the plan it
+/// makes resolved on `snapshot`.
 ///
 /// **A repair whose clock gives no reading is refused as a creation is**: the
-/// operation of each default that reads the clock is left unresolved, naming
-/// the clock, and `vault/plan-refused` answers it in both modes.
+/// operation of each default or route that reads the clock is left
+/// unresolved, naming the clock, and `vault/plan-refused` answers it in both
+/// modes.
 ///
 /// **It plans once and resolves once**: the batch is planned by
-/// [`repair::plan`], every fix judged where its document stands by the
-/// applier's own schema check, and the operations resolved through the one
-/// planner on the shared view. Routes, whose link cascade rewrites documents
-/// no judgment of one document's own fixes sees, are not planned yet
-/// (NORN-380); a misplaced finding skips until they are.
+/// [`repair::plan`], every fix judged where its document stands — or where
+/// its route lands — by the applier's own schema check, each route held
+/// back where its cascade may respell a link a rule reads by value, and the
+/// operations resolved through the one planner on the shared view, which
+/// writes every route's cascade. The plan's claims are held to the applier's
+/// judgment of it afterwards ([`guarded`]).
 fn repaired<V: VaultView>(
     batch: Findings<'_>,
     ground: &PlanGround,
@@ -247,7 +237,7 @@ fn repaired<V: VaultView>(
     view: &V,
     clock: &OneReading<'_>,
     refused: &dyn Fn(PageRefused) -> ErrorEnvelope,
-) -> Result<(ResolvedPlan, Vec<SkippedFinding>, Vec<Citation>), ErrorEnvelope>
+) -> Result<Repaired, ErrorEnvelope>
 where
     V::Error: std::fmt::Display,
 {
@@ -258,8 +248,15 @@ where
         clock,
         rule_sets: batch.rule_sets,
     };
-    let planned = repair::plan(batch.rows, &repairing, &RepairReading(view))
-        .map_err(|error| unreadable(name, error))?;
+    let reading = repair::Over {
+        view,
+        index: snapshot,
+    };
+    let planned =
+        repair::plan(batch.rows, &repairing, &reading).map_err(|unread| match unread {
+            repair::Unread::View(error) => unreadable(name, error),
+            repair::Unread::Index(refusal) => refused(refusal),
+        })?;
     let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
     // The resolution reads the clock through the plan's one reading: no
     // repair plan reaches a clock read in expansion today, and the shared
@@ -267,8 +264,144 @@ where
     let mut resolution =
         resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
     resolution.unresolved.extend(planned.unresolved);
-    let plan = fully_resolved(resolution)?.plan;
-    Ok((plan, planned.skipped, planned.citations))
+    let resolution = fully_resolved(resolution)?;
+    Ok(Repaired {
+        plan: resolution.plan,
+        forecast: resolution.forecast,
+        skipped: planned.skipped,
+        citations: planned.citations,
+        claims: planned.claims,
+    })
+}
+
+/// The answer a preview of the repair plan `plan` gives, judged by the
+/// applier's own check on `ground`, its links on `snapshot`, once
+/// ([`applier::preview_judged`]); or the refusal of a plan whose judgment
+/// breaks what its planning claims, `claims`, as a repair defect.
+///
+/// **The judgment of the whole plan is the backstop of each document's
+/// own.** Planning judges each document where it ends, its fixes composed
+/// and its route judged where it lands, and holds back each route whose
+/// cascade may change another document's judgment; the resolved plan, every
+/// cascade in it, is then judged whole, and where the two disagree the
+/// planning was wrong, so the plan is refused as `vault/plan-refused` with a
+/// note naming the repair defect: the plan introduces a violation; a finding
+/// an operation cites, or that planning dropped, still holds where its
+/// document lands; or a finding planning left standing on a document the plan
+/// writes no longer holds there. `forecast` is the planning's, which the
+/// refusal carries, and `cited` the findings each operation fixes.
+///
+/// **Only a judgment the schema alone could stop is held to the claims**: a
+/// plan another check stops — drift since planning, a failed condition, a
+/// vault that does not read, the kernel's judgment of its targets after the
+/// schema passed it, or a forecast that does not read — answers as the
+/// applier answers it.
+fn guarded(
+    plan: ResolvedPlan,
+    (forecast, claims, cited): (&Forecast, &[repair::Claim], &[Citation]),
+    ground: &PlanGround,
+    snapshot: &PlanSnapshot<'_>,
+) -> Result<Result<ApplyReport, PageRefused>, ErrorEnvelope> {
+    let (answer, whole) = applier::preview_judged(
+        plan.clone(),
+        &ground.root,
+        ground.identity,
+        &ground.exclusions,
+        &ground.schema,
+        &ground.declared,
+        snapshot,
+    );
+    let written: BTreeSet<&DocumentPath> = plan
+        .transitions
+        .iter()
+        .filter(|transition| transition.after.is_document())
+        .map(|transition| &transition.path)
+        .collect();
+    if let Some(whole) = whole
+        && let Some(defect) = defect(&whole, claims, cited, &written)
+    {
+        let checks = whole
+            .introduced
+            .into_iter()
+            .map(norn_wire::RefusedCheck::violation)
+            .collect();
+        return Err(ErrorEnvelope::new(
+            format!("repair defect: {defect}; nothing was written"),
+            ErrorDetail::plan_refused(
+                plan,
+                forecast.clone(),
+                checks,
+                whole.rule_sets,
+                Vec::new(),
+                Vec::new(),
+            ),
+        ));
+    }
+    Ok(previewed(answer, Vec::new()))
+}
+
+/// Where the applier's judgment of a repair plan, `whole`, breaks what its
+/// planning claims, `claims`, in words; `None` where it keeps every claim.
+/// `cited` says which findings an operation fixes, and `written` names each
+/// document the plan writes.
+///
+/// A claim on a document the plan does not write is kept by construction:
+/// the document stands as planning read it. Every document the plan writes
+/// is judged whole, so a claim on one always finds what it holds.
+fn defect(
+    whole: &applier::Whole,
+    claims: &[repair::Claim],
+    cited: &[Citation],
+    written: &BTreeSet<&DocumentPath>,
+) -> Option<String> {
+    if let Some(violation) = whole.introduced.first() {
+        return Some(format!(
+            "the plan introduces `{}`{} at `{}`, which its planning judged it would not",
+            violation.kind.as_str(),
+            on(violation.target.as_deref()),
+            violation.path,
+        ));
+    }
+    claims.iter().find_map(|claim| {
+        let holding = whole.holdings.get(&claim.at);
+        debug_assert!(
+            holding.is_some() || !written.contains(&claim.at),
+            "a claim on `{}`, which the plan writes, finds no judgment of it",
+            claim.at
+        );
+        let holding = holding?;
+        if !holding.judges(&claim.held) || holding.holds(&claim.held) == claim.standing {
+            return None;
+        }
+        let held = format!(
+            "`{}`{}",
+            claim.held.kind.as_str(),
+            on(claim.held.field.as_deref())
+        );
+        Some(if claim.standing {
+            format!(
+                "`{}` no longer holds {held}, which the plan leaves standing",
+                claim.at
+            )
+        } else if cited
+            .iter()
+            .any(|citation| citation.findings.iter().any(|f| f.finding == claim.finding))
+        {
+            format!("`{}` still holds {held}, which the plan fixes", claim.at)
+        } else {
+            format!(
+                "`{}` still holds {held}, which the plan no longer finds",
+                claim.at
+            )
+        })
+    })
+}
+
+/// ` on `field``, where a finding stands on a field.
+fn on(field: Option<&str>) -> String {
+    field
+        .map(|field| format!(" on `{field}`"))
+        .unwrap_or_default()
 }
 
 /// Plan `authored` as [`resolve_on`] does, reading the vault through `view`
@@ -683,15 +816,28 @@ fn preview_resolved(
     ground: &PlanGround,
     snapshot: &PlanSnapshot<'_>,
 ) -> Result<ApplyReport, PageRefused> {
-    match applier::preview(
-        plan,
-        &ground.root,
-        ground.identity,
-        &ground.exclusions,
-        &ground.schema,
-        &ground.declared,
-        snapshot,
-    ) {
+    previewed(
+        applier::preview(
+            plan,
+            &ground.root,
+            ground.identity,
+            &ground.exclusions,
+            &ground.schema,
+            &ground.declared,
+            snapshot,
+        ),
+        left_behind,
+    )
+}
+
+/// The answer the applier's preview `answer` gives, its forecast naming the
+/// files `left_behind`: the same plan and its forecast, or the answer an
+/// apply of it would end in.
+fn previewed(
+    answer: applier::Previewed,
+    left_behind: Vec<norn_wire::FilePath>,
+) -> Result<ApplyReport, PageRefused> {
+    match answer {
         Ok((plan, forecast)) => Ok(ApplyReport::previewed(
             plan,
             forecast.with_left_behind(left_behind),
@@ -826,17 +972,23 @@ where
     }
 
     /// Answer a `repair`: the next batch of the findings `params` selects,
-    /// planned as one resolved plan and previewed or applied through
-    /// [`Host::apply`].
+    /// planned as one resolved plan and previewed or applied.
     ///
     /// The batch is whole documents in path order ([`Snapshot::repair_batch`]),
     /// read under one hold with the plan resolved on that hold's snapshot.
     /// The plan carries its [`Provenance`]: the findings it left alone, the
     /// findings each operation fixes, the generation it read, the cursor that
     /// continues the batch, and, on a first batch, how many selected findings
-    /// remain after it. The hold is given back before the plan enters
-    /// [`Host::apply`], so the applier judges and writes the resolved plan as
-    /// it judges any, and the provenance it carries decides nothing there.
+    /// remain after it.
+    ///
+    /// **The plan is judged by the applier's own check on the same hold**,
+    /// and held to what its planning claims of every finding (`guarded`):
+    /// a plan whose judgment breaks a claim is refused as a repair defect in
+    /// both modes. A preview answers that one judgment, as a preview of the
+    /// same resolved plan sent to [`Host::apply`] answers, and is not checked
+    /// twice; an apply then gives the hold back and enters [`Host::apply`],
+    /// which judges and writes the resolved plan as it judges any, the
+    /// provenance it carries deciding nothing there.
     ///
     /// A request a read would refuse is refused as the read refuses it,
     /// including a cursor no repair minted. A selection holding parts the
@@ -846,70 +998,95 @@ where
     /// nothing, and a write goes no further than that nothing.
     pub fn repair(&self, params: RepairParams) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
-        let plan = self.repair_plan(&params)?;
-        self.apply(ApplyParams::new(mode, PlanDocument::resolved(plan)))
+        let (reading, (plan, previewed)) = self.repair_plan(&params)?;
+        match mode {
+            ApplyMode::Preview => {
+                Ok(PendingApply::answered(previewed.map(|report| {
+                    VaultAnswer::new(reading, Vec::new(), report)
+                })))
+            }
+            ApplyMode::Apply => self.apply(ApplyParams::new(mode, PlanDocument::resolved(plan))),
+        }
     }
 
     /// The resolved plan of the batch `params` selects, planned on one read
-    /// hold that is given back when this returns.
-    fn repair_plan(&self, params: &RepairParams) -> Result<ResolvedPlan, ErrorEnvelope> {
+    /// hold that is given back when this returns, with the answer its preview
+    /// gives on that hold.
+    #[allow(clippy::type_complexity)] // One plan and its preview's answer.
+    fn repair_plan(
+        &self,
+        params: &RepairParams,
+    ) -> Result<
+        (
+            AnswerReading,
+            (ResolvedPlan, Result<ApplyReport, ErrorEnvelope>),
+        ),
+        ErrorEnvelope,
+    > {
         let name = registered_name(&params.vault)?;
-        let (_, plan) =
-            self.planning_on_hold(name, params.vault.clone(), |ground, snapshot, refused| {
-                let selection = RepairSelection::from(params);
-                let batch = snapshot
-                    .reading(|held| held.repair_batch(&selection, snapshot.declared))
-                    .map_err(refused)?;
-                self.count_repair_batch(RepairBatchCost::of(
-                    batch.as_ref().ok().map(|batch| &batch.work),
+        self.planning_on_hold(name, params.vault.clone(), |ground, snapshot, refused| {
+            let selection = RepairSelection::from(params);
+            let batch = snapshot
+                .reading(|held| held.repair_batch(&selection, snapshot.declared))
+                .map_err(refused)?;
+            self.count_repair_batch(RepairBatchCost::of(
+                batch.as_ref().ok().map(|batch| &batch.work),
+            ));
+            let batch = batch.map_err(|refusal| refused(page_refusal(refusal)))?;
+            // A read answers an unsatisfied part in-band and matches
+            // nothing; a write goes no further than that nothing
+            // (`planner::expand`), so the repair is refused, naming every
+            // part, before anything is planned.
+            if !batch.unsatisfied.is_empty() {
+                return Err(ErrorEnvelope::new(
+                    "the repair's selection holds parts that could not be applied as \
+                     asked, so nothing was planned",
+                    ErrorDetail::unsatisfied(batch.unsatisfied),
                 ));
-                let batch = batch.map_err(|refusal| refused(page_refusal(refusal)))?;
-                // A read answers an unsatisfied part in-band and matches
-                // nothing; a write goes no further than that nothing
-                // (`planner::expand`), so the repair is refused, naming every
-                // part, before anything is planned.
-                if !batch.unsatisfied.is_empty() {
-                    return Err(ErrorEnvelope::new(
-                        "the repair's selection holds parts that could not be applied as \
-                         asked, so nothing was planned",
-                        ErrorDetail::unsatisfied(batch.unsatisfied),
-                    ));
-                }
-                // The batch's `moved` is not carried: a repair cursor names a
-                // path and the batch reads the state that stands now, so
-                // nothing in it is the caller's to act on. Its advisories are
-                // dropped as a `where` target's are (`PlanSnapshot::matching`
-                // reads only the find's rows).
-                // One view of the vault serves the fixes and the planning
-                // they resolve through, so a document a fix is made to is read
-                // once and composed from the bytes its fix was judged on; and
-                // one clock reading serves every default the plan fills.
-                let view = planning_view(ground, name)?;
-                let view = Remembered::over(&view);
-                let reading = OneReading::of(&crate::clock::local_now);
-                let (plan, skipped, citations) = repaired(
-                    Findings {
-                        rows: &batch.rows,
-                        rule_sets: &batch.rule_sets,
-                    },
-                    ground,
-                    name,
-                    snapshot,
-                    &view,
-                    &reading,
-                    refused,
-                )?;
-                let mut provenance =
-                    Provenance::new(batch.snapshot.generation, skipped).with_citations(citations);
-                if let Some(remaining) = batch.remaining {
-                    provenance = provenance.with_remaining(remaining);
-                }
-                if let Some(next) = batch.next {
-                    provenance = provenance.continued_by(next);
-                }
-                Ok(plan.with_provenance(provenance))
-            })?;
-        Ok(plan)
+            }
+            // The batch's `moved` is not carried: a repair cursor names a
+            // path and the batch reads the state that stands now, so
+            // nothing in it is the caller's to act on. Its advisories are
+            // dropped as a `where` target's are (`PlanSnapshot::matching`
+            // reads only the find's rows).
+            // One view of the vault serves the fixes and the planning
+            // they resolve through, so a document a fix is made to is read
+            // once and composed from the bytes its fix was judged on; and
+            // one clock reading serves every route and default the plan
+            // fills.
+            let view = planning_view(ground, name)?;
+            let view = Remembered::over(&view);
+            let reading = OneReading::of(&crate::clock::local_now);
+            let repaired = repaired(
+                Findings {
+                    rows: &batch.rows,
+                    rule_sets: &batch.rule_sets,
+                },
+                ground,
+                name,
+                snapshot,
+                &view,
+                &reading,
+                refused,
+            )?;
+            let mut provenance = Provenance::new(batch.snapshot.generation, repaired.skipped)
+                .with_citations(repaired.citations.clone());
+            if let Some(remaining) = batch.remaining {
+                provenance = provenance.with_remaining(remaining);
+            }
+            if let Some(next) = batch.next {
+                provenance = provenance.continued_by(next);
+            }
+            let plan = repaired.plan.with_provenance(provenance);
+            let previewed = guarded(
+                plan.clone(),
+                (&repaired.forecast, &repaired.claims, &repaired.citations),
+                ground,
+                snapshot,
+            )?
+            .map_err(refused);
+            Ok((plan, previewed))
+        })
     }
 
     /// Plan on one read hold over the vault `name`: the hold, the ground the
@@ -1170,6 +1347,472 @@ mod tests {
         assert_eq!(
             detail,
             &crate::clock::cannot_fill("the rule default for `created`")
+        );
+    }
+
+    /// A vault on disk holding `documents`, its ground pinning `schema`, and
+    /// the store its links are judged on.
+    fn routed_vault(
+        label: &str,
+        schema: &str,
+        documents: &[(&str, &str)],
+    ) -> (
+        Scratch,
+        PlanGround,
+        crate::planner::links::testing::TreeStore,
+    ) {
+        use norn_config::schema::VaultSchema;
+
+        let scratch = Scratch::new(label);
+        for (path, text) in documents {
+            let at = scratch.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, text).unwrap();
+        }
+        let mut ground = ground_over(scratch.root());
+        ground.declared = Arc::new(Declared::pinned(
+            VaultSchema::parse(schema.as_bytes()).expect("a schema"),
+            "a fingerprint",
+        ));
+        let store = crate::planner::links::testing::TreeStore::over(scratch.root());
+        (scratch, ground, store)
+    }
+
+    /// The repair of the misplaced document at `path`, citing every rule of
+    /// `ground`'s schema, planned and resolved over the vault on disk.
+    fn routed(
+        ground: &PlanGround,
+        snapshot: &PlanSnapshot<'_>,
+        path: &str,
+    ) -> Result<Repaired, ErrorEnvelope> {
+        use norn_wire::{FindingKind, Severity};
+
+        let name = VaultName::new("notes").unwrap();
+        let rule_sets = [RuleSet::new(
+            1,
+            ground
+                .declared
+                .schema()
+                .rules()
+                .map(|rule| rule.name().to_string()),
+        )
+        .unwrap()];
+        let misplaced = FindingRow::new(
+            7,
+            FindingKind::Misplaced,
+            Severity::Warning,
+            DocumentPath::new(path).unwrap(),
+            None,
+            None,
+            norn_wire::CandidateHead::new([], 0).unwrap(),
+            None,
+            "misplaced",
+            1,
+        )
+        .citing(1);
+        let view = planning_view(ground, &name).unwrap();
+        let view = Remembered::over(&view);
+        let clock = || panic!("no route here reads the clock");
+        let reading = OneReading::of(&clock);
+        let refused = |refused: PageRefused| -> ErrorEnvelope { panic!("refused: {refused:?}") };
+        repaired(
+            Findings {
+                rows: &[misplaced],
+                rule_sets: &rule_sets,
+            },
+            ground,
+            &name,
+            snapshot,
+            &view,
+            &reading,
+            &refused,
+        )
+    }
+
+    /// The repair plan of `repaired`, held to its claims by [`guarded`].
+    fn guarding(
+        repaired: Repaired,
+        ground: &PlanGround,
+        snapshot: &PlanSnapshot<'_>,
+    ) -> Result<Result<ApplyReport, PageRefused>, ErrorEnvelope> {
+        guarded(
+            repaired.plan,
+            (&repaired.forecast, &repaired.claims, &repaired.citations),
+            ground,
+            snapshot,
+        )
+    }
+
+    /// A rule routing a task into `tasks/`, and one closing a hub's `up` over
+    /// the spelling it holds now.
+    const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[loose/a]]']}\n";
+
+    /// **The judgment of the whole plan refuses a plan its planning's local
+    /// judgment got wrong, as a repair defect**: with the respell check
+    /// blinded, the route moving `loose/a.md` is planned though its cascade
+    /// respells the hub's closed `up`, and the guard refuses the plan as
+    /// `vault/plan-refused`, its note naming the defect and its checks the
+    /// violation, and its forecast the cascade's advisories; planned with the
+    /// check, the route is skipped and the plan passes.
+    #[test]
+    fn the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect() {
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-defect",
+            CLOSED_UP,
+            &[
+                ("loose/a.md", "---\ntype: task\n---\n# A\n"),
+                (
+                    "h.md",
+                    "---\ntype: hub\nup: \"[[loose/a]]\"\nsee: [\"[[loose/a]]\"]\n---\n",
+                ),
+            ],
+        );
+        let snapshot = store.index();
+
+        let blinded = crate::planner::repair::blinding_the_respell_check(|| {
+            routed(&ground, &snapshot, "loose/a.md")
+        })
+        .expect("the blinded repair plans");
+        assert_eq!(blinded.plan.operations.len(), 1, "the route is planned");
+        let refusal = guarding(blinded, &ground, &snapshot).expect_err("the guard refused");
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+        assert!(
+            refusal.message().starts_with("repair defect:") && refusal.message().contains("h.md"),
+            "{}",
+            refusal.message()
+        );
+        let ErrorDetail::PlanRefused {
+            checks, forecast, ..
+        } = refusal.detail()
+        else {
+            panic!("refused with {:?}", refusal.detail());
+        };
+        assert!(
+            matches!(
+                checks.as_slice(),
+                [norn_wire::RefusedCheck::SchemaViolation { .. }]
+            ),
+            "{checks:?}"
+        );
+        // The refusal carries the plan's forecast: the cascade's advisory on
+        // the link it cannot respell included.
+        assert_eq!(
+            forecast.links,
+            [norn_wire::LinkAdvisory::skipped_unplaced(
+                norn_wire::LinkKey::new(
+                    DocumentPath::new("h.md").unwrap(),
+                    norn_wire::LinkFamily::Wikilink,
+                    "loose/a",
+                )
+            )]
+        );
+
+        let checked = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        assert!(checked.plan.operations.is_empty());
+        assert_eq!(
+            checked.skipped[0].reason,
+            norn_wire::SkipReason::RespellsAJudgedLink
+        );
+        let previewed = guarding(checked, &ground, &snapshot).expect("no defect");
+        assert!(matches!(previewed, Ok(ApplyReport::Previewed { .. })));
+    }
+
+    /// **Drift between planning and the guard answers the applier's own
+    /// refusal, not a repair defect**: the routed document is written over
+    /// after the plan was made, so the applier's check stops the plan for
+    /// drift before the schema is asked — though the plan, planned blind,
+    /// also breaks its claims.
+    #[test]
+    fn drift_between_planning_and_the_guard_answers_the_appliers_own_refusal() {
+        let (scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-drift",
+            CLOSED_UP,
+            &[
+                ("loose/a.md", "---\ntype: task\n---\n# A\n"),
+                ("h.md", "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n"),
+            ],
+        );
+        let snapshot = store.index();
+        // Blinded, the plan breaks its claims too, so only the order of the
+        // checks keeps the answer the applier's.
+        let repaired = crate::planner::repair::blinding_the_respell_check(|| {
+            routed(&ground, &snapshot, "loose/a.md")
+        })
+        .expect("the repair plans");
+        assert_eq!(repaired.plan.operations.len(), 1, "the route is planned");
+
+        std::fs::write(
+            scratch.join("loose/a.md"),
+            "---\ntype: task\n---\n# Edited\n",
+        )
+        .unwrap();
+
+        let answered = guarding(repaired, &ground, &snapshot).expect("no repair defect");
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the drifted plan answered {answered:?}");
+        };
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+        assert!(
+            !refusal.message().contains("repair defect"),
+            "{}",
+            refusal.message()
+        );
+        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+            panic!("refused with {:?}", refusal.detail());
+        };
+        assert!(
+            checks
+                .iter()
+                .any(|check| matches!(check, norn_wire::RefusedCheck::Drifted { .. })),
+            "{checks:?}"
+        );
+    }
+
+    /// **A stop after the schema's judgment answers the applier's own
+    /// refusal too**: the plan claims a finding stands where its document
+    /// lands that no longer holds there, which the schema's judgment shows,
+    /// but the kernel's judgment of its targets refuses the plan, so the
+    /// answer is the kernel's, as an apply of the plan would end, never a
+    /// repair defect.
+    #[test]
+    fn a_kernel_stop_answers_the_appliers_own_refusal_though_the_plan_breaks_its_claims() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-kernel",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+
+        let answered = crate::applier::kernel_refusing(|| guarding(repaired, &ground, &snapshot))
+            .expect("no repair defect");
+
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the kernel's refusal answered {answered:?}");
+        };
+        assert!(
+            !refusal.message().contains("repair defect"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    /// **A forecast that fails after the schema passed the plan answers the
+    /// applier's own failure too**: the plan claims a finding stands where
+    /// its document lands that no longer holds there, but the preview's
+    /// forecast fails, so the answer is the write that failed, as an apply of
+    /// the plan would end — the judgment is answered only beside a preview
+    /// it completes, never a repair defect.
+    #[test]
+    fn a_failed_forecast_answers_the_appliers_own_failure_though_the_plan_breaks_its_claims() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-forecast",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+
+        let answered = crate::applier::forecast_failing(|| guarding(repaired, &ground, &snapshot))
+            .expect("no repair defect");
+
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the failed forecast answered {answered:?}");
+        };
+        assert!(
+            !refusal.message().contains("repair defect")
+                && refusal.message().contains("the forecast failed"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    /// **A check the applier makes after reading the links answers the
+    /// applier's own refusal too**: the plan claims a finding stands where its
+    /// document lands that no longer holds there, but it also carries an
+    /// address resolution its after-state does not keep, so the applier
+    /// stops it for the failed condition before its schema judgment could be
+    /// held to the claims — never a repair defect.
+    #[test]
+    fn a_failed_address_condition_answers_the_appliers_own_refusal_though_the_plan_breaks_its_claims()
+     {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-condition",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+        repaired
+            .plan
+            .conditions
+            .push(norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    DocumentPath::new("tasks/a.md").unwrap(),
+                    norn_wire::LinkFamily::Wikilink,
+                    "nowhere",
+                ),
+                norn_wire::Resolves::one(DocumentPath::new("nowhere.md").unwrap()),
+            ));
+
+        let answered = guarding(repaired, &ground, &snapshot).expect("no repair defect");
+
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the failed condition answered {answered:?}");
+        };
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+        assert!(
+            !refusal.message().contains("repair defect"),
+            "{}",
+            refusal.message()
+        );
+        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+            panic!("refused with {:?}", refusal.detail());
+        };
+        assert!(
+            checks
+                .iter()
+                .any(|check| matches!(check, norn_wire::RefusedCheck::ConditionFailed { .. })),
+            "{checks:?}"
+        );
+    }
+
+    /// The claims of `repaired`, one more added: `finding` 99, `field` of
+    /// the document `bytes` spell judged at `judged_at`, claimed at `at` as
+    /// `standing`, and cited by the plan's first operation where `cited`.
+    fn claiming(
+        repaired: &mut Repaired,
+        ground: &PlanGround,
+        (judged_at, bytes, field): (&str, &[u8], &str),
+        at: &str,
+        standing: bool,
+        cited: bool,
+    ) {
+        let held = crate::applier::standing(
+            &DocumentPath::new(judged_at).unwrap(),
+            bytes,
+            &ground.declared,
+            norn_wire::CaseFold::Exact,
+        )
+        .holds()
+        .into_iter()
+        .find(|held| held.field.as_deref() == Some(field))
+        .expect("the finding the claim names");
+        repaired.claims.push(repair::Claim {
+            finding: 99,
+            at: DocumentPath::new(at).unwrap(),
+            held,
+            standing,
+        });
+        if cited {
+            repaired.citations[0]
+                .findings
+                .push(norn_wire::CitedFinding::new(
+                    99,
+                    norn_wire::Confidence::Declared,
+                ));
+        }
+    }
+
+    /// **A finding an operation cites, or that planning dropped, still held
+    /// where its document lands is a repair defect**: the moved task still
+    /// lacks the `owner` its rule requires at its destination, and a claim
+    /// that the plan fixes it, or that it no longer stands, is refused,
+    /// naming the finding and which it was.
+    #[test]
+    fn the_guard_refuses_a_plan_still_holding_a_finding_it_fixes_or_dropped() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n    required:\n      owner:\n";
+        for (cited, said) in [
+            (true, "which the plan fixes"),
+            (false, "which the plan no longer finds"),
+        ] {
+            let (_scratch, ground, store) = routed_vault(
+                "norn-host-repair-guard-still-held",
+                schema,
+                &[("loose/a.md", "---\ntype: task\n---\n")],
+            );
+            let snapshot = store.index();
+            let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+            claiming(
+                &mut repaired,
+                &ground,
+                ("tasks/a.md", b"---\ntype: task\n---\n", "owner"),
+                "tasks/a.md",
+                false,
+                cited,
+            );
+
+            let refusal = guarding(repaired, &ground, &snapshot).expect_err("a repair defect");
+
+            assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+            assert!(
+                refusal.message().starts_with("repair defect:")
+                    && refusal.message().contains("`owner`")
+                    && refusal.message().contains(said),
+                "{}",
+                refusal.message()
+            );
+        }
+    }
+
+    /// **A finding planning left standing that no longer holds on a document
+    /// the plan writes is a repair defect**: the inbox rule requiring
+    /// `triage` reads `loose/` alone, so the moved task no longer lacks it
+    /// where it lands, and a claim that it still stands there is refused.
+    #[test]
+    fn the_guard_refuses_a_plan_no_longer_holding_a_finding_it_leaves_standing() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-no-longer-held",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+
+        let refusal = guarding(repaired, &ground, &snapshot).expect_err("a repair defect");
+
+        assert!(
+            refusal.message().starts_with("repair defect:")
+                && refusal.message().contains("no longer holds")
+                && refusal.message().contains("`triage`"),
+            "{}",
+            refusal.message()
         );
     }
 }

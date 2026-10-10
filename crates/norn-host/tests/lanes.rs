@@ -33,6 +33,7 @@ const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
     ("memory", "memory-lane case:"),
     ("host_soak", "soak-lane case:"),
     ("settle", "soak-lane case:"),
+    ("repair_cost", "soak-lane case:"),
 ];
 
 #[test]

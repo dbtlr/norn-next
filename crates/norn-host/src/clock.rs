@@ -23,10 +23,9 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 /// it: the planner's expansion of each creation (`crate::planner::rule`) reads
 /// it the first time a creation by rule, or a rule default reading a clock
 /// token that is proposed for a field or compared with a filled value, asks,
-/// and a repair (`crate::planner::repair`) the first time a rule default it
-/// fills reads a clock token; every template and default of the plan fills
-/// from that one reading ([`OneReading`]). A route reading a clock token will
-/// fill from it too once NORN-380 plans routes; repair plans none today.
+/// and a repair (`crate::planner::repair`) the first time a rule default or a
+/// route it fills reads a clock token; every template, default and route of
+/// the plan fills from that one reading ([`OneReading`]).
 ///
 /// **The one seam the host reads the clock through, and counted**: each call
 /// is one reading, tallied on the account the planning thread works for

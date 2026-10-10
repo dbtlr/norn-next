@@ -3660,16 +3660,17 @@ fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() 
     );
 }
 
-/// The statements a narrowed repair's preview runs on its two read holds'
-/// snapshots, at every scale: the five its batch read accounts for, and the
-/// statement that establishes each of the two snapshots, the repair's own and
-/// the preview's of the plan it resolved.
-const REPAIR_STATEMENTS: u64 = 7;
+/// The statements a narrowed repair's preview runs on its one read hold's
+/// snapshot, at every scale: the five its batch read accounts for, and the
+/// statement that establishes the snapshot. The preview of the plan it
+/// resolved is judged on the same hold, so it establishes none of its own.
+const REPAIR_STATEMENTS: u64 = 6;
 
-/// The read holds a narrowed repair's preview takes, at every scale: the
-/// repair's own and the preview's. A read on a hold of its own would cost the
-/// same at both scales and hide from the pair, so the count is pinned exactly.
-const REPAIR_HOLDS: u64 = 2;
+/// The read holds a narrowed repair's preview takes, at every scale: one,
+/// which its planning and the applier's judgment of its plan share. A read on
+/// a hold of its own would cost the same at both scales and hide from the
+/// pair, so the count is pinned exactly.
+const REPAIR_HOLDS: u64 = 1;
 
 /// **A repair narrowed to a path evaluates the documents that path admits and
 /// no others, and costs the same at both scales (NORN-373).** This drives

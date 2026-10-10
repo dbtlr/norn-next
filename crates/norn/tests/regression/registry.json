@@ -1925,9 +1925,11 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/tests/repair.rs::a_configured_repair_never_writes_what_the_validator_flags",
-          "crates/norn-host/tests/repair.rs::a_misplaced_document_is_skipped_noting_the_route_its_rule_declares",
+          "crates/norn-host/tests/repair.rs::a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips",
           "crates/norn-host/src/planner/repair/declared.rs::fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand",
-          "crates/norn-host/src/planner/repair/declared.rs::a_misplaced_document_a_rule_routes_skips_noting_the_route_is_not_planned_yet"
+          "crates/norn-host/src/planner/repair/declared.rs::a_route_the_judge_refuses_at_its_destination_skips_as_judge_would_refuse",
+          "crates/norn-host/src/planner/repair/declared/respells.rs::a_route_respelling_a_frontmatter_link_in_a_field_read_by_value_skips",
+          "crates/norn-host/src/apply.rs::the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect"
         ]
       }
     },

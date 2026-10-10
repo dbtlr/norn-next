@@ -506,6 +506,41 @@ fn placed_and_unplaced_frontmatter_links_are_reported_in_document_order() {
     }
 }
 
+/// Each frontmatter link is reported beside the top-level field whose value
+/// holds it, at any depth, as the same answer in the same order and with the
+/// same places: the one reading of which field a link stands in.
+#[test]
+fn each_frontmatter_link_is_reported_beside_the_field_holding_it() {
+    let source = "---\na: \"[[One]]\"\nb: [\"[[Two]]\"]\nc:\n  - \"[[Three]]\"\nd:\n  e: \"[[Five]]\"\n---\n[[Body]]\n";
+    let document = Document::parse(source);
+
+    let held = document.frontmatter_field_wikilinks();
+
+    let fields: Vec<(&str, &str, bool)> = held
+        .iter()
+        .map(|held| {
+            (
+                held.field,
+                held.link.target.as_str(),
+                held.link.span.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("a", "One", true),
+            ("b", "Two", false),
+            ("c", "Three", true),
+            ("d", "Five", false)
+        ]
+    );
+    assert_eq!(
+        held.into_iter().map(|held| held.link).collect::<Vec<_>>(),
+        document.frontmatter_wikilinks()
+    );
+}
+
 /// A key is not a value: writing the wikilink form in a property's value is
 /// what opts it into the link graph, and a key spelled as one names the
 /// property.

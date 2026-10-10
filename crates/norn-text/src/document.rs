@@ -44,6 +44,14 @@ pub struct FieldText<'a> {
     pub range: Option<Range<usize>>,
 }
 
+/// One frontmatter wikilink, and the top-level field whose value holds it
+/// ([`Document::frontmatter_field_wikilinks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldLink<'a> {
+    pub field: &'a str,
+    pub link: Link,
+}
+
 /// Why an edit was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditError {
@@ -614,6 +622,19 @@ impl<'a> Document<'a> {
     /// attributable to a field. Its tags are not: [`Document::frontmatter_tags`]
     /// reads the `tags` field's own texts, which a refused split withholds.
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
+        self.frontmatter_field_wikilinks()
+            .into_iter()
+            .map(|held| held.link)
+            .collect()
+    }
+
+    /// Every wikilink the frontmatter holds, as
+    /// [`Document::frontmatter_wikilinks`] reports them, each beside the
+    /// top-level field whose value holds it at any depth: the one reading of
+    /// which field a frontmatter link stands in. A link is placed — its
+    /// `span` is `Some` — exactly where a rewrite can write over it
+    /// ([`crate::RewriteSkip::Unplaced`] refuses every other).
+    pub fn frontmatter_field_wikilinks(&self) -> Vec<FieldLink<'_>> {
         let mut cursor = LineCursor::new(self.source);
         let mut links = Vec::new();
         for text in self.frontmatter_texts(Depth::Values) {
@@ -628,7 +649,10 @@ impl<'a> Document<'a> {
                 let span = start
                     .zip(link.span)
                     .map(|(start, at)| cursor.span_at(start + at.byte_offset));
-                links.push(Link { span, ..link });
+                links.push(FieldLink {
+                    field: text.field,
+                    link: Link { span, ..link },
+                });
             }
         }
         links

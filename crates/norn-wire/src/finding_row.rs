@@ -357,20 +357,18 @@ macro_rules! bounded_head {
     };
 }
 
-// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
-// names each candidate of a missing field whose rule defaults conflict, of
-// declared fixes that tie (synonym members, forbidden remedies) and of an
-// agreed fix the write gate would refuse, with the rule proposing it. Not
-// built yet: a tie at the derived or suggested level, which derived fixes
-// (NORN-375) and suggestions (Layer 5C) consume, and a route's destination,
-// which routes (NORN-380) consume; repair plans no route until then, so the
-// destination candidates below are what it will send once that task lands. The
-// note lives here rather than in the doc comment schemars lifts into the
-// published schema.
+// Layer 5B's declared fixes build it (NORN-374, NORN-380):
+// `planner::repair::declared` names each candidate of a missing field whose
+// rule defaults conflict, of declared fixes that tie (synonym members,
+// forbidden remedies, route destinations) and of an agreed fix the write gate
+// would refuse, with the rule proposing it. Not built yet: a tie at the
+// derived or suggested level, which derived fixes (NORN-375) and suggestions
+// (Layer 5C) consume. The note lives here rather than in the doc comment
+// schemars lifts into the published schema.
 /// One value a repair could have written, and the rule that proposed it: a
 /// field's default or synonym member, a forbidden field's remedy, spelled
 /// `remove` or `rename_to: <field>`, or a destination a route names (a
-/// document path), once repair plans routes.
+/// document path).
 ///
 /// On the wire a candidate is a plain object:
 /// `{"value":{"text":"done","byte_length":4,"hash":"sha256:…"},"rule":"status-default"}`.
@@ -402,20 +400,18 @@ impl ValueCandidate {
     }
 }
 
-// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
-// names each candidate of a missing field whose rule defaults conflict, of
-// declared fixes that tie (synonym members, forbidden remedies) and of an
-// agreed fix the write gate would refuse, with the rule proposing it. Not
-// built yet: a tie at the derived or suggested level, which derived fixes
-// (NORN-375) and suggestions (Layer 5C) consume, and a route's destination,
-// which routes (NORN-380) consume; repair plans no route until then, so the
-// destination candidates below are what it will send once that task lands. The
-// note lives here rather than in the doc comment schemars lifts into the
-// published schema.
+// Layer 5B's declared fixes build it (NORN-374, NORN-380):
+// `planner::repair::declared` names each candidate of a missing field whose
+// rule defaults conflict, of declared fixes that tie (synonym members,
+// forbidden remedies, route destinations) and of an agreed fix the write gate
+// would refuse, with the rule proposing it. Not built yet: a tie at the
+// derived or suggested level, which derived fixes (NORN-375) and suggestions
+// (Layer 5C) consume. The note lives here rather than in the doc comment
+// schemars lifts into the published schema.
 bounded_head!(
     ValueCandidateHead of ValueCandidate, candidates,
     what: "value candidate",
-    head_doc: "The bounded head of the values a repair could have written, with how many there were: conflicting defaults, differing declared fixes (synonym members, a forbidden field's remedies, and route destinations once repair plans routes), the fix a refusal names, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
+    head_doc: "The bounded head of the values a repair could have written, with how many there were: conflicting defaults, differing declared fixes (synonym members, a forbidden field's remedies, and route destinations), the fix a refusal names, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
     list_doc: "The values a repair could have written, each with the rule that proposed it.",
     total_doc: "How many values a repair could have written, which is what makes the candidates a head.",
 );
