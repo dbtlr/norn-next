@@ -139,7 +139,7 @@ pub(super) fn fix_field(
             )
             .and_then(|next| {
                 document
-                    .written_at(replacement.level, row, &set)
+                    .within_threshold(replacement.level, row, &set)
                     .map(|()| next)
             });
         match admitted {

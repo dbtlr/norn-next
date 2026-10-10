@@ -763,7 +763,7 @@ impl Document<'_> {
     /// request's threshold writes; otherwise the skip of the finding `row`
     /// as below the threshold, carrying `proposed`, the operation the plan
     /// would have held.
-    fn written_at(
+    fn within_threshold(
         &self,
         level: Confidence,
         row: &FindingRow,

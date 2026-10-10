@@ -60,7 +60,7 @@ fn reshaped(shape: Shape, value: &AuthoredValue) -> Option<AuthoredValue> {
 
 /// The candidates a derived fix skipped by the judge carries: the one value
 /// it would have written, proposed by no named rule.
-pub(super) fn candidate_of(value: &AuthoredValue) -> SkippedCandidates {
+fn candidate_of(value: &AuthoredValue) -> SkippedCandidates {
     SkippedCandidates::values(
         ValueCandidateHead::new([ValueCandidate::new(head(value))], 1)
             .expect("a head of the one candidate it names"),
@@ -98,7 +98,7 @@ pub(super) fn reshape(
             candidates: &candidate_of(&reshaped),
         },
     )?;
-    document.written_at(Confidence::Derived, row, &set)?;
+    document.within_threshold(Confidence::Derived, row, &set)?;
     Ok(Fix {
         operations: vec![set],
         cited: vec![cited(row, Confidence::Derived, Vec::new())],
