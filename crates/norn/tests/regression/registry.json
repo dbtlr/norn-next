@@ -1922,10 +1922,12 @@
       "property": "No declared fix, rule default or route a repair applies writes a value the validator flags.",
       "sources": ["NRN-494", "NRN-495", "NRN-59", "NRN-438", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "nothing fixes: the repair verb reads and skips every selected finding, since no declared fix, rule default or route exists to apply, so there is no repaired value to judge. The load, finding and selection clauses of unsatisfiable-config-is-rejected-at-load are bound there; this case binds at the Layer 5 exit walk with a named test over every declared fix, default and route, its carrier the declared-fix module pre-committed as crates/norn-host/src/planner/repair.rs::declared.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::declared" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/repair.rs::a_configured_repair_never_writes_what_the_validator_flags",
+          "crates/norn-host/tests/repair.rs::a_route_the_judge_refuses_at_its_destination_skips_as_judge_would_refuse",
+          "crates/norn-host/src/planner/repair/declared.rs::fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand",
+          "crates/norn-host/src/planner/repair/declared.rs::a_route_to_a_place_still_misplaced_skips_as_judge_would_refuse"
         ]
       }
     },
