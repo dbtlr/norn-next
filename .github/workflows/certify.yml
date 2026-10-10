@@ -355,8 +355,10 @@ jobs:
           NORN_SETTLE_PROFILE: soak
       # The clock on a repair's routes: the preview of 400 and 800 routes,
       # alone and with a hub linking every moved document, and of 200, 400
-      # and 800 routes whose documents share one file stem that as many
-      # holders link, recorded as readings. The lane builds without optimisation, so it holds the
+      # and 800 routes whose documents share one class that as many holders
+      # link — a stem, a dotted stem, links written with the extension, and
+      # two stems whose links are taken in turn — recorded as readings. The
+      # lane builds without optimisation, so it holds the
       # readings to growing linearly with the routes and the links they
       # touch; the absolute bars the routes were accepted on are a release
       # build's, read by hand (`crates/norn-host/tests/repair_cost.rs`).
