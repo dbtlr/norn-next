@@ -486,6 +486,13 @@ pub enum SkipReason {
     // published schema.
     /// Something already stands where the fix would write.
     DestinationTaken,
+    /// The fix moves a document, and the move's link cascade would respell
+    /// a link to it in a frontmatter field a schema rule reads by value — a
+    /// selector key, a closed set, a length limit, a forbidden field, the
+    /// tags, a field of a type other than text or link, or a field holding a
+    /// finding — so the respelling could change what the holder is judged
+    /// to be. The note names the holder and the field.
+    RespellsAJudgedLink,
 }
 
 /// The candidates a skipped finding had to choose between: documents, or

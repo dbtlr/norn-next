@@ -11573,6 +11573,7 @@ fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
         (SkipReason::ExcludedClass, "excluded_class"),
         (SkipReason::JudgeWouldRefuse, "judge_would_refuse"),
         (SkipReason::DestinationTaken, "destination_taken"),
+        (SkipReason::RespellsAJudgedLink, "respells_a_judged_link"),
     ];
     for (reason, text) in reasons {
         assert_eq!(wire(&reason), format!("\"{text}\""));
