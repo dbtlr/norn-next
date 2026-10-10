@@ -41,10 +41,14 @@
 //! the document still holds its finding, is skipped and the next composes
 //! without it, so the plan stays applicable and no fix brings back what an
 //! earlier one took away. The document is composed where it stands as well,
-//! which a route skipped later leaves it with. A selected finding the composed
-//! document no longer holds, whatever its kind, is dropped: it is neither
-//! fixed nor skipped — a route out of a rule's area drops that rule's
-//! findings. The skipped findings keep the batch's order.
+//! which a route skipped later leaves it with. A selected finding the
+//! judgment of a document's bytes concludes — a rule's, an undeclared tag,
+//! one about the document whole — that the composed document no longer holds
+//! is dropped: it is neither fixed nor skipped — a route out of a rule's area
+//! drops that rule's findings. **A link finding is not settled so**: link
+//! health is no conclusion of that judgment, so a broken or ambiguous link
+//! another route's move resolves stays skipped as its row reads (NORN-381).
+//! The skipped findings keep the batch's order.
 //!
 //! **A route's link cascade is judged by construction, not by generation.**
 //! A cascade rewrites other documents, which no judgment of the moved

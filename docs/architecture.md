@@ -2766,7 +2766,9 @@ a violation, still holds a finding an operation cites or the planning dropped, o
 holds one it left standing on a document it writes, is refused as `vault/plan-refused`
 with a note naming the repair defect. A judgment another check stops first — drift since
 planning, a failed condition, a vault that does not read — answers as the applier answers
-it. A document's fixes compose in finding order — kind,
+it, and so does a plan the schema passed that the write kernel's judgment of its targets
+then stops, or whose forecast does not read: the judgment is held to the claims only beside
+the preview it completes. A document's fixes compose in finding order — kind,
 field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
@@ -2776,7 +2778,9 @@ holds its finding is no fix. Every selected finding the judgment of a document's
 concludes — a rule's, an undeclared tag, one about the document whole — is decided against
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
-and a removal taking a tag with it drops the tag's. Each fix is judged where its document
+and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
+judgment, so a broken or ambiguous link another route's move resolves stays skipped as its
+row reads. Each fix is judged where its document
 ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where

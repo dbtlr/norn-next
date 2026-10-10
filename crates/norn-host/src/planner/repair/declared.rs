@@ -84,10 +84,13 @@
 //! judgment: a row names the finding the before-state's judgment concludes of
 //! its kind on its field or tag whose offending value has the row's head — its
 //! bytes, length and hash, so a head cut short still names one value — and the
-//! composition asks after that finding by its identity. A selected finding the
-//! composed document no longer holds is dropped, neither fixed nor skipped,
-//! whatever its kind: a rule's, an undeclared tag, or one about the document
-//! whole, each decided against the document as the last fix leaves it.
+//! composition asks after that finding by its identity. A selected finding of
+//! that judgment the composed document no longer holds is dropped, neither
+//! fixed nor skipped, whichever the judgment concludes: a rule's, an
+//! undeclared tag, or one about the document whole, each decided against the
+//! document as the last fix leaves it. A link finding is no conclusion of it,
+//! and is skipped as its row reads, though another route's move may resolve
+//! the link (NORN-381).
 //!
 //! **A list's elements are fixed one by one into one change to the field.**
 //! Every selected `field/not-one-of` finding of one field composes into one
