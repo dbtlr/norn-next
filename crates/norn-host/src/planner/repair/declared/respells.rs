@@ -31,8 +31,16 @@
 //! keeps naming the document, since a route keeps the file name and so every
 //! stem's documents stay where they are counted; except where a route of the
 //! batch carries a document of that stem across the schema's ambiguity-ignore
-//! set, which changes what the stem counts, so such a stem's bare links may be
-//! respelled too. A `vault://` or path-qualified wikilink may be respelled.
+//! set — as the store's own rule reads the set, so a document a bare link
+//! names on one side of its route and not the other — which changes what the
+//! stem counts, so such a stem's bare links may be respelled too. A
+//! `vault://` or path-qualified wikilink may be respelled. A link the text
+//! layer cannot place — a flow list's item, an escaped scalar — has no bytes
+//! a rewrite can write over, so every cascade leaves it as written, advised
+//! on as a Layer 4 move advises on it, and it is never respelled. A placed
+//! link no spelling of the destination reads back for is still counted as
+//! one that may be respelled: which spelling reads back is the resolution's
+//! to find, and counting it keeps the check local.
 //!
 //! **"Read by value" is read on every state the holder may end in**: a
 //! field is read by value where it is a `match.frontmatter` key of any rule,
@@ -49,10 +57,13 @@
 //!
 //! **The cost is linear in the links under the routed documents' keys**: one
 //! batched read of the index, the routed documents' frontmatter links probed
-//! once per candidate state, and each holder with a link that may be
-//! respelled read and judged once — a holder outside the batch at its
-//! before-state alone, through the view the plan resolves on, which reads it
-//! again from memory where its cascade composes it.
+//! once per candidate state, each holder outside the batch with a link that
+//! may be respelled read once at its before-state, through the view the plan
+//! resolves on — which reads it again from memory where its cascade composes
+//! it — and judged once only where a frontmatter field of it holds such a
+//! link. The store keeps no record of whether a link stands in a frontmatter
+//! or a body, so a holder is read to tell; one whose links stand in its body
+//! alone is never judged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -60,13 +71,11 @@ use std::sync::Arc;
 use norn_config::schema::{FieldType, RuleWork, VaultSchema};
 use norn_fs::NormalizedPath;
 use norn_store::{AmbiguityIgnore, LinkFamily, PathOverlay, ProbedLink, StoredPathOrder};
-use norn_wire::{
-    AuthoredValue, CaseFold, DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding,
-};
+use norn_wire::{CaseFold, DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding};
 
 use super::{Draft, State};
 use crate::applier::standing;
-use crate::derivation::{frontmatter_links, written_fields};
+use crate::derivation::{frontmatter_field_links, written_fields};
 use crate::evidence::count_rule_work;
 use crate::planner::repair::{Before, Reading, Repairing};
 
@@ -74,6 +83,15 @@ use crate::planner::repair::{Before, Reading, Repairing};
 /// protocol. Two links of one holder written alike resolve alike, so the
 /// address names every link a respelling of one would respell.
 type Address = (String, Option<String>);
+
+/// A document holding a link a route may respell: a batch document, by its
+/// draft's position, judged at every state it may end in; or one outside the
+/// batch, by its path, judged where it stands.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Holder {
+    Batch(usize),
+    Outside(DocumentPath),
+}
 
 /// The routes of `drafts` whose link cascade may respell a frontmatter
 /// wikilink in a field a rule reads by value, each with its skip, by the
@@ -98,24 +116,24 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
     }
     let schema = repairing.declared.schema();
     // Each route by the place its document leaves; and each batch document
-    // by every place it may stand at.
+    // by every place it may stand at, two routes landing at one place each
+    // naming it.
     let place = |path: &DocumentPath| vault.place(path);
     let origins: BTreeMap<NormalizedPath, usize> = routes
         .iter()
         .filter_map(|(at, passed)| Some((place(&passed.from)?, *at)))
         .collect();
-    let mut documents: BTreeMap<NormalizedPath, usize> = BTreeMap::new();
+    let mut documents: BTreeMap<NormalizedPath, BTreeSet<usize>> = BTreeMap::new();
     for (at, draft) in drafts.iter().enumerate() {
         let Some(compositions) = draft.compositions() else {
             continue;
         };
-        if let Some(origin) = place(&compositions.reckoned.start.at) {
-            documents.insert(origin, at);
-        }
-        if let Some((passed, _)) = draft.passed()
-            && let Some(lands) = place(&passed.to)
+        let lands = draft.passed().and_then(|(passed, _)| place(&passed.to));
+        for stands in [place(&compositions.reckoned.start.at), lands]
+            .into_iter()
+            .flatten()
         {
-            documents.insert(lands, at);
+            documents.entry(stands).or_default().insert(at);
         }
     }
     let crossing = crossing_stems(&routes, schema, repairing);
@@ -130,7 +148,7 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
     let probed = probes(drafts);
 
     // The routes each holder's links name, by the address the link writes.
-    let mut named: BTreeMap<DocumentPath, BTreeMap<Address, BTreeSet<usize>>> = BTreeMap::new();
+    let mut named: BTreeMap<Holder, BTreeMap<Address, BTreeSet<usize>>> = BTreeMap::new();
     vault.links(&overlay, &probed, &mut |change| {
         if change.link.family != LinkFamily::Wikilink {
             return;
@@ -144,26 +162,23 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         if !may_respell(&change.link, &crossing) {
             return;
         }
-        // A batch document is named where it stands, wherever the probe
-        // held it.
+        // A batch document is named by its draft, wherever the probe held
+        // it; a place two routes land at names each.
         let holder = DocumentPath::new(change.holder.as_str())
             .expect("a stored document path is a wire document path");
-        let holder = match place(&holder).and_then(|held| documents.get(&held)) {
-            Some(&at) => drafts[at]
-                .compositions()
-                .expect("a batch document placed was read")
-                .reckoned
-                .start
-                .at
-                .clone(),
-            None => holder,
+        let holders: Vec<Holder> = match place(&holder).and_then(|held| documents.get(&held)) {
+            Some(batch) => batch.iter().copied().map(Holder::Batch).collect(),
+            None => vec![Holder::Outside(holder)],
         };
-        named
-            .entry(holder)
-            .or_default()
-            .entry((change.link.target.clone(), change.link.protocol.clone()))
-            .or_default()
-            .insert(*route);
+        let address = (change.link.target.clone(), change.link.protocol.clone());
+        for holder in holders {
+            named
+                .entry(holder)
+                .or_default()
+                .entry(address.clone())
+                .or_default()
+                .insert(*route);
+        }
     })?;
 
     let selector_keys: BTreeSet<&str> = schema
@@ -172,43 +187,57 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         .collect();
     let mut refused = BTreeMap::new();
     for (holder, addresses) in &named {
-        let states = match place(holder).and_then(|held| documents.get(&held)) {
-            Some(&at) => candidate_states(&drafts[at]),
-            None => match vault.before(holder)? {
-                Before::Held(bytes) => vec![State::of(
-                    holder.clone(),
-                    Arc::clone(&bytes),
-                    standing(holder, &bytes, repairing.declared, repairing.case),
-                )],
+        // The fields each state the holder may end in holds a link the
+        // routes may respell in; a holder holding none — its links in its
+        // body, or written where the text layer cannot respell them — is
+        // never judged.
+        let (at, states) = match holder {
+            Holder::Batch(at) => {
+                let states = candidate_states(&drafts[*at]);
+                (states[0].at.clone(), states)
+            }
+            Holder::Outside(holder) => match vault.before(holder)? {
+                Before::Held(bytes) => {
+                    if respelled(&bytes, addresses).next().is_none() {
+                        continue;
+                    }
+                    let standing = standing(holder, &bytes, repairing.declared, repairing.case);
+                    (
+                        holder.clone(),
+                        vec![State::of(holder.clone(), bytes, standing)],
+                    )
+                }
                 // A holder that does not read holds no field the cascade
                 // could respell; its cascade cannot compose either.
-                Before::Unread => Vec::new(),
+                Before::Unread => continue,
             },
         };
+        let fields: Vec<(String, &BTreeSet<usize>)> = states
+            .iter()
+            .flat_map(|state| respelled(&state.bytes, addresses).collect::<Vec<_>>())
+            .collect();
+        if fields.is_empty() {
+            continue;
+        }
         let judged = ValueRead::of(&states, schema, &selector_keys, repairing);
-        for state in &states {
-            for (field, address) in field_links(&state.bytes) {
-                let Some(routes) = addresses.get(&address) else {
-                    continue;
-                };
-                if !judged.reads(&field) {
-                    continue;
-                }
-                for &route in routes {
-                    refused.entry(route).or_insert_with(|| {
-                        let (passed, _) = drafts[route]
-                            .passed()
-                            .expect("a route the index names passed its own judgment");
-                        passed.skipped(
-                            SkipReason::RespellsAJudgedLink,
-                            format!(
-                                "moving the document to `{}` would respell its link in `{field}` \
-                                 of `{holder}`, a field the rules read by value",
-                                passed.to
-                            ),
-                        )
-                    });
-                }
+        for (field, routes) in fields {
+            if !judged.reads(&field) {
+                continue;
+            }
+            for &route in routes {
+                refused.entry(route).or_insert_with(|| {
+                    let (passed, _) = drafts[route]
+                        .passed()
+                        .expect("a route the index names passed its own judgment");
+                    passed.skipped(
+                        SkipReason::RespellsAJudgedLink,
+                        format!(
+                            "moving the document to `{}` would respell its link in `{field}` \
+                             of `{at}`, a field the rules read by value",
+                            passed.to
+                        ),
+                    )
+                });
             }
         }
     }
@@ -297,7 +326,7 @@ fn probes(drafts: &[Draft<'_>]) -> Vec<ProbedLink> {
         };
         let mut seen = BTreeSet::new();
         for state in candidate_states(draft) {
-            for link in frontmatter_links(&state.bytes) {
+            for (_, link) in frontmatter_field_links(&state.bytes) {
                 if seen.insert((link.target.clone(), link.protocol.clone(), link.embed)) {
                     probed.push(ProbedLink {
                         before_holder: before_holder.clone(),
@@ -338,43 +367,19 @@ fn candidate_states(draft: &Draft<'_>) -> Vec<State> {
     states
 }
 
-/// Each frontmatter field of the document `bytes` spell, with the address of
-/// each wikilink its value holds at any depth.
-fn field_links(bytes: &[u8]) -> Vec<(String, Address)> {
-    let Some(fields) = written_fields(bytes) else {
-        return Vec::new();
-    };
-    let mut links = Vec::new();
-    for (field, value) in fields.entries() {
-        each_string(value, &mut |text| {
-            for link in norn_text::parse_wikilinks_in_text(text) {
-                links.push((field.clone(), (link.target, link.protocol)));
-            }
-        });
-    }
-    links
-}
-
-/// Hand `each` every string `value` holds, at any depth: what the
-/// derivation reads a frontmatter value's wikilinks from.
-fn each_string(value: &AuthoredValue, each: &mut dyn FnMut(&str)) {
-    match value {
-        AuthoredValue::String(text) => each(text),
-        AuthoredValue::List(items) => {
-            for item in items {
-                each_string(item, each);
-            }
-        }
-        AuthoredValue::Map(map) => {
-            for (_, item) in map.entries() {
-                each_string(item, each);
-            }
-        }
-        AuthoredValue::Null
-        | AuthoredValue::Bool(_)
-        | AuthoredValue::Integer(_)
-        | AuthoredValue::Float(_) => {}
-    }
+/// Each frontmatter field of the document `bytes` spell holding a wikilink
+/// of one of `addresses` the text layer can respell, with the routes that
+/// may respell it; a field once per such link. A link the text layer cannot
+/// place — no bytes a rewrite can write over — is left as written by every
+/// cascade ([`norn_text::RewriteSkip::Unplaced`]), so it is never respelled.
+fn respelled<'a>(
+    bytes: &[u8],
+    addresses: &'a BTreeMap<Address, BTreeSet<usize>>,
+) -> impl Iterator<Item = (String, &'a BTreeSet<usize>)> {
+    frontmatter_field_links(bytes)
+        .into_iter()
+        .filter(|(_, link)| link.span.is_some())
+        .filter_map(|(field, link)| Some((field, addresses.get(&(link.target, link.protocol))?)))
 }
 
 /// The fields a holder's rules and field declarations read by value at any
@@ -492,6 +497,16 @@ mod tests {
     /// The repair of the misplaced documents `routed` among `documents`,
     /// written to a tree on disk whose links a store derived, under `schema`.
     fn planned(schema: &str, documents: &[(&str, &str)], routed: &[&str]) -> Planned {
+        tallied(schema, documents, routed).0
+    }
+
+    /// [`planned`], with the rule work the planning alone paid: the tree's
+    /// derivation is not counted.
+    fn tallied(
+        schema: &str,
+        documents: &[(&str, &str)],
+        routed: &[&str],
+    ) -> (Planned, norn_config::schema::RuleWork) {
         let scratch = Scratch::new("repair-respells");
         for (path, text) in documents {
             let at = scratch.join(path);
@@ -527,8 +542,10 @@ mod tests {
             view: &view,
             index: &index,
         };
-        match plan(&misplaced(routed), &repairing, &reading) {
-            Ok(planned) => planned,
+        let rows = misplaced(routed);
+        let (planned, paid) = crate::evidence::rule_work_of(|| plan(&rows, &repairing, &reading));
+        match planned {
+            Ok(planned) => (planned, paid),
             Err(_) => panic!("the tree reads"),
         }
     }
@@ -600,7 +617,7 @@ mod tests {
                 "  hubs:\n    match: {frontmatter: {type: hub}}\n    forbidden:\n      up:\n",
                 "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n",
             ),
-            ("the tags", "", "---\ntags: [\"[[loose/a]]\"]\n---\n"),
+            ("the tags", "", "---\ntags:\n  - \"[[loose/a]]\"\n---\n"),
             (
                 "a declared type",
                 "fields:\n  up: {type: number}\n",
@@ -725,6 +742,78 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// **A frontmatter link the text layer cannot place is never respelled,
+    /// so it never holds a route back**, wherever it stands: a flow list's
+    /// item has no bytes a rewrite can write over, so the cascade leaves it
+    /// as written and the forecast advises on it, as a Layer 4 move's does.
+    #[test]
+    fn a_frontmatter_link_the_text_layer_cannot_place_never_skips_the_route() {
+        let planned = planned(
+            &routing(CLOSED_UP),
+            &[
+                TASK,
+                ("h.md", "---\ntype: hub\nup: [\"[[loose/a]]\"]\n---\n"),
+            ],
+            &["loose/a.md"],
+        );
+
+        assert_eq!(moved(&planned), ["loose/a.md"]);
+        assert!(planned.skipped.is_empty(), "{planned:?}");
+    }
+
+    /// **Two routes landing at one place are each judged on their own
+    /// document's states**: `x/a.md` and `y/a.md` both route to `tasks/a.md`,
+    /// and `x/a.md`'s own path-qualified link in its limited `up` would be
+    /// respelled past the limit by its move, so its route skips, and
+    /// `y/a.md`'s, no longer taken, moves.
+    #[test]
+    fn two_routes_landing_at_one_place_are_each_judged_on_their_own_documents_states() {
+        let schema = routing(
+            "  ups:\n    match: {frontmatter: {type: task}}\n    max_length:\n      up: 9\n",
+        );
+
+        let planned = planned(
+            &schema,
+            &[
+                ("x/a.md", "---\ntype: task\nup: \"[[x/a]]\"\n---\n"),
+                ("y/a.md", "---\ntype: task\n---\n"),
+            ],
+            &["x/a.md", "y/a.md"],
+        );
+
+        assert_eq!(moved(&planned), ["y/a.md"]);
+        let [(finding, reason, note)] = skips(&planned)
+            .try_into()
+            .unwrap_or_else(|skips| panic!("one skip: {skips:?}"));
+        assert_eq!((finding, reason), (1, SkipReason::RespellsAJudgedLink));
+        assert!(note.contains("`x/a.md`") && note.contains("`up`"), "{note}");
+    }
+
+    /// **A holder whose links a route may respell only in its body is never
+    /// judged**: the hub's rules close its `up`, but its link to the routed
+    /// document is in its body, so the plan pays no rule work for the hub —
+    /// exactly what it pays with no hub at all.
+    #[test]
+    fn a_body_only_holder_is_never_judged() {
+        let schema = routing(CLOSED_UP);
+        let alone = tallied(&schema, &[TASK], &["loose/a.md"]);
+
+        let held = tallied(
+            &schema,
+            &[
+                TASK,
+                (
+                    "h.md",
+                    "---\ntype: hub\nup: \"[[a]]\"\n---\nSee [[loose/a]].\n",
+                ),
+            ],
+            &["loose/a.md"],
+        );
+
+        assert_eq!(moved(&held.0), ["loose/a.md"]);
+        assert_eq!(held.1, alone.1);
     }
 
     /// **A body-only backlink never skips the route**, however the holder's

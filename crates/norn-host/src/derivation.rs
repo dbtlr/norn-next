@@ -1457,16 +1457,18 @@ pub(crate) fn document_links(bytes: &[u8]) -> Vec<LinkFact> {
 }
 
 /// The wikilinks the frontmatter of the document `bytes` spell holds, as
-/// [`document_links`] reads them, its body's left out: what a repair probes
-/// of a document whose frontmatter a route's cascade may respell.
-pub(crate) fn frontmatter_links(bytes: &[u8]) -> Vec<LinkFact> {
+/// [`document_links`] reads them, its body's left out, each beside the
+/// top-level field holding it (`norn_text`'s one reading of which field a
+/// link stands in): what a repair probes of a document whose frontmatter a
+/// route's cascade may respell, and which of its fields that would respell.
+pub(crate) fn frontmatter_field_links(bytes: &[u8]) -> Vec<(String, LinkFact)> {
     let Ok(source) = document_source(bytes) else {
         return Vec::new();
     };
     parsed(source)
-        .frontmatter_wikilinks()
+        .frontmatter_field_wikilinks()
         .into_iter()
-        .map(map_link)
+        .map(|held| (held.field.to_string(), map_link(held.link)))
         .collect()
 }
 

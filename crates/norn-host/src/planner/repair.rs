@@ -61,8 +61,8 @@
 //! declaration, the case its globs compare under, what the vault holds as
 //! [`Reading`] answers it — the bytes each document with a fix to make held,
 //! read once, what stands at each route's destination, the links naming each
-//! routed document, and the bytes of each document holding such a link where
-//! it may be respelled in its frontmatter — and the plan's one clock reading
+//! routed document, and the bytes of each document holding such a link a
+//! cascade may respell — and the plan's one clock reading
 //! ([`OneReading`]), taken only where a default or a route reads the clock.
 //! **A clock that gives no reading refuses the repair as it refuses a
 //! creation**: the operation of each default or route that reads the clock
@@ -305,8 +305,8 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// under `repairing`, reading through `vault` the bytes of each document a
 /// fix may be made to, once, and no other document's; what stands at each
 /// destination a route names; the links naming each document a route moves;
-/// and the bytes of each document holding such a link where it may be
-/// respelled in its frontmatter.
+/// and the bytes of each document holding such a link a cascade may
+/// respell.
 ///
 /// **Each document is drafted alone, then the routes are judged together.**
 /// A document's draft is every fix composed where it stands, and, where a

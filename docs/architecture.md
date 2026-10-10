@@ -2742,7 +2742,10 @@ composed where it stands, and its route and fixes composed where that route land
 frontmatter wikilink may be respelled where it resolves before the plan to exactly a routed
 document and is not a bare single-segment stem, which keeps naming the document since a
 route keeps its file name, unless a route of the batch carries a document of that stem
-across the ambiguity-ignore set. A route whose cascade may so respell a link is skipped as
+across the ambiguity-ignore set, as the store's own rule reads it; and where the text layer
+can place it, since a link with no bytes a rewrite can write over is left as written by
+every cascade. A placed link for which no spelling of the destination reads back still
+counts as one that may be respelled, which keeps the check local. A route whose cascade may so respell a link is skipped as
 `respells_a_judged_link`, naming the holder and the field; no other route's cascade is
 judged in planning. The batch's routes are read together, through one batched read of the
 resolution door over an overlay of every route and the routed documents' own frontmatter
@@ -2794,9 +2797,10 @@ and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
 resolution: each document holding a finding a declared fix may answer is read whole once,
-beside resolution and never a second time, and so is each document holding a frontmatter
-link a route's cascade may respell, which the cascade composes from the same bytes; a
-document holding no such finding or link is not read. Those bytes stay held for the batch's
+beside resolution and never a second time, and so is each document holding a link a
+route's cascade may respell, which the cascade composes from the same bytes, judged only
+where its frontmatter holds that link, since the store records no link's place as body or
+frontmatter; a document holding no such finding or link is not read. Those bytes stay held for the batch's
 planning, so the planning heap grows with the bytes of the batch's fixed documents and of
 those holders. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each

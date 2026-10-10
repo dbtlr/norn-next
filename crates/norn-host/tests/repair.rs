@@ -2438,6 +2438,60 @@ fn a_routes_move_rewrites_every_respellable_link_and_lists_the_rest_as_a_move_fo
     assert!(stands(&vault, "tasks/a.md"));
 }
 
+/// **An unrespellable link never holds a route back, even in a field a rule
+/// reads by value**: the hub's closed `up` holds the link to the moved
+/// document in a flow list, which no cascade can respell, so the route moves
+/// and its forecast advises on the link as unplaced, as a `move` of the
+/// document forecasts it.
+#[test]
+fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
+    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-route-unplaced-judged",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n"),
+            (
+                "h.md",
+                b"---\ntype: hub\nup: [\"[[zz-repair/loose/a]]\"]\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let unplaced = norn_wire::LinkAdvisory::skipped_unplaced(norn_wire::LinkKey::new(
+        at("h.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "zz-repair/loose/a",
+    ));
+    let ApplyReport::Previewed {
+        forecast: moved, ..
+    } = planned(host.move_path(norn_wire::MoveParams::new(
+        address(&vault),
+        ApplyMode::Preview,
+        norn_wire::MoveSubject::document(at("loose/a.md"), at("tasks/a.md")),
+    )))
+    else {
+        panic!("a preview answers a preview");
+    };
+    assert_eq!(moved.links, [unplaced.clone()]);
+
+    let ApplyReport::Previewed { plan, forecast, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)))
+    else {
+        panic!("a preview answers a preview");
+    };
+
+    assert_eq!(
+        kinds(&plan),
+        [OperationKind::move_document(
+            at("loose/a.md"),
+            at("tasks/a.md")
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty(), "{plan:?}");
+    assert_eq!(forecast.links, [unplaced]);
+}
+
 /// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
 /// link field over the link to `loose/a.md` as it is written now.
 const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
