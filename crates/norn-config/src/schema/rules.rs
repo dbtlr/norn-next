@@ -148,10 +148,14 @@
 //! derivation on each composed result and refuses each violation whose
 //! identity ([`FindingIdentity`]) no document it was composed from held.
 //! Every creation — `new` by a creation rule, inbox capture and `new` at a
-//! bare path — takes the defaults fixpoint at planning. **A dormant carrier
-//! beyond that:** repair's declared fixes land at Layer 5B (NORN-351). A
-//! rule's
-//! declaration reaches `norn-host` too: it reads each rule's accessors into
+//! bare path — takes the defaults fixpoint at planning, and repair fills a
+//! selected missing field from the defaults its contributing rules declare
+//! (`norn-host`'s `planner::repair::declared`), replaces an offending value
+//! by the member a `one_of`'s synonym maps it to, and removes or renames a
+//! forbidden field as the rule declares. **A dormant carrier beyond that:**
+//! a rule's `allowed_paths` route, which repair will move a misplaced document
+//! along once NORN-380 plans routes, is read and filled ([`Rule::fill_route`])
+//! and not yet reached by any caller. A rule's declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
 //!
@@ -169,6 +173,7 @@
 mod checks;
 mod combined;
 mod defaults;
+mod fill;
 mod judge;
 mod placement;
 mod read;
@@ -180,6 +185,7 @@ use norn_wire::{AuthoredValue, Captures, CaseFold, Severity, ValueMap, fold_tag}
 
 pub use combined::{CombinedConstraint, FieldConstraint, OneOfIntersection, RulesConflict};
 pub use defaults::{DefaultCandidate, DefaultsConflict, RuleDefaultsRefusal};
+pub use fill::{FillRefusal, PathBindings};
 pub use judge::{Breach, FindingIdentity, Judgment, RuleFinding, RuleWork};
 pub use placement::PLACEMENT_CEILING;
 
@@ -197,8 +203,10 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// Schema read's own checks read it, rule judgment reads it as a constraint
 /// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
 /// `norn-host` reads its accessors into the declaration `describe`'s rule
-/// facet reports. **A dormant carrier** beyond that: repair's declared fixes
-/// (NORN-351) read it as a constraint, and are not built.
+/// facet reports, and repair reads the defaults its required fields declare,
+/// the synonyms its `one_of` maps, the fix it declares for a forbidden field
+/// and, once NORN-380 plans routes, the route its `allowed_paths` sends a
+/// misplaced document along (see [`Rule::fill_route`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -403,8 +411,9 @@ impl RuleDefault {
     /// no clock token; one reading the clock refuses it as
     /// [`FillError::NoClock`].
     ///
-    /// Read by the defaults fixpoint here. Repair's declared fix fills one
-    /// default the same way at Layer 5B (NORN-351), which is not built.
+    /// Read through [`Rule::fill_default`], which binds the captures and
+    /// reads the clock for the defaults fixpoint and for repair's declared
+    /// fix alike.
     pub fn fill(
         &self,
         at: Option<LocalTimestamp>,
@@ -414,7 +423,8 @@ impl RuleDefault {
             .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
     }
 
-    /// Whether the default reads a path capture.
+    /// Whether the default reads a path capture, so filling it needs its
+    /// rule's `match.path` bound uniquely in the document's path.
     fn reads_captures(&self) -> bool {
         templates(&self.value).any(|template| template.path_captures().next().is_some())
     }
@@ -455,6 +465,9 @@ pub struct ClosedSet {
     values: Vec<String>,
     members: BTreeMap<TypedValue, String>,
     synonyms: Vec<(String, String)>,
+    /// Each synonym's member as the schema wrote it, in the order of
+    /// `synonyms`.
+    synonym_values: Vec<AuthoredValue>,
 }
 
 impl ClosedSet {
@@ -468,6 +481,21 @@ impl ClosedSet {
         self.synonyms
             .iter()
             .map(|(written, member)| (written.as_str(), member.as_str()))
+    }
+
+    /// Each synonym, as written, and the member it maps onto as the schema
+    /// wrote it: the YAML scalar with its type, so a member written as the
+    /// string `"1.50"` is that string, and one written `true` a boolean. A
+    /// number written unquoted is the number the YAML reader reads: its
+    /// spelling is the canonical one, which the reader leaves no other of.
+    ///
+    /// Read by repair, which writes the member into a document as the owner
+    /// wrote it rather than as the field's type would re-spell it.
+    pub fn synonym_values(&self) -> impl Iterator<Item = (&str, &AuthoredValue)> {
+        self.synonyms
+            .iter()
+            .zip(&self.synonym_values)
+            .map(|((written, _), member)| (written.as_str(), member))
     }
 }
 
@@ -517,6 +545,39 @@ impl Route {
     /// The template the route is.
     pub fn template(&self) -> &Template {
         &self.template
+    }
+
+    /// The folder the route fills to at `at`, each `{{path.<name>}}` from
+    /// `captures`: what the rule's match bound. `at` may be `None` for a
+    /// route reading no clock token; one reading the clock refuses it as
+    /// [`FillError::NoClock`].
+    ///
+    /// **Each value is judged as a creation rule's target judges one**: a
+    /// value empty after its filter, holding `/`, `\` or `:`, or that is `.`
+    /// or `..`, is refused as [`FillError::UnsafeValue`], so a capture
+    /// spelled with a `:`, which a document path admits, never writes one
+    /// into a route, whose own text holds none. The caller judges the whole
+    /// filled path as a document path too.
+    ///
+    /// Read through [`Rule::fill_route`], which fills a misplaced document's
+    /// destination as [`Rule::fill_default`] fills a rule default. A dormant
+    /// carrier: NORN-380, which plans routes, is the consuming step.
+    fn fill(&self, at: Option<LocalTimestamp>, captures: Captures) -> Result<String, FillError> {
+        super::creation::fill_path(
+            self.template.parts(),
+            &TemplateValues::reading(BTreeMap::new(), at).with_captures(captures),
+        )
+    }
+
+    /// Whether the route reads a path capture, so filling it needs its
+    /// rule's `match.path` bound uniquely in the document's path.
+    fn reads_captures(&self) -> bool {
+        self.template.path_captures().next().is_some()
+    }
+
+    /// Whether the route reads the clock, so filling it needs a reading.
+    fn reads_clock(&self) -> bool {
+        self.template.reads_clock()
     }
 }
 
@@ -737,8 +798,10 @@ impl VaultSchema {
 
     /// The rule called `name`, if the schema declares one.
     ///
-    /// Its consumer is not built: repair (Layer 5B, NORN-351), which reads
-    /// back each rule a stored finding cites for the fixes it declares. Rule
+    /// Repair reads back by it each rule a finding cites for every fix it
+    /// declares: the default of a required field, the synonyms of a closed
+    /// set and the remedy of a forbidden field, and names a route its allowed
+    /// paths declare (`norn-host`'s `planner::repair::declared`). Rule
     /// judgment reads the rules selecting a document rather than one by name,
     /// `describe` reports every rule, in name order, and takes no rule name,
     /// and a `validate` naming a rule is checked against the declaration the

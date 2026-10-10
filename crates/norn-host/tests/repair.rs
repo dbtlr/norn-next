@@ -1,34 +1,44 @@
 //! **The `repair` verb, end to end**: `Host::repair` over a real vault and a
 //! real attachment.
 //!
-//! No finding has a fix yet, so what is pinned here is the verb's core: the
-//! findings a request selects are read in batches of whole documents in path
-//! order, every one is left alone for the reason it has, the plan that comes
-//! back is the resolved plan an apply would land (none of it), and the
-//! provenance it carries counts what remains, names where the next batch
-//! continues, and decides nothing an apply does.
+//! The verb's core is pinned over a schema declaring no fix: the findings a
+//! request selects are read in batches of whole documents in path order,
+//! every one is left alone for the reason it has, the plan that comes back is
+//! the resolved plan an apply would land (none of it), and the provenance it
+//! carries counts what remains, names where the next batch continues, and
+//! decides nothing an apply does. Declared fixes are pinned over schemas of
+//! their own: a missing required field filled from its rule default, a value
+//! outside a closed set replaced by its synonym's member (a list's elements
+//! one by one into one change), a forbidden field removed or renamed, and
+//! each reason such a fix is skipped for; a misplaced document is skipped with
+//! a note of the route its rule declares until routes are planned (NORN-380);
+//! and over a schema declaring every kind of fix, that the validator flags
+//! nothing a repair wrote.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Cursor, ErrorDetail,
-    ErrorEnvelope, FieldChange, FindingKind, NewParams, PagedRows, PlanDocument, Predicate,
-    Provenance, ReasonCode, RepairParams, ResolvedPlan, SetParams, Severity, SkipReason,
-    SkippedCandidates, Unsatisfied, ValidateParams, ValidateReport, VaultAddress, WriteTarget,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Citation, CitedFinding,
+    Confidence, Cursor, DocumentPath, ErrorDetail, ErrorEnvelope, FieldChange, FindingKind,
+    NewParams, Operation, OperationId, OperationKind, PagedRows, PlanDocument, Predicate,
+    Provenance, ReasonCode, RepairParams, RequiredField, RequiredFieldHead, ResolvedPlan,
+    SetParams, Severity, SkipReason, SkippedCandidates, SkippedFinding, Unsatisfied,
+    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
 
-/// The schema the cases pin: one rule, so a task missing its `status` or
-/// holding one outside its closed set is a finding that cites it.
-const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done]}\n";
+/// The schema the batch cases pin: one rule, so a task missing its `status`
+/// or holding one outside its closed set is a finding that cites it. It
+/// declares no default, so no finding here has a fix.
+const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n    one_of:\n      status: {values: [todo, done]}\n";
 
 /// Where every document the cases judge stands, so a path predicate leaves
 /// the profile's own documents out.
@@ -73,9 +83,19 @@ fn a_vault_holding(
     label: &str,
     documents: &[(&str, &[u8])],
 ) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(label, SCHEMA, documents)
+}
+
+/// A sandbox and a vault holding `documents`, each named beneath [`FOLDER`],
+/// under `schema`, attached.
+fn a_vault_under(
+    label: &str,
+    schema: &str,
+    documents: &[(&str, &[u8])],
+) -> (Sandbox, attach::Vault, attach::ServingHost) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
-    std::fs::write(vault.path().join(".norn/schema.yaml"), SCHEMA).expect("write the schema");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the schema");
     for (name, bytes) in documents {
         let at = vault.path().join(FOLDER).join(name);
         std::fs::create_dir_all(at.parent().expect("a parent folder")).expect("make the folder");
@@ -762,4 +782,1460 @@ fn an_ambiguous_link_names_a_twin_added_since_the_last_repair() {
             3
         )
     );
+}
+
+/// The document beneath [`FOLDER`] at `name`, as a path.
+fn at(name: &str) -> DocumentPath {
+    DocumentPath::new(format!("{FOLDER}{name}")).expect("a document path")
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// `value`.
+fn setting(n: usize, name: &str, field: &str, value: &str) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        AuthoredValue::string(value),
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The id of the one finding of `kind` on `field` the validate of the
+/// repair's documents reports for the document at `name`.
+fn finding_of(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    name: &str,
+    kind: FindingKind,
+    field: &str,
+) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    let answered = host.validate(&request).expect("a validate answers");
+    let ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered a tally");
+    };
+    let ids: Vec<u64> = page
+        .rows
+        .iter()
+        .filter(|row| {
+            row.path == at(name) && row.kind == kind && row.target.as_deref() == Some(field)
+        })
+        .map(|row| row.id)
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!("one {kind:?} on `{field}` of {name}: {:?}", page.rows);
+    };
+    *id
+}
+
+/// The value candidates `values` name, each with the rule proposing it.
+fn candidates(values: &[(&str, &str)]) -> SkippedCandidates {
+    SkippedCandidates::values(
+        ValueCandidateHead::new(
+            values.iter().map(|(value, rule)| {
+                ValueCandidate::new(norn_store::value_head(value)).by_rule(*rule)
+            }),
+            values.len() as u64,
+        )
+        .expect("a head"),
+    )
+}
+
+/// One rule requiring a task's `status`, defaulting it to `todo`.
+const DEFAULTING: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n";
+
+/// **A missing required field fills from its rule default.** The preview's
+/// plan sets the default, cited at the declared level; its apply writes it,
+/// and the finding no longer stands.
+#[test]
+fn a_missing_required_field_fills_from_its_rule_default() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-default",
+        DEFAULTING,
+        &[("a.md", b"---\ntype: task\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let missing = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "status", "todo")]);
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![CitedFinding::new(missing, Confidence::Declared)]
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+
+    let ApplyReport::Applied { changeset, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(written, "---\ntype: task\nstatus: todo\n---\n# A\n");
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **Co-selecting rules whose defaults disagree skip the field as
+/// conflicting defaults with both candidates, while an unrelated fix on the
+/// same document applies**: `priority`, which one rule defaults, fills.
+#[test]
+fn disagreeing_defaults_skip_as_conflicting_defaults_while_an_unrelated_fix_applies() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n      priority: {default: normal}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: doing}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-conflicting-defaults",
+        schema,
+        &[("a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let status = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "priority", "normal")]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(status, SkipReason::ConflictingDefaults)
+                .with_candidates(candidates(&[("todo", "a-rule"), ("doing", "b-rule")]))
+        ]
+    );
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(written, "---\ntype: task\npriority: normal\n---\n");
+}
+
+/// **A default reading a capture its rule's `match.path` binds several ways
+/// skips as an ambiguous capture**: `<area>` binds `red` and `blue` in
+/// `red/blue/a.md`.
+#[test]
+fn a_default_reading_a_capture_bound_several_ways_skips_as_ambiguous_capture() {
+    let schema = "version: 1\nrules:\n  areas:\n    match: {path: 'zz-repair/**/<area>/**'}\n    required:\n      area: {default: '{{path.area}}'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-ambiguous-capture",
+        schema,
+        &[("red/blue/a.md", b"---\ntitle: A\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    // `zz-repair/*` names one level beneath the folder; the document stands
+    // two below it.
+    let plan = previewed(
+        host.repair(
+            RepairParams::new(address(&vault), ApplyMode::Preview)
+                .with_predicates([Predicate::path(format!("{FOLDER}**"))]),
+        ),
+    );
+
+    assert!(plan.operations.is_empty());
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(skipped.reason, SkipReason::AmbiguousCapture);
+    let note = skipped
+        .note
+        .as_deref()
+        .expect("the skip notes the bindings");
+    assert!(
+        note.contains("{area=red}") && note.contains("{area=blue}"),
+        "{note}"
+    );
+}
+
+/// **A default fill bringing a document under a forbidding rule skips as one
+/// the judge would refuse**, and nothing is written: `kind: special` brings
+/// in the rule forbidding the `scratch` the document holds.
+#[test]
+fn a_default_fill_bringing_a_document_under_a_forbidding_rule_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: task}}\n    required:\n      kind: {default: special}\n  specials:\n    match: {frontmatter: {kind: special}}\n    forbidden:\n      scratch:\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidding",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("special", "kinds")]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a refused fill wrote");
+}
+
+/// **Filling `kind` where `kind: task` brings in a rule requiring `status`
+/// skips as bringing in required fields, naming `status` and its declared
+/// default, and fills no `status`.**
+#[test]
+fn filling_kind_where_kind_task_brings_in_a_rule_requiring_status_skips_and_fills_no_status() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: work}}\n    required:\n      kind: {default: task}\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-brings-in",
+        schema,
+        &[("a.md", b"---\ntype: work\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let fields = RequiredFieldHead::new(
+        [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+        1,
+    )
+    .expect("a head");
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::BringsInRequiredFields)
+                .with_required_fields(fields)
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped fill wrote");
+}
+
+/// **Fixes compose in finding order and a fix the judge refuses skips while
+/// earlier ones stand**: `a_owner` fills, `kind` would bring in the rule
+/// forbidding `scratch` and skips, and `z_due` composes without it; the apply
+/// lands both fills.
+#[test]
+fn fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand() {
+    let schema = "version: 1\nrules:\n  base:\n    match: {frontmatter: {type: task}}\n    required:\n      a_owner: {default: me}\n      kind: {default: special}\n      z_due: {default: soon}\n  specials:\n    match: {frontmatter: {kind: special}}\n    forbidden:\n      scratch:\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-composition",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let kind = finding_of(&host, &vault, "a.md", FindingKind::RequiredMissing, "kind");
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "a_owner", "me"),
+            setting(2, "a.md", "z_due", "soon")
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(kind, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates(&[("special", "base")]))
+        ]
+    );
+    let written = std::fs::read_to_string(vault.path().join(FOLDER).join("a.md")).expect("read");
+    assert_eq!(
+        written,
+        "---\ntype: task\nscratch: x\na_owner: me\nz_due: soon\n---\n"
+    );
+}
+
+/// The id of the one finding of `kind` on `field` the validate of the
+/// repair's documents reports for the document at `name`, offending with
+/// `value`.
+fn finding_valued(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    name: &str,
+    kind: FindingKind,
+    field: &str,
+    value: &str,
+) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    let answered = host.validate(&request).expect("a validate answers");
+    let ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered a tally");
+    };
+    let ids: Vec<u64> = page
+        .rows
+        .iter()
+        .filter(|row| {
+            row.path == at(name)
+                && row.kind == kind
+                && row.target.as_deref() == Some(field)
+                && row.value.as_ref().map(|head| head.text()) == Some(value)
+        })
+        .map(|row| row.id)
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!(
+            "one {kind:?} on `{field}` of {name} offending with `{value}`: {:?}",
+            page.rows
+        );
+    };
+    *id
+}
+
+/// What the document at `name` holds now.
+fn written(vault: &attach::Vault, name: &str) -> String {
+    std::fs::read_to_string(vault.path().join(FOLDER).join(name)).expect("read a document")
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// the list of strings `items`.
+fn setting_list(n: usize, name: &str, field: &str, items: &[&str]) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        AuthoredValue::List(
+            items
+                .iter()
+                .map(|item| AuthoredValue::string(*item))
+                .collect(),
+        ),
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The citation of `repair-<n>` fixing the findings `ids`, each at the
+/// declared level.
+fn citing(n: usize, ids: &[u64]) -> Citation {
+    Citation::new(
+        OperationId::new(format!("repair-{n}")).expect("an id"),
+        ids.iter()
+            .map(|id| CitedFinding::new(*id, Confidence::Declared))
+            .collect(),
+    )
+}
+
+/// The finding `id` as a citation carries it, with its offending `value`.
+fn cited_valued(id: u64, value: &str) -> CitedFinding {
+    CitedFinding::new(id, Confidence::Declared).with_value(norn_store::value_head(value))
+}
+
+/// A list-shaped `status`, closed over `todo` and `done`, with `complete`
+/// mapped to `done`.
+const LISTED: &str = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+
+/// **A list's element with a synonym is repaired and the element without one
+/// stands, still reported**: `status: [complete, bogus]` repairs to
+/// `[done, bogus]` in one operation, `bogus` is skipped as having no declared
+/// fix, and a validate afterwards reports it and nothing else; and
+/// `status: [todo, done]` has no finding at all.
+#[test]
+fn a_list_repairs_the_element_with_a_synonym_and_the_other_stands_reported() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-list-synonym",
+        LISTED,
+        &[
+            (
+                "a.md",
+                b"---\ntype: task\nstatus: [complete, bogus]\n---\n# A\n",
+            ),
+            ("b.md", b"---\ntype: task\nstatus: [todo, done]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+    assert!(
+        by_id.values().all(|(path, _)| path.ends_with("a.md")),
+        "`[todo, done]` stands under no finding: {by_id:?}"
+    );
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let bogus = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "bogus",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_list(1, "a.md", "status", &["done", "bogus"])]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(complete, "complete")]
+        )]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(bogus, SkipReason::NoDeclaredFix)
+                .with_value(norn_store::value_head("bogus"))
+        ]
+    );
+
+    let ApplyReport::Applied { changeset, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}a.md"), FindingKind::NotOneOf)],
+        "{after:?}"
+    );
+    // The finding is filed again with the re-derived document, under the value
+    // that stands.
+    finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "bogus",
+    );
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: [done, bogus]\n---\n# A\n"
+    );
+}
+
+/// **A repeated offending element is one finding whose fix rewrites every
+/// occurrence**: `[complete, todo, complete]` stands under one finding and
+/// repairs to `[done, todo, done]`.
+#[test]
+fn a_repeated_offending_element_is_one_finding_whose_fix_rewrites_every_occurrence() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-list-repeated",
+        LISTED,
+        &[(
+            "a.md",
+            b"---\ntype: task\nstatus: [complete, todo, complete]\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+    assert_eq!(
+        by_id.len(),
+        1,
+        "one finding for the repeated element: {by_id:?}"
+    );
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_list(1, "a.md", "status", &["done", "todo", "done"])]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(complete, "complete")]
+        )]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert!(standing(&host, &vault, |request| request).is_empty());
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: [done, todo, done]\n---\n"
+    );
+}
+
+/// **Co-selecting rules mapping one value to different members skip as a tie
+/// with both candidates and their rules.**
+#[test]
+fn co_selecting_rules_mapping_a_value_to_different_members_skip_as_a_tie() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: todo}}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-tie",
+        schema,
+        &[("a.md", b"---\ntype: task\nstatus: complete\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(complete, SkipReason::Tie)
+                .with_value(norn_store::value_head("complete"))
+                .with_candidates(candidates(&[("done", "a-rule"), ("todo", "b-rule")]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a tie wrote");
+}
+
+/// **A synonym the judge refuses skips as one it would refuse, while an
+/// earlier fix on the document stands**: `done` is outside the closed set
+/// `strict` narrows `status` to, and `a_priority` repairs.
+#[test]
+fn a_synonym_the_judge_refuses_skips_while_an_earlier_fix_stands() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      a_priority: {values: [low, high], synonyms: {hi: high}}\n      status: {values: [todo, done], synonyms: {complete: done}}\n  strict:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-refused",
+        schema,
+        &[(
+            "a.md",
+            b"---\ntype: task\na_priority: hi\nstatus: complete\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let complete = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "a_priority", "high")]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(complete, SkipReason::JudgeWouldRefuse)
+                .with_value(norn_store::value_head("complete"))
+                .with_candidates(candidates(&[("done", "tasks")]))
+        ]
+    );
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\na_priority: high\nstatus: complete\n---\n"
+    );
+}
+
+/// **A synonym that brings a document under a rule requiring `status` skips
+/// as bringing in required fields, naming `status` and its default**: mapping
+/// `kind` to `task` selects the rule requiring it.
+#[test]
+fn a_synonym_that_brings_in_a_rule_requiring_status_skips_as_brings_in_required_fields() {
+    let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: work}}\n    one_of:\n      kind: {values: [task, note], synonyms: {todo: task}}\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-synonym-brings-in",
+        schema,
+        &[("a.md", b"---\ntype: work\nkind: todo\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let todo = finding_valued(&host, &vault, "a.md", FindingKind::NotOneOf, "kind", "todo");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let fields = RequiredFieldHead::new(
+        [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+        1,
+    )
+    .expect("a head");
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(todo, SkipReason::BringsInRequiredFields)
+                .with_value(norn_store::value_head("todo"))
+                .with_required_fields(fields)
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped synonym wrote");
+}
+
+/// One rule fixing three forbidden fields: `scratch` is removed, `due_date`
+/// renamed to `due`, and `legacy` has no fix.
+const BANNED: &str = "version: 1\nrules:\n  bans:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: remove\n      due_date: {rename_to: due}\n      legacy:\n";
+
+/// **A forbidden field a rule removes is removed.**
+#[test]
+fn a_forbidden_field_a_rule_removes_is_removed() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-remove",
+        BANNED,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scratch = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "scratch");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "scratch"
+            ))
+            .with_id(OperationId::new("repair-1").expect("an id"))
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(scratch, "x")]
+        )]
+    );
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A forbidden field a rule renames is set under the new name and removed
+/// under the old, the removal requiring the set, both cited for the
+/// finding.**
+#[test]
+fn a_forbidden_field_a_rule_renames_is_set_under_the_new_name_and_removed() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-rename",
+        BANNED,
+        &[("a.md", b"---\ntype: task\ndue_date: soon\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let due_date = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "due_date");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let first = OperationId::new("repair-1").expect("an id");
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "due", "soon"),
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "due_date"
+            ))
+            .with_id(OperationId::new("repair-2").expect("an id"))
+            .with_requires(vec![first])
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![citing(1, &[due_date]), citing(2, &[due_date])]
+            .into_iter()
+            .map(|citation| Citation::new(citation.operation, vec![cited_valued(due_date, "soon")]))
+            .collect::<Vec<_>>()
+    );
+
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\ndue: soon\n---\n# A\n"
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A rename onto a field the document already holds is skipped as one onto
+/// an occupied field, and writes nothing.**
+#[test]
+fn a_rename_onto_an_occupied_field_is_skipped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-occupied",
+        BANNED,
+        &[(
+            "a.md",
+            b"---\ntype: task\ndue_date: soon\ndue: later\n---\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let due_date = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "due_date");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(skipped.finding, due_date);
+    assert_eq!(skipped.reason, SkipReason::RenameOntoOccupiedField);
+    assert_eq!(skipped.value, Some(norn_store::value_head("soon")));
+    assert_eq!(tree_bytes(vault.path()), before, "a skipped rename wrote");
+}
+
+/// **Rules that remove and rename one forbidden field skip it as a tie with
+/// each candidate and its rule.**
+#[test]
+fn rules_that_remove_and_rename_a_forbidden_field_skip_it_as_a_tie() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: remove\n  b-rule:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: {rename_to: notes}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-forbidden-tie",
+        schema,
+        &[("a.md", b"---\ntype: task\nscratch: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scratch = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "scratch");
+    let before = tree_bytes(vault.path());
+
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(scratch, SkipReason::Tie)
+                .with_value(norn_store::value_head("x"))
+                .with_candidates(candidates(&[
+                    ("remove", "a-rule"),
+                    ("rename_to: notes", "b-rule")
+                ]))
+        ]
+    );
+    assert_eq!(tree_bytes(vault.path()), before, "a tie wrote");
+}
+
+/// One rule stamping each task it requires `created` of with the clock.
+const STAMPED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n";
+
+/// **Every default a repair plan fills comes from one clock reading**: five
+/// clock defaults across three documents read the host's clock once, read off
+/// its read account, in both modes, and write one instant and one day, each
+/// noting it is the repair's time.
+#[test]
+fn every_default_a_repair_plan_fills_comes_from_one_clock_reading() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-one-clock-reading",
+        STAMPED,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\ncreated: then\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+    assert_eq!(plan.operations.len(), 5, "{:?}", plan.operations);
+    let written_as = |wanted: &str| -> BTreeSet<String> {
+        plan.operations
+            .iter()
+            .filter_map(|operation| match &operation.kind {
+                OperationKind::SetFrontmatter { field, value, .. } if field == wanted => {
+                    Some(format!("{value:?}"))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        written_as("day").len(),
+        1,
+        "one day: {:?}",
+        written_as("day")
+    );
+    assert_eq!(
+        written_as("created").len(),
+        1,
+        "one instant: {:?}",
+        written_as("created")
+    );
+    for citation in &provenance(&plan).citations {
+        assert!(
+            citation.findings[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("the repair's time")),
+            "{citation:?}"
+        );
+    }
+
+    let account = host.read_evidence();
+    planned(host.repair(repairing(&vault, ApplyMode::Apply)));
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+}
+
+/// **A repair plan filling no default that reads the clock reads it not at
+/// all.**
+#[test]
+fn a_repair_plan_filling_no_clock_default_reads_no_clock() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-no-clock-reading",
+        DEFAULTING,
+        &[("a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
+}
+
+/// **A `new` reads the clock through the same counted reading**: a creation
+/// whose rule default reads the clock takes one reading for its plan.
+#[test]
+fn a_new_reads_the_clock_once_through_the_counted_reading() {
+    let (_sandbox, vault, host) = a_vault_under("host-repair-new-clock-reading", STAMPED, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let account = host.read_evidence();
+    let report = planned(host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Preview,
+        at("fresh.md"),
+        "---\ntype: task\n---\n# Fresh\n",
+    )));
+
+    assert!(
+        matches!(report, ApplyReport::Previewed { .. }),
+        "{report:?}"
+    );
+    assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+}
+
+/// **Findings the rules conflict over skip as a rules conflict**, in batch
+/// order: a field one rule requires and another forbids, and placement rules
+/// allowing no path in common.
+#[test]
+fn rules_conflict_findings_skip_as_rules_conflict() {
+    let schema = "version: 1\nrules:\n  needs:\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n    allowed_paths: {paths: ['zz-repair/x/**']}\n  bans:\n    match: {frontmatter: {priority: high}}\n    forbidden:\n      status:\n    allowed_paths: {paths: ['zz-repair/y/**']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-rules-conflict",
+        schema,
+        &[("a.md", b"---\ntype: task\npriority: high\nstatus: x\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let by_id = standing(&host, &vault, |request| request);
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let skipped: Vec<(FindingKind, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (by_id[&skipped.finding].1, skipped.reason))
+        .collect();
+    assert_eq!(
+        skipped,
+        [
+            (FindingKind::FieldRulesConflict, SkipReason::RulesConflict),
+            (
+                FindingKind::DocumentRulesConflict,
+                SkipReason::RulesConflict
+            ),
+        ],
+        "{by_id:?}"
+    );
+}
+
+/// **Operations are numbered `repair-1`, `repair-2` and on in plan order
+/// across documents, each cited at the declared level with the finding it
+/// fixes.**
+#[test]
+fn operations_are_numbered_repair_n_and_cited_at_declared_confidence() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-numbering",
+        DEFAULTING,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+    let b = finding_of(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::RequiredMissing,
+        "status",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "status", "todo"),
+            setting(2, "b.md", "status", "todo")
+        ]
+    );
+    let cited = |n: usize, id: u64| {
+        Citation::new(
+            OperationId::new(format!("repair-{n}")).expect("an id"),
+            vec![CitedFinding::new(id, Confidence::Declared)],
+        )
+    };
+    assert_eq!(provenance(&plan).citations, vec![cited(1, a), cited(2, b)]);
+}
+
+/// A repair of every document beneath [`FOLDER`], at any depth, in `mode`.
+fn repairing_beneath(vault: &attach::Vault, mode: ApplyMode) -> RepairParams {
+    RepairParams::new(address(vault), mode)
+        .with_predicates([Predicate::path(format!("{FOLDER}**"))])
+}
+
+/// Every finding a validate reports beneath [`FOLDER`], at any depth.
+fn findings_beneath(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+) -> Vec<norn_wire::FindingRow> {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}**"))])
+        .with_limit(1000);
+    let answered = host.validate(&request).expect("a validate answers");
+    let ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered a tally");
+    };
+    page.rows
+}
+
+/// The id of the one finding that the document at `name` is misplaced.
+fn misplaced_of(host: &attach::ServingHost, vault: &attach::Vault, name: &str) -> u64 {
+    let ids: Vec<u64> = findings_beneath(host, vault)
+        .iter()
+        .filter(|row| row.path == at(name) && row.kind == FindingKind::Misplaced)
+        .map(|row| row.id)
+        .collect();
+    let [id] = ids.as_slice() else {
+        panic!("one misplaced finding of {name}: {ids:?}");
+    };
+    *id
+}
+
+/// One rule placing a task in `tasks/` beneath [`FOLDER`] and declaring a
+/// route there, which a repair does not plan yet (NORN-380).
+const TASKED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+
+/// One rule declaring every kind of fix a repair applies: a plain default
+/// (`status`), a default filled from a capture (`area`) and one from the
+/// clock (`created`), a synonym on a scalar (`status`) and on a list
+/// (`labels`), a forbidden field removed (`scratch`), one renamed
+/// (`due_date`), and one with no fix (`legacy`); and a route into the area's
+/// `tasks/` folder, which a repair does not plan yet (NORN-380) and skips.
+const EVERY_FIX: &str = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}, path: 'zz-repair/<area>/**'}\n    required:\n      status: {default: todo}\n      area: {default: '{{path.area}}'}\n      created: {default: '{{date}}'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n      labels: {values: [red, blue], synonyms: {crimson: red}}\n    forbidden:\n      scratch: remove\n      due_date: {rename_to: due}\n      legacy:\n    allowed_paths: {paths: ['zz-repair/*/tasks/**'], route: 'zz-repair/{{path.area}}/tasks/'}\n";
+
+/// A finding as the validator reports it, apart from its identity: where it
+/// stands, its kind, its field and the value it judged.
+type Reported = (String, String, Option<String>, Option<String>);
+
+/// `row` as [`Reported`] names it, standing at `path`.
+fn reported(row: &norn_wire::FindingRow, path: &str) -> Reported {
+    (
+        path.to_string(),
+        row.kind.as_str().to_string(),
+        row.target.clone(),
+        row.value.as_ref().map(|value| value.text().to_string()),
+    )
+}
+
+/// **A configured repair never writes what the validator flags.** Over a
+/// schema declaring every kind of fix — a default, a templated default, a
+/// synonym on a scalar and on a list, a forbidden field removed and one
+/// renamed — and a route, a repair applies, and a validate afterwards reports
+/// no finding on any field or path the repair wrote but the ones it skipped,
+/// each still standing as it stood: what is skipped is skipped, not written.
+/// A misplaced document whose rule declares a route is one of those skips: it
+/// is skipped as having no declared fix, noting routes are NORN-380's, and
+/// nothing the route would have moved is written. NORN-380 extends this test
+/// with the route's move.
+#[test]
+fn a_configured_repair_never_writes_what_the_validator_flags() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-never-writes-flagged",
+        EVERY_FIX,
+        &[
+            (
+                "work/a.md",
+                b"---\ntype: task\nstatus: complete\nlabels: [crimson, bogus]\nscratch: x\ndue_date: soon\nlegacy: old\n---\n# A\n",
+            ),
+            ("home/b.md", b"---\ntype: task\n---\n# B\n"),
+            ("work/tasks/c.md", b"---\ntype: task\nstatus: complete\narea: work\ncreated: '2026-01-01'\n---\n# C\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before: BTreeMap<u64, norn_wire::FindingRow> = findings_beneath(&host, &vault)
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+
+    // Every kind of fix but a route was made: the defaults, both synonyms,
+    // the removal and the rename.
+    let mut wrote: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+    for operation in &plan.operations {
+        match &operation.kind {
+            OperationKind::SetFrontmatter {
+                target: WriteTarget::Path(at),
+                field,
+                ..
+            }
+            | OperationKind::RemoveFrontmatter {
+                target: WriteTarget::Path(at),
+                field,
+            } => {
+                wrote.insert((at.as_str().to_string(), Some(field.clone())));
+            }
+            other => panic!("a repair made {other:?}"),
+        }
+    }
+    let to = |name: &str| format!("{FOLDER}{name}");
+    for (name, field) in [
+        ("work/a.md", "status"),
+        ("work/a.md", "labels"),
+        ("work/a.md", "scratch"),
+        ("work/a.md", "due"),
+        ("work/a.md", "due_date"),
+        ("work/a.md", "area"),
+        ("work/a.md", "created"),
+        ("home/b.md", "status"),
+        ("work/tasks/c.md", "status"),
+    ] {
+        assert!(
+            wrote.contains(&(to(name), Some(field.to_string()))),
+            "`{field}` of {name} was not written: {wrote:?}"
+        );
+    }
+
+    // What was skipped, where it stands.
+    let skipped: BTreeSet<Reported> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| {
+            let row = &before[&skipped.finding];
+            reported(row, row.path.as_str())
+        })
+        .collect();
+    let expected_skips: BTreeSet<Reported> = [
+        (
+            "work/a.md",
+            "field/not-one-of",
+            Some("labels"),
+            Some("bogus"),
+        ),
+        ("work/a.md", "field/forbidden", Some("legacy"), Some("old")),
+        ("work/a.md", "document/misplaced", None, None),
+        ("home/b.md", "document/misplaced", None, None),
+    ]
+    .into_iter()
+    .map(|(name, kind, field, value)| {
+        (
+            to(name),
+            kind.to_string(),
+            field.map(str::to_string),
+            value.map(str::to_string),
+        )
+    })
+    .collect();
+    assert_eq!(skipped, expected_skips);
+
+    // A misplaced document whose rule declares a route is skipped as having
+    // no declared fix, the note naming the rule and NORN-380, and nothing the
+    // route would have moved is written.
+    for skip in provenance(&plan)
+        .skipped
+        .iter()
+        .filter(|skip| before[&skip.finding].kind == FindingKind::Misplaced)
+    {
+        assert_eq!(skip.reason, SkipReason::NoDeclaredFix, "{skip:?}");
+        let note = skip.note.as_deref().expect("the skip notes the route");
+        assert!(
+            note.contains("`tasks`") && note.contains("NORN-380"),
+            "{note}"
+        );
+    }
+    for name in ["work/a.md", "home/b.md"] {
+        assert!(vault.path().join(FOLDER).join(name).exists(), "{name}");
+    }
+    for name in ["work/tasks/a.md", "home/tasks/b.md"] {
+        assert!(!vault.path().join(FOLDER).join(name).exists(), "{name}");
+    }
+
+    // The validator flags nothing the repair wrote: every finding standing
+    // after it is one it skipped, unchanged, and every one it skipped still
+    // stands.
+    let after: BTreeSet<Reported> = findings_beneath(&host, &vault)
+        .iter()
+        .map(|row| reported(row, row.path.as_str()))
+        .collect();
+    for finding in &after {
+        let (path, _, field, _) = finding;
+        let on_written =
+            wrote.contains(&(path.clone(), field.clone())) || wrote.contains(&(path.clone(), None));
+        assert!(
+            skipped.contains(finding),
+            "the validator flags {finding:?}, which the repair did not skip (on what it wrote: \
+             {on_written})"
+        );
+    }
+    assert_eq!(
+        after, skipped,
+        "a skipped finding no longer stands as it stood"
+    );
+    assert!(
+        written(&vault, "work/a.md").contains("labels: [red, bogus]"),
+        "{}",
+        written(&vault, "work/a.md")
+    );
+}
+
+/// **A misplaced document whose rule declares a route is skipped as having no
+/// declared fix, noting the rule declares a route and routes are NORN-380's**:
+/// nothing is moved, the apply writes nothing, and the clock is not read.
+#[test]
+fn a_misplaced_document_is_skipped_noting_the_route_its_rule_declares() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-misplaced-skipped",
+        TASKED,
+        &[("loose/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+    let account = host.read_evidence();
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(host.read_evidence().since(account).clock_reads, 0);
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let [skipped] = provenance(&plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(&plan).skipped);
+    };
+    assert_eq!(
+        (skipped.finding, skipped.reason),
+        (misplaced, SkipReason::NoDeclaredFix)
+    );
+    let note = skipped.note.as_deref().expect("the skip notes the route");
+    assert!(
+        note.contains("`tasks`") && note.contains("NORN-380"),
+        "{note}"
+    );
+
+    let before = tree_bytes(vault.path());
+    planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)));
+    assert_eq!(tree_bytes(vault.path()), before, "a skip wrote");
+}
+
+/// **A misplaced document whose rules declare no route is skipped as having no
+/// declared fix, with no note.**
+#[test]
+fn a_misplaced_document_no_rule_routes_is_skipped_with_no_note() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-misplaced-unrouted",
+        "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**']}\n",
+        &[("loose/a.md", b"---\ntype: task\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/a.md");
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![SkippedFinding::new(misplaced, SkipReason::NoDeclaredFix)]
+    );
+}
+
+/// Apply the repair of every document beneath [`FOLDER`], and hold it to
+/// what a configured repair guarantees: it answers a preview and an apply
+/// alike, its apply commits, every finding standing after it is one it
+/// skipped, and every finding it fixed or dropped no longer stands. The
+/// applied plan.
+fn applied_leaving_only_its_skips(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+) -> ResolvedPlan {
+    let before: BTreeMap<u64, norn_wire::FindingRow> = findings_beneath(host, vault)
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+    let preview = previewed(host.repair(repairing_beneath(vault, ApplyMode::Preview)));
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.repair(repairing_beneath(vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        preview.operations, plan.operations,
+        "preview and apply differ"
+    );
+    let standing_at = |row: &norn_wire::FindingRow| reported(row, row.path.as_str());
+    let skipped: BTreeSet<Reported> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| standing_at(&before[&skipped.finding]))
+        .collect();
+    let after: BTreeSet<Reported> = findings_beneath(host, vault)
+        .iter()
+        .map(|row| reported(row, row.path.as_str()))
+        .collect();
+    for finding in &after {
+        assert!(
+            skipped.contains(finding),
+            "the validator flags {finding:?}, which the repair did not skip: {plan:?}"
+        );
+    }
+    let skipped_ids: BTreeSet<u64> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| skipped.finding)
+        .collect();
+    for (id, row) in &before {
+        if !skipped_ids.contains(id) {
+            assert!(
+                !after.contains(&standing_at(row)),
+                "finding {id}, fixed or dropped, still stands: {row:?}"
+            );
+        }
+    }
+    plan
+}
+
+/// The one skip of `plan`, its note taken off so the rest compares whole,
+/// and the note.
+fn the_one_skip(plan: &ResolvedPlan) -> (SkippedFinding, String) {
+    let [skipped] = provenance(plan).skipped.as_slice() else {
+        panic!("one skip: {:?}", provenance(plan).skipped);
+    };
+    let mut skipped = skipped.clone();
+    let note = skipped.note.take().expect("the skip carries a note");
+    (skipped, note)
+}
+
+/// **A fix never brings back what an earlier fix took away**: removing `k`
+/// fixes its finding, so renaming `z_k` onto `k` would make the document
+/// forbid `k` again, and skips as one the judge would refuse, with its
+/// candidate and its value.
+#[test]
+fn a_rename_onto_the_field_an_earlier_removal_fixed_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  s:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      k: remove\n  t:\n    match: {path: 'zz-repair/**'}\n    forbidden:\n      z_k: {rename_to: k}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-rename-onto-a-removed-field",
+        schema,
+        &[("a.md", b"---\ntype: task\nk: on\nz_k: on\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "k");
+    let z_k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "z_k");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::path(at("a.md")),
+                "k"
+            ))
+            .with_id(OperationId::new("repair-1").expect("an id"))
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(k, "on")]
+        )]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(z_k, SkipReason::JudgeWouldRefuse)
+                .with_value(norn_store::value_head("on"))
+                .with_candidates(candidates(&[("rename_to: k", "t")]))
+        ]
+    );
+}
+
+/// **A finding an earlier fix dropped is not made to hold again by a later
+/// one**: removing `k` takes the document out of the rule forbidding `m`, so
+/// `m`'s finding is dropped, and the rename of `z_k` onto `k`, which would
+/// bring that rule back, skips; `m` stands unflagged after.
+#[test]
+fn a_finding_an_earlier_fix_dropped_is_not_made_to_hold_again() {
+    let schema = "version: 1\nrules:\n  r:\n    match: {frontmatter: {k: on}}\n    forbidden:\n      m:\n  s:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      k: remove\n  t:\n    match: {path: 'zz-repair/**'}\n    forbidden:\n      z_k: {rename_to: k}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-dropped-stays-dropped",
+        schema,
+        &[("a.md", b"---\ntype: task\nk: on\nm: x\nz_k: on\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let z_k = finding_of(&host, &vault, "a.md", FindingKind::Forbidden, "z_k");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(skipped_ids(&plan), vec![z_k]);
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nm: x\nz_k: on\n---\n"
+    );
+}
+
+/// **A fix that leaves its finding standing is no fix**: the synonym maps
+/// `complete` onto itself, a member of its own rule's set but not of the
+/// set the two rules narrow `status` to, so it skips as one the judge would
+/// refuse, with its candidate and its value, and nothing is written.
+#[test]
+fn a_synonym_that_leaves_its_finding_standing_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, complete], synonyms: {complete: complete}}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fix-leaving-its-finding",
+        schema,
+        &[("a.md", b"---\ntype: task\nstatus: complete\n---\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let status = finding_of(&host, &vault, "a.md", FindingKind::NotOneOf, "status");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    let (skipped, _) = the_one_skip(&plan);
+    assert_eq!(
+        skipped,
+        SkippedFinding::new(status, SkipReason::JudgeWouldRefuse)
+            .with_value(norn_store::value_head("complete"))
+            .with_candidates(candidates(&[("complete", "a-rule")]))
+    );
+}
+
+/// A declared tag vocabulary reporting every other tag, and a rule removing
+/// a task's `tags`.
+const UNTAGGED: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\nrules:\n  bans:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      tags: remove\n";
+
+/// **A finding of a kind no fix answers is dropped where a fix of the batch
+/// eliminates it, and skipped where it still stands**: removing `a.md`'s
+/// `tags` takes its undeclared `draft` with it, so that finding is neither
+/// fixed nor skipped; `b.md` writes `#draft` in its body too, so its tag
+/// finding still stands after the removal and is skipped as having no
+/// declared fix.
+#[test]
+fn a_finding_a_fix_eliminates_is_dropped_whatever_its_kind() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fix-eliminates-a-tag",
+        UNTAGGED,
+        &[
+            ("a.md", b"---\ntype: task\ntags: [draft]\n---\n# A\n"),
+            (
+                "b.md",
+                b"---\ntype: task\ntags: [draft]\n---\nA #draft body\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let tag_of = |name: &str| {
+        let ids: Vec<u64> = findings_beneath(&host, &vault)
+            .iter()
+            .filter(|row| row.path == at(name) && row.kind == FindingKind::UndeclaredTag)
+            .map(|row| row.id)
+            .collect();
+        let [id] = ids.as_slice() else {
+            panic!("one tag finding of {name}: {ids:?}");
+        };
+        *id
+    };
+    let b_tag = tag_of("b.md");
+    let _ = tag_of("a.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+    let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.finding, skipped.reason))
+        .collect();
+    assert_eq!(skipped, [(b_tag, SkipReason::NoDeclaredFix)]);
 }

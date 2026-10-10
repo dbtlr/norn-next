@@ -357,14 +357,20 @@ macro_rules! bounded_head {
     };
 }
 
-// A dormant carrier: Layer 5B declared fixes (NORN-374), which skip a finding
-// whose declared fixes differ, whose defaults conflict, or whose candidates tie,
-// are the consuming layer. `planner::repair` skips with no value candidates
-// until declared fixes land, so nothing in the current call graph builds one,
-// and it is reached only when a caller sends a plan carrying one back. The
-// roadmap note lives here rather than in the doc comment schemars lifts into the
+// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
+// names each candidate of a missing field whose rule defaults conflict, of
+// declared fixes that tie (synonym members, forbidden remedies) and of an
+// agreed fix the write gate would refuse, with the rule proposing it. Not
+// built yet: a tie at the derived or suggested level, which derived fixes
+// (NORN-375) and suggestions (Layer 5C) consume, and a route's destination,
+// which routes (NORN-380) consume; repair plans no route until then, so the
+// destination candidates below are what it will send once that task lands. The
+// note lives here rather than in the doc comment schemars lifts into the
 // published schema.
-/// One value a repair could have written, and the rule that proposed it.
+/// One value a repair could have written, and the rule that proposed it: a
+/// field's default or synonym member, a forbidden field's remedy, spelled
+/// `remove` or `rename_to: <field>`, or a destination a route names (a
+/// document path), once repair plans routes.
 ///
 /// On the wire a candidate is a plain object:
 /// `{"value":{"text":"done","byte_length":4,"hash":"sha256:…"},"rule":"status-default"}`.
@@ -396,26 +402,27 @@ impl ValueCandidate {
     }
 }
 
-// A dormant carrier: Layer 5B declared fixes (NORN-374), which skip a finding
-// whose declared fixes differ, whose defaults conflict, or whose candidates tie,
-// are the consuming layer. `planner::repair` skips with no value candidates
-// until declared fixes land, so nothing in the current call graph builds one,
-// and it is reached only when a caller sends a plan carrying one back. The
-// roadmap note lives here rather than in the doc comment schemars lifts into the
+// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
+// names each candidate of a missing field whose rule defaults conflict, of
+// declared fixes that tie (synonym members, forbidden remedies) and of an
+// agreed fix the write gate would refuse, with the rule proposing it. Not
+// built yet: a tie at the derived or suggested level, which derived fixes
+// (NORN-375) and suggestions (Layer 5C) consume, and a route's destination,
+// which routes (NORN-380) consume; repair plans no route until then, so the
+// destination candidates below are what it will send once that task lands. The
+// note lives here rather than in the doc comment schemars lifts into the
 // published schema.
 bounded_head!(
     ValueCandidateHead of ValueCandidate, candidates,
     what: "value candidate",
-    head_doc: "The bounded head of the values a repair could have written, with how many there were: differing declared fixes, conflicting defaults, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
+    head_doc: "The bounded head of the values a repair could have written, with how many there were: conflicting defaults, differing declared fixes (synonym members, a forbidden field's remedies, and route destinations once repair plans routes), the fix a refusal names, or a tie at the deciding level. The candidates stop at the ceiling this schema advertises, and the total beside them is never below the candidates carried: a smaller total heads nothing, and the read refuses it.",
     list_doc: "The values a repair could have written, each with the rule that proposed it.",
     total_doc: "How many values a repair could have written, which is what makes the candidates a head.",
 );
 
-// A dormant carrier: Layer 5B declared fixes (NORN-374), which skip a fix that
-// brings required fields into a document, are the consuming layer.
-// `planner::repair` skips with no required fields until declared fixes land, so
-// nothing in the current call graph builds one, and it is reached only when a
-// caller sends a plan carrying one back. The roadmap note lives here rather
+// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
+// names each required field a rule default's fill would bring into a
+// document, with the default its rules declare. The note lives here rather
 // than in the doc comment schemars lifts into the published schema.
 /// One field a repair would bring into a document, and the default the rules
 /// declare for it.
@@ -456,11 +463,9 @@ impl RequiredField {
     }
 }
 
-// A dormant carrier: Layer 5B declared fixes (NORN-374), which skip a fix that
-// brings required fields into a document, are the consuming layer.
-// `planner::repair` skips with no required fields until declared fixes land, so
-// nothing in the current call graph builds one, and it is reached only when a
-// caller sends a plan carrying one back. The roadmap note lives here rather
+// Layer 5B's declared fixes build it (NORN-374): `planner::repair::declared`
+// names each required field a rule default's fill would bring into a
+// document, with the default its rules declare. The note lives here rather
 // than in the doc comment schemars lifts into the published schema.
 bounded_head!(
     RequiredFieldHead of RequiredField, fields,

@@ -477,6 +477,13 @@ const fn same_kind(left: FindingKind, right: FindingKind) -> bool {
     true
 }
 
+/// Whether a finding of `kind` is one the derivation concludes of a
+/// document's bytes ([`plan_document`]), so a judgment of those bytes says
+/// whether it holds; a link's health is the store's to judge, and is not.
+pub(crate) const fn judged_by_bytes(kind: FindingKind) -> bool {
+    causes_carrying(kind) > 0
+}
+
 /// How many causes in [`CAUSES`] record findings under this kind.
 const fn causes_carrying(kind: FindingKind) -> usize {
     let mut count = 0;
@@ -1087,8 +1094,10 @@ fn authored(value: &FrontmatterValue) -> AuthoredValue {
 
 /// An offending value spelled as the store keeps a field value: a scalar as
 /// its field row's raw text, a list or a map as its canonical JSON. A null has
-/// no spelling, and names no value.
-fn stored_spelling(value: &AuthoredValue) -> Option<String> {
+/// no spelling, and names no value. A repair heads the values it proposes by
+/// the same spelling (`crate::planner::repair`), so a candidate and a finding
+/// naming one value carry one head.
+pub(crate) fn stored_spelling(value: &AuthoredValue) -> Option<String> {
     match value {
         AuthoredValue::List(_) | AuthoredValue::Map(_) => {
             norn_store::canonical_json(&projected(value)).ok()

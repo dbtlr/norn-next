@@ -62,14 +62,16 @@ use norn_store::{
     RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
-    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, DocumentPath,
-    EditParams, ErrorDetail, ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument,
-    Predicate, Provenance, RepairParams, ResolvedPlan, RewriteWikilinkParams, RootIdentity,
-    SetParams, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
+    DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, MoveParams,
+    NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
+    RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
 use crate::applier;
+use crate::clock::OneReading;
 use crate::derivation::Declared;
 use crate::evidence::{LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SnapshotWork};
 use crate::lifecycle::{
@@ -84,7 +86,7 @@ use crate::planner::links::LinkIndex;
 use crate::planner::repair;
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::rule::Rules;
-use crate::planner::view::TreeView;
+use crate::planner::view::{Body, Entry, Remembered, TreeView, VaultView};
 use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
@@ -170,19 +172,131 @@ pub(crate) fn resolve_on(
     name: &VaultName,
     snapshot: &PlanSnapshot<'_>,
 ) -> Result<Resolution, PageRefused> {
-    let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
-        .map_err(|error| PageRefused::Answered(unreadable(name, error)))?;
+    let view = planning_view(ground, name).map_err(PageRefused::Answered)?;
+    resolve_through(
+        authored,
+        ground,
+        name,
+        snapshot,
+        &view,
+        &OneReading::of(&crate::clock::local_now),
+    )
+}
+
+/// The vault on `ground` as the planner reads it, or the refusal of a root
+/// its walk cannot open.
+fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, ErrorEnvelope> {
+    TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
+        .map_err(|error| unreadable(name, error))
+}
+
+/// What a repair reads of the vault, through the view its plan resolves on.
+struct RepairReading<'v, V>(&'v V);
+
+impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
+    type Error = V::Error;
+
+    /// The bytes of the document at `path` as the view reads it whole, or
+    /// that no document whose bytes can be read stands there: what a repair
+    /// composes a document's fixes onto.
+    fn before(&self, path: &DocumentPath) -> Result<repair::Before, V::Error> {
+        let Ok(at) = self
+            .0
+            .normalizer()
+            .normalize(std::path::Path::new(path.as_str()))
+        else {
+            return Ok(repair::Before::Unread);
+        };
+        Ok(match self.0.entry(&at)? {
+            Entry::Document {
+                body: Body::Held(bytes),
+                ..
+            } => repair::Before::Held(bytes),
+            _ => repair::Before::Unread,
+        })
+    }
+}
+
+/// A repair batch's findings: its rows, and the rule sets they cite.
+#[derive(Clone, Copy)]
+struct Findings<'b> {
+    rows: &'b [FindingRow],
+    rule_sets: &'b [RuleSet],
+}
+
+/// The resolved plan of the repair of the batch `batch`, under
+/// `ground`'s declaration, with the findings it skips and the findings each
+/// operation fixes: each fix composed onto the bytes `view` reads, its clock
+/// read once through `clock`, and the plan it makes resolved on `snapshot`.
+///
+/// **A repair whose clock gives no reading is refused as a creation is**: the
+/// operation of each default that reads the clock is left unresolved, naming
+/// the clock, and `vault/plan-refused` answers it in both modes.
+///
+/// **It plans once and resolves once**: the batch is planned by
+/// [`repair::plan`], every fix judged where its document stands by the
+/// applier's own schema check, and the operations resolved through the one
+/// planner on the shared view. Routes, whose link cascade rewrites documents
+/// no judgment of one document's own fixes sees, are not planned yet
+/// (NORN-380); a misplaced finding skips until they are.
+fn repaired<V: VaultView>(
+    batch: Findings<'_>,
+    ground: &PlanGround,
+    name: &VaultName,
+    snapshot: &PlanSnapshot<'_>,
+    view: &V,
+    clock: &OneReading<'_>,
+    refused: &dyn Fn(PageRefused) -> ErrorEnvelope,
+) -> Result<(ResolvedPlan, Vec<SkippedFinding>, Vec<Citation>), ErrorEnvelope>
+where
+    V::Error: std::fmt::Display,
+{
+    let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
+    let repairing = repair::Repairing {
+        declared: &ground.declared,
+        case,
+        clock,
+        rule_sets: batch.rule_sets,
+    };
+    let planned = repair::plan(batch.rows, &repairing, &RepairReading(view))
+        .map_err(|error| unreadable(name, error))?;
+    let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
+    // The resolution reads the clock through the plan's one reading: no
+    // repair plan reaches a clock read in expansion today, and the shared
+    // reading keeps the plan at one should a repair ever create by rule.
+    let mut resolution =
+        resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
+    resolution.unresolved.extend(planned.unresolved);
+    let plan = fully_resolved(resolution)?.plan;
+    Ok((plan, planned.skipped, planned.citations))
+}
+
+/// Plan `authored` as [`resolve_on`] does, reading the vault through `view`
+/// and the clock through `clock`: what a repair resolves its plan through, on
+/// the view it read its documents' bytes from and the one reading its rule
+/// defaults filled from.
+fn resolve_through<V: VaultView>(
+    authored: AuthoredPlan,
+    ground: &PlanGround,
+    name: &VaultName,
+    snapshot: &PlanSnapshot<'_>,
+    view: &V,
+    clock: &OneReading<'_>,
+) -> Result<Resolution, PageRefused>
+where
+    V::Error: std::fmt::Display,
+{
     // The creation rules are the pinned schema's, the declaration the
     // applier's schema check judges the plan's results under, and the clock
     // is read at most once for the plan.
     let rules = Rules {
         schema: ground.declared.schema(),
-        clock: &crate::clock::local_now,
+        clock,
     };
     resolve_expanding(
         authored,
         ground.root_identity(),
-        &view,
+        view,
         snapshot,
         snapshot,
         &rules,
@@ -766,12 +880,27 @@ where
                 // nothing in it is the caller's to act on. Its advisories are
                 // dropped as a `where` target's are (`PlanSnapshot::matching`
                 // reads only the find's rows).
-                let planned = repair::plan(&batch.rows);
-                let authored = AuthoredPlan::new(params.vault.clone(), planned.operations);
-                let resolution = resolve_on(authored, ground, name, snapshot).map_err(refused)?;
-                let plan = fully_resolved(resolution)?.plan;
-                let mut provenance = Provenance::new(batch.snapshot.generation, planned.skipped)
-                    .with_citations(planned.citations);
+                // One view of the vault serves the fixes and the planning
+                // they resolve through, so a document a fix is made to is read
+                // once and composed from the bytes its fix was judged on; and
+                // one clock reading serves every default the plan fills.
+                let view = planning_view(ground, name)?;
+                let view = Remembered::over(&view);
+                let reading = OneReading::of(&crate::clock::local_now);
+                let (plan, skipped, citations) = repaired(
+                    Findings {
+                        rows: &batch.rows,
+                        rule_sets: &batch.rule_sets,
+                    },
+                    ground,
+                    name,
+                    snapshot,
+                    &view,
+                    &reading,
+                    refused,
+                )?;
+                let mut provenance =
+                    Provenance::new(batch.snapshot.generation, skipped).with_citations(citations);
                 if let Some(remaining) = batch.remaining {
                     provenance = provenance.with_remaining(remaining);
                 }
@@ -790,9 +919,10 @@ where
     /// a read withdraws it. This is the one way a request plans on a read
     /// hold, so a preview and a repair count one account.
     ///
-    /// What the plan's link judgments cost, and what the hold's snapshot ran
-    /// whoever ran it, are the read account's, however `plan` ended. The hold
-    /// is given back when this returns.
+    /// What the plan's link judgments cost, what the hold's snapshot ran
+    /// whoever ran it, and the readings of the clock its plan took, are the
+    /// read account's, however `plan` ended. The hold is given back when this
+    /// returns.
     fn planning_on_hold<T>(
         &self,
         name: &VaultName,
@@ -815,9 +945,11 @@ where
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let planned = plan(ground, &snapshot, &refused);
+        let (planned, clock_reads) =
+            crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused));
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
         self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
+        self.count_clock_reads(clock_reads);
         Ok((reading, planned?))
     }
 
@@ -965,6 +1097,79 @@ mod tests {
                 ReadRefusal::NotServing(Demand::State(lost)).answer(&name),
                 None
             ))
+        );
+    }
+
+    /// **A repair whose clock gives no reading is refused as a `new` is**:
+    /// `vault/plan-refused` with the operation of the default that reads the
+    /// clock left unresolved, naming the clock, in the words a creation
+    /// refuses in; and nothing is skipped. The mode decides nothing here: the
+    /// plan is refused before a preview or an apply takes it.
+    #[test]
+    fn a_repair_whose_clock_gives_no_reading_is_refused_as_a_new_is() {
+        use crate::planner::view::memory::MemoryVault;
+        use norn_config::schema::{LocalTimestamp, NotALocalTimestamp, VaultSchema};
+        use norn_wire::{FindingKind, FindingRow, Severity, UnresolvedReason};
+
+        let scratch = Scratch::new("norn-host-repair-clock-unread");
+        let mut ground = ground_over(scratch.root());
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n";
+        ground.declared = Arc::new(Declared::pinned(
+            VaultSchema::parse(schema.as_bytes()).expect("a schema"),
+            "a fingerprint",
+        ));
+        let name = VaultName::new("notes").unwrap();
+        let declared = ContentModel::default();
+        let mint = || Err(crate::lifecycle::ReaderUnavailable::new("never minted"));
+        let snapshot = PlanSnapshot::on_demand(VaultAddress::name(name.clone()), &mint, &declared);
+        let vault = MemoryVault::with(&[("a.md", "---\ntype: task\n---\n")]);
+        let clock = || -> Result<LocalTimestamp, NotALocalTimestamp> { Err(NotALocalTimestamp) };
+        let reading = OneReading::of(&clock);
+        let missing = FindingRow::new(
+            7,
+            FindingKind::RequiredMissing,
+            Severity::Warning,
+            DocumentPath::new("a.md").unwrap(),
+            Some("created".to_string()),
+            None,
+            norn_wire::CandidateHead::new([], 0).unwrap(),
+            None,
+            "created is missing",
+            1,
+        );
+        let refused = |_: PageRefused| -> ErrorEnvelope { panic!("the snapshot was asked") };
+
+        let answered = repaired(
+            Findings {
+                rows: &[missing],
+                rule_sets: &[],
+            },
+            &ground,
+            &name,
+            &snapshot,
+            &vault,
+            &reading,
+            &refused,
+        );
+
+        let envelope = answered.expect_err("a repair with no clock was refused");
+        assert_eq!(envelope.code(), &ReasonCode::VaultPlanRefused);
+        let ErrorDetail::PlanRefused {
+            plan, unresolved, ..
+        } = envelope.detail()
+        else {
+            panic!("refused with {:?}", envelope.detail());
+        };
+        assert!(plan.operations.is_empty());
+        let [left] = unresolved.as_slice() else {
+            panic!("one unresolved: {unresolved:?}");
+        };
+        let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+            panic!("left out for {:?}", left.reason);
+        };
+        assert_eq!(
+            detail,
+            &crate::clock::cannot_fill("the rule default for `created`")
         );
     }
 }

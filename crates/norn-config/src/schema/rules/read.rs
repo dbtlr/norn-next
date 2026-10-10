@@ -480,24 +480,30 @@ fn read_closed_set(
     }
     let at_synonyms = format!("{at_path}.synonyms");
     const SYNONYMS: &str = "a mapping of written value to member";
-    let synonyms = match at(set, "synonyms") {
-        None => Vec::new(),
-        Some(Value::Mapping(entries)) => entries
-            .iter()
-            .map(|(written, member)| {
-                let written = yaml_scalar_text(written)
-                    .ok_or_else(|| section_error(&at_synonyms, SYNONYMS, written))?;
-                let member = yaml_scalar_text(member)
-                    .ok_or_else(|| section_error(&at_synonyms, SYNONYMS, member))?;
-                Ok((written, member))
-            })
-            .collect::<Result<_, VaultSchemaError>>()?,
-        Some(other) => return Err(section_error(&at_synonyms, SYNONYMS, other)),
-    };
+    let (synonyms, synonym_values): (Vec<(String, String)>, Vec<AuthoredValue>) =
+        match at(set, "synonyms") {
+            None => (Vec::new(), Vec::new()),
+            Some(Value::Mapping(entries)) => entries
+                .iter()
+                .map(|(written, member)| {
+                    let written = yaml_scalar_text(written)
+                        .ok_or_else(|| section_error(&at_synonyms, SYNONYMS, written))?;
+                    let text = yaml_scalar_text(member)
+                        .ok_or_else(|| section_error(&at_synonyms, SYNONYMS, member))?;
+                    let value = yaml_scalar_value(member)
+                        .ok_or_else(|| section_error(&at_synonyms, SYNONYMS, member))?;
+                    Ok(((written, text), value))
+                })
+                .collect::<Result<Vec<_>, VaultSchemaError>>()?
+                .into_iter()
+                .unzip(),
+            Some(other) => return Err(section_error(&at_synonyms, SYNONYMS, other)),
+        };
     Ok(ClosedSet {
         values,
         members,
         synonyms,
+        synonym_values,
     })
 }
 
@@ -666,6 +672,30 @@ fn read_glob(at_path: &str, value: &Value, capturing: bool) -> Result<Pattern, V
         wanted: "a glob",
         found: error.to_string(),
     })
+}
+
+/// A YAML scalar as the value the schema wrote, with its type: a string, a
+/// boolean, an integer or a finite float, or nothing for a null, a list, a
+/// map or a tagged value. An integer beyond the signed 64-bit range is its
+/// decimal text.
+fn yaml_scalar_value(value: &Value) -> Option<AuthoredValue> {
+    match value {
+        Value::String(text) => Some(AuthoredValue::string(text)),
+        Value::Bool(flag) => Some(AuthoredValue::Bool(*flag)),
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Some(AuthoredValue::Integer(integer))
+            } else if number.is_u64() {
+                yaml_scalar_text(value).map(AuthoredValue::string)
+            } else {
+                number
+                    .as_f64()
+                    .and_then(|float| FiniteFloat::new(float).ok())
+                    .map(AuthoredValue::Float)
+            }
+        }
+        Value::Null | Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => None,
+    }
 }
 
 /// A YAML scalar's text as a field value's raw text reads, or nothing for a
