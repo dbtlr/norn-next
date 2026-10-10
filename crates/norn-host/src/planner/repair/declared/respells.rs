@@ -865,6 +865,37 @@ mod tests {
         assert_eq!(held.1, alone.1);
     }
 
+    /// **A batch holder whose links to a routed document stand in its body
+    /// alone is never judged either**: `h.md` is in the batch, its own route
+    /// read and composed though skipped where it lands, which lacks the
+    /// `owner` a rule there requires, so the store hands back its body link
+    /// to `loose/a.md` as a batch document's; the plan pays the rule work it
+    /// pays where `h.md` links nothing.
+    #[test]
+    fn a_batch_holder_whose_backlinks_stand_in_its_body_alone_is_never_judged() {
+        let schema = routing(
+            "  hubs:\n    match: {frontmatter: {type: hub}}\n    allowed_paths: {paths: ['shelf/**'], route: 'shelf/'}\n  shelved:\n    match: {path: 'shelf/**'}\n    required:\n      owner:\n",
+        );
+        let routed = ["h.md", "loose/a.md"];
+        let tally = |hub: &str| {
+            let (planned, paid) = tallied(&schema, &[TASK, ("h.md", hub)], &routed);
+            assert_eq!(moved(&planned), ["loose/a.md"]);
+            assert_eq!(
+                skips(&planned)
+                    .into_iter()
+                    .map(|(finding, reason, _)| (finding, reason))
+                    .collect::<Vec<_>>(),
+                [(1, SkipReason::BringsInRequiredFields)]
+            );
+            paid
+        };
+
+        let unlinked = tally("---\ntype: hub\n---\n# Hub\n");
+        let linked = tally("---\ntype: hub\n---\n# Hub\nSee [[loose/a]].\n");
+
+        assert_eq!(linked, unlinked);
+    }
+
     /// **A body-only backlink never skips the route**, however the holder's
     /// rules read its fields, and **a frontmatter backlink in a field no
     /// rule reads by value does not either**.
