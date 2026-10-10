@@ -3528,3 +3528,235 @@ fn a_declared_fix_outranks_the_derived_answer_through_preview_then_apply() {
         "---\ntype: task\nstrict: yes\nstatus: Todo\n---\n# B\n"
     );
 }
+
+/// A `link` field `up`, which a bare value leaves a type mismatch.
+const LINKING: &str = "version: 1\nfields:\n  up: {type: link}\n";
+
+/// A document holding `up: zz-target` and the one document that value names.
+const LINKED_PAIR: [(&str, &[u8]); 2] = [
+    ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+    ("zz-target.md", b"# Target\n"),
+];
+
+/// The address resolution a repair of [`LINKED_PAIR`] records: `zz-target`,
+/// written in the holder, names the target at `lands`.
+fn linking_to(lands: &str) -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "zz-target",
+        ),
+        norn_wire::Resolves::one(at(lands)),
+    )
+}
+
+/// The refusal an apply of `plan` met, with the plan the refusal carries.
+fn apply_refused(
+    host: &attach::ServingHost,
+    mode: ApplyMode,
+    plan: &ResolvedPlan,
+) -> (ErrorEnvelope, ResolvedPlan, Vec<norn_wire::RefusedCheck>) {
+    let refusal = refused(host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone()))));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused, "{refusal:?}");
+    let ErrorDetail::PlanRefused { plan, checks, .. } = refusal.detail() else {
+        panic!("refused with {:?}", refusal.detail());
+    };
+    let (plan, checks) = (plan.clone(), checks.clone());
+    (refusal, plan, checks)
+}
+
+/// Whether `checks` fail the address resolution `condition`.
+fn fails(checks: &[norn_wire::RefusedCheck], condition: &norn_wire::PlanCondition) -> bool {
+    checks.iter().any(|check| {
+        matches!(check, norn_wire::RefusedCheck::ConditionFailed { condition: failed, .. } if failed == condition)
+    })
+}
+
+/// **A bare value is made a link through preview then apply, and the plan
+/// records the resolution of the address it wrote.** The condition reaches
+/// the resolved plan in both modes, only the link fix records one, and the
+/// validator no longer reports the finding.
+#[test]
+fn a_bare_value_is_made_a_link_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under("host-repair-bare-link", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_valued(
+        &host,
+        &vault,
+        "zz-holder.md",
+        FindingKind::TypeMismatch,
+        "up",
+        "zz-target",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "zz-holder.md", "up", "[[zz-target]]")]
+    );
+    assert_eq!(plan.conditions, vec![linking_to("zz-target.md")]);
+    let cited = &provenance(&plan).citations[0].findings[0];
+    assert_eq!(
+        (cited.finding, cited.confidence),
+        (mismatch, Confidence::Derived)
+    );
+    assert!(
+        written(&vault, "zz-holder.md").contains("up: '[[zz-target]]'")
+            || written(&vault, "zz-holder.md").contains("up: \"[[zz-target]]\""),
+        "{}",
+        written(&vault, "zz-holder.md")
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **Deleting the target between preview and apply refuses the apply, in
+/// apply mode and in a preview that judges the previewed plan again.**
+#[test]
+fn deleting_the_target_after_the_preview_refuses_the_plan() {
+    let (_sandbox, vault, host) =
+        a_vault_under("host-repair-bare-link-deleted", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    host.delete(norn_wire::DeleteParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        at("zz-target.md"),
+    ))
+    .expect("the delete is admitted")
+    .wait()
+    .expect("the target is deleted");
+
+    for mode in [ApplyMode::Apply, ApplyMode::Preview] {
+        let (_, _, checks) = apply_refused(&host, mode, &plan);
+        assert!(
+            fails(&checks, &linking_to("zz-target.md")),
+            "{mode:?}: {checks:?}"
+        );
+    }
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nup: zz-target\n---\n# Holder\n"
+    );
+}
+
+/// **A second document of the same stem, created between preview and apply,
+/// refuses the plan**: the address names two documents now.
+#[test]
+fn a_competing_target_created_after_the_preview_refuses_the_plan() {
+    let (_sandbox, vault, host) =
+        a_vault_under("host-repair-bare-link-competitor", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        at("elsewhere/zz-target.md"),
+        "# Competitor\n",
+    ))
+    .expect("the write is admitted")
+    .wait()
+    .expect("the competitor is written");
+
+    for mode in [ApplyMode::Apply, ApplyMode::Preview] {
+        let (_, _, checks) = apply_refused(&host, mode, &plan);
+        assert!(
+            fails(&checks, &linking_to("zz-target.md")),
+            "{mode:?}: {checks:?}"
+        );
+    }
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nup: zz-target\n---\n# Holder\n"
+    );
+}
+
+/// **A refused plan's fresh plan carries the recorded resolution as it was.**
+/// A holder changed after the preview refuses the plan; where the evidence is
+/// unchanged the fresh plan applies and lands the link, and where the target
+/// is gone the fresh plan refuses again for the same condition.
+#[test]
+fn a_refused_plans_fresh_plan_carries_the_resolution_and_refuses_where_the_evidence_changed() {
+    for target_deleted in [false, true] {
+        let label = format!("host-repair-bare-link-fresh-{target_deleted}");
+        let (_sandbox, vault, host) = a_vault_under(&label, LINKING, &LINKED_PAIR);
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+        std::fs::write(
+            vault.path().join(FOLDER).join("zz-holder.md"),
+            "---\nup: zz-target\nnote: x\n---\n# Holder\n",
+        )
+        .expect("another writer changes the holder");
+        if target_deleted {
+            host.delete(norn_wire::DeleteParams::new(
+                address(&vault),
+                ApplyMode::Apply,
+                at("zz-target.md"),
+            ))
+            .expect("the delete is admitted")
+            .wait()
+            .expect("the target is deleted");
+        }
+
+        let (_, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+        assert_eq!(fresh.conditions, vec![linking_to("zz-target.md")]);
+        if target_deleted {
+            let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &fresh);
+            assert!(fails(&checks, &linking_to("zz-target.md")), "{checks:?}");
+        } else {
+            let report = planned(host.apply(ApplyParams::new(
+                ApplyMode::Apply,
+                PlanDocument::resolved(fresh),
+            )));
+            assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+            let holder = written(&vault, "zz-holder.md");
+            assert!(
+                holder.contains("[[zz-target]]") && holder.contains("note: x"),
+                "{holder}"
+            );
+        }
+    }
+}
+
+/// **A route in the same batch moving the target leaves a plan that applies
+/// with the link resolving**: the plan records the path the target lands at.
+#[test]
+fn a_route_in_the_batch_moving_the_target_leaves_a_plan_that_applies_with_the_link_resolving() {
+    let schema = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-bare-link-routed",
+        schema,
+        &[
+            ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+            ("zz-target.md", b"---\ntype: task\n---\n# Target\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    // The resolution change set records the written link's own move with the
+    // target; the repair records the resolution of the address it wrote.
+    let recorded: Vec<_> = plan
+        .conditions
+        .iter()
+        .filter(|condition| {
+            matches!(
+                condition,
+                norn_wire::PlanCondition::AddressResolution { .. }
+            )
+        })
+        .collect();
+    assert_eq!(recorded, vec![&linking_to("tasks/zz-target.md")]);
+    assert!(
+        vault
+            .path()
+            .join(FOLDER)
+            .join("tasks/zz-target.md")
+            .exists()
+    );
+    assert!(written(&vault, "zz-holder.md").contains("[[zz-target]]"));
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
