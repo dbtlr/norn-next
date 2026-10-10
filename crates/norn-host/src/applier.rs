@@ -455,8 +455,10 @@ pub(crate) fn preview(
 /// another check stops the plan first — drift, a failed condition, a shape
 /// that is not what its operations do, a link whose resolution moved, a vault
 /// or a snapshot that does not read — or the kernel's judgment of its targets
-/// stops a plan the schema passed, no judgment is answered, and the answer
-/// is that cause, as an apply or a preview of the plan answers it.
+/// stops a plan the schema passed, or its forecast does not read, no
+/// judgment is answered, and the answer is that cause, as an apply or a
+/// preview of the plan answers it: the judgment is answered only beside the
+/// preview it completes.
 ///
 /// A repair reads it (`crate::apply`'s repair) to hold the plan it planned
 /// to the plan's own claims, its preview answering from the same check.
@@ -542,18 +544,30 @@ fn previewing(
     let stop = match checked {
         Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
             Ok(()) => {
-                if let Some(whole) = whole {
-                    *whole = judged;
-                }
                 let cited = citations.cited_by(&checked.forced);
-                return match forecast(&plan.transitions, &view) {
-                    Ok(forecast) => Ok((
-                        plan,
-                        forecast
-                            .with_forced(checked.forced, cited)
-                            .with_links(checked.links),
-                    )),
-                    Err(error) => Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
+                let forecasted =
+                    forecast(&plan.transitions, &view).map_err(|error| error.to_string());
+                #[cfg(test)]
+                let forecasted = match FORECAST_FAILS.with(std::cell::Cell::get) {
+                    true => Err("the forecast failed, as a case asked".to_string()),
+                    false => forecasted,
+                };
+                return match forecasted {
+                    // The judgment is answered only beside the answer it
+                    // judged: a forecast that fails answers the write that
+                    // failed, which the schema did not stop.
+                    Ok(forecast) => {
+                        if let Some(whole) = whole {
+                            *whole = judged;
+                        }
+                        Ok((
+                            plan,
+                            forecast
+                                .with_forced(checked.forced, cited)
+                                .with_links(checked.links),
+                        ))
+                    }
+                    Err(error) => Err(Box::new(write_failed(plan, error, Vec::new()))),
                 };
             }
             // The kernel stops the plan after the schema passed it: the
@@ -582,6 +596,24 @@ fn previewing(
             healing: Vec::new(),
         },
     }))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether a preview's forecast fails on this thread, as a vault that
+    /// stops reading after the check passed the plan would make it: a stop
+    /// after the schema judgment, which a repair's guard must answer as the
+    /// applier answers it.
+    static FORECAST_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `run`, with every preview's forecast on this thread failing.
+#[cfg(test)]
+pub(crate) fn forecast_failing<T>(run: impl FnOnce() -> T) -> T {
+    FORECAST_FAILS.with(|fails| fails.set(true));
+    let ran = run();
+    FORECAST_FAILS.with(|fails| fails.set(false));
+    ran
 }
 
 /// The answer when the root at `anchor` the plan was judged under is no

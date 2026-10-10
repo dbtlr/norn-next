@@ -293,8 +293,9 @@ where
 ///
 /// **Only a judgment the schema alone could stop is held to the claims**: a
 /// plan another check stops — drift since planning, a failed condition, a
-/// vault that does not read, or the kernel's judgment of its targets after
-/// the schema passed it — answers as the applier answers it.
+/// vault that does not read, the kernel's judgment of its targets after the
+/// schema passed it, or a forecast that does not read — answers as the
+/// applier answers it.
 fn guarded(
     plan: ResolvedPlan,
     (forecast, claims, cited): (&Forecast, &[repair::Claim], &[Citation]),
@@ -1600,6 +1601,45 @@ mod tests {
         };
         assert!(
             !refusal.message().contains("repair defect"),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    /// **A forecast that fails after the schema passed the plan answers the
+    /// applier's own failure too**: the plan claims a finding stands where
+    /// its document lands that no longer holds there, but the preview's
+    /// forecast fails, so the answer is the write that failed, as an apply of
+    /// the plan would end — the judgment is answered only beside a preview
+    /// it completes, never a repair defect.
+    #[test]
+    fn a_failed_forecast_answers_the_appliers_own_failure_though_the_plan_breaks_its_claims() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  inbox:\n    match: {path: 'loose/**'}\n    required:\n      triage:\n";
+        let (_scratch, ground, store) = routed_vault(
+            "norn-host-repair-guard-forecast",
+            schema,
+            &[("loose/a.md", "---\ntype: task\n---\n")],
+        );
+        let snapshot = store.index();
+        let mut repaired = routed(&ground, &snapshot, "loose/a.md").expect("the repair plans");
+        claiming(
+            &mut repaired,
+            &ground,
+            ("loose/a.md", b"---\ntype: task\n---\n", "triage"),
+            "tasks/a.md",
+            true,
+            false,
+        );
+
+        let answered = crate::applier::forecast_failing(|| guarding(repaired, &ground, &snapshot))
+            .expect("no repair defect");
+
+        let Err(PageRefused::Answered(refusal)) = answered else {
+            panic!("the failed forecast answered {answered:?}");
+        };
+        assert!(
+            !refusal.message().contains("repair defect")
+                && refusal.message().contains("the forecast failed"),
             "{}",
             refusal.message()
         );
