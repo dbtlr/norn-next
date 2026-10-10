@@ -152,8 +152,8 @@
 //! selected missing field from the defaults its contributing rules declare
 //! (`norn-host`'s `planner::repair::declared`), replaces an offending value
 //! by the member a `one_of`'s synonym maps it to, and removes or renames a
-//! forbidden field as the rule declares. **A dormant carrier beyond that:**
-//! a route lands in a later step of Layer 5B (NORN-374). A rule's
+//! forbidden field as the rule declares, and moves a misplaced document
+//! into the folder its `allowed_paths` route names. A rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
@@ -201,9 +201,8 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
 /// `norn-host` reads its accessors into the declaration `describe`'s rule
 /// facet reports, and repair reads the defaults its required fields declare,
-/// the synonyms its `one_of` maps and the fix it declares for a forbidden
-/// field. **A dormant carrier** beyond that: a route is read in a later step
-/// of Layer 5B (NORN-374), and is not built.
+/// the synonyms its `one_of` maps, the fix it declares for a forbidden field
+/// and the route its `allowed_paths` sends a misplaced document along.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -524,6 +523,34 @@ impl Route {
     /// The template the route is.
     pub fn template(&self) -> &Template {
         &self.template
+    }
+
+    /// The folder the route fills to at `at`, each `{{path.<name>}}` from
+    /// `captures`: what the rule's match bound. `at` may be `None` for a
+    /// route reading no clock token; one reading the clock refuses it as
+    /// [`FillError::NoClock`].
+    ///
+    /// Read by repair's declared fix, which fills a misplaced document's
+    /// destination as it fills a rule default ([`RuleDefault::fill`];
+    /// `norn-host`'s `planner::repair::declared`).
+    pub fn fill(
+        &self,
+        at: Option<LocalTimestamp>,
+        captures: Captures,
+    ) -> Result<String, FillError> {
+        self.template
+            .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
+    }
+
+    /// Whether the route reads a path capture, so filling it needs its
+    /// rule's `match.path` bound uniquely in the document's path.
+    pub fn reads_captures(&self) -> bool {
+        self.template.path_captures().next().is_some()
+    }
+
+    /// Whether the route reads the clock, so filling it needs a reading.
+    pub fn reads_clock(&self) -> bool {
+        self.template.reads_clock()
     }
 }
 

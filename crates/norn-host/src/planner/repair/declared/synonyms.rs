@@ -27,7 +27,7 @@ use std::sync::Arc;
 use norn_config::schema::{FieldType, VaultSchema};
 use norn_wire::{AuthoredValue, FindingRow, SkipReason, SkippedFinding};
 
-use super::{Document, Fix, Proposal, State, candidates, cited, field_of, holding};
+use super::{Document, Fix, Proposal, State, candidates, cited, field_of, holding, skip};
 use crate::planner::edit::edited;
 
 /// What the synonyms of one field's selected findings come to: the one fix
@@ -56,7 +56,7 @@ pub(super) fn fix_field(
             if holding(row, &state.holds).is_some() {
                 skipped.push((
                     at,
-                    SkippedFinding::new(row.id, SkipReason::JudgeWouldRefuse).with_note(format!(
+                    skip(row, SkipReason::JudgeWouldRefuse).with_note(format!(
                         "the document's `{field}` cannot be read to replace an element of"
                     )),
                 ));
@@ -93,22 +93,22 @@ pub(super) fn fix_field(
         {
             skipped.push((
                 at,
-                SkippedFinding::new(row.id, SkipReason::Tie)
-                    .with_candidates(candidates(&proposals)),
+                skip(row, SkipReason::Tie).with_candidates(candidates(&proposals)),
             ));
             continue;
         }
         let Some(replaced) = replaced(&working, schema, field, &offending, &first.value) else {
             skipped.push((
                 at,
-                SkippedFinding::new(row.id, SkipReason::JudgeWouldRefuse)
+                skip(row, SkipReason::JudgeWouldRefuse)
                     .with_candidates(candidates(&proposals))
                     .with_note(format!("no element of `{field}` is `{offending}`")),
             ));
             continue;
         };
-        let set = document.set(field, replaced.clone());
+        let set = document.set(&state.at, field, replaced.clone());
         match document.admit(
+            &state.at,
             &bytes,
             std::slice::from_ref(&set),
             row,
@@ -126,7 +126,7 @@ pub(super) fn fix_field(
     if cites.is_empty() {
         return Mapped { fix: None, skipped };
     }
-    let set = document.set(field, working);
+    let set = document.set(&state.at, field, working);
     if cites.len() > 1 {
         // Each element was composed onto the one before it; the operation
         // the plan carries is one set of the field, so the state is what that
@@ -137,7 +137,11 @@ pub(super) fn fix_field(
         fix: Some(Fix {
             operations: vec![set],
             cited: cites,
-            state: State { bytes, holds },
+            state: State {
+                at: state.at.clone(),
+                bytes,
+                holds,
+            },
         }),
         skipped,
     }

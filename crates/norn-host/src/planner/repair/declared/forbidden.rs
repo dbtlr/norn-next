@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use norn_config::schema::ForbiddenFix;
 use norn_wire::{FindingRow, SkipReason, SkippedFinding, ValueHead};
 
-use super::{Document, Fix, State, cited, field_of, spelled_candidates};
+use super::{Document, Fix, State, cited, field_of, skip, spelled_candidates};
 
 /// What one rule declares for a forbidden field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,18 +76,18 @@ pub(super) fn fix(
     };
     if rest.iter().any(|(other, _)| other != remedy) {
         return Err(Box::new(
-            SkippedFinding::new(row.id, SkipReason::Tie).with_candidates(candidates),
+            skip(row, SkipReason::Tie).with_candidates(candidates),
         ));
     }
     let cannot_read = || {
         Box::new(
-            SkippedFinding::new(row.id, SkipReason::JudgeWouldRefuse)
+            skip(row, SkipReason::JudgeWouldRefuse)
                 .with_candidates(candidates.clone())
                 .with_note(format!("the document's `{field}` cannot be read")),
         )
     };
     let edits = match remedy {
-        Remedy::Remove => vec![document.remove(field)],
+        Remedy::Remove => vec![document.remove(&state.at, field)],
         Remedy::RenameTo(to) => {
             let Some(Some(value)) = field_of(&state.bytes, field) else {
                 return Err(cannot_read());
@@ -97,14 +97,17 @@ pub(super) fn fix(
             };
             if held.is_some() {
                 return Err(Box::new(
-                    SkippedFinding::new(row.id, SkipReason::RenameOntoOccupiedField)
+                    skip(row, SkipReason::RenameOntoOccupiedField)
                         .with_note(format!("the document already holds `{to}`")),
                 ));
             }
-            vec![document.set(to, value), document.remove(field)]
+            vec![
+                document.set(&state.at, to, value),
+                document.remove(&state.at, field),
+            ]
         }
     };
-    let composed = document.admit(&state.bytes, &edits, row, &candidates)?;
+    let composed = document.admit(&state.at, &state.bytes, &edits, row, &candidates)?;
     Ok(Fix {
         operations: edits,
         cited: vec![cited(row, field, false)],

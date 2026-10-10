@@ -87,7 +87,7 @@ use crate::planner::links::LinkIndex;
 use crate::planner::repair;
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::rule::Rules;
-use crate::planner::view::{Body, Entry, Remembered, TreeView, VaultView};
+use crate::planner::view::{Barrier, Body, Entry, Remembered, TreeView, VaultView};
 use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
@@ -191,23 +191,55 @@ fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, Erro
         .map_err(|error| unreadable(name, error))
 }
 
-/// The bytes of the document at `path` as `view` reads it whole, or that no
-/// document whose bytes can be read stands there: what a repair composes a
-/// document's fixes onto.
-fn before_of<V: VaultView>(view: &V, path: &DocumentPath) -> Result<repair::Before, V::Error> {
-    let Ok(at) = view
-        .normalizer()
-        .normalize(std::path::Path::new(path.as_str()))
-    else {
-        return Ok(repair::Before::Unread);
-    };
-    Ok(match view.entry(&at)? {
-        Entry::Document {
-            body: Body::Held(bytes),
-            ..
-        } => repair::Before::Held(bytes),
-        _ => repair::Before::Unread,
-    })
+/// What a repair reads of the vault, through the view its plan resolves on.
+struct RepairReading<'v, V>(&'v V);
+
+impl<V: VaultView> repair::Reading for RepairReading<'_, V> {
+    type Error = V::Error;
+
+    /// The bytes of the document at `path` as the view reads it whole, or
+    /// that no document whose bytes can be read stands there: what a repair
+    /// composes a document's fixes onto.
+    fn before(&self, path: &DocumentPath) -> Result<repair::Before, V::Error> {
+        let Ok(at) = self
+            .0
+            .normalizer()
+            .normalize(std::path::Path::new(path.as_str()))
+        else {
+            return Ok(repair::Before::Unread);
+        };
+        Ok(match self.0.entry(&at)? {
+            Entry::Document {
+                body: Body::Held(bytes),
+                ..
+            } => repair::Before::Held(bytes),
+            _ => repair::Before::Unread,
+        })
+    }
+
+    /// What stands at `path` as the view reads it streamed, under the root's
+    /// identity rule: the read the move's own planning makes of its
+    /// destination, which the shared view answers again from memory.
+    fn destination(&self, path: &DocumentPath) -> Result<repair::Destination, V::Error> {
+        let at = match self
+            .0
+            .normalizer()
+            .normalize(std::path::Path::new(path.as_str()))
+        {
+            Ok(at) => at,
+            Err(error) => return Ok(repair::Destination::Closed(error.to_string())),
+        };
+        Ok(match self.0.streamed_entry(&at)? {
+            Entry::Absent { .. } => repair::Destination::Free(at),
+            Entry::Blocked {
+                detail,
+                barrier: Barrier::Closed,
+            } => repair::Destination::Closed(detail),
+            Entry::Document { .. } | Entry::Folder | Entry::Blocked { .. } => {
+                repair::Destination::Taken
+            }
+        })
+    }
 }
 
 /// The resolved plan of the repair of `rows`, a batch's findings, under
@@ -235,7 +267,7 @@ where
         case: crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case(),
         clock,
     };
-    let planned = repair::plan(rows, &repairing, &mut |path| before_of(view, path))
+    let planned = repair::plan(rows, &repairing, &RepairReading(view))
         .map_err(|error| unreadable(name, error))?;
     let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
     let mut resolution = resolve_through(authored, ground, name, snapshot, view, &|| clock.get())
