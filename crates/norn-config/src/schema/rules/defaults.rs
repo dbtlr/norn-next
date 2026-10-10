@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use norn_wire::{AuthoredValue, Binding, Captures, CaseFold, ValueMap};
+use norn_wire::{AuthoredValue, Captures, CaseFold, ValueMap};
 
 use super::super::VaultSchema;
 use super::super::template::{LocalTimestamp, NotALocalTimestamp};
-use super::{Rule, RuleDefault, RuleWork, named, value_in};
+use super::{FillRefusal, PathBindings, Rule, RuleWork, named, value_in};
 
 /// One value proposed for a field, and the rules proposing it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,7 +204,7 @@ impl VaultSchema {
         let at = &mut at;
         let mut composed: Vec<(String, AuthoredValue)> = frontmatter.entries().to_vec();
         let mut filled: Vec<(String, AuthoredValue)> = Vec::new();
-        let mut bindings: BTreeMap<&str, Captures> = BTreeMap::new();
+        let mut bindings = PathBindings::default();
         let defaulted = self
             .rules
             .values()
@@ -224,14 +224,11 @@ impl VaultSchema {
                     continue;
                 }
                 work.rules_selected += 1;
-                for (field, default) in &rule.required {
-                    let Some(default) = default else {
-                        continue;
-                    };
-                    if value_in(&composed, field).is_some() {
+                for (field, default) in rule.required() {
+                    if default.is_none() || value_in(&composed, field).is_some() {
                         continue;
                     }
-                    let value = fill(rule, field, default, path, at, case, &mut bindings, work)?;
+                    let value = fill(rule, field, path, at, case, &mut bindings, work)?;
                     propose(proposed.entry(field).or_default(), value, &rule.name);
                 }
             }
@@ -259,16 +256,16 @@ impl VaultSchema {
             }
             work.rules_selected += 1;
             for (field, value) in &filled {
-                let Some(Some(default)) = rule.required.get(field) else {
+                if !matches!(rule.required.get(field), Some(Some(_))) {
                     continue;
-                };
+                }
                 let candidates = judged.entry(field).or_insert_with(|| {
                     vec![DefaultCandidate {
                         value: value.clone(),
                         rules: Vec::new(),
                     }]
                 });
-                let proposal = fill(rule, field, default, path, at, case, &mut bindings, work)?;
+                let proposal = fill(rule, field, path, at, case, &mut bindings, work)?;
                 propose(candidates, proposal, &rule.name);
             }
         }
@@ -290,11 +287,11 @@ struct Reading<'c> {
 
 impl Reading<'_> {
     /// The one reading, taken now where none is yet.
-    fn taken(&mut self) -> Result<LocalTimestamp, RuleDefaultsRefusal> {
+    fn taken(&mut self) -> Result<LocalTimestamp, NotALocalTimestamp> {
         match self.read {
             Some(at) => Ok(at),
             None => {
-                let at = (self.clock)().map_err(RuleDefaultsRefusal::NoClockReading)?;
+                let at = (self.clock)()?;
                 self.read = Some(at);
                 Ok(at)
             }
@@ -302,59 +299,33 @@ impl Reading<'_> {
     }
 }
 
-/// `default` filled from `at` where it reads the clock, its captures read
-/// from what `rule`'s match binds in `path`, each rule's binding found once
-/// and tallied in `work`.
-#[allow(clippy::too_many_arguments)] // One fill's whole context: splitting it would only rename the arguments.
+/// The default `rule` declares for `field`, filled for a document at `path`
+/// by the one way a rule's default is filled ([`Rule::fill_default`]),
+/// refused as the fixpoint refuses it.
 fn fill<'s>(
     rule: &'s Rule,
     field: &str,
-    default: &RuleDefault,
     path: &str,
     at: &mut Reading<'_>,
     case: CaseFold,
-    bindings: &mut BTreeMap<&'s str, Captures>,
+    bindings: &mut PathBindings<'s>,
     work: &mut RuleWork,
 ) -> Result<AuthoredValue, RuleDefaultsRefusal> {
-    let at = if default.reads_clock() {
-        Some(at.taken()?)
-    } else {
-        None
-    };
-    let captures = if default.reads_captures() {
-        match bindings.get(rule.name.as_str()) {
-            Some(captures) => captures.clone(),
-            None => {
-                work.captures_bound += 1;
-                let captures = match rule
-                    .selector
-                    .path
-                    .as_ref()
-                    .map(|glob| glob.bind(path, case))
-                {
-                    Some(Binding::Unique(captures)) => captures,
-                    Some(Binding::Several(several)) => {
-                        return Err(RuleDefaultsRefusal::AmbiguousCapture {
-                            rule: rule.name.clone(),
-                            field: field.to_string(),
-                            bindings: several,
-                        });
-                    }
-                    // A rule that selects the path matches it; a default
-                    // reading a capture is refused at read where the rule
-                    // has no `match.path`.
-                    Some(Binding::Unmatched) | None => Captures::default(),
-                };
-                bindings.insert(&rule.name, captures.clone());
-                captures
+    rule.fill_default(field, path, case, &mut || at.taken(), bindings, work)
+        .expect("the fixpoint fills a field its rule declares a default for")
+        .map_err(|refusal| match refusal {
+            FillRefusal::AmbiguousCapture { bindings } => RuleDefaultsRefusal::AmbiguousCapture {
+                rule: rule.name.clone(),
+                field: field.to_string(),
+                bindings,
+            },
+            FillRefusal::NoClockReading(unread) => RuleDefaultsRefusal::NoClockReading(unread),
+            // A rule default's tokens are the clock's and its own rule's
+            // captures, judged at read.
+            FillRefusal::Unfillable(error) => {
+                unreachable!("a rule default's tokens are judged at read: {error}")
             }
-        }
-    } else {
-        Captures::default()
-    };
-    Ok(default.fill(at, captures).expect(
-        "a rule default's tokens are the clock's and its own rule's captures, judged at read",
-    ))
+        })
 }
 
 /// Adds `value`, proposed by `rule`, to `candidates`.

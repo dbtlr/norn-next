@@ -22,7 +22,7 @@
 //! on the state the earlier elements' fixes left. An element whose fix is
 //! skipped stands where it is.
 
-use norn_config::schema::{FieldType, VaultSchema};
+use norn_config::schema::VaultSchema;
 use norn_wire::{AuthoredValue, FindingRow, SkipReason, SkippedFinding};
 
 use super::{Document, Fix, Fixing, Proposal, State, candidates, cited, field_of, skip};
@@ -71,7 +71,6 @@ pub(super) fn fix_field(
         }
         return Mapped { fix: None, skipped };
     };
-    let kind = schema.declared_type(field);
     let mut current = state.clone();
     let mut cites = Vec::new();
     for &Element { at, row, finding } in elements {
@@ -85,7 +84,6 @@ pub(super) fn fix_field(
         let proposals = proposals(
             schema,
             field,
-            kind,
             &held.rules.iter().cloned().collect::<Vec<_>>(),
             &offending,
         );
@@ -157,7 +155,6 @@ pub(super) fn fix_field(
 fn proposals(
     schema: &VaultSchema,
     field: &str,
-    kind: FieldType,
     contributing: &[String],
     offending: &str,
 ) -> Vec<Proposal> {
@@ -167,10 +164,10 @@ fn proposals(
             continue;
         };
         for (_, set) in rule.one_of().filter(|(declared, _)| *declared == field) {
-            for (written, member) in set.synonyms() {
+            for (written, member) in set.synonym_values() {
                 if same_value(schema, field, written, offending) {
                     proposals.push(Proposal {
-                        value: member_value(kind, member),
+                        value: member.clone(),
                         rule: name.clone(),
                         clocked: false,
                     });
@@ -239,32 +236,5 @@ fn replaced(
             any.then_some(AuthoredValue::List(elements))
         }
         scalar => is_offending(scalar).then(|| member.clone()),
-    }
-}
-
-/// The member `text`, as a value of a field of `kind` is written: a boolean
-/// or a number as such, any other as the string it is.
-fn member_value(kind: FieldType, text: &str) -> AuthoredValue {
-    let trimmed = text.trim();
-    match kind {
-        FieldType::Boolean => match trimmed {
-            "true" => AuthoredValue::Bool(true),
-            "false" => AuthoredValue::Bool(false),
-            _ => AuthoredValue::string(text),
-        },
-        FieldType::Number => trimmed
-            .parse::<i64>()
-            .map(AuthoredValue::Integer)
-            .ok()
-            .or_else(|| {
-                trimmed
-                    .parse::<f64>()
-                    .ok()
-                    .and_then(|number| AuthoredValue::float(number).ok())
-            })
-            .unwrap_or_else(|| AuthoredValue::string(text)),
-        FieldType::Text | FieldType::Date | FieldType::Tags | FieldType::Link => {
-            AuthoredValue::string(text)
-        }
     }
 }

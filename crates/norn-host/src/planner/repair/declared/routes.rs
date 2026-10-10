@@ -3,11 +3,13 @@
 //!
 //! The candidates for a selected `document/misplaced` finding are the
 //! destinations the placement rules it cites declare a route to: each rule's
-//! route filled ([`Route::fill`](norn_config::schema::Route::fill)) — a
+//! route filled ([`Rule::fill_route`](norn_config::schema::Rule::fill_route),
+//! the one way a route is bound to its path and filled) — a
 //! `{{path.<name>}}` from what the rule's own `match.path` binds where the
 //! document stands, a clock token from the plan's one reading — with the
 //! document's own file name after it. A rule declaring no route proposes
-//! nothing. The candidates agree only as one destination, spelled alike. No
+//! nothing. The candidates agree only as one destination, spelled alike: on a
+//! root folding case, `Tasks/` and `tasks/` tie. No
 //! candidate is [`SkipReason::NoDeclaredFix`]; candidates that disagree are
 //! [`SkipReason::Tie`], with each destination and the rule proposing it; a
 //! route reading a capture its rule's `match.path` binds several ways is
@@ -21,7 +23,7 @@
 //! or that an earlier route of the batch moves a document to, above or
 //! beneath, is [`SkipReason::DestinationTaken`]; one where no document can be
 //! made, and a route filling to no folder — a capture holding `:` or slugging
-//! to nothing ([`Route::fill`](norn_config::schema::Route::fill)) — is
+//! to nothing ([`Rule::fill_route`](norn_config::schema::Rule::fill_route)) — is
 //! [`SkipReason::JudgeWouldRefuse`], noting why. A route the judgment of the
 //! whole plan refused for its link cascade ([`Repairing::refused`]) skips the
 //! same way, with that judgment's note. **The move is
@@ -34,15 +36,15 @@
 
 use std::collections::BTreeSet;
 
+use norn_config::schema::{FillRefusal, PathBindings, RuleWork};
 use norn_wire::{
     CitedFinding, Confidence, DocumentPath, FindingRow, Operation, OperationId, OperationKind,
     SkipReason, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::{
-    Document, Fix, Fixing, Routing, State, Unmade, captures_of, skip, spelled, spelled_candidates,
-};
+use super::{Document, Fix, Fixing, Routing, State, Unmade, skip, spelled, spelled_candidates};
 use crate::applier::Held;
+use crate::evidence::count_rule_work;
 #[cfg(doc)]
 use crate::planner::repair::Repairing;
 use crate::planner::repair::{Destination, Reading};
@@ -138,7 +140,16 @@ pub(super) fn fix<R: Reading>(
         &format!("at `{to}` the document still stands where its rules do not allow"),
     ) {
         Ok(moved) => moved,
-        Err(skip) => return Ok(Err(Unmade::Skipped(skip))),
+        Err(skip) => {
+            // A destination that brings in required fields is named as the
+            // route's other refusals are: the one candidate it was.
+            let skip = if skip.reason == SkipReason::BringsInRequiredFields {
+                Box::new(skip.with_candidates(candidates))
+            } else {
+                skip
+            };
+            return Ok(Err(Unmade::Skipped(skip)));
+        }
     };
     routing.claimed.claim(identity, folders);
     let clocked = proposals.iter().any(|proposal| proposal.clocked);
@@ -182,36 +193,21 @@ fn proposed(
         let Some(route) = rule.allowed_paths().and_then(|allowed| allowed.route()) else {
             continue;
         };
-        let captures = if route.reads_captures() {
-            captures_of(rule, &state.at, repairing.case).map_err(|bindings| {
-                Unproposed::Skipped(Box::new(skip(row, SkipReason::AmbiguousCapture).with_note(
-                    format!(
-                        "the rule `{rule_name}` routes to `{}` from a capture its `match.path` \
-                     binds several ways in `{}`: {} and {}",
-                        route.as_str(),
-                        state.at,
-                        spelled(&bindings[0]),
-                        spelled(&bindings[1]),
-                    ),
-                )))
-            })?
-        } else {
-            norn_wire::Captures::default()
-        };
-        let at = if route.reads_clock() {
-            match repairing.clock.get() {
-                Ok(at) => Some(at),
-                Err(_) => {
-                    return Err(Unproposed::NoClockReading {
-                        written: in_folder(route.as_str(), name).expect(
-                            "schema read refuses a route whose text, each token standing as \
-                             plain text, is no folder path",
-                        ),
-                    });
-                }
-            }
-        } else {
-            None
+        let mut clocked = false;
+        let mut work = RuleWork::default();
+        let filled = rule.fill_route(
+            state.at.as_str(),
+            repairing.case,
+            &mut || {
+                clocked = true;
+                repairing.clock.get()
+            },
+            &mut PathBindings::default(),
+            &mut work,
+        );
+        count_rule_work(work);
+        let Some(filled) = filled else {
+            continue;
         };
         let unfillable = |why: String| {
             Unproposed::Skipped(Box::new(skip(row, SkipReason::JudgeWouldRefuse).with_note(
@@ -223,16 +219,37 @@ fn proposed(
                 ),
             )))
         };
-        let folder = route
-            .fill(at, captures)
-            .map_err(|error| unfillable(error.to_string()))?;
+        let folder = match filled {
+            Ok(folder) => folder,
+            Err(FillRefusal::AmbiguousCapture { bindings }) => {
+                return Err(Unproposed::Skipped(Box::new(
+                    skip(row, SkipReason::AmbiguousCapture).with_note(format!(
+                        "the rule `{rule_name}` routes to `{}` from a capture its `match.path` \
+                         binds several ways in `{}`: {} and {}",
+                        route.as_str(),
+                        state.at,
+                        spelled(&bindings[0]),
+                        spelled(&bindings[1]),
+                    )),
+                )));
+            }
+            Err(FillRefusal::NoClockReading(_)) => {
+                return Err(Unproposed::NoClockReading {
+                    written: in_folder(route.as_str(), name).expect(
+                        "schema read refuses a route whose text, each token standing as plain \
+                         text, is no folder path",
+                    ),
+                });
+            }
+            Err(FillRefusal::Unfillable(error)) => return Err(unfillable(error.to_string())),
+        };
         let to = in_folder(&folder, name).map_err(|problem| {
             unfillable(format!("`{folder}{name}` is no document path: {problem}"))
         })?;
         proposals.push(Proposal {
             to,
             rule: rule_name.clone(),
-            clocked: route.reads_clock(),
+            clocked,
         });
     }
     Ok(proposals)
@@ -243,7 +260,7 @@ fn proposed(
 ///
 /// Schema read refuses a route whose text, each token standing as plain
 /// text, is no folder path, and a route's fill refuses a value that would
-/// break its segment ([`Route::fill`](norn_config::schema::Route::fill)); the
+/// break its segment ([`Rule::fill_route`](norn_config::schema::Rule::fill_route)); the
 /// whole path is judged here as well, since a value stands beside literal
 /// text.
 fn in_folder(folder: &str, name: &str) -> Result<DocumentPath, norn_wire::PathProblem> {

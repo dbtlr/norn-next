@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 
 use norn_config::schema::{
-    CaseFold, CreationProblem, ElementProblem, FieldType, FillError, ForbiddenFix, GlobProblem,
-    PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, UnsafeValue,
-    VaultSchema, VaultSchemaError,
+    CaseFold, CreationProblem, ElementProblem, FieldType, FillError, FillRefusal, ForbiddenFix,
+    GlobProblem, PLACEMENT_CEILING, PathBindings, RuleProblem, RuleWork, RulesConflict, Shape,
+    TypedValue, UnsafeValue, VaultSchema, VaultSchemaError,
 };
-use norn_wire::{AuthoredValue, Binding, PathProblem, Severity, ValueMap};
+use norn_wire::{AuthoredValue, PathProblem, Severity, ValueMap};
 
 /// A schema holding one rule of every key the grammar has.
 const TASK: &[u8] = b"version: 1
@@ -875,16 +875,21 @@ fn a_route_refuses_a_capture_that_would_break_its_folder() {
     )
     .expect("a schema");
     let filled = |name: &str, path: &str| {
-        let rule = schema.rule(name).expect("the rule");
-        let route = rule
-            .allowed_paths()
-            .and_then(|allowed| allowed.route())
-            .expect("a route");
-        let glob = rule.selector().path().expect("a match path");
-        let Binding::Unique(captures) = glob.bind(path, CaseFold::Exact) else {
-            panic!("`{path}` binds once");
-        };
-        route.fill(None, captures)
+        schema
+            .rule(name)
+            .expect("the rule")
+            .fill_route(
+                path,
+                CaseFold::Exact,
+                &mut || panic!("a route reading no clock token read the clock"),
+                &mut PathBindings::default(),
+                &mut RuleWork::default(),
+            )
+            .expect("a rule routing")
+            .map_err(|refusal| match refusal {
+                FillRefusal::Unfillable(error) => error,
+                other => panic!("`{path}` binds once: {other}"),
+            })
     };
 
     assert_eq!(filled("s", "work/a.md"), Ok("work/tasks/".to_string()));

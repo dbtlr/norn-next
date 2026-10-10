@@ -154,9 +154,9 @@ use norn_wire::fold_tag;
 pub use norn_wire::{Binding, Captures, CaseFold, Pattern, PatternError};
 pub use rules::{
     AllowedPaths, Breach, ClosedSet, CombinedConstraint, DefaultCandidate, DefaultsConflict,
-    ElementProblem, FieldConstraint, FindingIdentity, ForbiddenFix, Judgment, OneOfIntersection,
-    PLACEMENT_CEILING, Route, Rule, RuleDefault, RuleDefaultsRefusal, RuleFinding, RuleProblem,
-    RuleWork, RulesConflict, Selector,
+    ElementProblem, FieldConstraint, FillRefusal, FindingIdentity, ForbiddenFix, Judgment,
+    OneOfIntersection, PLACEMENT_CEILING, PathBindings, Route, Rule, RuleDefault,
+    RuleDefaultsRefusal, RuleFinding, RuleProblem, RuleWork, RulesConflict, Selector,
 };
 pub use template::{
     FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateError, TemplateValues,

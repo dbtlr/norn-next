@@ -172,6 +172,7 @@
 mod checks;
 mod combined;
 mod defaults;
+mod fill;
 mod judge;
 mod placement;
 mod read;
@@ -183,6 +184,7 @@ use norn_wire::{AuthoredValue, Captures, CaseFold, Severity, ValueMap, fold_tag}
 
 pub use combined::{CombinedConstraint, FieldConstraint, OneOfIntersection, RulesConflict};
 pub use defaults::{DefaultCandidate, DefaultsConflict, RuleDefaultsRefusal};
+pub use fill::{FillRefusal, PathBindings};
 pub use judge::{Breach, FindingIdentity, Judgment, RuleFinding, RuleWork};
 pub use placement::PLACEMENT_CEILING;
 
@@ -407,9 +409,9 @@ impl RuleDefault {
     /// no clock token; one reading the clock refuses it as
     /// [`FillError::NoClock`].
     ///
-    /// Read by the defaults fixpoint here, and by repair's declared fix,
-    /// which fills one selected field's default the same way
-    /// (`norn-host`'s `planner::repair::declared`).
+    /// Read through [`Rule::fill_default`], which binds the captures and
+    /// reads the clock for the defaults fixpoint and for repair's declared
+    /// fix alike.
     pub fn fill(
         &self,
         at: Option<LocalTimestamp>,
@@ -421,12 +423,12 @@ impl RuleDefault {
 
     /// Whether the default reads a path capture, so filling it needs its
     /// rule's `match.path` bound uniquely in the document's path.
-    pub fn reads_captures(&self) -> bool {
+    fn reads_captures(&self) -> bool {
         templates(&self.value).any(|template| template.path_captures().next().is_some())
     }
 
     /// Whether the default reads the clock, so filling it needs a reading.
-    pub fn reads_clock(&self) -> bool {
+    fn reads_clock(&self) -> bool {
         templates(&self.value).any(Template::reads_clock)
     }
 }
@@ -461,6 +463,9 @@ pub struct ClosedSet {
     values: Vec<String>,
     members: BTreeMap<TypedValue, String>,
     synonyms: Vec<(String, String)>,
+    /// Each synonym's member as the schema wrote it, in the order of
+    /// `synonyms`.
+    synonym_values: Vec<AuthoredValue>,
 }
 
 impl ClosedSet {
@@ -474,6 +479,21 @@ impl ClosedSet {
         self.synonyms
             .iter()
             .map(|(written, member)| (written.as_str(), member.as_str()))
+    }
+
+    /// Each synonym, as written, and the member it maps onto as the schema
+    /// wrote it: the YAML scalar with its type, so a member written as the
+    /// string `"1.50"` is that string, and one written `true` a boolean. A
+    /// number written unquoted is the number the YAML reader reads: its
+    /// spelling is the canonical one, which the reader leaves no other of.
+    ///
+    /// Read by repair, which writes the member into a document as the owner
+    /// wrote it rather than as the field's type would re-spell it.
+    pub fn synonym_values(&self) -> impl Iterator<Item = (&str, &AuthoredValue)> {
+        self.synonyms
+            .iter()
+            .zip(&self.synonym_values)
+            .map(|((written, _), member)| (written.as_str(), member))
     }
 }
 
@@ -537,14 +557,9 @@ impl Route {
     /// into a route, whose own text holds none. The caller judges the whole
     /// filled path as a document path too.
     ///
-    /// Read by repair's declared fix, which fills a misplaced document's
-    /// destination as it fills a rule default ([`RuleDefault::fill`];
-    /// `norn-host`'s `planner::repair::declared`).
-    pub fn fill(
-        &self,
-        at: Option<LocalTimestamp>,
-        captures: Captures,
-    ) -> Result<String, FillError> {
+    /// Read through [`Rule::fill_route`], which fills a misplaced document's
+    /// destination as [`Rule::fill_default`] fills a rule default.
+    fn fill(&self, at: Option<LocalTimestamp>, captures: Captures) -> Result<String, FillError> {
         super::creation::fill_path(
             self.template.parts(),
             &TemplateValues::reading(BTreeMap::new(), at).with_captures(captures),
@@ -553,12 +568,12 @@ impl Route {
 
     /// Whether the route reads a path capture, so filling it needs its
     /// rule's `match.path` bound uniquely in the document's path.
-    pub fn reads_captures(&self) -> bool {
+    fn reads_captures(&self) -> bool {
         self.template.path_captures().next().is_some()
     }
 
     /// Whether the route reads the clock, so filling it needs a reading.
-    pub fn reads_clock(&self) -> bool {
+    fn reads_clock(&self) -> bool {
         self.template.reads_clock()
     }
 }
@@ -780,8 +795,10 @@ impl VaultSchema {
 
     /// The rule called `name`, if the schema declares one.
     ///
-    /// Repair reads back by it each rule a finding cites for the defaults it
-    /// declares (`norn-host`'s `planner::repair::declared`). Rule
+    /// Repair reads back by it each rule a finding cites for every fix it
+    /// declares: the default of a required field, the synonyms of a closed
+    /// set, the remedy of a forbidden field and the route of its allowed
+    /// paths (`norn-host`'s `planner::repair::declared`). Rule
     /// judgment reads the rules selecting a document rather than one by name,
     /// `describe` reports every rule, in name order, and takes no rule name,
     /// and a `validate` naming a rule is checked against the declaration the

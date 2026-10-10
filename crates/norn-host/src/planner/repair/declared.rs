@@ -10,7 +10,8 @@
 //! - a missing required field (`field/required-missing`) fills from the
 //!   default the rules requiring it declare, each filled as the defaults
 //!   fixpoint fills one
-//!   ([`RuleDefault::fill`](norn_config::schema::RuleDefault::fill)): a
+//!   ([`Rule::fill_default`](norn_config::schema::Rule::fill_default), the one
+//!   way a default is bound to its path and filled): a
 //!   `{{path.<name>}}` from what the rule's own `match.path` binds in the
 //!   document's path, and a clock token from the plan's one reading. The
 //!   candidates agree only as one written value, as the fixpoint's do: `1`
@@ -27,6 +28,15 @@
 //!   placement rules' `allowed_paths` route names, keeping its file name
 //!   ([`routes`]).
 //!
+//! **Each kind's candidates agree by its own rule.** Defaults agree as one
+//! written value (`1` and `1.0` disagree). Synonyms agree by the field's typed
+//! equality (`4` and `4.0` are one number under a `number` field), and where
+//! rules agree typed but spell the member differently, the member is written
+//! as the first rule in name order spells it. Routes agree by the destination's
+//! exact spelling, so on a root folding case `Tasks/` and `tasks/` are two
+//! destinations and tie. Forbidden fixes agree when every one removes the
+//! field, or every one renames it to the same field.
+//!
 //! **What is skipped, and with what.** No fix declared is
 //! [`SkipReason::NoDeclaredFix`], with the value the finding judged; defaults
 //! that disagree are [`SkipReason::ConflictingDefaults`], and synonyms or
@@ -38,8 +48,9 @@
 //! something stands at, or another route of the batch moves a document to,
 //! is [`SkipReason::DestinationTaken`]; a fix that brings in a
 //! required field the document lacks is [`SkipReason::BringsInRequiredFields`],
-//! naming each such field and the default its rules declare, whatever else it
-//! introduces; and a fix that introduces any other violation, or that cannot
+//! naming each such field and the default its rules declare (none, with the
+//! note saying so, where its rules declare differing defaults), whatever else
+//! it introduces, and a route's carrying the destination as its candidate; and a fix that introduces any other violation, or that cannot
 //! be set into the document, is [`SkipReason::JudgeWouldRefuse`], with its
 //! candidates. **A default reading a clock that gives no reading is no
 //! skip**: the repair is refused as a creation is, the default's operation
@@ -90,18 +101,18 @@ mod synonyms;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use norn_config::schema::{FillError, Rule, VaultSchema};
+use norn_config::schema::{FillError, FillRefusal, PathBindings, RuleWork, VaultSchema};
 use norn_wire::{
-    AuthoredValue, Binding, Captures, CaseFold, Citation, CitedFinding, Confidence, DocumentPath,
-    FindingKind, FindingRow, Operation, OperationId, OperationKind, RequiredField,
-    RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding,
-    UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead,
-    WriteTarget,
+    AuthoredValue, Captures, Citation, CitedFinding, Confidence, DocumentPath, FindingKind,
+    FindingRow, Operation, OperationId, OperationKind, RequiredField, RequiredFieldHead,
+    SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding, UnresolvedOperation,
+    UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead, WriteTarget,
 };
 
 use super::{Claimed, Planned, Reading, Repairing, skip};
 use crate::applier::{Held, Standing, standing, verdict};
 use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
+use crate::evidence::count_rule_work;
 use crate::planner::edit::edited;
 
 /// Whether `row` is a finding a declared fix may answer, so its document's
@@ -362,28 +373,6 @@ fn field_of(bytes: &[u8], name: &str) -> Option<Option<AuthoredValue>> {
     )
 }
 
-/// The captures `rule`'s own `match.path` binds in `path`, its letters
-/// compared as `case` says; the first two bindings where it binds several
-/// ways.
-fn captures_of(
-    rule: &Rule,
-    path: &DocumentPath,
-    case: CaseFold,
-) -> Result<Captures, Box<[Captures; 2]>> {
-    match rule
-        .selector()
-        .path()
-        .map(|glob| glob.bind(path.as_str(), case))
-    {
-        Some(Binding::Unique(captures)) => Ok(captures),
-        Some(Binding::Several(bindings)) => Err(bindings),
-        // A rule selecting the document matches its path; a default or route
-        // reading a capture is refused at read where its rule has no
-        // `match.path`.
-        Some(Binding::Unmatched) | None => Ok(Captures::default()),
-    }
-}
-
 /// The citation of the finding `row` fixed by setting `field`, noting where
 /// the value written is the repair's own time.
 fn cited(row: &FindingRow, field: &str, clocked: bool) -> CitedFinding {
@@ -516,10 +505,21 @@ impl Document<'_> {
         let state = State::of(at.clone(), composed, verdict.standing);
         let brought = brought_in(&verdict.introduced);
         if !brought.is_empty() {
-            return Err(Box::new(
-                skip(row, SkipReason::BringsInRequiredFields)
-                    .with_required_fields(required_fields(&brought, &state.holds, self.schema())),
-            ));
+            let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
+            let skipped =
+                skip(row, SkipReason::BringsInRequiredFields).with_required_fields(fields);
+            return Err(Box::new(if differing.is_empty() {
+                skipped
+            } else {
+                skipped.with_note(format!(
+                    "the rules requiring {} declare differing defaults, so no default is named",
+                    differing
+                        .iter()
+                        .map(|field| format!("`{field}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }));
         }
         if !verdict.introduced.is_empty() {
             return Err(Box::new(
@@ -668,7 +668,9 @@ impl Composing<'_> {
     }
 
     /// What the default each of `rules` declares for the field fills to, in
-    /// rule name order, the clock read only for a default reading it.
+    /// rule name order, filled as the defaults fixpoint fills one
+    /// ([`Rule::fill_default`](norn_config::schema::Rule::fill_default)) — the clock read only for a default reading
+    /// it — and its work tallied on the logical rule counters.
     fn proposed(&self, rules: &BTreeSet<String>) -> Proposed {
         let repairing = self.document.repairing;
         let schema = self.document.schema();
@@ -684,48 +686,50 @@ impl Composing<'_> {
             else {
                 continue;
             };
-            let captures = if default.reads_captures() {
-                match captures_of(rule, &self.state.at, repairing.case) {
-                    Ok(captures) => captures,
-                    Err(bindings) => {
-                        return Proposed::AmbiguousCapture {
-                            rule: name.clone(),
-                            bindings,
-                        };
-                    }
-                }
-            } else {
-                Captures::default()
-            };
-            let at = if default.reads_clock() {
-                match repairing.clock.get() {
-                    Ok(at) => Some(at),
-                    Err(_) => {
-                        return Proposed::NoClockReading {
-                            source: default.source(),
-                        };
-                    }
-                }
-            } else {
-                None
+            let mut clocked = false;
+            let mut work = RuleWork::default();
+            let filled = rule.fill_default(
+                self.field,
+                self.state.at.as_str(),
+                repairing.case,
+                &mut || {
+                    clocked = true;
+                    repairing.clock.get()
+                },
+                &mut PathBindings::default(),
+                &mut work,
+            );
+            count_rule_work(work);
+            let Some(filled) = filled else {
+                continue;
             };
             // Schema read holds a default's tokens to the clock's and its own
-            // rule's captures, each supplied here, so a default fills; a
-            // failure is answered as a skip, never a panic.
-            let value = match default.fill(at, captures) {
-                Ok(value) => value,
-                Err(error) => {
+            // rule's captures, so a default fills; a failure is answered as a
+            // skip, never a panic.
+            match filled {
+                Ok(value) => proposals.push(Proposal {
+                    value,
+                    rule: name.clone(),
+                    clocked,
+                }),
+                Err(FillRefusal::AmbiguousCapture { bindings }) => {
+                    return Proposed::AmbiguousCapture {
+                        rule: name.clone(),
+                        bindings,
+                    };
+                }
+                Err(FillRefusal::NoClockReading(_)) => {
+                    return Proposed::NoClockReading {
+                        source: default.source(),
+                    };
+                }
+                Err(FillRefusal::Unfillable(error)) => {
                     return Proposed::Unfillable {
                         rule: name.clone(),
                         error,
                     };
                 }
-            };
-            proposals.push(Proposal {
-                value,
-                rule: name.clone(),
-                clocked: default.reads_clock(),
-            });
+            }
         }
         Proposed::Candidates(proposals)
     }
@@ -743,12 +747,15 @@ fn brought_in(introduced: &[SchemaViolation]) -> BTreeSet<&str> {
 
 /// The fields `brought` names, each with the default the rules requiring it
 /// on the composed document — those its finding among `holds` cites —
-/// declare, as the schema writes it, where they declare one and agree on it.
-fn required_fields(
-    brought: &BTreeSet<&str>,
+/// declare, as the schema writes it, where they declare one and agree on it;
+/// and the fields whose rules declare differing defaults, which are named
+/// with none.
+fn required_fields<'b>(
+    brought: &BTreeSet<&'b str>,
     holds: &[Held],
     schema: &VaultSchema,
-) -> RequiredFieldHead {
+) -> (RequiredFieldHead, Vec<&'b str>) {
+    let mut differing = Vec::new();
     let fields = brought.iter().map(|field| {
         let rules = holds
             .iter()
@@ -772,10 +779,16 @@ fn required_fields(
             Some((first, rest)) if rest.iter().all(|value| value == first) => {
                 required.with_default(head(first))
             }
-            _ => required,
+            Some(_) => {
+                differing.push(*field);
+                required
+            }
+            None => required,
         }
     });
-    RequiredFieldHead::new(fields, brought.len() as u64).expect("a head of every field it names")
+    let head = RequiredFieldHead::new(fields.collect::<Vec<_>>(), brought.len() as u64)
+        .expect("a head of every field it names");
+    (head, differing)
 }
 
 /// Every proposal, as the value candidates a skip carries.
@@ -1142,6 +1155,63 @@ mod tests {
                     .with_required_fields(fields)
             ]
         );
+    }
+
+    /// **A brought-in required field whose rules declare differing defaults
+    /// names no default, and the skip says why**: `status` is required by two
+    /// rules the filled `kind` brings in, which default it differently.
+    #[test]
+    fn a_brought_in_field_whose_rules_disagree_on_its_default_names_none_and_says_so() {
+        let schema = "version: 1\nrules:\n  kinds:\n    match: {frontmatter: {type: work}}\n    required:\n      kind: {default: task}\n  a-tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n  b-tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: doing}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: work\n---\n")]);
+
+        let planned = vault.plan(&[missing(5, "a.md", "kind")]);
+
+        assert!(planned.operations.is_empty());
+        let fields = RequiredFieldHead::new([RequiredField::new("status")], 1).expect("a head");
+        let expected =
+            SkippedFinding::new(5, SkipReason::BringsInRequiredFields).with_required_fields(fields);
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
+        };
+        let note = skipped.note.as_deref().expect("the skip says why");
+        assert!(
+            note.contains("`status`") && note.contains("differing defaults"),
+            "{note}"
+        );
+        assert_eq!(
+            &SkippedFinding {
+                note: None,
+                ..skipped.clone()
+            },
+            &expected
+        );
+    }
+
+    /// **A default's path capture is bound and tallied as the defaults
+    /// fixpoint's is**: one binding on the logical rule counters.
+    #[test]
+    fn a_default_reading_a_capture_tallies_its_binding_on_the_rule_counters() {
+        let schema = "version: 1\nrules:\n  areas:\n    match: {path: '<area>/**'}\n    required:\n      area: {default: '{{path.area}}'}\n";
+        let vault = Vault::of(schema, &[("red/a.md", "---\ntitle: A\n---\n")]);
+
+        let (planned, work) =
+            crate::evidence::rule_work_of(|| vault.plan(&[missing(1, "red/a.md", "area")]));
+
+        assert_eq!(planned.operations, vec![set(1, "red/a.md", "area", "red")]);
+        assert_eq!(work.captures_bound, 1, "{work:?}");
+    }
+
+    /// **A route's path capture is bound and tallied the same way.**
+    #[test]
+    fn a_route_reading_a_capture_tallies_its_binding_on_the_rule_counters() {
+        let vault = Vault::of(AREAS, &[("work/a.md", "---\ntype: task\n---\n# A\n")]);
+
+        let (planned, work) =
+            crate::evidence::rule_work_of(|| vault.plan(&[misplaced(3, "work/a.md")]));
+
+        assert_eq!(planned.operations.len(), 1, "{planned:?}");
+        assert_eq!(work.captures_bound, 1, "{work:?}");
     }
 
     const COMPOSED: &str = "version: 1\nrules:\n  base:\n    match: {frontmatter: {type: task}}\n    required:\n      a_owner: {default: me}\n      kind: {default: special}\n      z_due: {default: soon}\n  specials:\n    match: {frontmatter: {kind: special}}\n    forbidden:\n      scratch:\n";
@@ -1621,6 +1691,36 @@ mod tests {
             planned.citations,
             vec![citing_values(1, &[(1, "complete")])]
         );
+    }
+
+    /// **A synonym's member is written as the schema wrote it**, not as the
+    /// field's type would re-spell it: `"1.50"`, a string the owner quoted
+    /// under a `number` field, is not rewritten as the float `1.5`; and a
+    /// member written as a number stays that number.
+    #[test]
+    fn a_synonyms_member_is_written_as_the_schema_wrote_it() {
+        let schema = "version: 1\nfields:\n  score: {type: number}\nrules:\n  scored:\n    match: {frontmatter: {type: task}}\n    one_of:\n      score: {values: ['1.50', 3], synonyms: {'7': '1.50', '8': 3}}\n";
+        let vault = Vault::of(
+            schema,
+            &[
+                ("a.md", "---\ntype: task\nscore: 7\n---\n"),
+                ("b.md", "---\ntype: task\nscore: 8\n---\n"),
+            ],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "score", "7"),
+            offending(2, NOT_ONE_OF, "b.md", "score", "8"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![
+                set_to(1, "a.md", "score", AuthoredValue::string("1.50")),
+                set_to(2, "b.md", "score", AuthoredValue::Integer(3)),
+            ]
+        );
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
     }
 
     /// **Co-selecting rules mapping one value to different members skip as a
@@ -2118,7 +2218,9 @@ mod tests {
     }
 
     /// **A route that brings the document under a rule requiring a field
-    /// skips as bringing in required fields**, naming it and its default.
+    /// skips as bringing in required fields**, naming it and its default, and
+    /// carries the destination as its candidate as the route's other refusals
+    /// do.
     #[test]
     fn a_route_that_brings_in_a_rule_requiring_a_field_skips_as_brings_in_required_fields() {
         let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  tracked:\n    match: {path: 'tasks/**'}\n    required:\n      status: {default: todo}\n";
@@ -2136,6 +2238,7 @@ mod tests {
             planned.skipped,
             vec![
                 SkippedFinding::new(1, SkipReason::BringsInRequiredFields)
+                    .with_candidates(values(&[("tasks/a.md", "tasks")]))
                     .with_required_fields(fields)
             ]
         );
