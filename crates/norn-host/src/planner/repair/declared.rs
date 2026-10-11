@@ -48,7 +48,10 @@
 //! declared fix decides and the derived answer differs, the citation notes
 //! the derived answer. A derived fix the threshold does not admit is judged
 //! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
-//! operation the plan would have held.
+//! operation lowering the threshold writes for it: the document composed
+//! again at the derived level ([`Reckoned::propose_lowered`]), so each
+//! element of a list proposes the one write of the field every admitted
+//! element composes into.
 //!
 //! **A document is drafted alone, its routes judged together.** Each
 //! document's draft composes its fixes where it stands and, where its route
@@ -262,7 +265,7 @@ pub(super) fn draft<'d, R: Reading>(
         }
     };
     let reckoned = Reckoned::of(document, &bytes, repairing);
-    let origin = reckoned.compose(reckoned.start.clone(), Vec::new());
+    let origin = reckoned.compose(&reckoned.document, reckoned.start.clone(), Vec::new());
     let misplaced = reckoned.misplaced();
     let route = match misplaced {
         Some(at) if has_fix(&document[at], repairing) => Some(routes::route(&reckoned, at, vault)?),
@@ -272,9 +275,11 @@ pub(super) fn draft<'d, R: Reading>(
         None => None,
     };
     let destination = match &route {
-        Some(routes::Routed::Passed(passed)) => {
-            Some(reckoned.compose(passed.state.clone(), vec![passed.moved.clone()]))
-        }
+        Some(routes::Routed::Passed(passed)) => Some(reckoned.compose(
+            &reckoned.document,
+            passed.state.clone(),
+            vec![passed.moved.clone()],
+        )),
         _ => None,
     };
     Ok(Draft {
@@ -412,8 +417,9 @@ impl Decided<'_> {
             }
             Deciding::Composed(composed) => *composed,
         };
-        reckoned.link_fixes(&mut composed, namings, respellable);
+        reckoned.link_fixes(&reckoned.document, &mut composed, namings, respellable);
         let claims = reckoned.settle(&mut composed);
+        reckoned.propose_lowered(&mut composed, namings, respellable);
         for made in composed.made {
             push(planned, made, namings);
         }
@@ -457,6 +463,9 @@ struct Composed {
     decided: Vec<Option<SkippedFinding>>,
     unresolved: BTreeSet<usize>,
     state: State,
+    /// The state the composition started from and the additions made
+    /// before it: what it is composed again from at a lowered threshold.
+    began: (State, Vec<Made>),
 }
 
 /// One addition a composition makes.
@@ -484,6 +493,7 @@ impl<'d> Reckoned<'d> {
         let composing = Document {
             before: standing(path, before, repairing.declared, repairing.case),
             repairing,
+            threshold: repairing.threshold,
         };
         let start = State::of(path.clone(), Arc::clone(before), composing.before.clone());
         let found: Vec<Option<Held>> = document
@@ -553,11 +563,13 @@ impl<'d> Reckoned<'d> {
     }
 
     /// Compose every fix of the document onto `from`, after the additions
-    /// `made` already made: its findings taken in finding order, each fix
-    /// set into the bytes the earlier ones left and judged where `from`
-    /// stands ([`Document::admit`]). A misplaced finding is left undecided:
-    /// its route decides it.
-    fn compose(&self, from: State, mut made: Vec<Made>) -> Composed {
+    /// `made` already made, as `composing` — the document at a threshold —
+    /// makes them: its findings taken in finding order, each fix set into the
+    /// bytes the earlier ones left and judged where `from` stands
+    /// ([`Document::admit`]). A misplaced finding is left undecided: its
+    /// route decides it.
+    fn compose(&self, composing: &Document<'_>, from: State, mut made: Vec<Made>) -> Composed {
+        let began = (from.clone(), made.clone());
         let document = self.rows;
         let mut state = from;
         let mut decided = vec![None; document.len()];
@@ -590,22 +602,22 @@ impl<'d> Reckoned<'d> {
                     FindingKind::NotOneOf => {
                         let mut folds = derived::FoldCache::default();
                         elements::fix_field(
-                            &self.document,
+                            composing,
                             &state,
                             field,
                             &rows,
                             &mut |offending| {
-                                closed_set::propose(&self.document, field, &mut folds, offending)
+                                closed_set::propose(composing, field, &mut folds, offending)
                             },
                             &|_| None,
                         )
                     }
                     _ => elements::fix_field(
-                        &self.document,
+                        composing,
                         &state,
                         field,
                         &rows,
-                        &mut |offending| derived::boolean_case(&self.document, offending),
+                        &mut |offending| derived::boolean_case(composing, offending),
                         &|_| None,
                     ),
                 };
@@ -632,21 +644,21 @@ impl<'d> Reckoned<'d> {
                 ),
                 row.target.as_deref(),
             ) else {
-                decided[at] = Some(unfixed(row, self.document.repairing));
+                decided[at] = Some(unfixed(row, composing.repairing));
                 continue;
             };
             let rules = held.rules.clone();
             let fixed = match row.kind {
                 FindingKind::Forbidden => {
-                    forbidden::fix(&self.document, &state, row, finding, field, &rules)
+                    forbidden::fix(composing, &state, row, finding, field, &rules)
                         .map_err(Unmade::Skipped)
                 }
                 FindingKind::ShapeMismatch => {
-                    derived::reshape(&self.document, &state, row, finding, field)
+                    derived::reshape(composing, &state, row, finding, field)
                         .map_err(Unmade::Skipped)
                 }
                 _ => Composing {
-                    document: &self.document,
+                    document: composing,
                     state: &state,
                     row,
                     finding,
@@ -670,6 +682,65 @@ impl<'d> Reckoned<'d> {
             decided,
             unresolved,
             state,
+            began,
+        }
+    }
+
+    /// Make each fix of `composed` skipped below the threshold carry what
+    /// lowering the threshold writes: the document composed again from where
+    /// `composed` began, at the threshold lowered to the fix's level
+    /// ([`Document::lowered`]), its link fixes resolved as `namings` answers
+    /// and judged against `respellable` as the plan's are. **A proposal is
+    /// exactly the write lowering makes**: each element of a list proposes
+    /// the one write of the field every admitted element composes into, and
+    /// a fix after an earlier below-threshold fix of the document proposes
+    /// what it writes onto that one. Where the lowered composition skips the
+    /// fix, the skip is its; where it drops the finding, the proposal is the
+    /// fix's own. Composed only where a fix is skipped below the threshold.
+    fn propose_lowered(
+        &self,
+        composed: &mut Composed,
+        namings: &Namings,
+        respellable: Option<&Respellable>,
+    ) {
+        let below = |decision: &Option<SkippedFinding>| {
+            decision
+                .as_ref()
+                .is_some_and(|skipped| skipped.reason == SkipReason::BelowThreshold)
+        };
+        if !composed.decided.iter().any(below) {
+            return;
+        }
+        let lowered_document = self.document.lowered();
+        let (from, made) = composed.began.clone();
+        let mut lowered = self.compose(&lowered_document, from, made);
+        self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
+        self.settle(&mut lowered);
+        for (at, decision) in composed.decided.iter_mut().enumerate() {
+            if !below(decision) {
+                continue;
+            }
+            let id = self.rows[at].id;
+            let written = lowered.made.iter().find_map(|made| match made {
+                Made::Fixed { operations, cited }
+                    if cited.iter().any(|cited| cited.finding == id) =>
+                {
+                    match operations.as_slice() {
+                        [operation] => Some(operation),
+                        _ => None,
+                    }
+                }
+                Made::Fixed { .. } | Made::Unresolved { .. } => None,
+            });
+            match (written, lowered.decided[at].take()) {
+                (Some(operation), _) => {
+                    if let Some(skipped) = decision.as_mut() {
+                        skipped.proposed = Some(Operation::new(operation.clone()));
+                    }
+                }
+                (None, Some(skipped)) => *decision = Some(skipped),
+                (None, None) => {}
+            }
         }
     }
 
@@ -877,11 +948,15 @@ fn cited(row: &FindingRow, level: Confidence, notes: Vec<String>) -> CitedFindin
     cited.with_notes(notes)
 }
 
-/// One document being composed: what it held before any fix, and what the
-/// fixes are made under.
+/// One document being composed: what it held before any fix, what the
+/// fixes are made under, and the weakest level a fix is written at — the
+/// request's threshold, or the level a fix below it is made at, where the
+/// write lowering the threshold makes is composed ([`Document::lowered`]).
+#[derive(Clone)]
 struct Document<'c> {
     before: Standing,
     repairing: &'c Repairing<'c>,
+    threshold: Confidence,
 }
 
 /// What the fixes made so far have composed: where the document stands, its
@@ -919,15 +994,27 @@ impl Document<'_> {
         self.repairing.declared.schema()
     }
 
-    /// Whether the request's threshold admits a fix made at `level`.
+    /// Whether the threshold admits a fix made at `level`.
     fn admits(&self, level: Confidence) -> bool {
-        self.repairing.threshold.admits(level)
+        self.threshold.admits(level)
+    }
+
+    /// The document composed at the threshold lowered to the derived level,
+    /// the level every fix the request's threshold may leave below it is
+    /// made at: what a fix below the threshold proposes is what composing
+    /// the document so writes.
+    fn lowered(&self) -> Self {
+        Document {
+            threshold: Confidence::Derived,
+            ..self.clone()
+        }
     }
 
     /// `Ok` where a fix made at `level`, judged and admitted, is one the
-    /// request's threshold writes; otherwise the skip of the finding `row`
-    /// as below the threshold, carrying `proposed`, the operation the plan
-    /// would have held.
+    /// threshold writes; otherwise the skip of the finding `row` as below
+    /// the threshold, carrying `proposed`, the fix's own operation, which the
+    /// write lowering the threshold makes replaces
+    /// ([`Reckoned::propose_lowered`]).
     fn within_threshold(
         &self,
         level: Confidence,
@@ -3386,6 +3473,40 @@ mod tests {
             assert_eq!(planned.operations.len(), 1, "{threshold:?}");
             assert!(planned.skipped.is_empty(), "{threshold:?}");
         }
+    }
+
+    /// **Each below-threshold element of a list carries the one write of the
+    /// field lowering the threshold makes**: `BLUE` and `RED` fold to `blue`
+    /// and `red`, and each skip proposes the whole list with both folded, as
+    /// the plan at the derived threshold writes it.
+    #[test]
+    fn below_threshold_elements_of_a_list_each_propose_the_write_lowering_makes() {
+        let schema = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      labels: {values: [red, blue]}\n";
+        let documents = [("a.md", "---\ntype: task\nlabels: [BLUE, RED]\n---\n")];
+        let rows = [
+            offending(1, NOT_ONE_OF, "a.md", "labels", "BLUE"),
+            offending(2, NOT_ONE_OF, "a.md", "labels", "RED"),
+        ];
+
+        let strict = Vault::of(schema, &documents)
+            .at(Confidence::Declared)
+            .plan(&rows);
+        let lowered = Vault::of(schema, &documents).plan(&rows);
+
+        let written = proposing("a.md", "labels", list(&["blue", "red"]));
+        assert_eq!(lowered.operations[0].kind, written.kind);
+        let proposed: Vec<(u64, SkipReason, Option<Operation>)> = strict
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.finding, skipped.reason, skipped.proposed.clone()))
+            .collect();
+        assert_eq!(
+            proposed,
+            vec![
+                (1, SkipReason::BelowThreshold, Some(written.clone())),
+                (2, SkipReason::BelowThreshold, Some(written)),
+            ]
+        );
     }
 
     /// **A wrap the judge refuses skips as one the judge would refuse, with

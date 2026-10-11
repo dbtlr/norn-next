@@ -3885,3 +3885,36 @@ fn a_link_fix_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() 
     assert_eq!(skipped, [SkipReason::JudgeWouldRefuse], "{plan:?}");
     assert!(written(&vault, "h.md").contains("up: zz-projects"));
 }
+
+/// **What a below-threshold skip proposes is what lowering the threshold
+/// writes, through the host**: each of a list's two folded elements proposes
+/// the one write of the field the derived threshold's plan holds.
+#[test]
+fn below_threshold_proposals_of_a_lists_elements_are_what_lowering_the_threshold_writes() {
+    let schema = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      labels: {values: [red, blue]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-below-threshold-proposals",
+        schema,
+        &[("h.md", b"---\ntype: task\nlabels: [BLUE, RED]\n---\n# H\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let below = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Declared)),
+    );
+    let lowered = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let proposed: Vec<Option<OperationKind>> = provenance(&below)
+        .skipped
+        .iter()
+        .map(|skipped| {
+            skipped
+                .proposed
+                .as_ref()
+                .map(|operation| operation.kind.clone())
+        })
+        .collect();
+    let written = kinds(&lowered);
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(proposed, vec![Some(written[0].clone()); 2]);
+}

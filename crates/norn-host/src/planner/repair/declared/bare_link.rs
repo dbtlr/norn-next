@@ -48,8 +48,8 @@ use norn_wire::{
 
 use super::elements::{self, Offending, Proposed, Replacement};
 use super::{
-    Composed, Reckoned, Respellable, State, decided_skips, derived, field_of, respells, skip,
-    written_links,
+    Composed, Document, Reckoned, Respellable, State, decided_skips, derived, field_of, respells,
+    skip, written_links,
 };
 use crate::planner::repair::{Namings, Written};
 
@@ -173,7 +173,8 @@ impl Reckoned<'_> {
         }
     }
 
-    /// Compose the document's link fixes onto `composed`, last: its selected
+    /// Compose the document's link fixes onto `composed`, last, as
+    /// `composing` — the document at a threshold — makes them: its selected
     /// `field/type-mismatch` findings on link fields, in finding order, each
     /// field's elements into one write of it, each address resolved as
     /// `namings` answers, where the batch's settled routes leave it.
@@ -185,11 +186,12 @@ impl Reckoned<'_> {
     /// it would make is one the applier refuses — and never the route.
     pub(super) fn link_fixes(
         &self,
+        composing: &Document<'_>,
         composed: &mut Composed,
         namings: &Namings,
         respellable: Option<&Respellable>,
     ) {
-        let repairing = self.document.repairing;
+        let repairing = composing.repairing;
         let vetoed = |state: &State| {
             let (field, (from, to)) =
                 respells::reads_a_respellable_link(state, respellable?, repairing)?;
@@ -202,7 +204,7 @@ impl Reckoned<'_> {
         for (field, elements) in self.link_runs() {
             let holder = composed.state.at.clone();
             let mapped = elements::fix_field(
-                &self.document,
+                composing,
                 &composed.state,
                 field,
                 &elements,
@@ -576,6 +578,46 @@ mod tests {
             proposed.kind,
             setting("a.md", "up", AuthoredValue::string("[[b]]"))
         );
+    }
+
+    /// **Each below-threshold link fix of a list proposes the one write of
+    /// the field lowering the threshold makes**, both elements linked.
+    #[test]
+    fn below_threshold_link_fixes_of_a_list_each_propose_the_write_lowering_makes() {
+        let documents = [
+            ("a.md", "---\nups: [b, c]\n---\n"),
+            ("b.md", "# B\n"),
+            ("c.md", "# C\n"),
+        ];
+        let rows = [
+            mismatch(1, "a.md", "ups", "b"),
+            mismatch(2, "a.md", "ups", "c"),
+        ];
+
+        let lowered = planned(LINKED, &documents, &rows);
+        let strict = planned_at(LINKED, &documents, &rows, Confidence::Declared);
+
+        let written = setting(
+            "a.md",
+            "ups",
+            AuthoredValue::List(vec![
+                AuthoredValue::string("[[b]]"),
+                AuthoredValue::string("[[c]]"),
+            ]),
+        );
+        assert_eq!(kinds(&lowered), vec![written.clone()]);
+        let proposed: Vec<Option<OperationKind>> = strict
+            .skipped
+            .iter()
+            .map(|skipped| {
+                skipped
+                    .proposed
+                    .as_ref()
+                    .map(|operation| operation.kind.clone())
+            })
+            .collect();
+        assert_eq!(proposed, vec![Some(written.clone()), Some(written)]);
+        assert!(strict.conditions.is_empty(), "{:?}", strict.conditions);
     }
 
     const ROUTED: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n";

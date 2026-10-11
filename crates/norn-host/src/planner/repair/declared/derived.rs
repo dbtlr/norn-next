@@ -7,8 +7,9 @@
 //! so a fix the applier would refuse, or that brings required fields in, is
 //! skipped with the reason the judge gives. A fix whose level the request's
 //! threshold does not admit is judged too, then skipped as
-//! [`SkipReason::BelowThreshold`], carrying the operation the plan would have
-//! held: lowering the threshold writes exactly that.
+//! [`SkipReason::BelowThreshold`], carrying the operation lowering the
+//! threshold writes for it: its document composed again at the derived
+//! level, where the batch's routes leave it (`Reckoned::propose_lowered`).
 //!
 //! - **Wrap and unwrap** answer a `field/shape-mismatch`. A field declared a
 //!   list holding a scalar is set to the one-item list of that scalar, its

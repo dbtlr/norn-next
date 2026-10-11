@@ -2738,7 +2738,11 @@ declared one is, so a wrap that brings out a type or closed-set violation is
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
 pooled for a finding and the strongest level present decides. A derived fix the threshold
 does not admit is judged all the same, then skipped as `below_threshold` with the finding's
-value and `proposed`, the operation the plan would have held, in preview and apply alike. A
+value and `proposed`, the operation lowering the threshold writes for it, in preview and
+apply alike: its document is composed again at the `derived` level, where the batch's routes
+as the request's threshold settles them leave it, so each below-threshold element of a list
+proposes the one write of the field every admitted element composes into, and a fix the
+lowered composition refuses skips with the lowered composition's reason. A
 declared fix counts even where it fails the combined constraint or the judge: it blocks the
 derived answer, and the finding skips with every candidate, the derived answer among them. Where a
 declared fix is made and the derived answer differs, the citation notes the derived answer.
