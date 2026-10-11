@@ -897,9 +897,10 @@ impl<'t> Respelling<'t> {
 }
 
 /// The collections a proof's lookups read, each behind accessors that count
-/// every entry they read ([`tests::ENTRIES_READ`]) and that offer no other
-/// way in: a lookup visiting every entry counts every one, so the proof's
-/// cost bar sees a scan wherever one is written.
+/// every entry they read ([`tests::ENTRIES_READ`]) and offer no length and no
+/// iteration: a pass over one of them counts every entry it visits, so the
+/// proof's cost bar sees it. A copy taken out of one is not counted, and is
+/// diff review's to catch.
 mod counted {
     use std::collections::{HashMap, HashSet};
     use std::hash::Hash;
