@@ -157,7 +157,7 @@ pub(super) use routes::colliding;
 
 use norn_store::PathOverlay;
 
-use super::{Before, Claim, Namings, Planned, Reading, Repairing, Written, skip};
+use super::{Before, Claim, Namings, Planned, Reading, Repairing, Written, naming_of, skip};
 use crate::applier::{Held, Standing, standing, verdict};
 use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::evidence::count_rule_work;
@@ -809,17 +809,13 @@ fn push(planned: &mut Planned, made: Made, namings: &Namings) {
             for kind in operations {
                 planned
                     .conditions
-                    .extend(written_links(&kind).into_iter().filter_map(|written| {
-                        let naming = namings.get(&written);
-                        debug_assert!(
-                            naming.is_some(),
-                            "a link a fix writes was resolved with the batch: {written:?}"
-                        );
+                    .extend(written_links(&kind).into_iter().map(|written| {
+                        let resolves = naming_of(namings, &written).resolves.clone();
                         let (holder, address) = written;
-                        Some(PlanCondition::address_resolution(
+                        PlanCondition::address_resolution(
                             LinkKey::new(holder, LinkFamily::Wikilink, address),
-                            naming?.resolves.clone(),
-                        ))
+                            resolves,
+                        )
                     }));
                 let id = next_id(planned);
                 let operation = Operation::new(kind).with_id(id.clone());
@@ -848,6 +844,14 @@ fn push(planned: &mut Planned, made: Made, namings: &Namings) {
 /// at any depth, as the derivation reads a frontmatter's links
 /// ([`norn_text::Document::frontmatter_wikilinks`]). A link to a place in its
 /// own document names no other document, and is none of them.
+///
+/// **The one definition of a link the plan conditions on**: the batch's links
+/// are asked of the index as these ([`Decided::written`]) and each is
+/// recorded as one of these ([`push`]). Each is a wikilink, which the index
+/// probes, and an address with a protocol is written back as the
+/// `protocol://target` the probe splits again, so a link naming no document
+/// of the vault — `[[https://example.com]]` — is answered as resolving to
+/// none and recorded so, as the applier probes it again.
 fn written_links(kind: &OperationKind) -> Vec<Written> {
     let OperationKind::SetFrontmatter {
         target: WriteTarget::Path(holder),

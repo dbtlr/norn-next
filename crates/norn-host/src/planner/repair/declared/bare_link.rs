@@ -54,7 +54,7 @@ use super::{
     Composed, Document, Reckoned, Respellable, State, decided_skips, derived, field_of, respells,
     skip, written_links,
 };
-use crate::planner::repair::{Namings, Written};
+use crate::planner::repair::{Namings, Written, naming_of};
 
 /// Whether `row` is a `field/type-mismatch` on a field declared `link`.
 pub(super) fn is_link_mismatch(schema: &VaultSchema, row: &FindingRow) -> bool {
@@ -95,13 +95,9 @@ fn propose(holder: &DocumentPath, namings: &Namings, offending: &Offending<'_>) 
     else {
         return Proposed::Skipped(Box::new(crate::planner::repair::skipped(row)));
     };
-    let naming = namings.get(&(holder.clone(), address.to_string()));
-    debug_assert!(
-        naming.is_some(),
-        "a bare value's address was resolved with the batch: `{address}`"
-    );
-    match naming.map(|naming| (&naming.resolves, &naming.candidates)) {
-        Some((Resolves::One { path }, _)) => {
+    let naming = naming_of(namings, &(holder.clone(), address.to_string()));
+    match (&naming.resolves, &naming.candidates) {
+        (Resolves::One { path }, _) => {
             let member = AuthoredValue::string(format!("[[{address}]]"));
             Proposed::Replace(Replacement {
                 candidates: derived::candidate_of(&member),
@@ -110,14 +106,14 @@ fn propose(holder: &DocumentPath, namings: &Namings, offending: &Offending<'_>) 
                 level: Confidence::Derived,
             })
         }
-        Some((Resolves::Several {}, candidates)) => {
+        (Resolves::Several {}, candidates) => {
             let skipped = skip(row, SkipReason::AmbiguousLink);
             Proposed::Skipped(Box::new(match candidates {
                 Some(head) => skipped.with_candidates(SkippedCandidates::documents(head.clone())),
                 None => skipped,
             }))
         }
-        Some((Resolves::None {}, _)) | None => Proposed::Skipped(Box::new(
+        (Resolves::None {}, _) => Proposed::Skipped(Box::new(
             skip(row, SkipReason::NoDeclaredFix)
                 .with_note(format!("`[[{address}]]` would resolve to no document")),
         )),
@@ -231,7 +227,7 @@ mod tests {
     use crate::derivation::Declared;
     use crate::planner::control::SchemaPlace;
     use crate::planner::links::testing::TreeStore;
-    use crate::planner::repair::{Over, Planned, Repairing, plan};
+    use crate::planner::repair::{Over, Planned, Reading, Repairing, plan};
     use crate::planner::view::TreeView;
 
     /// The rule set every misplaced row cites.
@@ -279,6 +275,58 @@ mod tests {
         rows: &[FindingRow],
         threshold: Confidence,
     ) -> Planned {
+        planned_reading(schema, documents, rows, threshold, false)
+    }
+
+    /// The vault of [`planned_reading`] read by a repair whose index answers
+    /// the batch's links with none: what a broken index would hand back.
+    struct Unanswering<'r, R>(&'r R);
+
+    impl<R: Reading> Reading for Unanswering<'_, R> {
+        type Error = R::Error;
+
+        fn before(&self, path: &DocumentPath) -> Result<crate::planner::repair::Before, R::Error> {
+            self.0.before(path)
+        }
+
+        fn destination(
+            &self,
+            path: &DocumentPath,
+        ) -> Result<crate::planner::repair::Destination, R::Error> {
+            self.0.destination(path)
+        }
+
+        fn place(&self, path: &DocumentPath) -> Option<norn_fs::NormalizedPath> {
+            self.0.place(path)
+        }
+
+        fn links(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            probed: &[norn_store::ProbedLink],
+            each: &mut dyn FnMut(norn_store::LinkChange),
+        ) -> Result<(), R::Error> {
+            self.0.links(overlay, probed, each)
+        }
+
+        fn namings(
+            &self,
+            _: &norn_store::PathOverlay,
+            _: &std::collections::BTreeSet<crate::planner::repair::Written>,
+        ) -> Result<Namings, R::Error> {
+            Ok(Namings::new())
+        }
+    }
+
+    /// [`planned_at`], over a vault whose index answers no link where
+    /// `unanswering`.
+    fn planned_reading(
+        schema: &str,
+        documents: &[(&str, &str)],
+        rows: &[FindingRow],
+        threshold: Confidence,
+        unanswering: bool,
+    ) -> Planned {
         let scratch = Scratch::new("repair-bare-link");
         for (path, text) in documents {
             let at = scratch.join(path);
@@ -313,7 +361,12 @@ mod tests {
             view: &view,
             index: &index,
         };
-        match plan(rows, &repairing, &reading) {
+        let planned = if unanswering {
+            plan(rows, &repairing, &Unanswering(&reading))
+        } else {
+            plan(rows, &repairing, &reading)
+        };
+        match planned {
             Ok(planned) => planned,
             Err(_) => panic!("the tree reads"),
         }
@@ -885,6 +938,176 @@ mod tests {
                 resolving("a.md", "b", "b.md"),
                 resolving("a.md", "c", "c.md")
             ]
+        );
+    }
+
+    /// The rule default `default` for `next` on `a.md`, planned over
+    /// documents `c.md` and `d.md`; `unanswering` if the index answers none.
+    fn defaulting(default: &str, unanswering: bool) -> Planned {
+        let schema = format!(
+            "version: 1\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    \
+             required:\n      next: {{default: '{}'}}\n",
+            default.replace('\'', "''")
+        );
+        planned_reading(
+            &schema,
+            &[
+                ("a.md", "---\ntype: task\n---\n"),
+                ("c.md", "# C\n"),
+                ("d.md", "# D\n"),
+            ],
+            &[FindingRow::new(
+                1,
+                FindingKind::RequiredMissing,
+                Severity::Warning,
+                DocumentPath::new("a.md").expect("a document path"),
+                Some("next".to_string()),
+                None,
+                CandidateHead::new([], 0).expect("an empty head"),
+                None,
+                "a finding",
+                1,
+            )],
+            Confidence::DEFAULT_THRESHOLD,
+            unanswering,
+        )
+    }
+
+    /// **Every link a fix writes is recorded, whatever it addresses**: a link
+    /// of a protocol, of no document of the vault, with a fragment or an
+    /// alias, an embed, several in one text. The index judges each wikilink
+    /// the plan asks of it, so the batch's namings hold one for each link
+    /// the fix writes, and the plan records its resolution — broken
+    /// included, as the applier probes it again — and a link naming no
+    /// document at all, as `[[#section]]` does, is written by no fix.
+    #[test]
+    fn every_link_a_fix_writes_is_recorded_whatever_it_addresses() {
+        let cases: [(&str, &[(&str, Resolves)]); 9] = [
+            (
+                "[[c]]",
+                &[(
+                    "c",
+                    Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                )],
+            ),
+            (
+                "[[vault://c]]",
+                &[(
+                    "vault://c",
+                    Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                )],
+            ),
+            (
+                "[[https://example.com/x]]",
+                &[("https://example.com/x", Resolves::none())],
+            ),
+            (
+                "[[c#section]]",
+                &[(
+                    "c",
+                    Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                )],
+            ),
+            ("[[#section]]", &[]),
+            (
+                "![[c]]",
+                &[(
+                    "c",
+                    Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                )],
+            ),
+            (
+                "[[c|alias]]",
+                &[(
+                    "c",
+                    Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                )],
+            ),
+            ("[[note:draft]]", &[("note:draft", Resolves::none())]),
+            (
+                "see [[c]] and [[d]]",
+                &[
+                    (
+                        "c",
+                        Resolves::one(DocumentPath::new("c.md").expect("a path")),
+                    ),
+                    (
+                        "d",
+                        Resolves::one(DocumentPath::new("d.md").expect("a path")),
+                    ),
+                ],
+            ),
+        ];
+        for (default, recorded) in cases {
+            let planned = defaulting(default, false);
+            assert_eq!(
+                planned.operations.len(),
+                1,
+                "{default}: {:?}",
+                planned.skipped
+            );
+            let expected: Vec<PlanCondition> = recorded
+                .iter()
+                .map(|(address, after)| recording("a.md", address, after.clone()))
+                .collect();
+            assert_eq!(planned.conditions, expected, "{default}");
+        }
+    }
+
+    /// **A bare value that qualifies is exactly one written link of its own
+    /// address**: the link fix looks its address up in the batch's namings
+    /// by the value, and the batch asked for it by the link the fix writes,
+    /// so the two cannot name different addresses.
+    #[test]
+    fn a_qualifying_bare_value_writes_exactly_one_link_of_its_own_address() {
+        let mut characters: Vec<char> = (0x20u8..0x7f).map(char::from).collect();
+        characters.extend(['\t', '\u{a0}', '\u{200b}', '\u{2028}', 'é', '\u{85}']);
+        let mut values: Vec<String> = ["vault://c", "HTTPS://x", "a://b", "a:/b", "x://", "c.md"]
+            .map(String::from)
+            .to_vec();
+        for a in &characters {
+            values.extend([format!("x{a}y"), format!("{a}x"), format!("x{a}")]);
+            for b in &characters {
+                values.push(format!("x{a}{b}y"));
+            }
+        }
+        let holder = DocumentPath::new("a.md").expect("a path");
+        let mut qualifying = 0;
+        for value in values {
+            if bare_address(&value) != Some(value.as_str()) {
+                continue;
+            }
+            qualifying += 1;
+            let link = setting("a.md", "up", AuthoredValue::string(format!("[[{value}]]")));
+            assert_eq!(
+                written_links(&link),
+                vec![(holder.clone(), value.clone())],
+                "{value:?}"
+            );
+        }
+        assert!(qualifying > 1000, "{qualifying}");
+    }
+
+    /// **A link a fix writes that the batch's namings lack stops the plan,
+    /// in any build**: recording no condition for it would let the applier
+    /// write a link it never checked, and answering it as broken would say
+    /// what nothing read.
+    #[test]
+    #[should_panic(expected = "the batch resolved every link a fix writes")]
+    fn a_written_link_the_batch_did_not_resolve_stops_the_plan() {
+        defaulting("[[c]]", true);
+    }
+
+    /// The same stop for a bare value the link fix asks the namings of.
+    #[test]
+    #[should_panic(expected = "the batch resolved every link a fix writes")]
+    fn a_bare_value_the_batch_did_not_resolve_stops_the_plan() {
+        planned_reading(
+            LINKED,
+            &[("a.md", "---\nup: b\n---\n"), ("b.md", "# B\n")],
+            &[mismatch(1, "a.md", "up", "b")],
+            Confidence::DEFAULT_THRESHOLD,
+            true,
         );
     }
 }

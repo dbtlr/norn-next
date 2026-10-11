@@ -172,7 +172,25 @@ pub(crate) type Written = (DocumentPath, String);
 
 /// What each link a plan's fixes write resolves to once the plan has landed,
 /// by the holder and address written ([`Reading::namings`]).
+///
+/// **Total over the links the batch asked for.** The batch asks for every
+/// link a fix may write, each a wikilink, a syntax the index judges, so an
+/// entry is there for each ([`naming_of`] holds the lookup to it).
 pub(crate) type Namings = BTreeMap<Written, Naming>;
+
+/// What the link `written` resolves to, as the batch's `namings` answer it.
+///
+/// **A link a fix writes the batch did not resolve stops the plan.** Recording
+/// no condition for it would let the applier write a link nothing checked,
+/// and answering it as broken would say what nothing read; either is a
+/// defect of the predictor of the links the fixes write
+/// ([`declared::Decided::written`]), never an answer, so this refuses in
+/// every build.
+pub(super) fn naming_of<'n>(namings: &'n Namings, written: &Written) -> &'n Naming {
+    namings.get(written).unwrap_or_else(|| {
+        panic!("the batch resolved every link a fix writes: {written:?} was not resolved")
+    })
+}
 
 /// What a repair plans under: the declaration the applier judges its result
 /// by, how that declaration's path globs compare letters, and the plan's one
@@ -262,8 +280,8 @@ pub(crate) trait Reading {
     /// resolution a repair records. **The batch is read at once**: one
     /// judgment of the index for every link, and one more for the heads of
     /// the addresses naming several, so the cost follows the links written
-    /// and the plan's targets, never their product. A link the index holds
-    /// no syntax of has no answer.
+    /// and the plan's targets, never their product. **Every link of `written`
+    /// is answered**: each is a wikilink, which the index always judges.
     fn namings(
         &self,
         overlay: &PathOverlay,
@@ -398,16 +416,17 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
         Ok(written
             .iter()
             .zip(&links)
-            .filter_map(|(written, link)| {
-                let resolves = resolves(link)?;
+            .map(|(written, link)| {
+                let resolves =
+                    resolves(link).expect("the index judges every wikilink it is probed with");
                 let candidates = heads.get(link.address.as_str()).cloned().flatten();
-                Some((
+                (
                     written.clone(),
                     Naming {
                         resolves,
                         candidates,
                     },
-                ))
+                )
             })
             .collect())
     }
