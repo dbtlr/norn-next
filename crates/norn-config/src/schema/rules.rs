@@ -98,7 +98,7 @@
 //! - **a closed set that holds a wikilink**: a `one_of` on a field declared
 //!   `link`, or any member, synonym written side or synonym target holding a
 //!   wikilink the text layer parses, an embed included
-//!   ([`typed::holds_wikilink`]). A closed set is a list of values the vault
+//!   ([`super::typed::holds_wikilink`]). A closed set is a list of values the vault
 //!   spells out, and a link is an address the vault's own moves respell, so a
 //!   set of them is drift; brackets the text layer reads as no wikilink, such
 //!   as `[x]` or `a]]b`, are plain text and load;
