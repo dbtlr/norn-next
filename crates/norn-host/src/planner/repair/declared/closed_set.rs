@@ -28,9 +28,10 @@
 //! and none is [`SkipReason::NoDeclaredFix`], with the offending value. A
 //! derived level the request's threshold does not admit decides nothing.
 //!
-//! **A field's offending values are fixed together** ([`elements`]): a
-//! scalar field's one finding is a `set_frontmatter` of the member, and a list
-//! field's findings compose into one `set_frontmatter` of the whole list.
+//! **A field's offending values are fixed together**
+//! ([`elements`](super::elements)): a scalar field's one finding is a
+//! `set_frontmatter` of the member, and a list field's findings compose into
+//! one `set_frontmatter` of the whole list.
 
 use norn_config::schema::VaultSchema;
 use norn_wire::{AuthoredValue, Confidence, SkipReason, SkippedCandidates, ValueCandidate};
