@@ -684,3 +684,61 @@ fn a_standing_violation_respelled_under_its_equality_key_introduces_nothing() {
         }
     }
 }
+
+/// **A standing link violation respelled under its link key introduces
+/// nothing, and another link does**: a link value's identity is its target
+/// and fragment, the alias dropped, so a length violation keeps its identity
+/// when only an alias changes or a duplicate alias is added, while another
+/// fragment or another target is a violation the write introduces.
+#[test]
+fn a_standing_link_violation_respelled_under_its_link_key_introduces_nothing() {
+    let schema = "version: 1\nfields:\n  project: {type: link, shape: single}\n  related: {type: link, shape: list}\nrules:\n  limited:\n    max_length: {project: 2, related: 2}\n";
+    let cases = [
+        (
+            "an alias changed",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta|Two]]"),
+            None,
+        ),
+        (
+            "a fragment added",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta#Plan]]"),
+            Some("[[beta#Plan]]"),
+        ),
+        (
+            "the same target under another alias",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta]]", "[[beta|Three]]"]),
+            None,
+        ),
+        (
+            "another target pushed",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta|One]]", "[[gamma|G]]"]),
+            Some("[[gamma|G]]"),
+        ),
+    ];
+    for (name, held, field, value, introduced) in cases {
+        let content = format!("---\n{held}\n---\n");
+        let mut fixture = Fixture::with_schema(schema, &[("a.md", content.as_str())]);
+        let outcome = fixture.apply(fixture.plan(vec![setting("a.md", field, value)]));
+        match introduced {
+            None => assert!(applied(outcome).forced.is_empty(), "{name}"),
+            Some(offending) => assert_eq!(
+                violations(&refused_for(outcome)),
+                [violation(
+                    "a.md",
+                    FindingKind::TooLong,
+                    field,
+                    Some(offending)
+                )],
+                "{name}"
+            ),
+        }
+    }
+}
