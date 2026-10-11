@@ -146,7 +146,7 @@ use norn_wire::{
 
 #[cfg(test)]
 pub(crate) use respells::blinded;
-pub(super) use respells::respelling;
+pub(super) use respells::{Respellable, respelling};
 pub(super) use routes::colliding;
 
 /// The plan the batch's routes settle to as the vault's documents see it: a
@@ -396,8 +396,15 @@ impl Decided<'_> {
     /// composition, numbered on from the plan's, each cited for the findings
     /// it fixes and recording what each link it writes resolves to; its
     /// skipped findings settled against the state the composition leaves;
-    /// and what the plan claims of each finding.
-    pub(super) fn emit(self, planned: &mut Planned, namings: &Namings) {
+    /// and what the plan claims of each finding. A link fix bringing the
+    /// document under a rule reading by value a link of `respellable` — one
+    /// a settled route may respell — is skipped ([`respells`]).
+    pub(super) fn emit(
+        self,
+        planned: &mut Planned,
+        namings: &Namings,
+        respellable: Option<&Respellable>,
+    ) {
         let (reckoned, mut composed) = match self.decided {
             Deciding::Alone(decided) => {
                 planned.skipped.extend(decided);
@@ -405,7 +412,7 @@ impl Decided<'_> {
             }
             Deciding::Composed(composed) => *composed,
         };
-        reckoned.link_fixes(&mut composed, namings);
+        reckoned.link_fixes(&mut composed, namings, respellable);
         let claims = reckoned.settle(&mut composed);
         for made in composed.made {
             push(planned, made, namings);
@@ -590,6 +597,7 @@ impl<'d> Reckoned<'d> {
                             &mut |offending| {
                                 closed_set::propose(&self.document, field, &mut folds, offending)
                             },
+                            &|_| None,
                         )
                     }
                     _ => elements::fix_field(
@@ -598,6 +606,7 @@ impl<'d> Reckoned<'d> {
                         field,
                         &rows,
                         &mut |offending| derived::boolean_case(&self.document, offending),
+                        &|_| None,
                     ),
                 };
                 decided_skips(&mut decided, mapped.skipped);

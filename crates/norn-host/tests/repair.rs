@@ -3847,3 +3847,41 @@ fn a_fold_never_recases_a_link_so_no_link_health_finding_is_introduced() {
         .collect();
     assert_eq!(skipped, [SkipReason::NoDeclaredFix]);
 }
+
+/// A route moving `loose/x.md` into `tasks/`, and a rule selecting a
+/// document by the link its `up` holds, reading its `parent` by value.
+const SELECTED_BY_LINK: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  projects:\n    match: {frontmatter: {up: '[[zz-projects]]'}}\n    one_of:\n      parent: {values: ['[[zz-repair/loose/x]]']}\n";
+
+/// **A link fix bringing its holder under a rule that reads a link a route
+/// respells skips; the route moves.** Making `up` the link `[[zz-projects]]`
+/// brings `h.md` under the rule reading `parent` by value, and the route of
+/// `loose/x.md` respells `parent`'s link: the two together would introduce a
+/// value outside the closed set. The link fix skips as one the judge would
+/// refuse, and the plan applies.
+#[test]
+fn a_link_fix_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-link-fix-respelled",
+        SELECTED_BY_LINK,
+        &[
+            ("loose/x.md", b"---\ntype: task\n---\n# X\n"),
+            (
+                "h.md",
+                b"---\nup: zz-projects\nparent: '[[zz-repair/loose/x]]'\n---\n# H\n",
+            ),
+            ("zz-projects.md", b"# Projects\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(stands(&vault, "tasks/x.md"));
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::JudgeWouldRefuse], "{plan:?}");
+    assert!(written(&vault, "h.md").contains("up: zz-projects"));
+}

@@ -2757,7 +2757,10 @@ as `[[value]]` where that link resolves to exactly one document; any other value
 on the batch's settled routes (a route moves its target, and a path-qualified address can
 break or gain a competitor), so it is the one exception to finding order: a document's link
 fixes compose last, after its other fixes and at its route's destination, once every route
-of the batch is settled (after the respell check and the destination claims). Each is
+of the batch is settled (after the respell check and the destination claims); a link fix
+that would bring its holder under a rule reading by value a link a settled route's cascade
+may respell — a rule selecting by the link it writes, say — is `judge_would_refuse`, its
+note naming the field and the move, and the route stands. Each is
 resolved over the plan the settled routes make, as the moves of that plan, through the one
 index probe the applier makes again of an address resolution, so what the planner records
 is by construction what the applier computes. One document: the link is written, a derived

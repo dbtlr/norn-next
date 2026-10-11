@@ -55,6 +55,16 @@
 //! its own judgment. Judging the union makes each route's answer independent
 //! of whether its holder's own route is made, so routes need no order here.
 //!
+//! **A holder's link fixes are judged against the routes, not the other way
+//! about.** They compose after the routes are settled (`super::bare_link`),
+//! so no candidate state holds them; a link fix can bring its holder under a
+//! rule — one selecting by the link it writes — that reads by value a field
+//! holding a link a settled route may respell. Each such fix is judged on
+//! the state it composes to ([`reads_a_respellable_link`]), over the links
+//! of the holder the routes the check let stand may respell
+//! ([`Respelled::respellable`]), and skipped as one the judge would refuse:
+//! the route stands, as it was judged.
+//!
 //! **The cost is linear in the links under the routed documents' keys**: one
 //! batched read of the index, the routed documents' frontmatter links probed
 //! once per candidate state, each holder outside the batch with a link that
@@ -93,18 +103,111 @@ enum Holder {
     Outside(DocumentPath),
 }
 
+/// What the respell check found: the routes it skips, and, for each batch
+/// document holding a frontmatter wikilink a route may respell, each such
+/// link's address with the routes that may respell it, by the draft's
+/// position.
+#[derive(Default)]
+pub(in crate::planner::repair) struct Respelled {
+    pub(in crate::planner::repair) refused: BTreeMap<usize, SkippedFinding>,
+    named: BTreeMap<usize, BTreeMap<Address, BTreeSet<usize>>>,
+}
+
+/// The links of one batch document a settled route may respell: each
+/// address its frontmatter writes, with the move — where the route's
+/// document stands, and where it lands — of each settled route that may
+/// respell it.
+pub(in crate::planner::repair) type Respellable =
+    BTreeMap<Address, Vec<(DocumentPath, DocumentPath)>>;
+
+impl Respelled {
+    /// The links of each batch document the routes of `drafts` that stand
+    /// once `refused` are skipped may respell, by the draft's position.
+    pub(in crate::planner::repair) fn respellable(
+        &self,
+        drafts: &[Draft<'_>],
+        refused: &BTreeMap<usize, SkippedFinding>,
+    ) -> BTreeMap<usize, Respellable> {
+        let moved = |route: &usize| {
+            if refused.contains_key(route) {
+                return None;
+            }
+            drafts[*route]
+                .passed()
+                .map(|(passed, _)| (passed.from.clone(), passed.to.clone()))
+        };
+        self.named
+            .iter()
+            .filter_map(|(at, addresses)| {
+                let settled: Respellable = addresses
+                    .iter()
+                    .filter_map(|(address, routes)| {
+                        let moves: Vec<_> = routes.iter().filter_map(moved).collect();
+                        (!moves.is_empty()).then(|| (address.clone(), moves))
+                    })
+                    .collect();
+                (!settled.is_empty()).then_some((*at, settled))
+            })
+            .collect()
+    }
+}
+
+/// Where `state`, a batch document's composed state, reads by value a field
+/// holding a link of `respellable` — one a settled route may respell — under
+/// `repairing`'s rules: the field and the move that may respell it; `None`
+/// where it reads none. **A state no candidate state of its document is —
+/// one its link fixes, composed after the routes are settled, reach — is
+/// judged here**, so a link fix bringing its holder under a rule reading such
+/// a field by value is refused rather than the route ([`super::bare_link`]).
+pub(in crate::planner::repair) fn reads_a_respellable_link<'r>(
+    state: &State,
+    respellable: &'r Respellable,
+    repairing: &Repairing<'_>,
+) -> Option<(String, &'r (DocumentPath, DocumentPath))> {
+    let fields: Vec<(String, &(DocumentPath, DocumentPath))> =
+        frontmatter_field_links(&state.bytes)
+            .into_iter()
+            .filter(|(_, link)| link.span.is_some())
+            .filter_map(|(field, link)| {
+                let moves = respellable.get(&(link.target, link.protocol))?;
+                Some((field, moves.first()?))
+            })
+            .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    let schema = repairing.declared.schema();
+    let selector_keys = selector_keys(schema);
+    let judged = ValueRead::of(
+        std::slice::from_ref(state),
+        schema,
+        &selector_keys,
+        repairing,
+    );
+    fields.into_iter().find(|(field, _)| judged.reads(field))
+}
+
+/// Every `match.frontmatter` key of a rule of `schema`.
+fn selector_keys(schema: &VaultSchema) -> BTreeSet<&str> {
+    schema
+        .rules()
+        .flat_map(|rule| rule.selector().frontmatter().map(|(key, _)| key))
+        .collect()
+}
+
 /// The routes of `drafts` whose link cascade may respell a frontmatter
 /// wikilink in a field a rule reads by value, each with its skip, by the
-/// draft's position; read through `vault` under `repairing`. The index is
-/// not read where no route passes its own judgment.
+/// draft's position, and the links of each batch document a route may
+/// respell; read through `vault` under `repairing`. The index is not read
+/// where no route passes its own judgment.
 pub(in crate::planner::repair) fn respelling<R: Reading>(
     drafts: &[Draft<'_>],
     repairing: &Repairing<'_>,
     vault: &R,
-) -> Result<BTreeMap<usize, SkippedFinding>, R::Error> {
+) -> Result<Respelled, R::Error> {
     #[cfg(test)]
     if BLIND.with(std::cell::Cell::get) {
-        return Ok(BTreeMap::new());
+        return Ok(Respelled::default());
     }
     let routes: Vec<(usize, &super::routes::Passed)> = drafts
         .iter()
@@ -112,7 +215,7 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         .filter_map(|(at, draft)| draft.passed().map(|(passed, _)| (at, passed)))
         .collect();
     if routes.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(Respelled::default());
     }
     let schema = repairing.declared.schema();
     // Each route by the place its document leaves; and each batch document
@@ -181,10 +284,7 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         }
     })?;
 
-    let selector_keys: BTreeSet<&str> = schema
-        .rules()
-        .flat_map(|rule| rule.selector().frontmatter().map(|(key, _)| key))
-        .collect();
+    let selector_keys = selector_keys(schema);
     let mut refused = BTreeMap::new();
     for (holder, addresses) in &named {
         // The fields each state the holder may end in holds a link the
@@ -241,7 +341,14 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
             }
         }
     }
-    Ok(refused)
+    let named = named
+        .into_iter()
+        .filter_map(|(holder, addresses)| match holder {
+            Holder::Batch(at) => Some((at, addresses)),
+            Holder::Outside(_) => None,
+        })
+        .collect();
+    Ok(Respelled { refused, named })
 }
 
 #[cfg(test)]

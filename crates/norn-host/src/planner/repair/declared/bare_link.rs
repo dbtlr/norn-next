@@ -47,7 +47,10 @@ use norn_wire::{
 };
 
 use super::elements::{self, Offending, Proposed, Replacement};
-use super::{Composed, Reckoned, State, decided_skips, derived, field_of, skip, written_links};
+use super::{
+    Composed, Reckoned, Respellable, State, decided_skips, derived, field_of, respells, skip,
+    written_links,
+};
 use crate::planner::repair::{Namings, Written};
 
 /// Whether `row` is a `field/type-mismatch` on a field declared `link`.
@@ -174,7 +177,28 @@ impl Reckoned<'_> {
     /// `field/type-mismatch` findings on link fields, in finding order, each
     /// field's elements into one write of it, each address resolved as
     /// `namings` answers, where the batch's settled routes leave it.
-    pub(super) fn link_fixes(&self, composed: &mut Composed, namings: &Namings) {
+    ///
+    /// **A link fix never brings its holder under a rule reading by value a
+    /// link a settled route may respell** (`respellable`): the respell check
+    /// judged the holder's states without its link fixes, which compose after
+    /// it, so such a fix is skipped as one the judge would refuse — the plan
+    /// it would make is one the applier refuses — and never the route.
+    pub(super) fn link_fixes(
+        &self,
+        composed: &mut Composed,
+        namings: &Namings,
+        respellable: Option<&Respellable>,
+    ) {
+        let repairing = self.document.repairing;
+        let vetoed = |state: &State| {
+            let (field, (from, to)) =
+                respells::reads_a_respellable_link(state, respellable?, repairing)?;
+            Some(format!(
+                "the link brings `{}` under a rule reading `{field}` by value, whose link the \
+                 move of `{from}` to `{to}` would respell",
+                state.at
+            ))
+        };
         for (field, elements) in self.link_runs() {
             let holder = composed.state.at.clone();
             let mapped = elements::fix_field(
@@ -183,6 +207,7 @@ impl Reckoned<'_> {
                 field,
                 &elements,
                 &mut |offending| propose(&holder, namings, offending),
+                &vetoed,
             );
             decided_skips(&mut composed.decided, mapped.skipped);
             if let Some(fix) = mapped.fix {

@@ -72,13 +72,16 @@ pub(super) struct Replacement {
 
 /// Fix the `field` of the document from `state`, for `elements` — the
 /// selected findings of that field, in finding order — each as `propose`
-/// answers it.
+/// answers it, an element whose admitted state `vetoed` names a reason the
+/// plan would be refused for skipped as one the judge would refuse, noting
+/// it.
 pub(super) fn fix_field(
     document: &Document<'_>,
     state: &State,
     field: &str,
     elements: &[Element<'_>],
     propose: &mut dyn FnMut(&Offending<'_>) -> Proposed,
+    vetoed: &dyn Fn(&State) -> Option<String>,
 ) -> Mapped {
     let schema = document.schema();
     let mut skipped = Vec::new();
@@ -140,6 +143,14 @@ pub(super) fn fix_field(
                     candidates: &replacement.candidates,
                 },
             )
+            .and_then(|next| match vetoed(&next) {
+                Some(note) => Err(Box::new(
+                    skip(row, SkipReason::JudgeWouldRefuse)
+                        .with_candidates(replacement.candidates.clone())
+                        .with_note(note),
+                )),
+                None => Ok(next),
+            })
             .and_then(|next| {
                 document
                     .within_threshold(replacement.level, row, &set)

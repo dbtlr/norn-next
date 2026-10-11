@@ -440,9 +440,10 @@ pub(crate) fn plan<R: Reading>(
     for document in rows.chunk_by(|left, right| left.path == right.path) {
         drafts.push(declared::draft(document, repairing, vault)?);
     }
-    let mut refused: BTreeMap<usize, SkippedFinding> =
-        declared::respelling(&drafts, repairing, vault)?;
+    let mut respelled = declared::respelling(&drafts, repairing, vault)?;
+    let mut refused: BTreeMap<usize, SkippedFinding> = std::mem::take(&mut respelled.refused);
     refused.extend(declared::colliding(&drafts, &refused));
+    let respellable = respelled.respellable(&drafts, &refused);
     // The routes are settled: a link fix, composed last, is resolved with
     // them as the plan's moves, and so is every link a fix writes.
     let settled = declared::settled(&drafts, &refused);
@@ -461,8 +462,8 @@ pub(crate) fn plan<R: Reading>(
         vault.namings(&settled, &written)?
     };
     let mut planned = Planned::default();
-    for document in decided {
-        document.emit(&mut planned, &namings);
+    for (at, document) in decided.into_iter().enumerate() {
+        document.emit(&mut planned, &namings, respellable.get(&at));
     }
     // One condition per link a plan writes, however many fixes write it.
     let mut recorded = BTreeSet::new();
