@@ -56,12 +56,13 @@ pub struct RewrittenLinks {
 ///
 /// A batch that reads back whole is proven by one read. One that does not is
 /// searched for the edits to leave as written, and each read of that search
-/// costs the whole document: about one read per edit left as written, plus
-/// one per doubling of the spacing between them, so a batch where most edits
-/// fail would otherwise read the document once per edit, quadratic in a
-/// holder's links. Past this many reads the rewrite answers
-/// [`RewriteUnproven`] and writes nothing: where most edits fail, and where a
-/// dozen or so are scattered through a batch of thousands.
+/// costs the whole document: one read for an edit left as written beside
+/// the last, and a few plus one per doubling of the spacing for one standing
+/// apart ([`Proof::kept_in_runs`]), so a batch where most edits fail would
+/// otherwise read the document once per edit, quadratic in a holder's links.
+/// Past this many reads the rewrite answers [`RewriteUnproven`] and writes
+/// nothing: where most edits fail, and where about ten stand apart in a
+/// batch of thousands, or twenty in adjacent pairs.
 pub const REWRITE_PROOF_READS: usize = 128;
 
 /// Why [`Document::rewrite_links`] rewrote nothing: proving which of the
@@ -334,13 +335,14 @@ impl<'a, 'd> Proof<'a, 'd> {
     /// The edits kept in runs in document order, where `edits` together do
     /// not read back: from the first edit not yet decided, the longest run
     /// found to read back alongside the edits kept before it is kept, and the
-    /// edit ending it is skipped. Each run is found by trying it one edit
-    /// longer than the run before it, doubling that length while it reads
-    /// back, then halving the gap between the longest that did and the
-    /// shortest that did not. So the reads follow the edits skipped rather
-    /// than the edits in the batch: about one for each, plus one per doubling
-    /// of the spacing between them where that spacing is steady, and a
-    /// doubling and a halving of a run where it changes.
+    /// edit ending it is skipped. Each run is found by trying its first edit
+    /// alone, then the run one edit longer than the last run that ended in a
+    /// refusal, doubling that length while it reads back, then halving the
+    /// gap between the longest that did and the shortest that did not. So
+    /// the reads follow the edits skipped rather than the edits in the batch:
+    /// one for an edit skipped beside the last, about two plus one per
+    /// doubling of the spacing for one skipped at the spacing before it, and
+    /// a doubling and a halving of a run where the spacing changes.
     ///
     /// The answer is the one keeping each edit in turn when it reads back
     /// alongside the ones kept before it would give, wherever an edit that
@@ -365,22 +367,24 @@ impl<'a, 'd> Proof<'a, 'd> {
         let mut kept: Vec<&Edit> = Vec::with_capacity(edits.len());
         let mut refused = vec![false; edits.len()];
         let mut next = 0;
-        // The length the next run's search starts at: one past the run
-        // before it, so edits refused at a steady spacing are each found in
-        // about a halving per doubling of that spacing.
-        let mut start = 1;
+        // The length a run's search tries once its first edit reads back:
+        // one past the last run that ended in a refusal, so edits refused at
+        // a steady spacing are each found in about a halving per doubling of
+        // that spacing.
+        let mut guess = 2;
         while next < edits.len() {
             let rest = &edits[next..];
             // The longest run known to read back, and the shortest known not
-            // to.
+            // to. The first edit is tried alone, so an edit refused beside
+            // the last costs one read.
             let mut good = 0;
             let mut bad = None;
-            let mut run = start;
+            let mut run = 1;
             while bad.is_none() && good < rest.len() {
                 let length = run.min(rest.len());
                 if self.reads_back_with(&kept, &rest[..length])? {
                     good = length;
-                    run *= 2;
+                    run = if length == 1 { guess } else { run * 2 };
                 } else {
                     bad = Some(length);
                 }
@@ -395,8 +399,10 @@ impl<'a, 'd> Proof<'a, 'd> {
                     }
                 }
                 refused[next + good] = true;
+                if good > 0 {
+                    guess = good + 1;
+                }
             }
-            start = good + 1;
             kept.extend(&rest[..good]);
             next += good + usize::from(bad.is_some());
         }
@@ -1089,26 +1095,54 @@ mod tests {
         }
     }
 
-    /// **Edits refused at a steady spacing cost about one read each, plus one
-    /// per doubling of the spacing**: each run's search starts one edit past
-    /// the run before it, so it finds the next refusal by halving that run
-    /// rather than doubling up to it first.
+    /// The reads `entries` rewrites spend where the items at `spoiled` are
+    /// refused, the proof's answer checked: every other link respelled.
+    fn reads_refusing(entries: usize, spoiled: &[usize]) -> usize {
+        let (source, rewrites) = spoiled_at(entries, spoiled);
+        let (rewritten, _, reads) = counted(&source, &rewrites);
+        let rewritten = rewritten.expect("a proof within its reads");
+        assert_eq!(rewritten.rewritten, entries - spoiled.len());
+        assert_eq!(rewritten.skipped.len(), spoiled.len());
+        reads
+    }
+
+    /// **An edit refused apart from the last costs a few reads plus one per
+    /// doubling of the spacing, and one refused beside the last a read or
+    /// two**, each bound well under [`REWRITE_PROOF_READS`]: a run's search
+    /// tries its first edit alone, then one edit past the last run that
+    /// ended in a refusal, so it halves toward the next refusal rather than
+    /// doubling up to it first, and a refusal beside the last is found by
+    /// the first read.
     #[test]
-    fn edits_refused_at_a_steady_spacing_cost_a_read_each_and_one_per_doubling_of_the_spacing() {
-        for (entries, refusals) in [(1024_usize, 16_usize), (4096, 12)] {
+    fn a_refusal_apart_costs_a_read_per_doubling_of_the_spacing_and_one_beside_the_last_a_read_or_two()
+     {
+        for (entries, refusals) in [(1024_usize, 8_usize), (4096, 6)] {
             let spacing = entries / refusals;
             let spoiled: Vec<usize> = (0..refusals)
                 .map(|refusal| refusal * spacing + spacing / 2)
                 .collect();
-            let (source, rewrites) = spoiled_at(entries, &spoiled);
-            let (rewritten, _, reads) = counted(&source, &rewrites);
-            let rewritten = rewritten.expect("a proof within its reads");
-            assert_eq!(rewritten.rewritten, entries - refusals);
-            assert_eq!(rewritten.skipped.len(), refusals);
-            let bound = refusals * (spacing.ilog2() as usize + 2) + 2 * entries.ilog2() as usize;
+            let reads = reads_refusing(entries, &spoiled);
+            let bound = refusals * (spacing.ilog2() as usize + 3) + entries.ilog2() as usize + 2;
             assert!(
-                reads <= bound,
-                "{entries} rewrites with {refusals} refused took {reads} reads, past {bound}"
+                bound < REWRITE_PROOF_READS && reads <= bound,
+                "{entries} rewrites with {refusals} refused apart took {reads} reads, past {bound}"
+            );
+        }
+        for (entries, pairs) in [(1024_usize, 6_usize), (4096, 4)] {
+            let spacing = entries / pairs;
+            let spoiled: Vec<usize> = (0..pairs)
+                .flat_map(|pair| {
+                    [
+                        pair * spacing + spacing / 2,
+                        pair * spacing + spacing / 2 + 1,
+                    ]
+                })
+                .collect();
+            let reads = reads_refusing(entries, &spoiled);
+            let bound = pairs * (spacing.ilog2() as usize + 4) + entries.ilog2() as usize + 2;
+            assert!(
+                bound < REWRITE_PROOF_READS && reads <= bound,
+                "{entries} rewrites with {pairs} adjacent pairs refused took {reads} reads, past {bound}"
             );
         }
     }

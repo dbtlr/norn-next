@@ -178,12 +178,12 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// rewrites of the batch that read back takes more reads of the holder than
 /// the text layer spends ([`norn_text::REWRITE_PROOF_READS`]), nothing is
 /// rewritten and the batch answers [`RewriteUnproven`]. Otherwise a rewrite
-/// matching no link composes its
-/// document unchanged — composition refuses an authored one that matches
-/// none before it gets here ([`super::compose::compose`]): the applier recomposes a cascade over the stand-in for
-/// a holder already holding its change, where nothing matches, and a link a
-/// foreign edit took away since planning is the change set's to notice, not
-/// composition's. Bytes that do not decode as a vault document
+/// matching no link composes its document unchanged — composition refuses
+/// an authored one that matches none before it gets here
+/// ([`super::compose::compose`]): the applier recomposes a cascade over the
+/// stand-in for a holder already holding its change, where nothing matches,
+/// and a link a foreign edit took away since planning is the change set's to
+/// notice, not composition's. Bytes that do not decode as a vault document
 /// ([`document_source`]) hold no link the index derives, so they are returned
 /// as they are, and a rewrite of a syntax the text layer reads no link of
 /// matches nothing.
