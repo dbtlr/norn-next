@@ -19,7 +19,8 @@
 //!   string whose trimmed text lower-cases to exactly `true` or `false` is
 //!   written as the YAML boolean, element by element for a list.
 //! - **Case and white space** answer a `field/not-one-of` on a field whose
-//!   values compare as text ([`Folds`]): the one member of the combined closed
+//!   values compare as text ([`Folds`]), every element the finding names a
+//!   string — a YAML boolean or number is never re-typed: the one member of the combined closed
 //!   set that folds equal to the value — Unicode lower case, the ends trimmed
 //!   and each run of white space inside one space — is written as the schema
 //!   writes it. Several members folding equal are a tie. A word join or split
@@ -123,6 +124,11 @@ fn boolean_of(text: &str) -> Option<bool> {
 /// What the boolean field `field` makes of the type-mismatched element
 /// `offending`: the YAML boolean its text spells but for case and padding, or
 /// an excluded class where no case fix answers it.
+///
+/// Every element such a finding names is a string: a boolean field reads a
+/// string spelling exactly `true` or `false` as the boolean, so no finding
+/// names one beside a YAML boolean, and no number, date or null spells a
+/// boolean but for its case.
 pub(super) fn boolean_case(document: &Document<'_>, offending: &Offending<'_>) -> Proposed {
     match boolean_of(offending.text) {
         Some(flag) => {

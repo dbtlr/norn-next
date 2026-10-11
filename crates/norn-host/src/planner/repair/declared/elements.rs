@@ -41,7 +41,7 @@ pub(super) struct Element<'e> {
 
 /// One offending element a kind's proposals are asked for: its row, the
 /// finding as the composed state holds it, the offending value whole, and
-/// whether the field holds it as a string.
+/// whether every element the finding names is a string ([`strings_only`]).
 pub(super) struct Offending<'o> {
     pub(super) row: &'o FindingRow,
     pub(super) held: &'o Held,
@@ -111,7 +111,7 @@ pub(super) fn fix_field(
             row,
             held,
             text: &offending,
-            string: holds_string(&working, schema, field, &offending),
+            string: strings_only(&working, schema, field, &offending),
         }) {
             Proposed::Skipped(skip) => {
                 skipped.push((at, *skip));
@@ -202,14 +202,24 @@ pub(super) fn same_member(
     }
 }
 
-/// Whether `value`, a field's value, holds the string `offending` as an
-/// element, or is it: a number or a boolean spelled the same is none.
-fn holds_string(value: &AuthoredValue, schema: &VaultSchema, field: &str, offending: &str) -> bool {
-    let is_it = |element: &AuthoredValue| matches!(element, AuthoredValue::String(text) if same_value(schema, field, text, offending));
-    match value {
-        AuthoredValue::List(elements) => elements.iter().any(is_it),
-        scalar => is_it(scalar),
-    }
+/// Whether every element of `value`, a field's value, that is `offending` —
+/// a list's elements, or a scalar as the one element it is — is a string, and
+/// there is one. A finding names a value by its text, so a YAML number,
+/// boolean or null spelled as a string element is spelled is the same
+/// finding: a derived fix rewriting text answers only a finding every
+/// element of which is a string, and never coerces the others.
+fn strings_only(value: &AuthoredValue, schema: &VaultSchema, field: &str, offending: &str) -> bool {
+    let is_it = |element: &AuthoredValue| {
+        element
+            .scalar_text()
+            .is_some_and(|text| same_value(schema, field, &text, offending))
+    };
+    let elements = match value {
+        AuthoredValue::List(elements) => elements.as_slice(),
+        scalar => std::slice::from_ref(scalar),
+    };
+    let mut named = elements.iter().filter(|element| is_it(element)).peekable();
+    named.peek().is_some() && named.all(|element| matches!(element, AuthoredValue::String(_)))
 }
 
 /// `value`, a field's value, with each element that is `offending` replaced by

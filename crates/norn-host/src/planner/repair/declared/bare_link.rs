@@ -3,7 +3,9 @@
 //! `note` where `[[note]]` is meant.
 //!
 //! **A value qualifies only where `[[value]]` reads back as exactly one plain
-//! wikilink.** The element is a non-empty string with no surrounding white
+//! wikilink.** The element is a non-empty string — and so is every element of
+//! the field the finding names, so a YAML number, boolean, date or null is
+//! never linked, nor a string sharing its text — with no surrounding white
 //! space and no `#` fragment, `|` alias, `[` or `]`, or line break, and
 //! `[[value]]` is, to the `link` reader ([`link_key`]) and the text layer, one
 //! wikilink of that address and nothing else. Any other value has no
@@ -478,6 +480,54 @@ mod tests {
             (1..=6)
                 .map(|id| (id, SkipReason::NoDeclaredFix))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// **Only a string is made a link**: a YAML number, boolean or null
+    /// never is, and a string sharing its text with one is left too, since
+    /// the finding names them both; a quoted date is a string, and is made a
+    /// link.
+    #[test]
+    fn only_a_string_is_made_a_link_and_one_sharing_its_text_with_a_scalar_stays() {
+        let planned = planned(
+            LINKED,
+            &[
+                (
+                    "a.md",
+                    "---\nups: [3, '3', true, 'true', null, '2026-10-11']\n---\n",
+                ),
+                ("3.md", "# 3\n"),
+                ("true.md", "# True\n"),
+                ("2026-10-11.md", "# Day\n"),
+            ],
+            &[
+                mismatch(1, "a.md", "ups", "2026-10-11"),
+                mismatch(2, "a.md", "ups", "3"),
+                mismatch(3, "a.md", "ups", "true"),
+            ],
+        );
+
+        assert_eq!(
+            kinds(&planned),
+            vec![setting(
+                "a.md",
+                "ups",
+                AuthoredValue::List(vec![
+                    AuthoredValue::Integer(3),
+                    AuthoredValue::string("3"),
+                    AuthoredValue::Bool(true),
+                    AuthoredValue::string("true"),
+                    AuthoredValue::Null,
+                    AuthoredValue::string("[[2026-10-11]]"),
+                ])
+            )]
+        );
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (2, SkipReason::NoDeclaredFix),
+                (3, SkipReason::NoDeclaredFix)
+            ]
         );
     }
 

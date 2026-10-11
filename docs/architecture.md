@@ -2721,8 +2721,9 @@ scalar, its YAML type kept, and a field declared single holding a one-item list 
 item; a list of any other length under single has no derived fix. A `field/type-mismatch`
 finding on a `boolean` field, for an element that is a string whose trimmed text lower-cases
 to exactly `true` or `false`, is written as the YAML boolean. A `field/not-one-of` finding on
-a field whose values compare as text is replaced by the one member of the combined closed set
-that folds equal to the offending value, a fold being Unicode lower case, the ends trimmed and
+a field whose values compare as text, every element it names a string (a YAML boolean or
+number is never re-typed), is replaced by the one member of the combined closed set that
+folds equal to the offending value, a fold being Unicode lower case, the ends trimmed and
 each internal run of white space collapsed to one space: members that fold equal tie, and a
 word join or split (`inprogress` for `in progress`) is not a fold. A fold never re-cases a
 wikilink: where the member would change the address of a link the value holds — a link
@@ -2748,7 +2749,9 @@ or yes/no coercion are fixes a repair never makes. Any other unfixed type mismat
 **A bare value is made a link where it resolves to one document at the plan's
 after-state.** A `field/type-mismatch` finding on a field declared `link`, for an element
 that is a string such that `[[value]]` reads back as exactly one plain wikilink (non-empty,
-no surrounding white space, no `#` fragment, `|` alias, bracket or line break), is written
+no surrounding white space, no `#` fragment, `|` alias, bracket or line break), every
+element of the field the finding names being a string (a YAML number, boolean, date or
+null is never linked, nor a string sharing its text, which the finding names with it), is written
 as `[[value]]` where that link resolves to exactly one document; any other value is
 `no_declared_fix`, and a repair never respells a value to make it qualify. The answer rests
 on the batch's settled routes (a route moves its target, and a path-qualified address can

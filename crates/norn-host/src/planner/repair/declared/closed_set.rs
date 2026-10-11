@@ -57,8 +57,9 @@ pub(super) fn propose(
         .of(schema, field, &offending.held.rules)
         .answer(offending.text);
     let derived_admitted = document.admits(Confidence::Derived);
-    // A fold that would re-case a link is no derived answer.
+    // A fold rewrites only a string, and never re-cases a link.
     let (folded, recasing) = match folded {
+        _ if !offending.string => (Folded::None, None),
         Folded::One(member) if derived::recases_a_link(offending.text, &member) => {
             (Folded::None, Some(member))
         }

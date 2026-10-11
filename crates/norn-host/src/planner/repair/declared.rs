@@ -3785,6 +3785,35 @@ mod tests {
         );
     }
 
+    /// **Only a string is folded**: a YAML boolean is no spelling of the
+    /// member `True`, alone or beside a string of its text, which the
+    /// finding names with it.
+    #[test]
+    fn only_a_string_is_folded() {
+        let schema = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: ['True']}\n      labels: {values: ['True']}\n";
+        let vault = Vault::of(
+            schema,
+            &[(
+                "a.md",
+                "---\ntype: task\nstatus: true\nlabels: [true, 'true']\n---\n",
+            )],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "labels", "true"),
+            offending(2, NOT_ONE_OF, "a.md", "status", "true"),
+        ]);
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::NoDeclaredFix),
+                (2, SkipReason::NoDeclaredFix)
+            ]
+        );
+    }
+
     /// **A fold never re-cases a wikilink**: `[[ZZ-target]]` folds to the
     /// member `[[zz-target]]`, whose address differs, so the finding skips
     /// with no declared fix and a note saying why; a fold changing only a
