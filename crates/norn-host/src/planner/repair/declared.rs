@@ -4238,6 +4238,43 @@ mod tests {
         );
     }
 
+    /// **A below-threshold re-shape the judge refuses where the document
+    /// stands skips with the judge's reason**, as a below-threshold fold does,
+    /// even where lowering the threshold would drop its finding: at a
+    /// `declared` threshold wrapping `priority: 3` as `[3]` brings in the
+    /// `others` rule's closed set over `priority`, which `[3]` is outside, so
+    /// it is refused where it stands, though the lowered composition, folding
+    /// `kind` to `task` first, leaves `others` unselected and drops the
+    /// finding.
+    #[test]
+    fn a_below_threshold_reshape_the_judge_refuses_where_it_stands_skips_with_its_reason() {
+        let schema = "version: 1\nfields:\n  priority: {type: number, shape: list}\nrules:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [task]}\n  others:\n    match: {frontmatter: {kind: Task}}\n    one_of:\n      priority: {values: [9]}\n";
+        let docs = [("a.md", "---\nkind: Task\npriority: 3\n---\n")];
+        let rows = [
+            offending(1, NOT_ONE_OF, "a.md", "kind", "Task"),
+            judging(
+                2,
+                SHAPE_MISMATCH,
+                "a.md",
+                "priority",
+                &AuthoredValue::Integer(3),
+            ),
+        ];
+
+        let planned = Vault::of(schema, &docs)
+            .at(Confidence::Declared)
+            .plan(&rows);
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::BelowThreshold),
+                (2, SkipReason::JudgeWouldRefuse)
+            ]
+        );
+    }
+
     /// **A declared synonym agreeing with the fold needs no note.**
     #[test]
     fn a_declared_synonym_the_fold_agrees_with_carries_no_note() {
