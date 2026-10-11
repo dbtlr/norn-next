@@ -48,13 +48,13 @@
 //! even where it fails the combined constraint or the judge: it blocks the
 //! derived answer, and the finding skips with every candidate. Where a
 //! declared fix decides and the derived answer differs, the citation notes
-//! the derived answer. A derived fix the threshold does not admit is skipped
-//! as [`SkipReason::BelowThreshold`] before it is judged, carrying the
-//! operation lowering the threshold writes for it. [`Reckoned::propose_lowered`]
-//! is the one place that decides it: the document is composed again at the
-//! derived level, where the fix is judged, so each element of a list proposes
-//! the one write of the field every admitted element composes into, and a fix
-//! that composition refuses skips with its reason.
+//! the derived answer. A derived fix the threshold does not admit is judged
+//! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
+//! operation lowering the threshold writes for it: the document composed
+//! again at the derived level ([`Reckoned::propose_lowered`]), so each
+//! element of a list proposes the one write of the field every admitted
+//! element composes into, and a fix that composition refuses skips with its
+//! reason.
 //!
 //! **A document is drafted alone, its routes judged together.** Each
 //! document's draft composes its fixes where it stands and, where its route
@@ -1015,10 +1015,10 @@ impl Document<'_> {
 
     /// `Ok` where a fix made at `level` is one the threshold writes;
     /// otherwise the skip of the finding `row` as below the threshold,
-    /// carrying `proposed`, the fix's own operation, before the fix is judged:
-    /// [`Reckoned::propose_lowered`] judges it on the lowered composition and
+    /// carrying `proposed`, the fix's own operation, asked once the judge
+    /// has admitted the fix where it stands: [`Reckoned::propose_lowered`]
     /// replaces `proposed` with the write lowering the threshold makes, or the
-    /// skip is replaced by that composition's.
+    /// skip with the lowered composition's where that composition refuses it.
     fn within_threshold(
         &self,
         level: Confidence,
@@ -4201,6 +4201,36 @@ mod tests {
         assert_eq!(
             planned.skipped[0].proposed,
             Some(proposing("a.md", "kind", AuthoredValue::string("task")))
+        );
+    }
+
+    /// **A below-threshold fix the judge refuses where the document stands
+    /// skips with the judge's reason**, even where lowering the threshold
+    /// would drop its finding: at a `declared` threshold `status: DONE`
+    /// folded to `done` brings in the `finished` rule forbidding the `draft`
+    /// the document holds, so it is refused where it stands, though the
+    /// lowered composition, folding `kind` to `task` first, leaves `others`
+    /// unselected and drops the finding.
+    #[test]
+    fn a_below_threshold_fix_the_judge_refuses_where_it_stands_skips_with_its_reason() {
+        let schema = "version: 1\nrules:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [task]}\n  others:\n    match: {frontmatter: {kind: Task}}\n    one_of:\n      status: {values: [todo, done]}\n  finished:\n    match: {frontmatter: {status: done}}\n    forbidden:\n      draft:\n";
+        let docs = [("a.md", "---\nkind: Task\nstatus: DONE\ndraft: x\n---\n")];
+        let rows = [
+            offending(1, NOT_ONE_OF, "a.md", "kind", "Task"),
+            offending(2, NOT_ONE_OF, "a.md", "status", "DONE"),
+        ];
+
+        let planned = Vault::of(schema, &docs)
+            .at(Confidence::Declared)
+            .plan(&rows);
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::BelowThreshold),
+                (2, SkipReason::JudgeWouldRefuse)
+            ]
         );
     }
 

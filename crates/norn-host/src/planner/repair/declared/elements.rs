@@ -133,21 +133,16 @@ pub(super) fn fix_field(
             continue;
         };
         let set = document.set(&state.at, field, replaced.clone());
-        // The threshold is asked first: a fix below it is not judged here,
-        // since the lowered composition judges it ([`Reckoned::propose_lowered`]).
         let admitted = document
-            .within_threshold(replacement.level, row, &set)
-            .and_then(|()| {
-                document.admit(
-                    &current,
-                    std::slice::from_ref(&set),
-                    Fixing {
-                        row,
-                        finding,
-                        candidates: &replacement.candidates,
-                    },
-                )
-            })
+            .admit(
+                &current,
+                std::slice::from_ref(&set),
+                Fixing {
+                    row,
+                    finding,
+                    candidates: &replacement.candidates,
+                },
+            )
             .and_then(|next| match vetoed(&next) {
                 Some(note) => Err(Box::new(
                     skip(row, SkipReason::JudgeWouldRefuse)
@@ -155,6 +150,11 @@ pub(super) fn fix_field(
                         .with_note(note),
                 )),
                 None => Ok(next),
+            })
+            .and_then(|next| {
+                document
+                    .within_threshold(replacement.level, row, &set)
+                    .map(|()| next)
             });
         match admitted {
             Ok(next) => {

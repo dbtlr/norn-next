@@ -2745,8 +2745,8 @@ operation lowering the threshold writes for it, in preview and apply alike. One 
 decides it: its document is composed again at the `derived` level, where the batch's routes
 as the request's threshold settles them leave it, so each below-threshold element of a list
 proposes the one write of the field every admitted element composes into, and a fix that
-lowered composition refuses skips with the lowered composition's reason, never judged
-beforehand where it stands. A
+lowered composition refuses skips with the lowered composition's reason; a fix the judge
+refuses where the document stands skips with the judge's reason first. A
 declared fix counts even where it fails the combined constraint or the judge: it blocks the
 derived answer, and the finding skips with every candidate, the derived answer among them. Where a
 declared fix is made and the derived answer differs, the citation notes the derived answer.
@@ -2777,7 +2777,8 @@ fix. Several documents: `ambiguous_link` with the head of the candidates; none:
 `no_declared_fix`, the note saying the link would resolve to no document.
 **A fix that writes a link value records what the link resolves to.** For every wikilink a
 fix's `set_frontmatter` writes — a bare value made a link, and as well a wrap, an unwrap, a
-fold, a synonym, a default or a rename whose value is, or whose elements are, a wikilink —
+default or a rename whose value is, or whose elements are, a wikilink (a closed set holds
+none, so no fold or synonym writes one) —
 the plan records an address resolution condition: the holder at its after-state path, the
 wikilink, the address written, and what it resolves to at the after-state (one document,
 several, or none), one condition per holder and address however many fixes write it. It

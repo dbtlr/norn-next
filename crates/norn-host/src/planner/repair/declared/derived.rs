@@ -6,12 +6,11 @@
 //! one.** It is composed and judged as a declared fix is (`Document::admit`),
 //! so a fix the applier would refuse, or that brings required fields in, is
 //! skipped with the reason the judge gives. A fix whose level the request's
-//! threshold does not admit is skipped as [`SkipReason::BelowThreshold`]
-//! before it is judged where it stands, carrying the operation lowering the
-//! threshold writes for it. `Reckoned::propose_lowered` is the one place that
-//! decides such a fix: it composes the document again at the derived level,
-//! where the batch's routes leave it, and judges the fix there, so a fix that
-//! composition refuses skips with the judge's reason in place of this one.
+//! threshold does not admit is judged too, then skipped as
+//! [`SkipReason::BelowThreshold`], carrying the operation lowering the
+//! threshold writes for it: its document composed again at the derived
+//! level, where the batch's routes leave it (`Reckoned::propose_lowered`),
+//! and a fix that composition refuses skips with its reason.
 //!
 //! - **Wrap and unwrap** answer a `field/shape-mismatch`. A field declared a
 //!   list holding a scalar is set to the one-item list of that scalar, its
@@ -96,7 +95,6 @@ pub(super) fn reshape(
         return Err(Box::new(crate::planner::repair::skipped(row)));
     };
     let set = document.set(&state.at, field, reshaped.clone());
-    document.within_threshold(Confidence::Derived, row, &set)?;
     let composed = document.admit(
         state,
         std::slice::from_ref(&set),
@@ -106,6 +104,7 @@ pub(super) fn reshape(
             candidates: &candidate_of(&reshaped),
         },
     )?;
+    document.within_threshold(Confidence::Derived, row, &set)?;
     Ok(Fix {
         operations: vec![set],
         cited: vec![cited(row, Confidence::Derived, Vec::new())],
@@ -129,8 +128,8 @@ fn boolean_of(text: &str) -> Option<bool> {
 ///
 /// Every element such a finding names is a string: a boolean field reads a
 /// string spelling exactly `true` or `false` as the boolean, so no finding
-/// names one beside a YAML boolean, and no number, date or null spells a
-/// boolean but for its case.
+/// names one beside a YAML boolean, and no number or null spells a boolean
+/// but for its case.
 pub(super) fn boolean_case(document: &Document<'_>, offending: &Offending<'_>) -> Proposed {
     match boolean_of(offending.text) {
         Some(flag) => {
