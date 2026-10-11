@@ -28,9 +28,16 @@ publish.workspace = true
 # *written* on every build, because that is how a job's cost stops being
 # discarded, and the in-flight holds are kept on every build because the
 # lifecycle runs on them; nothing in the shipped artifact reads either back,
-# so a build without this feature carries no reader.
+# so a build without this feature carries no reader. It also turns on
+# `norn-fs`'s `test-support`, since `copied_sources` reads a plan's copy
+# sources under a case behavior its caller states, which only
+# `PathNormalizer::for_sensitivity` builds.
 [features]
-induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
+induced-failure = [
+    "norn-fs/induced-failure",
+    "norn-fs/test-support",
+    "norn-store/induced-failure",
+]
 
 # `jiff` is a registry dependency, implementation rather than contract: it
 # turns the current instant into the local day, time and offset a creation
