@@ -60,8 +60,8 @@ pub struct RewrittenLinks {
 /// one per doubling of the spacing between them, so a batch where most edits
 /// fail would otherwise read the document once per edit, quadratic in a
 /// holder's links. Past this many reads the rewrite answers
-/// [`RewriteUnproven`] and writes nothing — where most edits fail, and where
-/// a few dozen scattered through a large batch do.
+/// [`RewriteUnproven`] and writes nothing: where most edits fail, and where a
+/// dozen or so are scattered through a batch of thousands.
 pub const REWRITE_PROOF_READS: usize = 128;
 
 /// Why [`Document::rewrite_links`] rewrote nothing: proving which of the
