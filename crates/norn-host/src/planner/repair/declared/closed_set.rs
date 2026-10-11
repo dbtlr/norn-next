@@ -9,7 +9,11 @@
 //! number under a `number` field, and `Play` and `#play` one tag under a tag
 //! fold. The candidates agree when they name one member by the same equality.
 //! The derived answer is the one member of the combined closed set that
-//! differs from the value only by case and white space ([`derived::Folds`]).
+//! differs from the value only by case and white space ([`derived::Folds`]),
+//! where writing it changes the address of no wikilink the value holds
+//! ([`derived::recases_a_link`]): a fold that would re-case a link is
+//! [`SkipReason::NoDeclaredFix`], noted, and no derived answer beside a
+//! declared one.
 //!
 //! **The strongest level present decides.** A declared candidate decides even
 //! where the combined constraint or the judge refuses it: the derived answer
@@ -33,7 +37,7 @@ use norn_wire::{
     AuthoredValue, Confidence, SkipReason, SkippedCandidates, ValueCandidate, ValueCandidateHead,
 };
 
-use super::derived::{FoldCache, Folded};
+use super::derived::{self, FoldCache, Folded};
 use super::elements::{Offending, Proposed, Replacement, same_member, same_value};
 use super::{Document, Proposal, candidates, head, skip};
 
@@ -53,8 +57,23 @@ pub(super) fn propose(
         .of(schema, field, &offending.held.rules)
         .answer(offending.text);
     let derived_admitted = document.admits(Confidence::Derived);
+    // A fold that would re-case a link is no derived answer.
+    let (folded, recasing) = match folded {
+        Folded::One(member) if derived::recases_a_link(offending.text, &member) => {
+            (Folded::None, Some(member))
+        }
+        folded => (folded, None),
+    };
 
     let Some((first, rest)) = declared.split_first() else {
+        if let Some(member) = recasing {
+            return Proposed::Skipped(Box::new(crate::planner::repair::skipped(row).with_note(
+                format!(
+                    "a case and white space fold would write `{member}`, which would re-case a \
+                     link, and a fold never does"
+                ),
+            )));
+        }
         return match folded {
             Folded::One(member) => Proposed::Replace(Replacement {
                 candidates: derived_candidates(std::slice::from_ref(&member)),

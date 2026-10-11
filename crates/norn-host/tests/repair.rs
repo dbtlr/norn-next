@@ -3818,3 +3818,32 @@ fn every_link_a_repair_writes_is_resolved_in_one_judgment_however_many() {
     let many = link_judgments_of_a_preview("host-repair-link-judgments-many", 6);
     assert_eq!(few, many);
 }
+
+/// **A fold never re-cases a link, so a repair introduces no link-health
+/// finding**: `[[zz-TARGET]]` folds to the closed set's `[[zz-target]]`,
+/// which would name no document on a root telling case apart; the finding
+/// skips as having no declared fix, and the plan applies leaving only its
+/// skips.
+#[test]
+fn a_fold_never_recases_a_link_so_no_link_health_finding_is_introduced() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]']}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fold-recasing-a-link",
+        schema,
+        &[
+            ("a.md", b"---\ntype: task\nup: '[[zz-TARGET]]'\n---\n"),
+            ("zz-TARGET.md", b"# Target\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::NoDeclaredFix]);
+}

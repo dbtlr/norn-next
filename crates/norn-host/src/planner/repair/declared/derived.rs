@@ -23,7 +23,9 @@
 //!   set that folds equal to the value — Unicode lower case, the ends trimmed
 //!   and each run of white space inside one space — is written as the schema
 //!   writes it. Several members folding equal are a tie. A word join or split
-//!   (`inprogress` for `in progress`) is not a fold.
+//!   (`inprogress` for `in progress`) is not a fold, and neither is one that
+//!   would change the address of a wikilink the value holds
+//!   ([`recases_a_link`]).
 //!
 //! **A type mismatch no derived fix answers is an excluded class** where the
 //! field is declared `date`, `number` or `boolean`: a fix would reformat a
@@ -165,6 +167,22 @@ pub(super) fn excluded(row: &FindingRow, schema: &VaultSchema) -> Option<Skipped
         "`{field}` is declared `{declared}`, and a fix would be {class}, a class of fix a \
          repair never makes"
     )))
+}
+
+/// Whether writing `member` in the place of `value` would change the address
+/// of a wikilink the value holds: a link of the member whose address — its
+/// protocol and target — differs from the value's link at the same position,
+/// or a different number of links. A fold that only re-cases a link's alias
+/// or anchor keeps every address. A fold never re-cases a link: what the
+/// link names is resolution's to say, and case is no part of a fold's proof.
+pub(super) fn recases_a_link(value: &str, member: &str) -> bool {
+    let addresses = |text: &str| -> Vec<(Option<String>, String)> {
+        norn_text::parse_wikilinks_in_text(text)
+            .into_iter()
+            .map(|link| (link.protocol, link.target))
+            .collect()
+    };
+    addresses(value) != addresses(member)
 }
 
 /// What a value folds to when it is compared as text: lower-cased by Unicode,

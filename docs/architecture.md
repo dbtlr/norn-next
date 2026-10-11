@@ -2724,7 +2724,11 @@ to exactly `true` or `false`, is written as the YAML boolean. A `field/not-one-o
 a field whose values compare as text is replaced by the one member of the combined closed set
 that folds equal to the offending value, a fold being Unicode lower case, the ends trimmed and
 each internal run of white space collapsed to one space: members that fold equal tie, and a
-word join or split (`inprogress` for `in progress`) is not a fold. A list's boolean or
+word join or split (`inprogress` for `in progress`) is not a fold. A fold never re-cases a
+wikilink: where the member would change the address of a link the value holds — a link
+whose address differs from the value's link at the same position, or a different number of
+links — the finding is `no_declared_fix`, its note saying the fold would re-case a link; a
+declared synonym doing so is the schema's answer and is made. A list's boolean or
 closed-set elements are fixed one by one into the same single `set_frontmatter` of the whole
 list as its synonyms are. Every derived fix is composed and judged on the composed state as a
 declared one is, so a wrap that brings out a type or closed-set violation is

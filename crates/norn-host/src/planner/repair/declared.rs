@@ -3785,6 +3785,50 @@ mod tests {
         );
     }
 
+    /// **A fold never re-cases a wikilink**: `[[ZZ-target]]` folds to the
+    /// member `[[zz-target]]`, whose address differs, so the finding skips
+    /// with no declared fix and a note saying why; a fold changing only a
+    /// link's alias, `[[b|X]]` to `[[b|x]]`, keeps its address and is made.
+    #[test]
+    fn a_fold_that_would_recase_a_link_skips_and_one_keeping_its_address_is_made() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]', '[[b|x]]']}\n";
+        let vault = Vault::of(
+            schema,
+            &[
+                ("a.md", "---\ntype: task\nup: '[[ZZ-target]]'\n---\n"),
+                ("c.md", "---\ntype: task\nup: '[[b|X]]'\n---\n"),
+            ],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "up", "[[ZZ-target]]"),
+            offending(2, NOT_ONE_OF, "c.md", "up", "[[b|X]]"),
+        ]);
+
+        assert_eq!(planned.operations, vec![set(1, "c.md", "up", "[[b|x]]")]);
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+        let note = note_of(&planned, 1);
+        assert!(note.contains("re-case"), "{note}");
+    }
+
+    /// **A declared synonym re-casing a link is the owner's answer, and is
+    /// made.**
+    #[test]
+    fn a_declared_synonym_recasing_a_link_is_made() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]'], synonyms: {'[[ZZ-target]]': '[[zz-target]]'}}\n";
+        let vault = Vault::of(
+            schema,
+            &[("a.md", "---\ntype: task\nup: '[[ZZ-target]]'\n---\n")],
+        );
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "up", "[[ZZ-target]]")]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set(1, "a.md", "up", "[[zz-target]]")]
+        );
+    }
+
     const DECLARED_AND_FOLDED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished}}\n";
 
     /// **A declared synonym decides over the fold, and the cited fix notes the
