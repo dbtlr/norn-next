@@ -1,7 +1,7 @@
 //! Composition: each target's after-bytes from its before-bytes and the
 //! operations touching it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -875,7 +875,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 "the link rewrites into `{spelling}` were not proven, so none is written: {unproven}; plan fewer moves or link rewrites into `{spelling}` at once, or lower a repair's limit, and retry"
             )
         })?;
-        let kept = kept_at_written(&links, &BatchAddresses::of(rewrites));
+        let kept = kept_at_written(&links, batch::Addresses::of(rewrites));
         self.target(spelling).after = After::Bytes(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),
@@ -905,50 +905,67 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     }
 }
 
-/// The addresses a holder's batch of rewrites matches links by and writes
-/// them as, by syntax: each rewrite read once, so what the batch does to a
-/// link is a lookup however many rewrites the holder takes.
-struct BatchAddresses<'r> {
-    matched: HashSet<(LinkFamily, &'r str)>,
-    written: HashSet<(LinkFamily, &'r str)>,
-}
-
-impl<'r> BatchAddresses<'r> {
-    fn of(rewrites: &[&'r LinkRewrite]) -> Self {
-        let mut matched = HashSet::with_capacity(rewrites.len());
-        let mut written = HashSet::with_capacity(rewrites.len());
-        for rewrite in rewrites {
-            #[cfg(test)]
-            tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
-            matched.insert((rewrite.syntax, rewrite.from.as_str()));
-            written.insert((rewrite.syntax, rewrite.to.as_str()));
-        }
-        BatchAddresses { matched, written }
-    }
-}
-
 /// The syntax and address of each of `links`, as the change set reads them,
 /// that `batch` matches no link by and writes one as: what a batch over the
 /// holder of `links` keeps under a key it also writes, each once, in the
 /// order the holder holds them.
 fn kept_at_written(
     links: &[norn_store::LinkFact],
-    batch: &BatchAddresses<'_>,
+    mut batch: batch::Addresses<'_>,
 ) -> Vec<(LinkFamily, String)> {
-    let mut seen: HashSet<(LinkFamily, String)> = HashSet::new();
     let mut kept: Vec<(LinkFamily, String)> = Vec::new();
     for link in links {
         let syntax = wire_family(link.family);
         let address = links::address(link);
-        let key = (syntax, address.as_str());
-        if batch.written.contains(&key)
-            && !batch.matched.contains(&key)
-            && seen.insert((syntax, address.clone()))
-        {
+        if batch.keeps(syntax, &address) {
             kept.push((syntax, address));
         }
     }
     kept
+}
+
+/// A holder's batch of rewrites as the addresses it matches links by and
+/// writes them as, answering for one link at a time and offering no pass
+/// over them, so what the batch does to a link is a lookup however many
+/// rewrites the holder takes.
+mod batch {
+    use std::collections::HashSet;
+
+    use norn_wire::{LinkFamily, LinkRewrite};
+
+    pub(super) struct Addresses<'r> {
+        matched: HashSet<(LinkFamily, &'r str)>,
+        written: HashSet<(LinkFamily, &'r str)>,
+        kept: HashSet<(LinkFamily, String)>,
+    }
+
+    impl<'r> Addresses<'r> {
+        /// The addresses `rewrites` match and write, each rewrite read once.
+        pub(super) fn of(rewrites: &[&'r LinkRewrite]) -> Self {
+            let mut matched = HashSet::with_capacity(rewrites.len());
+            let mut written = HashSet::with_capacity(rewrites.len());
+            for rewrite in rewrites {
+                #[cfg(test)]
+                super::tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
+                matched.insert((rewrite.syntax, rewrite.from.as_str()));
+                written.insert((rewrite.syntax, rewrite.to.as_str()));
+            }
+            Addresses {
+                matched,
+                written,
+                kept: HashSet::new(),
+            }
+        }
+
+        /// Whether a link of `syntax` at `address` is one the batch keeps
+        /// under a key it writes — matched by no rewrite, at an address one
+        /// writes — and is the first such link asked about at that key.
+        pub(super) fn keeps(&mut self, syntax: LinkFamily, address: &str) -> bool {
+            self.written.contains(&(syntax, address))
+                && !self.matched.contains(&(syntax, address))
+                && self.kept.insert((syntax, address.to_owned()))
+        }
+    }
 }
 
 /// `identity` at the spelling its operation asked for, normalized.
@@ -1147,7 +1164,7 @@ mod tests {
     }
 
     thread_local! {
-        /// Rewrites [`BatchAddresses::of`] read on this thread.
+        /// Rewrites [`batch::Addresses::of`] read on this thread.
         pub(super) static REWRITES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 

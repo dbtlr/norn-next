@@ -2,8 +2,8 @@
 //! of its family whose address it is, respelled to its own target — the pure
 //! text half of a link cascade. See [`Document::rewrite_links`].
 
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::document::{Document, splice_all};
@@ -268,19 +268,21 @@ struct Proof<'a, 'd> {
     /// The bytes the document's placed Markdown links begin at, which a
     /// wikilink sharing its outer brackets with one begins at too
     /// ([`Respelling::read_as`]).
-    markdown_starts: HashSet<usize>,
+    markdown_starts: counted::Set<usize>,
     reads: usize,
 }
 
 impl<'a, 'd> Proof<'a, 'd> {
     fn of(document: &'a Document<'d>) -> Self {
         let before = Reading::of(document);
-        let markdown_starts = before
-            .links
-            .iter()
-            .filter(|link| link.family == LinkFamily::Markdown)
-            .filter_map(|link| link.at.as_ref().map(|at| at.start))
-            .collect();
+        let markdown_starts = counted::Set::new(
+            before
+                .links
+                .iter()
+                .filter(|link| link.family == LinkFamily::Markdown)
+                .filter_map(|link| link.at.as_ref().map(|at| at.start))
+                .collect(),
+        );
         Proof {
             document,
             before,
@@ -739,18 +741,19 @@ impl LinkReading {
 /// its bytes moved and which respelled links its text holds, so each answer
 /// is a lookup rather than a pass over the stems: by the link's name, by a
 /// search of the stems in order, and by a search of them ordered by where
-/// their tokens begin.
+/// their tokens begin. Every index is read through an accessor that counts
+/// each entry it reads ([`counted`]), so a pass over one counts every entry.
 struct Respelling<'t> {
-    stems: Vec<RespelledStem<'t>>,
+    stems: counted::List<RespelledStem<'t>>,
     /// Each stem's place in `stems`, by the family and token start naming its
     /// link.
-    named: HashMap<(LinkFamily, usize), usize>,
+    named: counted::Map<(LinkFamily, usize), usize>,
     /// The bytes the first `k` stems write and the bytes they replace, at
     /// `k`: so where a byte moves is one search away.
-    written: Vec<(usize, usize)>,
+    written: counted::List<(usize, usize)>,
     /// The places in `stems`, ordered by the byte each token begins at and
     /// then by place.
-    by_token: Vec<usize>,
+    by_token: counted::List<usize>,
 }
 
 /// One link a respelling rewrites: its family and the byte its token begins
@@ -770,7 +773,7 @@ impl<'t> Respelling<'t> {
     /// as a heading or title holding it reads it where `markdown_starts` are
     /// the bytes the document's Markdown links begin at. The edits are in
     /// document order and do not overlap.
-    fn of(edits: &[&'t Edit], markdown_starts: &HashSet<usize>) -> Self {
+    fn of(edits: &[&'t Edit], markdown_starts: &counted::Set<usize>) -> Self {
         let stems: Vec<RespelledStem<'t>> = edits
             .iter()
             .map(|&edit| RespelledStem {
@@ -785,7 +788,6 @@ impl<'t> Respelling<'t> {
         let mut written = Vec::with_capacity(stems.len() + 1);
         written.push((0, 0));
         for (place, stem) in stems.iter().enumerate() {
-            count_stem_read();
             named.insert((stem.family, stem.at), place);
             let (grown, shrunk) = written[place];
             written.push((grown + stem.to.len(), shrunk + stem.stem.len()));
@@ -793,10 +795,10 @@ impl<'t> Respelling<'t> {
         let mut by_token: Vec<usize> = (0..stems.len()).collect();
         by_token.sort_by_key(|&place| (stems[place].at, place));
         Respelling {
-            stems,
-            named,
-            written,
-            by_token,
+            stems: counted::List::new(stems),
+            named: counted::Map::new(named),
+            written: counted::List::new(written),
+            by_token: counted::List::new(by_token),
         }
     }
 
@@ -827,19 +829,17 @@ impl<'t> Respelling<'t> {
     /// respelled to, where this respelling rewrites it.
     fn target_of(&self, family: LinkFamily, at: usize) -> Option<&'t str> {
         let place = *self.named.get(&(family, at))?;
-        count_stem_read();
-        Some(self.stems[place].to)
+        Some(self.stems.get(place).to)
     }
 
     /// Where the source byte at `at` stands once every stem ending at or
     /// before it is written as its target. The stems do not overlap, so
     /// their ends ascend in document order.
     fn moved(&self, at: usize) -> usize {
-        let ended = self.stems.partition_point(|respelled| {
-            count_stem_read();
-            respelled.stem.end <= at
-        });
-        let (grown, shrunk) = self.written[ended];
+        let ended = self
+            .stems
+            .partition_point(|respelled| respelled.stem.end <= at);
+        let &(grown, shrunk) = self.written.get(ended);
         at + grown - shrunk
     }
 
@@ -863,18 +863,13 @@ impl<'t> Respelling<'t> {
         except: Option<(LinkFamily, usize)>,
     ) -> Option<String> {
         let begins_before = |bound: usize| {
-            self.by_token.partition_point(|&place| {
-                count_stem_read();
-                self.stems[place].at < bound
-            })
+            self.by_token
+                .partition_point(|&place| self.stems.get(place).at < bound)
         };
-        let mut inside: Vec<usize> = self.by_token
-            [begins_before(range.start)..begins_before(range.end)]
-            .iter()
-            .copied()
+        let mut inside: Vec<usize> = (begins_before(range.start)..begins_before(range.end))
+            .map(|order| *self.by_token.get(order))
             .filter(|&place| {
-                count_stem_read();
-                let stem = &self.stems[place];
+                let stem = self.stems.get(place);
                 except != Some((stem.family, stem.at))
             })
             .collect();
@@ -882,7 +877,7 @@ impl<'t> Respelling<'t> {
         let mut expected = String::with_capacity(text.len());
         let mut rest = text;
         for place in inside {
-            let Some((old, new)) = &self.stems[place].read_as else {
+            let Some((old, new)) = &self.stems.get(place).read_as else {
                 continue;
             };
             let found = rest.find(old)?;
@@ -895,10 +890,70 @@ impl<'t> Respelling<'t> {
     }
 }
 
-/// Count one respelled stem a proof's lookup read ([`tests::STEMS_READ`]).
-fn count_stem_read() {
-    #[cfg(test)]
-    tests::STEMS_READ.with(|reads| reads.set(reads.get() + 1));
+/// The collections a proof's lookups read, each behind accessors that count
+/// every entry they read ([`tests::ENTRIES_READ`]) and that offer no other
+/// way in: a lookup visiting every entry counts every one, so the proof's
+/// cost bar sees a scan wherever one is written.
+mod counted {
+    use std::collections::{HashMap, HashSet};
+    use std::hash::Hash;
+
+    /// A list read by place or by a search of its order.
+    pub(super) struct List<T>(Vec<T>);
+
+    impl<T> List<T> {
+        pub(super) fn new(entries: Vec<T>) -> Self {
+            List(entries)
+        }
+
+        /// The entry at `place`.
+        pub(super) fn get(&self, place: usize) -> &T {
+            count();
+            &self.0[place]
+        }
+
+        /// How many entries lead the list holding `before`, which holds of
+        /// a leading run of them and of none after it.
+        pub(super) fn partition_point(&self, mut before: impl FnMut(&T) -> bool) -> usize {
+            self.0.partition_point(|entry| {
+                count();
+                before(entry)
+            })
+        }
+    }
+
+    /// A map read by key.
+    pub(super) struct Map<K, V>(HashMap<K, V>);
+
+    impl<K: Eq + Hash, V> Map<K, V> {
+        pub(super) fn new(entries: HashMap<K, V>) -> Self {
+            Map(entries)
+        }
+
+        pub(super) fn get(&self, key: &K) -> Option<&V> {
+            count();
+            self.0.get(key)
+        }
+    }
+
+    /// A set read by membership.
+    pub(super) struct Set<T>(HashSet<T>);
+
+    impl<T: Eq + Hash> Set<T> {
+        pub(super) fn new(entries: HashSet<T>) -> Self {
+            Set(entries)
+        }
+
+        pub(super) fn contains(&self, entry: &T) -> bool {
+            count();
+            self.0.contains(entry)
+        }
+    }
+
+    fn count() {
+        #[cfg(test)]
+        super::tests::ENTRIES_READ.with(|reads| reads.set(reads.get() + 1));
+    }
 }
 
 #[cfg(test)]
@@ -908,26 +963,26 @@ mod tests {
     use super::*;
 
     thread_local! {
-        /// Respelled stems the proofs on this thread read
-        /// ([`count_stem_read`]).
-        pub(super) static STEMS_READ: Cell<usize> = const { Cell::new(0) };
+        /// Entries of a respelling's indexes the proofs on this thread read
+        /// ([`counted`]).
+        pub(super) static ENTRIES_READ: Cell<usize> = const { Cell::new(0) };
         /// Whole-document reads the proofs on this thread spent
         /// ([`Proof::read_back`]).
         pub(super) static PROOF_READS: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// What `rewrites` make of `source`, the respelled stems its proof read,
+    /// What `rewrites` make of `source`, the index entries its proof read,
     /// and the whole-document reads it spent.
     fn counted(
         source: &str,
         rewrites: &[AddressRewrite],
     ) -> (Result<RewrittenLinks, RewriteUnproven>, usize, usize) {
-        STEMS_READ.with(|reads| reads.set(0));
+        ENTRIES_READ.with(|reads| reads.set(0));
         PROOF_READS.with(|reads| reads.set(0));
         let rewritten = Document::parse(source).rewrite_links(rewrites);
         (
             rewritten,
-            STEMS_READ.with(Cell::get),
+            ENTRIES_READ.with(Cell::get),
             PROOF_READS.with(Cell::get),
         )
     }
@@ -962,26 +1017,27 @@ mod tests {
         (source, rewrites)
     }
 
-    /// **A hub's read-back reads its respelled stems in time linear in its
-    /// rewrites, up to a search's logarithmic factor**: every link, heading, tag and code span is placed, named
-    /// and carried by a lookup, so doubling the hub's entries doubles the
-    /// stems read, give or take a search's one more step — where a pass over
-    /// every stem per fact quadruples them.
+    /// **A hub's read-back reads its respelling's indexes in time linear in
+    /// its rewrites, up to a search's logarithmic factor**: every link,
+    /// heading, tag and code span is placed, named and carried by a lookup,
+    /// so doubling the hub's entries doubles the index entries read, give or
+    /// take a search's one more step — where a pass over every stem per fact
+    /// quadruples them.
     #[test]
     fn a_hubs_read_back_reads_its_stems_near_linearly_in_its_rewrites() {
-        let stems_read = |entries| {
+        let entries_read = |entries| {
             let (source, rewrites) = hub(entries);
-            let (rewritten, stems, reads) = counted(&source, &rewrites);
+            let (rewritten, read, reads) = counted(&source, &rewrites);
             let rewritten = rewritten.expect("a batch reading back is proven");
             assert!(rewritten.skipped.is_empty(), "{:?}", rewritten.skipped);
             assert_eq!(rewritten.rewritten, rewrites.len());
             assert_eq!(reads, 1, "a batch reading back whole is one read");
-            stems
+            read
         };
-        let (few, many) = (stems_read(128), stems_read(256));
+        let (few, many) = (entries_read(128), entries_read(256));
         assert!(
             many * 10 <= few * 25,
-            "doubling a hub's rewrites took the stems read from {few} to {many}"
+            "doubling a hub's rewrites took the index entries read from {few} to {many}"
         );
     }
 
