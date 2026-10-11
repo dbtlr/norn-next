@@ -78,8 +78,7 @@ impl std::fmt::Display for RewriteUnproven {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "proving which of the batch's link rewrites read back took more than {} reads of the document",
-            self.reads
+            "proving which of the batch's link rewrites read back took more than the {REWRITE_PROOF_READS} reads of the document a rewrite may spend"
         )
     }
 }
