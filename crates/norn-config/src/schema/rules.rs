@@ -824,6 +824,16 @@ impl VaultSchema {
         equality_key(field, self.declared_type(field), raw)
     }
 
+    /// Whether the values of `field` compare as text, exactly as written:
+    /// it is declared `text`, or undeclared, and is no tag key, which
+    /// compares under the tag fold ([`VaultSchema::equality_key`]). A repair's
+    /// case and white space fold is made only on such a field
+    /// (`norn-host`'s `planner::repair::declared`).
+    pub fn compares_as_text(&self, field: &str) -> bool {
+        let declared = self.declared_type(field);
+        declared == FieldType::Text && !is_tag_key(field, declared)
+    }
+
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
     ///
     /// The defaults fixpoint and rule judgment select by the same reading
@@ -955,12 +965,19 @@ fn value_in<'a>(entries: &'a [(String, AuthoredValue)], key: &str) -> Option<&'a
 /// where `raw` does not read as the declared type.
 fn equality_key(field: &str, declared: FieldType, raw: &str) -> Option<TypedValue> {
     let typed = declared.read(raw).ok()?;
-    if field == norn_text::TAGS_FIELD || declared == FieldType::Tags {
+    if is_tag_key(field, declared) {
         let name = raw.strip_prefix('#').unwrap_or(raw);
         Some(TypedValue::Text(fold_tag(name)))
     } else {
         Some(typed)
     }
+}
+
+/// Whether `field`, declared `declared`, is a tag key: the tag carrier
+/// `tags`, declared or not and whatever type it is declared with, or a key
+/// declared `tags`.
+fn is_tag_key(field: &str, declared: FieldType) -> bool {
+    field == norn_text::TAGS_FIELD || declared == FieldType::Tags
 }
 
 /// Whether `value` leaves a required field unmet: absent or null.

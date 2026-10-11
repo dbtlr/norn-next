@@ -2734,6 +2734,10 @@ closed-set elements are fixed one by one into the same single `set_frontmatter` 
 list as its synonyms are. Every derived fix is composed and judged on the composed state as a
 declared one is, so a wrap that brings out a type or closed-set violation is
 `judge_would_refuse` and one that brings in required fields is `brings_in_required_fields`.
+A fix is composed in one step: a wrap or unwrap that exposes an element violation — a
+boolean list holding the scalar string `"TRUE"`, whose one-item list has an element of the
+wrong type — is `judge_would_refuse`, and the element's own fix is not composed with it, a
+declared limit: a two-step fix is not made.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
 pooled for a finding and the strongest level present decides. A derived fix the threshold
@@ -2843,8 +2847,8 @@ with a note naming the repair defect. A judgment another check stops first — d
 planning, a failed condition, a vault that does not read — answers as the applier answers
 it, and so does a plan the schema passed that the write kernel's judgment of its targets
 then stops, or whose forecast does not read: the judgment is held to the claims only beside
-the preview it completes. A document's fixes compose in finding order — kind,
-field, offending value — onto the bytes the earlier ones left, each judged
+the preview it completes. A document's fixes compose in finding order (link fixes last) —
+kind, field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
 own: a fix the applier would refuse, or one bringing back a violation an earlier fix took

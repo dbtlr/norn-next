@@ -517,10 +517,12 @@ pub enum SkippedCandidates {
     /// The values a repair could have written: a field's defaults or
     /// synonym members, the destinations a document's routes name, or the
     /// remedies a forbidden field's rules declare, spelled `remove` and
-    /// `rename_to: <field>`.
+    /// `rename_to: <field>`; and the values a derived fix would have written,
+    /// which no rule proposes.
     #[non_exhaustive]
     Values {
-        /// The head of the values, each with the rule that proposed it.
+        /// The head of the values, each with the rule that proposed it,
+        /// where a rule did.
         head: ValueCandidateHead,
     },
 }

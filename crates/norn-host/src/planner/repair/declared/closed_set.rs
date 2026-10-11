@@ -33,13 +33,11 @@
 //! field's findings compose into one `set_frontmatter` of the whole list.
 
 use norn_config::schema::VaultSchema;
-use norn_wire::{
-    AuthoredValue, Confidence, SkipReason, SkippedCandidates, ValueCandidate, ValueCandidateHead,
-};
+use norn_wire::{AuthoredValue, Confidence, SkipReason, SkippedCandidates, ValueCandidate};
 
 use super::derived::{self, FoldCache, Folded};
 use super::elements::{Offending, Proposed, Replacement, same_member, same_value};
-use super::{Document, Proposal, candidates, head, skip};
+use super::{Document, Proposal, candidates, head, skip, value_candidates};
 
 /// What the closed set of the field `field` makes of the offending element
 /// `offending`, folds served from `folds`.
@@ -131,18 +129,17 @@ fn derived_candidates(members: &[String]) -> SkippedCandidates {
 /// Every declared proposal, with the rule proposing it, and then the derived
 /// members `derived`, proposed by no named rule.
 fn pooled(declared: &[Proposal], derived: &[String]) -> SkippedCandidates {
-    let mut candidates: Vec<ValueCandidate> = declared
-        .iter()
-        .map(|proposal| ValueCandidate::new(head(&proposal.value)).by_rule(proposal.rule.as_str()))
-        .collect();
-    candidates.extend(
-        derived
+    value_candidates(
+        declared
             .iter()
-            .map(|member| ValueCandidate::new(norn_store::value_head(member))),
-    );
-    let total = candidates.len() as u64;
-    SkippedCandidates::values(
-        ValueCandidateHead::new(candidates, total).expect("a head of every candidate it names"),
+            .map(|proposal| {
+                ValueCandidate::new(head(&proposal.value)).by_rule(proposal.rule.as_str())
+            })
+            .chain(
+                derived
+                    .iter()
+                    .map(|member| ValueCandidate::new(norn_store::value_head(member))),
+            ),
     )
 }
 

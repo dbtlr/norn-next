@@ -41,11 +41,11 @@ use std::collections::{BTreeSet, HashMap};
 use norn_config::schema::{FieldType, Rule, Shape, VaultSchema};
 use norn_wire::{
     AuthoredValue, Confidence, FindingKind, FindingRow, SkipReason, SkippedCandidates,
-    SkippedFinding, ValueCandidate, ValueCandidateHead,
+    SkippedFinding, ValueCandidate,
 };
 
 use super::elements::{Offending, Proposed, Replacement};
-use super::{Document, Fix, Fixing, State, cited, field_of, head, skip};
+use super::{Document, Fix, Fixing, State, cited, field_of, head, skip, value_candidates};
 use crate::applier::Held;
 
 /// The value a field declared `shape` holds once re-shaped, or `None` where
@@ -67,10 +67,7 @@ fn reshaped(shape: Shape, value: &AuthoredValue) -> Option<AuthoredValue> {
 /// The candidates a derived fix skipped by the judge carries: the one value
 /// it would have written, proposed by no named rule.
 pub(super) fn candidate_of(value: &AuthoredValue) -> SkippedCandidates {
-    SkippedCandidates::values(
-        ValueCandidateHead::new([ValueCandidate::new(head(value))], 1)
-            .expect("a head of the one candidate it names"),
-    )
+    value_candidates(std::iter::once(ValueCandidate::new(head(value))))
 }
 
 /// The fix of the `field/shape-mismatch` finding `row` — `finding`, as the
@@ -201,12 +198,6 @@ fn fold(text: &str) -> String {
         .join(" ")
 }
 
-/// Whether the values of `field` compare as text: it is declared `text` or
-/// undeclared, and is no tag key, which compares under the tag fold.
-fn compares_as_text(schema: &VaultSchema, field: &str) -> bool {
-    field != norn_text::TAGS_FIELD && schema.declared_type(field) == FieldType::Text
-}
-
 /// What the fold of an offending value finds among the combined closed set.
 pub(super) enum Folded {
     /// No member folds equal.
@@ -232,7 +223,7 @@ impl Folds {
     /// closes it.
     fn of(schema: &VaultSchema, field: &str, rules: &BTreeSet<String>) -> Self {
         let mut members: HashMap<String, Vec<String>> = HashMap::new();
-        if compares_as_text(schema, field) {
+        if schema.compares_as_text(field) {
             let closing: Vec<&Rule> = rules.iter().filter_map(|name| schema.rule(name)).collect();
             let combined = schema.combined(&closing);
             let set = combined

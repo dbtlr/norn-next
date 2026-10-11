@@ -1709,6 +1709,23 @@ fn the_undeclared_tags_carrier_selects_under_the_tag_fold() {
     );
 }
 
+/// **A field compares as text exactly where its equality key is its text**:
+/// an undeclared key and one declared `text`; never the tag carrier, declared
+/// or not, a key declared `tags`, or a typed or `link` key.
+#[test]
+fn a_field_compares_as_text_where_its_key_is_its_text() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  title: {type: text}\n  topics: {type: tags}\n  n: {type: number}\n  up: {type: link}\n",
+    )
+    .expect("a schema");
+    for field in ["title", "topic"] {
+        assert!(schema.compares_as_text(field), "{field}");
+    }
+    for field in ["tags", "topics", "n", "up"] {
+        assert!(!schema.compares_as_text(field), "{field}");
+    }
+}
+
 /// **Selector identity reads the tag fold**: two selectors whose tag values
 /// fold to one tag are one selector, so a field one requires and the other
 /// forbids is a conflict on every document either selects.

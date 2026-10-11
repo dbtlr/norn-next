@@ -29,17 +29,19 @@
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
 //!
-//! **Four kinds have a derived fix, made at [`Confidence::Derived`]**
-//! ([`derived`]): a shape mismatch is wrapped or unwrapped, a boolean field's
-//! string spelling a boolean but for its case is written as the boolean, a
-//! value outside a closed set that differs from exactly one member only by
-//! case and white space is replaced by that member ([`closed_set`]), and a
-//! bare value in a link field is written as the link it resolves to
-//! ([`bare_link`]). A link fix is the exception to finding order: its answer
+//! **Three kinds have derived fixes, four of them, made at
+//! [`Confidence::Derived`]** ([`derived`]): a shape mismatch is wrapped or
+//! unwrapped; a type mismatch on a boolean field whose string spells a
+//! boolean but for its case is written as the boolean, and one on a link
+//! field whose bare value resolves to one document is written as that link
+//! ([`bare_link`]); and a value outside a closed set that differs from exactly
+//! one member only by case and white space is replaced by that member
+//! ([`closed_set`]). A link fix is the exception to finding order: its answer
 //! rests on the batch's settled routes, so a document's link fixes compose
-//! last, after the routes of the batch are settled ([`Draft::emit`]). A type
-//! mismatch on a `date`, `number` or `boolean` field no derived fix answers
-//! is an excluded class.
+//! last, after the routes of the batch are settled ([`Decided::emit`]). A
+//! type mismatch on a `date`, `number` or `boolean` field no derived fix
+//! answers is an excluded class. Every link any fix writes is recorded with
+//! what it resolves to once the plan has landed ([`Decided::emit`]).
 //!
 //! **Every candidate at or above the request's threshold is pooled for a
 //! finding, and the strongest level present decides.** A declared fix counts
@@ -60,8 +62,8 @@
 //! whose cascade may respell a frontmatter wikilink a rule reads by value is
 //! skipped ([`respells`]), and a destination is claimed in batch order
 //! ([`colliding`]). Each document takes the composition its route's fate
-//! decides ([`Draft::emit`]), its skipped findings settled against the state
-//! that composition leaves.
+//! decides ([`Draft::decide`]), its link fixes composed onto it and its
+//! skipped findings settled against the state it leaves ([`Decided::emit`]).
 //!
 //! **Each kind's candidates agree by its own rule.** Defaults agree as one
 //! written value (`1` and `1.0` disagree). Synonyms agree by the field's typed
@@ -152,10 +154,18 @@ pub(crate) use respells::blinded;
 pub(super) use respells::{Respellable, respelling};
 pub(super) use routes::colliding;
 
+use norn_store::PathOverlay;
+
+use super::{Before, Claim, Namings, Planned, Reading, Repairing, Written, skip};
+use crate::applier::{Held, Standing, standing, verdict};
+use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
+use crate::evidence::count_rule_work;
+use crate::planner::edit::edited;
+
 /// The plan the batch's routes settle to as the vault's documents see it: a
 /// document gone from where each route that passed moves it from, and
 /// standing where it lands, as the applier draws every target of a plan at
-/// its after-state alone. A link fix is resolved over it.
+/// its after-state alone. Every link a fix writes is resolved over it.
 pub(super) fn settled(
     drafts: &[Draft<'_>],
     refused: &std::collections::BTreeMap<usize, SkippedFinding>,
@@ -169,14 +179,6 @@ pub(super) fn settled(
             .map(|(passed, _)| (&passed.from, &passed.to)),
     )
 }
-
-use norn_store::PathOverlay;
-
-use super::{Before, Claim, Namings, Planned, Reading, Repairing, Written, skip};
-use crate::applier::{Held, Standing, standing, verdict};
-use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
-use crate::evidence::count_rule_work;
-use crate::planner::edit::edited;
 
 /// Whether `row` is a finding a fix may answer, so its document's bytes are
 /// read: a missing required field, a value outside a closed set, a forbidden
@@ -1434,10 +1436,17 @@ fn candidates(proposals: &[Proposal]) -> SkippedCandidates {
 /// The candidates `proposed` names, each a value head and the rule proposing
 /// it, as a skip carries them.
 fn spelled_candidates<'p>(
-    proposed: impl ExactSizeIterator<Item = (ValueHead, &'p str)>,
+    proposed: impl Iterator<Item = (ValueHead, &'p str)>,
 ) -> SkippedCandidates {
-    let total = proposed.len() as u64;
-    let candidates = proposed.map(|(value, rule)| ValueCandidate::new(value).by_rule(rule));
+    value_candidates(proposed.map(|(value, rule)| ValueCandidate::new(value).by_rule(rule)))
+}
+
+/// Every one of `candidates`, in order, as the values a skip carries: the
+/// one way a skip's value candidates are headed, whether a named rule
+/// proposed each or none did.
+fn value_candidates(candidates: impl Iterator<Item = ValueCandidate>) -> SkippedCandidates {
+    let candidates: Vec<ValueCandidate> = candidates.collect();
+    let total = candidates.len() as u64;
     SkippedCandidates::values(
         ValueCandidateHead::new(candidates, total).expect("a head of every candidate it names"),
     )
