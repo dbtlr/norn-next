@@ -2754,17 +2754,21 @@ of the batch is settled (after the respell check and the destination claims). Ea
 resolved over the plan the settled routes make, as the moves of that plan, through the one
 index probe the applier makes again of an address resolution, so what the planner records
 is by construction what the applier computes. One document: the link is written, a derived
-fix, and the plan records an address resolution condition — the holder at its after-state
-path, the wikilink, the address written, and the one document's after-state path — which
+fix. Several documents: `ambiguous_link` with the head of the candidates; none:
+`no_declared_fix`, the note saying the link would resolve to no document.
+**A fix that writes a link value records what the link resolves to.** For every wikilink a
+fix's `set_frontmatter` writes — a bare value made a link, and as well a wrap, an unwrap, a
+fold, a synonym, a default or a rename whose value is, or whose elements are, a wikilink —
+the plan records an address resolution condition: the holder at its after-state path, the
+wikilink, the address written, and what it resolves to at the after-state (one document,
+several, or none), one condition per holder and address however many fixes write it. It
 rides the resolved plan in preview and apply alike and is checked at the after-state, so a
 target deleted, or a competitor of the same stem created, between preview and apply refuses
-the plan, and a refused plan's fresh plan carries the condition as recorded. It is the only
-fix that records one: a fix that re-shapes or re-cases a value already a link rests on no
-resolution, and no fix of this layer replaces a link address. Several documents:
-`ambiguous_link` with the head of the candidates; none: `no_declared_fix`, the note saying
-the link would resolve to no document. The cost is one index probe per distinct bare value,
-and one more read of the candidates' head where it names several, plus nothing for a batch
-with no link fix.
+the plan, and a refused plan's fresh plan carries the condition as recorded. No fix of this
+layer replaces a link address. Every link the batch's fixes write is resolved in one
+judgment of the link index over the settled routes, and the heads of those naming several
+in one more, so the cost follows the links written and the routes, never their product,
+and a batch writing no link reads nothing for it.
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
 rule's own captures where the document stands and the plan's one clock reading — with the
@@ -3355,11 +3359,11 @@ snapshot after its intake, and refuses on any difference: an entry the plan reco
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
 A resolved plan may carry a third kind of condition beside a file's content and a
-change-set entry: an `address_resolution`, which repair's planner records for a link it
-writes whose answer rests on the link's resolution (a bare value made a link), saying that
-from the link's holder the address resolves as recorded at the plan's after-state; an
-address a fix replaces is recorded the same way by the move-following and similarity fixes
-of a later layer, and no fix of today replaces one. It is not an entry of the change set: the applier
+change-set entry: an `address_resolution`, which repair's planner records for every link
+a fix writes a value holding, saying that from the link's holder the address resolves as
+recorded at the plan's after-state; an address a fix replaces is recorded the same way by
+the move-following and similarity fixes of a later layer, and no fix of today replaces
+one. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
 judgment of the link index holding one probe per address resolution the plan carries,

@@ -138,10 +138,10 @@ use norn_config::schema::{
 };
 use norn_wire::{
     AuthoredValue, Captures, Citation, CitedFinding, Confidence, DocumentPath, FindingKind,
-    FindingRow, Operation, OperationId, OperationKind, PlanCondition, RequiredField,
-    RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates, SkippedFinding,
-    UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead, ValueHead,
-    WriteTarget,
+    FindingRow, LinkFamily, LinkKey, Operation, OperationId, OperationKind, PlanCondition,
+    RequiredField, RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates,
+    SkippedFinding, UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead,
+    ValueHead, WriteTarget,
 };
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ pub(super) fn settled(
 
 use norn_store::PathOverlay;
 
-use super::{Before, Claim, Planned, Reading, Repairing, skip};
+use super::{Before, Claim, Namings, Planned, Reading, Repairing, Written, skip};
 use crate::applier::{Held, Standing, standing, verdict};
 use crate::derivation::{judged_by_bytes, stored_spelling, written_fields};
 use crate::evidence::count_rule_work;
@@ -288,7 +288,7 @@ pub(super) fn draft<'d, R: Reading>(
     })
 }
 
-impl Draft<'_> {
+impl<'d> Draft<'d> {
     /// The route that passed its own judgment, with the document's
     /// compositions, where there is one.
     fn passed(&self) -> Option<(&routes::Passed, &Compositions<'_>)> {
@@ -309,25 +309,18 @@ impl Draft<'_> {
         }
     }
 
-    /// Add the draft to `planned`, its route skipped as `refused` says where
-    /// the batch's judgment of its routes together refused it, and its link
-    /// fixes composed last, resolved with the `settled` routes as the plan's
-    /// moves and read through `vault`: the
-    /// operations of the composition its route's fate decides, numbered on
-    /// from the plan's, each cited for the findings it fixes, its skipped
-    /// findings settled against the state that composition leaves, and what
-    /// the plan claims of each finding.
-    pub(super) fn emit<R: Reading>(
-        self,
-        refused: Option<SkippedFinding>,
-        planned: &mut Planned,
-        settled: &PathOverlay,
-        vault: &R,
-    ) -> Result<(), R::Error> {
+    /// The composition its route's fate decides: its route skipped as
+    /// `refused` says where the batch's judgment of its routes together
+    /// refused it, so composed where it stands; otherwise where its route
+    /// lands, where it passed its own judgment. Its link fixes are not
+    /// composed yet: they are resolved with the batch's settled routes
+    /// ([`Decided::emit`]).
+    pub(super) fn decide(self, refused: Option<SkippedFinding>) -> Decided<'d> {
         let compositions = match self.drafted {
             Drafted::Alone(decided) => {
-                planned.skipped.extend(decided);
-                return Ok(());
+                return Decided {
+                    decided: Deciding::Alone(decided),
+                };
             }
             Drafted::Composed(compositions) => *compositions,
         };
@@ -359,16 +352,68 @@ impl Draft<'_> {
                 }
             }
         }
-        reckoned.link_fixes(&mut composed, settled, vault)?;
+        Decided {
+            decided: Deciding::Composed(Box::new((reckoned, composed))),
+        }
+    }
+}
+
+/// One document's decided composition, its link fixes still to compose.
+pub(super) struct Decided<'d> {
+    decided: Deciding<'d>,
+}
+
+/// What a document's decided composition holds: what its rows were decided
+/// from the rows alone, or the document read and the composition its route's
+/// fate decides.
+enum Deciding<'d> {
+    Alone(Vec<SkippedFinding>),
+    Composed(Box<(Reckoned<'d>, Composed)>),
+}
+
+impl Decided<'_> {
+    /// Add to `written` every wikilink the document's fixes may write, by
+    /// where the document stands once the plan has landed and the address
+    /// written: what its operations set ([`written_links`]), and what its
+    /// link fixes may write — each bare value made a link, and every link
+    /// the field it writes already holds.
+    pub(super) fn written(&self, written: &mut BTreeSet<Written>) {
+        let Deciding::Composed(composed) = &self.decided else {
+            return;
+        };
+        let (reckoned, composed) = &**composed;
+        for made in &composed.made {
+            if let Made::Fixed { operations, .. } = made {
+                written.extend(operations.iter().flat_map(written_links));
+            }
+        }
+        reckoned.link_writes(&composed.state, written);
+    }
+
+    /// Add the document to `planned`: its link fixes composed last onto the
+    /// composition its route's fate decided, each resolved as `namings`
+    /// answers ([`Reckoned::link_fixes`]); the operations of that
+    /// composition, numbered on from the plan's, each cited for the findings
+    /// it fixes and recording what each link it writes resolves to; its
+    /// skipped findings settled against the state the composition leaves;
+    /// and what the plan claims of each finding.
+    pub(super) fn emit(self, planned: &mut Planned, namings: &Namings) {
+        let (reckoned, mut composed) = match self.decided {
+            Deciding::Alone(decided) => {
+                planned.skipped.extend(decided);
+                return;
+            }
+            Deciding::Composed(composed) => *composed,
+        };
+        reckoned.link_fixes(&mut composed, namings);
         let claims = reckoned.settle(&mut composed);
         for made in composed.made {
-            push(planned, made);
+            push(planned, made, namings);
         }
         planned
             .skipped
             .extend(composed.decided.into_iter().flatten());
         planned.claims.extend(claims);
-        Ok(())
     }
 }
 
@@ -414,8 +459,6 @@ enum Made {
     Fixed {
         operations: Vec<OperationKind>,
         cited: Vec<CitedFinding>,
-        /// The address resolutions the fix records.
-        conditions: Vec<PlanCondition>,
     },
     /// The operation a fix would have been, which reads a clock that gives
     /// no reading, and why it does not resolve.
@@ -674,17 +717,27 @@ fn decided_skips(decided: &mut [Option<SkippedFinding>], skipped: Vec<(usize, Sk
 
 /// Add `made` to `planned`: each operation of a fix numbered and cited for
 /// the findings the fix answers, a later one requiring the one before it,
-/// or the operation left unresolved, numbered in its place.
-fn push(planned: &mut Planned, made: Made) {
+/// recording the address resolution of every link it writes as `namings`
+/// answers it; or the operation left unresolved, numbered in its place.
+fn push(planned: &mut Planned, made: Made, namings: &Namings) {
     match made {
-        Made::Fixed {
-            operations,
-            cited,
-            conditions,
-        } => {
-            planned.conditions.extend(conditions);
+        Made::Fixed { operations, cited } => {
             let mut earlier: Option<OperationId> = None;
             for kind in operations {
+                planned
+                    .conditions
+                    .extend(written_links(&kind).into_iter().filter_map(|written| {
+                        let naming = namings.get(&written);
+                        debug_assert!(
+                            naming.is_some(),
+                            "a link a fix writes was resolved with the batch: {written:?}"
+                        );
+                        let (holder, address) = written;
+                        Some(PlanCondition::address_resolution(
+                            LinkKey::new(holder, LinkFamily::Wikilink, address),
+                            naming?.resolves.clone(),
+                        ))
+                    }));
                 let id = next_id(planned);
                 let operation = Operation::new(kind).with_id(id.clone());
                 planned.operations.push(match earlier.take() {
@@ -704,6 +757,52 @@ fn push(planned: &mut Planned, made: Made) {
                 reason,
             ));
         }
+    }
+}
+
+/// Every wikilink the operation `kind` writes, by the document it writes and
+/// the address written: each `[[…]]` token a string of a value it sets holds,
+/// at any depth, as the derivation reads a frontmatter's links
+/// ([`norn_text::Document::frontmatter_wikilinks`]). A link to a place in its
+/// own document names no other document, and is none of them.
+fn written_links(kind: &OperationKind) -> Vec<Written> {
+    let OperationKind::SetFrontmatter {
+        target: WriteTarget::Path(holder),
+        value,
+        ..
+    } = kind
+    else {
+        return Vec::new();
+    };
+    let mut texts = Vec::new();
+    strings_of(value, &mut texts);
+    texts
+        .into_iter()
+        .flat_map(norn_text::parse_wikilinks_in_text)
+        .filter(|link| !link.target.is_empty())
+        .map(|link| {
+            let address = match &link.protocol {
+                Some(protocol) => format!("{protocol}://{}", link.target),
+                None => link.target,
+            };
+            (holder.clone(), address)
+        })
+        .collect()
+}
+
+/// Every string `value` holds, at any depth, in order.
+fn strings_of<'v>(value: &'v AuthoredValue, texts: &mut Vec<&'v str>) {
+    match value {
+        AuthoredValue::String(text) => texts.push(text),
+        AuthoredValue::List(items) => items.iter().for_each(|item| strings_of(item, texts)),
+        AuthoredValue::Map(map) => map
+            .entries()
+            .iter()
+            .for_each(|(_, item)| strings_of(item, texts)),
+        AuthoredValue::Null
+        | AuthoredValue::Bool(_)
+        | AuthoredValue::Integer(_)
+        | AuthoredValue::Float(_) => {}
     }
 }
 
@@ -963,9 +1062,6 @@ enum Unmade {
 struct Fix {
     operations: Vec<OperationKind>,
     cited: Vec<CitedFinding>,
-    /// The address resolutions the fix records: what each link it writes
-    /// resolves to once the plan has landed.
-    conditions: Vec<PlanCondition>,
     state: State,
 }
 
@@ -975,7 +1071,6 @@ impl Fix {
         made.push(Made::Fixed {
             operations: self.operations,
             cited: self.cited,
-            conditions: self.conditions,
         });
         self.state
     }
@@ -1170,7 +1265,6 @@ impl Composing<'_> {
         Ok(Fix {
             operations: vec![set],
             cited: vec![cited(self.row, Confidence::Declared, notes)],
-            conditions: Vec::new(),
             state,
         })
     }
@@ -1451,13 +1545,12 @@ mod tests {
             self.over.links(overlay, probed, each)
         }
 
-        fn naming(
+        fn namings(
             &self,
             overlay: &norn_store::PathOverlay,
-            holder: &DocumentPath,
-            address: &str,
-        ) -> Result<crate::planner::repair::Naming, Self::Error> {
-            self.over.naming(overlay, holder, address)
+            written: &BTreeSet<Written>,
+        ) -> Result<Namings, Self::Error> {
+            self.over.namings(overlay, written)
         }
     }
 

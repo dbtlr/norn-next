@@ -61,7 +61,6 @@ pub(super) fn propose(
                 member: AuthoredValue::string(member),
                 level: Confidence::Derived,
                 notes: Vec::new(),
-                conditions: Vec::new(),
             }),
             Folded::Many(members) if derived_admitted => Proposed::Skipped(Box::new(
                 skip(row, SkipReason::Tie).with_candidates(derived_candidates(&members)),
@@ -94,7 +93,6 @@ pub(super) fn propose(
         level: Confidence::Declared,
         candidates: pooled(&declared, differs.as_slice()),
         notes: differs.iter().map(|member| differing(member)).collect(),
-        conditions: Vec::new(),
     })
 }
 

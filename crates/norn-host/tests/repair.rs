@@ -3760,3 +3760,61 @@ fn a_route_in_the_batch_moving_the_target_leaves_a_plan_that_applies_with_the_li
     assert!(written(&vault, "zz-holder.md").contains("[[zz-target]]"));
     assert!(standing(&host, &vault, |request| request).is_empty());
 }
+
+/// What the link judgments of a repair's preview cost on the store's
+/// resolution door, over a vault where a route moves `loose/x.md` and
+/// `holders` documents each hold a bare value of `up`: every even one naming
+/// a document of its own, every odd one a stem two documents share.
+fn link_judgments_of_a_preview(label: &str, holders: usize) -> u64 {
+    let mut documents: Vec<(String, Vec<u8>)> = vec![
+        ("loose/x.md".to_string(), b"---\ntype: task\n---\n".to_vec()),
+        ("a/zz-twin.md".to_string(), b"# A\n".to_vec()),
+        ("b/zz-twin.md".to_string(), b"# B\n".to_vec()),
+    ];
+    for at in 0..holders {
+        let up = if at % 2 == 0 {
+            documents.push((format!("zz-t{at}.md"), b"# T\n".to_vec()));
+            format!("zz-t{at}")
+        } else {
+            "zz-twin".to_string()
+        };
+        documents.push((
+            format!("h{at}.md"),
+            format!("---\nup: {up}\n---\n").into_bytes(),
+        ));
+    }
+    let documents: Vec<(&str, &[u8])> = documents
+        .iter()
+        .map(|(at, bytes)| (at.as_str(), bytes.as_slice()))
+        .collect();
+    let schema = format!("{TASKED}fields:\n  up: {{type: link}}\n");
+    let (_sandbox, vault, host) = a_vault_under(label, &schema, &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    let judged = host.read_evidence().since(account).preview_link_judgments;
+    let written = plan
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.kind, OperationKind::SetFrontmatter { .. }))
+        .count();
+    assert_eq!(written, holders.div_ceil(2), "{plan:?}");
+    assert_eq!(
+        provenance(&plan).skipped.len(),
+        holders / 2,
+        "every odd holder's value names two documents"
+    );
+    judged.judgments
+}
+
+/// **A repair resolves every link its fixes write in one judgment, however
+/// many there are**: the preview of two link fixes and of six, beside a
+/// route, judges as often — once for the batch's links, once more for the
+/// heads of those naming several — so the cost of resolving them follows the
+/// links, never the links times the routes.
+#[test]
+fn every_link_a_repair_writes_is_resolved_in_one_judgment_however_many() {
+    let few = link_judgments_of_a_preview("host-repair-link-judgments-few", 2);
+    let many = link_judgments_of_a_preview("host-repair-link-judgments-many", 6);
+    assert_eq!(few, many);
+}

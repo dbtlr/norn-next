@@ -104,7 +104,6 @@ pub(super) fn reshape(
     Ok(Fix {
         operations: vec![set],
         cited: vec![cited(row, Confidence::Derived, Vec::new())],
-        conditions: Vec::new(),
         state: composed,
     })
 }
@@ -131,7 +130,6 @@ pub(super) fn boolean_case(document: &Document<'_>, offending: &Offending<'_>) -
                 member,
                 level: Confidence::Derived,
                 notes: Vec::new(),
-                conditions: Vec::new(),
             })
         }
         None => Proposed::Skipped(Box::new(

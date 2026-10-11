@@ -16,8 +16,7 @@
 
 use norn_config::schema::VaultSchema;
 use norn_wire::{
-    AuthoredValue, Confidence, FindingRow, PlanCondition, SkipReason, SkippedCandidates,
-    SkippedFinding,
+    AuthoredValue, Confidence, FindingRow, SkipReason, SkippedCandidates, SkippedFinding,
 };
 
 use super::{Document, Fix, Fixing, State, cited, field_of, skip};
@@ -69,8 +68,6 @@ pub(super) struct Replacement {
     pub(super) candidates: SkippedCandidates,
     /// Words about the fix, carried by the citation.
     pub(super) notes: Vec<String>,
-    /// The address resolutions the plan records if the fix is made.
-    pub(super) conditions: Vec<PlanCondition>,
 }
 
 /// Fix the `field` of the document from `state`, for `elements` — the
@@ -102,7 +99,6 @@ pub(super) fn fix_field(
     };
     let mut current = state.clone();
     let mut cites = Vec::new();
-    let mut conditions = Vec::new();
     for &Element { at, row, finding } in elements {
         let Some(held) = current.holding(finding) else {
             continue;
@@ -154,7 +150,6 @@ pub(super) fn fix_field(
                 working = replaced;
                 current = next;
                 cites.push(cited(row, replacement.level, replacement.notes));
-                conditions.extend(replacement.conditions);
             }
             Err(skip) => skipped.push((at, *skip)),
         }
@@ -175,7 +170,6 @@ pub(super) fn fix_field(
         fix: Some(Fix {
             operations: vec![set],
             cited: cites,
-            conditions,
             state: current,
         }),
         skipped,

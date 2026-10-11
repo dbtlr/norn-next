@@ -16,16 +16,17 @@
 //! after all its other fixes — at its route's destination where its route
 //! stands — once every route of the batch is settled
 //! ([`Reckoned::link_fixes`]): an exception to finding order. Each is
-//! resolved over the plan the settled routes make ([`Reading::naming`]), by
-//! the one probe the applier makes again of an address resolution
-//! ([`crate::planner::links::resolved_address`]), once per distinct element.
+//! resolved over the plan the settled routes make, by the one probe the
+//! applier makes again of an address resolution
+//! ([`crate::planner::links::resolved_addresses`]), every link the batch's
+//! fixes write in one judgment of the index
+//! ([`crate::planner::repair::Reading::namings`]).
 //!
 //! - One document: the element is written as `[[value]]`, a derived fix, and
 //!   the plan records the address resolution the link has at its after-state:
 //!   the holder where it stands then, the wikilink, the address written, and
-//!   the one document's path then. It is the only fix of a repair that records
-//!   one; a fix that re-shapes or re-cases a value already a link rests on
-//!   no resolution.
+//!   the one document's path then — as it records one for every link any fix
+//!   writes ([`super::Decided::emit`]).
 //! - Several documents: [`SkipReason::AmbiguousLink`], naming the documents
 //!   the address could name.
 //! - None: [`SkipReason::NoDeclaredFix`], the note saying the link would
@@ -34,19 +35,18 @@
 //! A list's elements are written into one write of the field
 //! ([`elements`]), and an element left standing never blocks its neighbours'.
 
-use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 use norn_config::schema::typed::link_key;
 use norn_config::schema::{FieldType, VaultSchema};
-use norn_store::PathOverlay;
 use norn_wire::{
-    AuthoredValue, Confidence, FindingKind, FindingRow, LinkFamily, LinkKey, PlanCondition,
-    Resolves, SkipReason, SkippedCandidates,
+    AuthoredValue, Confidence, DocumentPath, FindingKind, FindingRow, OperationKind, Resolves,
+    SkipReason, SkippedCandidates, WriteTarget,
 };
 
 use super::elements::{self, Offending, Proposed, Replacement};
-use super::{Composed, Reckoned, decided_skips, derived, skip};
-use crate::planner::repair::Reading;
+use super::{Composed, Reckoned, State, decided_skips, derived, field_of, skip, written_links};
+use crate::planner::repair::{Namings, Written};
 
 /// Whether `row` is a `field/type-mismatch` on a field declared `link`.
 pub(super) fn is_link_mismatch(schema: &VaultSchema, row: &FindingRow) -> bool {
@@ -84,63 +84,51 @@ fn bare_address(value: &str) -> Option<&str> {
 }
 
 /// What the document standing at `holder` makes of the offending element
-/// `offending` of a link field, resolved over the `settled` plan.
-fn propose<R: Reading>(
-    holder: &norn_wire::DocumentPath,
-    settled: &PathOverlay,
-    vault: &R,
-    offending: &Offending<'_>,
-) -> Result<Proposed, R::Error> {
+/// `offending` of a link field, its address resolved as `namings` answers.
+fn propose(holder: &DocumentPath, namings: &Namings, offending: &Offending<'_>) -> Proposed {
     let row = offending.row;
     let Some(address) = offending
         .string
         .then(|| bare_address(offending.text))
         .flatten()
     else {
-        return Ok(Proposed::Skipped(Box::new(
-            crate::planner::repair::skipped(row),
-        )));
+        return Proposed::Skipped(Box::new(crate::planner::repair::skipped(row)));
     };
-    let naming = vault.naming(settled, holder, address)?;
-    Ok(match naming.resolves {
-        Resolves::One { path } => {
+    let naming = namings.get(&(holder.clone(), address.to_string()));
+    debug_assert!(
+        naming.is_some(),
+        "a bare value's address was resolved with the batch: `{address}`"
+    );
+    match naming.map(|naming| (&naming.resolves, &naming.candidates)) {
+        Some((Resolves::One { path }, _)) => {
             let member = AuthoredValue::string(format!("[[{address}]]"));
             Proposed::Replace(Replacement {
                 candidates: derived::candidate_of(&member),
                 notes: vec![format!("`[[{address}]]` resolves to `{path}`")],
-                conditions: vec![PlanCondition::address_resolution(
-                    LinkKey::new(holder.clone(), LinkFamily::Wikilink, address),
-                    Resolves::one(path),
-                )],
                 member,
                 level: Confidence::Derived,
             })
         }
-        Resolves::Several {} => {
+        Some((Resolves::Several {}, candidates)) => {
             let skipped = skip(row, SkipReason::AmbiguousLink);
-            Proposed::Skipped(Box::new(match naming.candidates {
-                Some(head) => skipped.with_candidates(SkippedCandidates::documents(head)),
+            Proposed::Skipped(Box::new(match candidates {
+                Some(head) => skipped.with_candidates(SkippedCandidates::documents(head.clone())),
                 None => skipped,
             }))
         }
-        Resolves::None {} => Proposed::Skipped(Box::new(
+        Some((Resolves::None {}, _)) | None => Proposed::Skipped(Box::new(
             skip(row, SkipReason::NoDeclaredFix)
                 .with_note(format!("`[[{address}]]` would resolve to no document")),
         )),
-    })
+    }
 }
 
 impl Reckoned<'_> {
-    /// Compose the document's link fixes onto `composed`, last: its selected
-    /// `field/type-mismatch` findings on link fields, in finding order, each
-    /// field's elements into one write of it, resolved over the `settled`
-    /// routes through `vault`.
-    pub(super) fn link_fixes<R: Reading>(
-        &self,
-        composed: &mut Composed,
-        settled: &PathOverlay,
-        vault: &R,
-    ) -> Result<(), R::Error> {
+    /// The selected `field/type-mismatch` findings on link fields, in
+    /// finding order, each field's run of them once: the field, and the
+    /// elements of its run the before-state holds a finding for.
+    fn link_runs(&self) -> Vec<(&str, Vec<elements::Element<'_>>)> {
+        let mut runs = Vec::new();
         let mut next = 0;
         while let Some(&at) = self.order.get(next) {
             next += 1;
@@ -152,32 +140,53 @@ impl Reckoned<'_> {
             else {
                 continue;
             };
-            let (rows, siblings) = self.field_run(next - 1);
+            let (elements, siblings) = self.field_run(next - 1);
             next += siblings;
+            runs.push((field, elements));
+        }
+        runs
+    }
+
+    /// Add to `written` every wikilink the document's link fixes may write
+    /// once composed onto `state`: each bare value of a link field made a
+    /// link, and every link the field already holds, which the one write of
+    /// the field writes again.
+    pub(super) fn link_writes(&self, state: &State, written: &mut BTreeSet<Written>) {
+        for (field, elements) in self.link_runs() {
+            for element in elements {
+                if let Some(address) = element.finding.value.as_deref().and_then(bare_address) {
+                    written.insert((state.at.clone(), address.to_string()));
+                }
+            }
+            if let Some(Some(value)) = field_of(&state.bytes, field) {
+                written.extend(written_links(&OperationKind::set_frontmatter(
+                    WriteTarget::path(state.at.clone()),
+                    field,
+                    value,
+                )));
+            }
+        }
+    }
+
+    /// Compose the document's link fixes onto `composed`, last: its selected
+    /// `field/type-mismatch` findings on link fields, in finding order, each
+    /// field's elements into one write of it, each address resolved as
+    /// `namings` answers, where the batch's settled routes leave it.
+    pub(super) fn link_fixes(&self, composed: &mut Composed, namings: &Namings) {
+        for (field, elements) in self.link_runs() {
             let holder = composed.state.at.clone();
-            let failure: RefCell<Option<R::Error>> = RefCell::new(None);
             let mapped = elements::fix_field(
                 &self.document,
                 &composed.state,
                 field,
-                &rows,
-                &mut |offending| match propose(&holder, settled, vault, offending) {
-                    Ok(proposed) => proposed,
-                    Err(error) => {
-                        failure.borrow_mut().get_or_insert(error);
-                        Proposed::Skipped(Box::new(crate::planner::repair::skipped(offending.row)))
-                    }
-                },
+                &elements,
+                &mut |offending| propose(&holder, namings, offending),
             );
-            if let Some(error) = failure.into_inner() {
-                return Err(error);
-            }
             decided_skips(&mut composed.decided, mapped.skipped);
             if let Some(fix) = mapped.fix {
                 composed.state = fix.made(&mut composed.made);
             }
         }
-        Ok(())
     }
 }
 
@@ -594,10 +603,27 @@ mod tests {
         assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
     }
 
-    /// **Only a link fix records a condition**: a document wrapped, folded
-    /// and linked in one plan records the link's alone.
+    /// The finding `id` of `kind` on `field` of `at`, judging `value`.
+    fn finding(id: u64, kind: FindingKind, at: &str, field: &str, value: &str) -> FindingRow {
+        FindingRow::new(
+            id,
+            kind,
+            Severity::Warning,
+            DocumentPath::new(at).expect("a document path"),
+            Some(field.to_string()),
+            None,
+            CandidateHead::new([], 0).expect("an empty head"),
+            None,
+            "a finding",
+            1,
+        )
+        .with_value(norn_store::value_head(value))
+    }
+
+    /// **A fix writing no link records no condition**: a number wrapped
+    /// beside a link fix leaves the link's alone.
     #[test]
-    fn no_other_fix_records_a_condition() {
+    fn a_fix_writing_no_link_records_no_condition() {
         let schema =
             "version: 1\nfields:\n  up: {type: link}\n  ranks: {type: number, shape: list}\n";
         let planned = planned(
@@ -605,23 +631,145 @@ mod tests {
             &[("a.md", "---\nup: b\nranks: 3\n---\n"), ("b.md", "# B\n")],
             &[
                 mismatch(1, "a.md", "up", "b"),
-                FindingRow::new(
-                    2,
-                    FindingKind::ShapeMismatch,
-                    Severity::Warning,
-                    DocumentPath::new("a.md").expect("a path"),
-                    Some("ranks".to_string()),
-                    None,
-                    CandidateHead::new([], 0).expect("an empty head"),
-                    None,
-                    "a finding",
-                    1,
-                )
-                .with_value(norn_store::value_head("3")),
+                finding(2, FindingKind::ShapeMismatch, "a.md", "ranks", "3"),
             ],
         );
 
         assert_eq!(planned.operations.len(), 2, "{:?}", planned.operations);
         assert_eq!(planned.conditions, vec![resolving("a.md", "b", "b.md")]);
+    }
+
+    /// The condition recording that `address`, written in `holder`, resolves
+    /// as `after` says.
+    fn recording(holder: &str, address: &str, after: Resolves) -> PlanCondition {
+        PlanCondition::address_resolution(
+            LinkKey::new(
+                DocumentPath::new(holder).expect("a path"),
+                LinkFamily::Wikilink,
+                address,
+            ),
+            after,
+        )
+    }
+
+    /// **A re-shape writing a link records what the link resolves to at the
+    /// plan's after-state, a broken link included**: `[[b]]` wrapped names
+    /// `b.md`, and `[[ghost]]` unwrapped names nothing.
+    #[test]
+    fn a_reshape_writing_a_link_records_its_resolution_broken_or_not() {
+        let schema = "version: 1\nfields:\n  ups: {type: link, shape: list}\n  up: {type: link, shape: single}\n";
+        let planned = planned(
+            schema,
+            &[
+                ("a.md", "---\nups: '[[b]]'\n---\n"),
+                ("b.md", "# B\n"),
+                ("c.md", "---\nup: ['[[ghost]]']\n---\n"),
+            ],
+            &[
+                finding(1, FindingKind::ShapeMismatch, "a.md", "ups", "[[b]]"),
+                finding(
+                    2,
+                    FindingKind::ShapeMismatch,
+                    "c.md",
+                    "up",
+                    &crate::derivation::stored_spelling(&AuthoredValue::List(vec![
+                        AuthoredValue::string("[[ghost]]"),
+                    ]))
+                    .expect("a list's spelling"),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            kinds(&planned),
+            vec![
+                setting(
+                    "a.md",
+                    "ups",
+                    AuthoredValue::List(vec![AuthoredValue::string("[[b]]")])
+                ),
+                setting("c.md", "up", AuthoredValue::string("[[ghost]]")),
+            ],
+            "{:?}",
+            planned.skipped
+        );
+        assert_eq!(
+            planned.conditions,
+            vec![
+                resolving("a.md", "b", "b.md"),
+                recording("c.md", "ghost", Resolves::none()),
+            ]
+        );
+    }
+
+    /// **A fold and a declared default writing a link record its resolution
+    /// too**: ` [[b]] ` folds to the member `[[b]]`, and `next` fills from a
+    /// default naming `[[c]]`.
+    #[test]
+    fn a_fold_and_a_default_writing_a_link_record_its_resolution() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      parent: {values: ['[[b]]']}\n    required:\n      next: {default: '[[c]]'}\n";
+        let planned = planned(
+            schema,
+            &[
+                ("a.md", "---\ntype: task\nparent: ' [[b]] '\n---\n"),
+                ("b.md", "# B\n"),
+                ("c.md", "# C\n"),
+            ],
+            &[
+                finding(1, FindingKind::NotOneOf, "a.md", "parent", " [[b]] "),
+                FindingRow::new(
+                    2,
+                    FindingKind::RequiredMissing,
+                    Severity::Warning,
+                    DocumentPath::new("a.md").expect("a document path"),
+                    Some("next".to_string()),
+                    None,
+                    CandidateHead::new([], 0).expect("an empty head"),
+                    None,
+                    "a finding",
+                    1,
+                ),
+            ],
+        );
+
+        assert_eq!(planned.operations.len(), 2, "{:?}", planned.skipped);
+        let mut recorded = planned.conditions.clone();
+        recorded.sort_by_key(|condition| format!("{condition:?}"));
+        assert_eq!(
+            recorded,
+            vec![
+                resolving("a.md", "b", "b.md"),
+                resolving("a.md", "c", "c.md")
+            ]
+        );
+    }
+
+    /// **A link fix's one write of its field records every link the field
+    /// holds, and one condition stands for each link however many fixes
+    /// write it**: `ups` already holds `[[c]]`, and `up` and `ups` both come
+    /// to write `[[b]]`.
+    #[test]
+    fn every_link_a_field_write_holds_is_recorded_once() {
+        let planned = planned(
+            LINKED,
+            &[
+                ("a.md", "---\nup: b\nups: ['[[c]]', b]\n---\n"),
+                ("b.md", "# B\n"),
+                ("c.md", "# C\n"),
+            ],
+            &[
+                mismatch(1, "a.md", "up", "b"),
+                mismatch(2, "a.md", "ups", "b"),
+            ],
+        );
+
+        assert_eq!(planned.operations.len(), 2, "{:?}", planned.skipped);
+        assert_eq!(
+            planned.conditions,
+            vec![
+                resolving("a.md", "b", "b.md"),
+                resolving("a.md", "c", "c.md")
+            ]
+        );
     }
 }

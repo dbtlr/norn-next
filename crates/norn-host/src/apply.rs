@@ -710,6 +710,29 @@ impl LinkIndex for PlanSnapshot<'_> {
         Ok(naming)
     }
 
+    fn targets(
+        &self,
+        overlay: &PathOverlay,
+        addresses: &[&str],
+        headed: PlanSide,
+    ) -> Result<Vec<TargetNaming>, PageRefused> {
+        let (namings, work) = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .target_namings(overlay, addresses, headed, self.declared)
+                    .map(|(namings, work)| {
+                        (
+                            namings,
+                            LinkJudgmentCost::of(&work, before, snapshot.counters()),
+                        )
+                    })
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(namings)
+    }
+
     /// The links the snapshot holds for `holder`, read by its path without
     /// its body. What the read costs is the snapshot's own counters', as
     /// every read on it is; it is no link judgment, so it adds nothing to

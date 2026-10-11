@@ -17,6 +17,9 @@
 //! such classes are taken in turn. Routes whose documents each name a class
 //! of their own add each link once as well: the plan names a key per route,
 //! and each chunk of links pays for its own keys, never for every route's.
+//! A bare value made a link beside the routes is resolved where they leave
+//! its target, every link fix of the batch in one judgment of the index, so
+//! the link fixes add each link once too, never once per route.
 //!
 //! This is a clock, so it is the soak lane's (ADR 0004), not a per-PR gate.
 //! It records each case's best of three previews and holds each doubling of
@@ -35,8 +38,8 @@ use std::time::{Duration, Instant};
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    ApplyMode, ApplyReport, FindingKind, OperationKind, Predicate, RepairParams, ResolvedPlan,
-    VaultAddress,
+    ApplyMode, ApplyReport, FindingKind, OperationKind, PlanCondition, Predicate, RepairParams,
+    ResolvedPlan, VaultAddress,
 };
 
 /// Where every routed document and the hub stand.
@@ -133,12 +136,23 @@ fn previewing(routes: usize, hub: Hub) -> Duration {
 /// route and passing `check`. Only misplaced findings are selected, so a
 /// task's own ambiguous links fill no place in the batch.
 fn best_of_three(vault: &attach::Vault, routes: usize, check: &dyn Fn(&ResolvedPlan)) -> Duration {
-    let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
     let request = RepairParams::new(VaultAddress::name(vault.name().clone()), ApplyMode::Preview)
         .with_predicates([Predicate::path(format!("{FOLDER}**"))])
         .with_kinds([FindingKind::Misplaced])
         .with_limit(u32::try_from(routes).expect("a page") + 1);
+    best_of_three_of(vault, &request, routes, check)
+}
+
+/// The best of three previews of `request` over `vault`, each plan holding
+/// `routes` moves and passing `check`.
+fn best_of_three_of(
+    vault: &attach::Vault,
+    request: &RepairParams,
+    routes: usize,
+    check: &dyn Fn(&ResolvedPlan),
+) -> Duration {
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
     let mut best = Duration::MAX;
     for _ in 0..3 {
         let started = Instant::now();
@@ -434,4 +448,91 @@ fn a_repair_of_routes_previews_in_time_linear_in_routes_and_links_touched() {
     for hub in ["Body", "Frontmatter"] {
         assert!(at(400, hub) <= Duration::from_millis(1280), "{readings:?}");
     }
+}
+
+/// One rule routing a task into `tasks/`, and a `link` field `up` a bare
+/// value leaves a type mismatch.
+const LINKED: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+
+/// Where the tasks holding a bare value stand.
+#[derive(Clone, Copy, Debug)]
+enum Linked {
+    /// Misplaced in `loose/`: every task is routed, so each link fix is
+    /// resolved over a plan moving every task.
+    Routed,
+    /// Already in `tasks/`: no route, the link fixes alone.
+    Placed,
+}
+
+/// The best of three previews of the repair of `tasks` tasks, each holding
+/// the bare value `up: t<next>` naming the next task, standing as `linked`
+/// says: a link fix per task, resolved where the batch's routes leave the
+/// task it names, and a route per task where they are misplaced.
+fn previewing_linked(tasks: usize, linked: Linked) -> Duration {
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("repair-cost-linked-{tasks}-{linked:?}"),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), LINKED).expect("the schema");
+    let (place, routes) = match linked {
+        Linked::Routed => ("loose", tasks),
+        Linked::Placed => ("tasks", 0),
+    };
+    let folder = vault.path().join(FOLDER).join(place);
+    std::fs::create_dir_all(&folder).expect("the tasks' folder");
+    for at in 0..tasks {
+        std::fs::write(
+            folder.join(format!("t{at:04}.md")),
+            format!(
+                "---\ntype: task\nup: t{:04}\n---\n# Task {at}\n",
+                (at + 1) % tasks
+            ),
+        )
+        .expect("a task");
+    }
+    let request = RepairParams::new(VaultAddress::name(vault.name().clone()), ApplyMode::Preview)
+        .with_predicates([Predicate::path(format!("{FOLDER}**"))])
+        .with_limit(u32::try_from(2 * tasks).expect("a page"));
+    best_of_three_of(&vault, &request, routes, &|plan: &ResolvedPlan| {
+        let sets = plan
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation.kind, OperationKind::SetFrontmatter { .. }))
+            .count();
+        assert_eq!(
+            sets,
+            tasks,
+            "every link fix is planned; the first skips: {:?}",
+            plan.provenance.as_ref().map(|provenance| provenance
+                .skipped
+                .iter()
+                .take(3)
+                .collect::<Vec<_>>())
+        );
+        let recorded = plan
+            .conditions
+            .iter()
+            .filter(|condition| matches!(condition, PlanCondition::AddressResolution { .. }))
+            .count();
+        assert_eq!(recorded, tasks, "one address resolution per link written");
+    })
+}
+
+/// **A repair's link fixes beside its routes preview in time linear in the
+/// two**: each task's bare value is made a link resolved where the batch's
+/// routes leave the task it names, so a cost that read every route once per
+/// link fix would grow with their product. 128, 256 and 512 tasks, routed
+/// and already placed, each doubling within 2.5 times.
+#[test]
+#[ignore = "soak-lane case: a clock of a repair's link fixes beside its routes"]
+fn a_repairs_link_fixes_beside_its_routes_preview_in_time_linear_in_both() {
+    linear(
+        "a repair's preview of link fixes beside routes, best of three",
+        &[Linked::Routed, Linked::Placed],
+        &[128, 256, 512],
+        2.5,
+        previewing_linked,
+    );
 }

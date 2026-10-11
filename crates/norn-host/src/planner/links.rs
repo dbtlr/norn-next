@@ -153,6 +153,22 @@ pub(crate) trait LinkIndex {
         headed: PlanSide,
     ) -> Result<TargetNaming, Self::Error>;
 
+    /// What each of `addresses` names over the plan `overlay`, as
+    /// [`LinkIndex::target`] reads one, in their order: one judgment for
+    /// them all where the index answers so, so the plan's targets are read
+    /// once, not once per address.
+    fn targets(
+        &self,
+        overlay: &PathOverlay,
+        addresses: &[&str],
+        headed: PlanSide,
+    ) -> Result<Vec<TargetNaming>, Self::Error> {
+        addresses
+            .iter()
+            .map(|address| self.target(overlay, address, headed))
+            .collect()
+    }
+
     /// The links the index holds for the document at `holder`, beside the
     /// content hash of the bytes it derived them from; `None` where it holds
     /// no document at that spelling.
@@ -715,11 +731,8 @@ pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
         let standing = target.after.is_some();
         overlay.with(stored_path(target.path), standing, standing)
     });
-    let probed: Vec<ProbedLink> = recorded
-        .iter()
-        .filter_map(|(_, link, _)| probe_of(link))
-        .collect();
-    let resolved = resolved_after(index, &overlay, &probed)?;
+    let links: Vec<&LinkKey> = recorded.iter().map(|(_, link, _)| *link).collect();
+    let resolved = resolved_addresses(index, &overlay, links)?;
     Ok(recorded
         .into_iter()
         .filter(|(_, link, after)| resolved.get(&entry_key(link)) != Some(*after))
@@ -727,16 +740,24 @@ pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
         .collect())
 }
 
-/// What each of `probed` resolves to from its holder with every target of the
-/// plan `overlay` describes at its after-state, by the link's key: the one
-/// judgment an address resolution is recorded by and checked by.
-fn resolved_after<I: LinkIndex + ?Sized>(
+/// What each of `links` resolves to from its holder with every target of the
+/// plan `overlay` describes at its after-state, by the link's key
+/// ([`entry_key`]), in one judgment of the index: the one probe an address
+/// resolution is recorded by — a repair's planner, for every link its fixes
+/// write — and checked by ([`failed_address_resolutions`]), so what a
+/// planner records is by construction what the applier computes again. A
+/// link of a syntax the store holds no link of has no entry.
+pub(crate) fn resolved_addresses<'l, I: LinkIndex + ?Sized>(
     index: &I,
     overlay: &PathOverlay,
-    probed: &[ProbedLink],
+    links: impl IntoIterator<Item = &'l LinkKey>,
 ) -> Result<BTreeMap<EntryKey, Resolves>, I::Error> {
+    let probed: Vec<ProbedLink> = links.into_iter().filter_map(probe_of).collect();
     let mut resolved: BTreeMap<EntryKey, Resolves> = BTreeMap::new();
-    index.changes(overlay, probed, &mut |change| {
+    if probed.is_empty() {
+        return Ok(resolved);
+    }
+    index.changes(overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
             wire_family(change.link.family),
@@ -745,23 +766,6 @@ fn resolved_after<I: LinkIndex + ?Sized>(
         resolved.insert(entry_key(&key), change.after);
     })?;
     Ok(resolved)
-}
-
-/// What `link` resolves to from its holder at the plan's after-state, the plan
-/// being `overlay`: the one probe [`failed_address_resolutions`] makes of an
-/// address resolution it checks, so what a planner records is by construction
-/// what the applier computes again. `None` for a syntax the store holds no
-/// link of.
-pub(crate) fn resolved_address<I: LinkIndex + ?Sized>(
-    index: &I,
-    overlay: &PathOverlay,
-    link: &LinkKey,
-) -> Result<Option<Resolves>, I::Error> {
-    let Some(probed) = probe_of(link) else {
-        return Ok(None);
-    };
-    let mut resolved = resolved_after(index, overlay, &[probed])?;
-    Ok(resolved.remove(&entry_key(link)))
 }
 
 /// The overlay of a plan whose only effect on the vault's documents is

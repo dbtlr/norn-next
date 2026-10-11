@@ -1176,6 +1176,27 @@ fn a_target_is_named_on_each_side_of_a_plan() {
     });
 }
 
+/// **Several targets named over one plan in one judgment answer as each named
+/// alone**, in the order asked, a head carried where one names several.
+#[test]
+fn several_targets_named_in_one_judgment_answer_as_each_named_alone() {
+    both_orders("target-namings-batched", |mut vault| {
+        vault.write(&[("x/a.md", "a\n"), ("y/a.md", "a\n"), ("b.md", "b\n")]);
+        let plan = overlay(&["y/c.md"], &["b.md"]);
+        let addresses = ["a", "b", "c", "zzz"];
+        let (namings, _) = vault
+            .snapshot()
+            .target_namings(&plan, &addresses, PlanSide::After, &declared())
+            .expect("a naming of every address");
+        let alone: Vec<TargetNaming> = addresses
+            .iter()
+            .map(|address| named(&vault, &plan, address))
+            .collect();
+        assert_eq!(namings, alone);
+        assert!(namings[0].candidates.is_some(), "{namings:?}");
+    });
+}
+
 /// **A target naming several documents after a plan carries the head of
 /// them, as a store built at the plan's after-state reads it**: the documents
 /// in the resolution ladder's order, each named by its minimal disambiguating

@@ -76,9 +76,10 @@
 //! [`Reading`] answers it — the bytes each document with a fix to make held,
 //! read once, what stands at each route's destination, the links naming each
 //! routed document, the bytes of each document holding such a link a
-//! cascade may respell, and what each bare value a link fix writes resolves
-//! to once the batch's routes have landed — and the plan's one clock reading
-//! ([`OneReading`]), taken only where a default or a route reads the clock.
+//! cascade may respell, and what each link a fix writes resolves to once the
+//! batch's routes have landed, in one judgment — and the plan's one clock
+//! reading ([`OneReading`]), taken only where a default or a route reads the
+//! clock.
 //! **A clock that gives no reading refuses the repair as it refuses a
 //! creation**: the operation of each default or route that reads the clock
 //! is left in [`Planned::unresolved`], and the host's handler answers
@@ -91,15 +92,15 @@ mod declared;
 #[cfg(test)]
 pub(crate) use declared::blinded as blinding_the_respell_check;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
 use norn_store::{LinkChange, PathOverlay, PlanSide, ProbedLink};
 use norn_wire::{
-    CandidateHead, CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow, LinkKey,
-    Operation, PlanCondition, Resolves, RuleSet, SkipReason, SkippedCandidates, SkippedFinding,
-    UnresolvedOperation,
+    CandidateHead, CaseFold, Citation, Confidence, DocumentPath, FindingKind, FindingRow,
+    LinkFamily, LinkKey, Operation, PlanCondition, Resolves, RuleSet, SkipReason,
+    SkippedCandidates, SkippedFinding, UnresolvedOperation,
 };
 
 use crate::applier::Held;
@@ -122,9 +123,10 @@ pub(crate) struct Planned {
     /// repair is refused where there is any, as a creation is.
     pub(crate) unresolved: Vec<UnresolvedOperation>,
     /// The address resolutions the plan records, in plan order: the
-    /// resolution each link a fix writes has at the plan's after-state. The
-    /// host puts them on the resolved plan beside the conditions its
-    /// operations resolve to.
+    /// resolution each link a fix writes has at the plan's after-state, one
+    /// for each holder and address however many fixes write it. The host
+    /// puts them on the resolved plan beside the conditions its operations
+    /// resolve to.
     pub(crate) conditions: Vec<PlanCondition>,
     /// What the plan claims of every selected finding the judgment of its
     /// document's bytes names, in batch order: where the document stands
@@ -160,6 +162,14 @@ pub(crate) struct Naming {
     pub(crate) resolves: Resolves,
     pub(crate) candidates: Option<CandidateHead>,
 }
+
+/// A wikilink a plan's fix writes: the document holding it where it stands
+/// once the plan has landed, and the address written.
+pub(crate) type Written = (DocumentPath, String);
+
+/// What each link a plan's fixes write resolves to once the plan has landed,
+/// by the holder and address written ([`Reading::namings`]).
+pub(crate) type Namings = BTreeMap<Written, Naming>;
 
 /// What a repair plans under: the declaration the applier judges its result
 /// by, how that declaration's path globs compare letters, and the plan's one
@@ -242,17 +252,20 @@ pub(crate) trait Reading {
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), Self::Error>;
 
-    /// What the wikilink address `address`, written in the document standing
-    /// at `holder` once the plan `overlay` describes has landed, resolves
-    /// to: the probe the applier makes again of an address resolution a
-    /// repair records, and, where several documents are named, the head of
-    /// them.
-    fn naming(
+    /// What each wikilink of `written` — an address, written in the
+    /// document standing at its holder once the plan `overlay` describes has
+    /// landed — resolves to, and, where several documents are named, the
+    /// head of them: the probe the applier makes again of an address
+    /// resolution a repair records. **The batch is read at once**: one
+    /// judgment of the index for every link, and one more for the heads of
+    /// the addresses naming several, so the cost follows the links written
+    /// and the plan's targets, never their product. A link the index holds
+    /// no syntax of has no answer.
+    fn namings(
         &self,
         overlay: &PathOverlay,
-        holder: &DocumentPath,
-        address: &str,
-    ) -> Result<Naming, Self::Error>;
+        written: &BTreeSet<Written>,
+    ) -> Result<Namings, Self::Error>;
 }
 
 /// The vault `view` reads, with its links judged on `index`: what the host's
@@ -344,29 +357,56 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
             .map_err(Unread::Index)
     }
 
-    fn naming(
+    fn namings(
         &self,
         overlay: &PathOverlay,
-        holder: &DocumentPath,
-        address: &str,
-    ) -> Result<Naming, Self::Error> {
-        let link = LinkKey::new(holder.clone(), norn_wire::LinkFamily::Wikilink, address);
-        let resolves = crate::planner::links::resolved_address(self.index, overlay, &link)
-            .map_err(Unread::Index)?
-            .unwrap_or_else(Resolves::none);
-        let candidates = match resolves {
-            Resolves::Several {} => {
-                self.index
-                    .target(overlay, address, PlanSide::After)
-                    .map_err(Unread::Index)?
-                    .candidates
-            }
-            Resolves::One { .. } | Resolves::None {} => None,
+        written: &BTreeSet<Written>,
+    ) -> Result<Namings, Self::Error> {
+        let links: Vec<LinkKey> = written
+            .iter()
+            .map(|(holder, address)| LinkKey::new(holder.clone(), LinkFamily::Wikilink, address))
+            .collect();
+        let resolved = crate::planner::links::resolved_addresses(self.index, overlay, &links)
+            .map_err(Unread::Index)?;
+        let resolves = |link: &LinkKey| {
+            resolved
+                .get(&crate::planner::links::entry_key(link))
+                .cloned()
         };
-        Ok(Naming {
-            resolves,
-            candidates,
-        })
+        let several: BTreeSet<&str> = links
+            .iter()
+            .filter(|link| matches!(resolves(link), Some(Resolves::Several {})))
+            .map(|link| link.address.as_str())
+            .collect();
+        let several: Vec<&str> = several.into_iter().collect();
+        let heads: BTreeMap<&str, Option<CandidateHead>> = if several.is_empty() {
+            BTreeMap::new()
+        } else {
+            let named = self
+                .index
+                .targets(overlay, &several, PlanSide::After)
+                .map_err(Unread::Index)?;
+            several
+                .iter()
+                .copied()
+                .zip(named.into_iter().map(|naming| naming.candidates))
+                .collect()
+        };
+        Ok(written
+            .iter()
+            .zip(&links)
+            .filter_map(|(written, link)| {
+                let resolves = resolves(link)?;
+                let candidates = heads.get(link.address.as_str()).cloned().flatten();
+                Some((
+                    written.clone(),
+                    Naming {
+                        resolves,
+                        candidates,
+                    },
+                ))
+            })
+            .collect())
     }
 }
 
@@ -375,7 +415,8 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// fix may be made to, once, and no other document's; what stands at each
 /// destination a route names; the links naming each document a route moves;
 /// the bytes of each document holding such a link a cascade may respell;
-/// and what each bare value a link fix writes resolves to, one probe each.
+/// and what each link the plan's fixes write resolves to, in one judgment of
+/// the index for them all.
 ///
 /// **Each document is drafted alone, then the routes are judged together.**
 /// A document's draft is every fix composed where it stands, and, where a
@@ -386,7 +427,8 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// respell check); and where its destination collides with an earlier route
 /// of the batch the plan makes, in batch order. Each document then takes the
 /// composition its route's fate decides, and its link fixes compose onto it
-/// last, resolved over the routes so settled.
+/// last, resolved over the routes so settled, as every link a fix writes is
+/// recorded.
 pub(crate) fn plan<R: Reading>(
     rows: &[FindingRow],
     repairing: &Repairing<'_>,
@@ -402,12 +444,34 @@ pub(crate) fn plan<R: Reading>(
         declared::respelling(&drafts, repairing, vault)?;
     refused.extend(declared::colliding(&drafts, &refused));
     // The routes are settled: a link fix, composed last, is resolved with
-    // them as the plan's moves.
+    // them as the plan's moves, and so is every link a fix writes.
     let settled = declared::settled(&drafts, &refused);
-    let mut planned = Planned::default();
-    for (at, draft) in drafts.into_iter().enumerate() {
-        draft.emit(refused.remove(&at), &mut planned, &settled, vault)?;
+    let decided: Vec<declared::Decided<'_>> = drafts
+        .into_iter()
+        .enumerate()
+        .map(|(at, draft)| draft.decide(refused.remove(&at)))
+        .collect();
+    let mut written = BTreeSet::new();
+    for document in &decided {
+        document.written(&mut written);
     }
+    let namings = if written.is_empty() {
+        Namings::new()
+    } else {
+        vault.namings(&settled, &written)?
+    };
+    let mut planned = Planned::default();
+    for document in decided {
+        document.emit(&mut planned, &namings);
+    }
+    // One condition per link a plan writes, however many fixes write it.
+    let mut recorded = BTreeSet::new();
+    planned.conditions.retain(|condition| match condition {
+        PlanCondition::AddressResolution { link, .. } => {
+            recorded.insert(crate::planner::links::entry_key(link))
+        }
+        PlanCondition::ContentHash { .. } | PlanCondition::LinkResolution { .. } => true,
+    });
     Ok(planned)
 }
 
@@ -542,13 +606,12 @@ mod tests {
             panic!("a plan of no fix read the link index")
         }
 
-        fn naming(
+        fn namings(
             &self,
             _: &PathOverlay,
-            _: &DocumentPath,
-            address: &str,
-        ) -> Result<Naming, Self::Error> {
-            panic!("a plan of no fix resolved `{address}`")
+            written: &BTreeSet<Written>,
+        ) -> Result<Namings, Self::Error> {
+            panic!("a plan of no fix resolved {written:?}")
         }
     }
 
