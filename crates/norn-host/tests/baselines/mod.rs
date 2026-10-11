@@ -925,7 +925,7 @@ pub const DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 4 * 1024 * 1024
 ///
 /// **The floor is about five bodies, three allocations live together** while
 /// the rewrite verifies that the rewritten bytes read as the document did with
-/// only its links respelled (`Document::reads_as_rewritten`):
+/// only its links respelled (the read-back proof of `Document::rewrite_links`):
 ///
 /// - the before-body planning read whole and holds (`TreeView::entry`), one
 ///   body;

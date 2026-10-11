@@ -228,14 +228,18 @@ impl Document<'_> {
         }
         let mut edits = disjoint(edits, &mut skipped);
 
-        let mut text = self.spliced(edits.iter());
-        if !edits.is_empty() {
+        let text = if edits.is_empty() {
+            self.spliced(edits.iter())
+        } else {
             let mut proof = Proof::of(self);
-            if !proof.reads_back(&edits.iter().collect::<Vec<_>>())? {
-                edits = proof.kept_in_runs(edits, &mut skipped)?;
-                text = self.spliced(edits.iter());
+            match proof.read_back(&edits.iter().collect::<Vec<_>>())? {
+                Some(text) => text,
+                None => {
+                    edits = proof.kept_in_runs(edits, &mut skipped)?;
+                    self.spliced(edits.iter())
+                }
             }
-        }
+        };
         Ok(RewrittenLinks {
             text,
             rewritten: edits.len(),
@@ -270,9 +274,9 @@ impl<'a, 'd> Proof<'a, 'd> {
         }
     }
 
-    /// Whether this document with `edits` spliced in reads as this document
-    /// with exactly those edits' links respelled; `edits` are in document
-    /// order.
+    /// This document with `edits` spliced in, where it reads as this
+    /// document with exactly those edits' links respelled, and `None` where
+    /// it does not; `edits` are in document order.
     ///
     /// What the index derives from a document is read back from the spliced
     /// text and compared with what this document's own [`Reading`] becomes
@@ -294,7 +298,7 @@ impl<'a, 'd> Proof<'a, 'd> {
     /// it, and a quote ends the frontmatter scalar quoted with it. So each
     /// call is one read of the whole document, and the
     /// [`REWRITE_PROOF_READS`]th is the last a rewrite may spend.
-    fn reads_back(&mut self, edits: &[&Edit]) -> Result<bool, RewriteUnproven> {
+    fn read_back(&mut self, edits: &[&Edit]) -> Result<Option<String>, RewriteUnproven> {
         if self.reads == REWRITE_PROOF_READS {
             return Err(RewriteUnproven { reads: self.reads });
         }
@@ -303,10 +307,11 @@ impl<'a, 'd> Proof<'a, 'd> {
         tests::PROOF_READS.with(|reads| reads.set(reads.get() + 1));
         let respelling = Respelling::of(edits, &self.before);
         let text = self.document.spliced(edits.iter().copied());
-        Ok(self
+        let reads_back = self
             .before
             .respelled(&respelling)
-            .is_some_and(|expected| Reading::of(&Document::parse(&text)) == expected))
+            .is_some_and(|expected| Reading::of(&Document::parse(&text)) == expected);
+        Ok(reads_back.then_some(text))
     }
 
     /// The edits kept in runs in document order, where `edits` together do
@@ -390,7 +395,7 @@ impl<'a, 'd> Proof<'a, 'd> {
     /// Whether `kept`, then `run`, read back together.
     fn reads_back_with(&mut self, kept: &[&Edit], run: &[Edit]) -> Result<bool, RewriteUnproven> {
         let edits: Vec<&Edit> = kept.iter().copied().chain(run).collect();
-        self.reads_back(&edits)
+        Ok(self.read_back(&edits)?.is_some())
     }
 }
 
@@ -890,7 +895,7 @@ mod tests {
         /// ([`count_stem_read`]).
         pub(super) static STEMS_READ: Cell<usize> = const { Cell::new(0) };
         /// Whole-document reads the proofs on this thread spent
-        /// ([`Proof::reads_back`]).
+        /// ([`Proof::read_back`]).
         pub(super) static PROOF_READS: Cell<usize> = const { Cell::new(0) };
     }
 
@@ -1083,7 +1088,7 @@ mod tests {
         let mut kept: Vec<&Edit> = Vec::new();
         for edit in &edits {
             kept.push(edit);
-            if !proof.reads_back(&kept).expect("within the reads") {
+            if proof.read_back(&kept).expect("within the reads").is_none() {
                 kept.pop();
             }
         }

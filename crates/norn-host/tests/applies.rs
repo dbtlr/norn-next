@@ -174,6 +174,71 @@ fn a_preview_whose_operation_does_not_resolve_is_refused_with_the_operation_left
     );
 }
 
+/// **A move whose link cascade into one holder cannot be proven within the
+/// text layer's reads is refused, says to send fewer at once, and writes
+/// nothing**, in preview and apply alike. A hub links every document of a folder in one paragraph, and
+/// the folder moves under a name holding a backtick: every respelled link
+/// after the first pairs its backtick with one before it, so finding the
+/// links that read back would read the hub once per link, past
+/// `norn_text::REWRITE_PROOF_READS`.
+#[test]
+fn a_move_whose_cascade_into_a_holder_cannot_be_proven_is_refused_with_advice_to_send_fewer() {
+    let documents = 2 * norn_text::REWRITE_PROOF_READS;
+    let hub = (0..documents)
+        .map(|document| format!("[[notes/d{document}]]"))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + "\n";
+    let mut files = vec![("hub.md".to_string(), hub.clone())];
+    files.extend(
+        (0..documents).map(|document| (format!("notes/d{document}.md"), format!("d{document}\n"))),
+    );
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(at, text)| (at.as_str(), text.as_str()))
+        .collect();
+    let (_sandbox, vault) = an_adopted_vault("host-applies-unproven-cascade", &files);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moving = Operation::new(OperationKind::move_folder(
+        FolderPath::new("notes").expect("a folder path"),
+        FolderPath::new("odd`").expect("a folder path"),
+    ));
+    let plan = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![moving],
+    ));
+
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        let refused = host
+            .apply(ApplyParams::new(mode, plan.clone()))
+            .expect("a plan over a ready vault is admitted")
+            .wait()
+            .expect_err("an unproven cascade is refused");
+        assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused);
+        let ErrorDetail::PlanRefused { unresolved, .. } = refused.detail() else {
+            panic!("the refusal carries {:?}", refused.detail());
+        };
+        // The folder move is planned as a move of each document it holds,
+        // and every one of them writes into the hub.
+        assert_eq!(unresolved.len(), documents);
+        for left in unresolved {
+            let norn_wire::UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+                panic!("left out for {:?}", left.reason);
+            };
+            assert!(
+                detail.contains("`hub.md`") && detail.contains("fewer") && detail.contains("retry"),
+                "{detail}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("hub.md")).unwrap(),
+        hub
+    );
+    assert!(vault.path().join("notes/d0.md").is_file());
+}
+
 /// **A preview of operations whose own shape is wrong is refused as
 /// `request/plan-invalid`.** Two operations each requiring the other are no
 /// plan at all.
