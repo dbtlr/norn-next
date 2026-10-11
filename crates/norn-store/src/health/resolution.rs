@@ -487,6 +487,26 @@ impl Snapshot {
         headed: PlanSide,
         declared: &ContentModel,
     ) -> Result<(TargetNaming, ResolutionWork), PageRefusal> {
+        let (mut namings, work) = self.target_namings(overlay, &[address], headed, declared)?;
+        let naming = namings.pop().expect("one naming of the one address asked");
+        Ok((naming, work))
+    }
+
+    /// What each of `addresses` names over the plan `overlay`, as
+    /// [`Snapshot::target_naming`] reads one, in their order; and what
+    /// reading them cost, as one judgment.
+    ///
+    /// **The plan is read once for every address**: the overlay's targets
+    /// are keyed once, and each address's keys resolved as one address's
+    /// are, so the work is the addresses' keys and heads plus the plan's
+    /// targets, never their product.
+    pub fn target_namings(
+        &self,
+        overlay: &PathOverlay,
+        addresses: &[&str],
+        headed: PlanSide,
+        declared: &ContentModel,
+    ) -> Result<(Vec<TargetNaming>, ResolutionWork), PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
         let mut judging = Judging::new(
@@ -495,8 +515,12 @@ impl Snapshot {
             overlay,
             OnSnapshot::new(self),
         );
-        let naming = judging.name(address, headed).map_err(PageRefusal::from)?;
-        Ok((naming, judging.finished()))
+        let namings = addresses
+            .iter()
+            .map(|address| judging.name(address, headed))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PageRefusal::from)?;
+        Ok((namings, judging.finished()))
     }
 }
 

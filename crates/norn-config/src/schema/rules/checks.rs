@@ -12,7 +12,11 @@
 //! shape is judged against the field's declared shape whatever it holds,
 //! since a template fills a string and a list stays a list. Members are
 //! scalars whatever the field's shape: a collection's shape is judged on the
-//! composed field alone.
+//! composed field alone. **A closed set never holds a wikilink**: a `one_of`
+//! on a field declared `link` is refused, and so is a member, a synonym's
+//! written side or a synonym's target that holds one the text layer parses
+//! ([`super::super::typed::holds_wikilink`]), each naming the rule and the
+//! field.
 //!
 //! **A route is judged as a folder some document could stand directly
 //! inside.** The route's text, with each token standing as a `*` — a capture
@@ -103,7 +107,8 @@ use norn_wire::{CaseFold, DOCUMENT_EXTENSION, Pattern, sets_share_a_document_pat
 
 use super::super::creation::DefaultValue;
 use super::super::template::Part;
-use super::super::{Shape, VaultSchema, VaultSchemaError};
+use super::super::typed::holds_wikilink;
+use super::super::{FieldType, Shape, VaultSchema, VaultSchemaError};
 use super::combined::{CombinedConstraint, RulesConflict};
 use super::judge::Element;
 use super::placement::{self, PLACEMENT_CEILING};
@@ -168,7 +173,19 @@ fn check_rule(schema: &VaultSchema, rule: &Rule) -> Result<(), VaultSchemaError>
     }
     for (field, set) in &rule.one_of {
         let at_path = format!("{section}.one_of.{field}");
+        if schema.declared_type(field) == FieldType::Link {
+            return Err(refusal(at_path, RuleProblem::LinkFieldClosed));
+        }
         for member in &set.values {
+            if holds_wikilink(member) {
+                return Err(refusal(
+                    format!("{at_path}.values"),
+                    RuleProblem::Member {
+                        value: member.clone(),
+                        problem: ElementProblem::HoldsWikilink,
+                    },
+                ));
+            }
             if let Some(problem) = element_problem(schema, rule, field, member, false) {
                 return Err(refusal(
                     format!("{at_path}.values"),
@@ -179,7 +196,25 @@ fn check_rule(schema: &VaultSchema, rule: &Rule) -> Result<(), VaultSchemaError>
                 ));
             }
         }
-        for (_, target) in &set.synonyms {
+        for (written, target) in &set.synonyms {
+            if holds_wikilink(written) {
+                return Err(refusal(
+                    format!("{at_path}.synonyms"),
+                    RuleProblem::SynonymWritten {
+                        value: written.clone(),
+                        problem: ElementProblem::HoldsWikilink,
+                    },
+                ));
+            }
+            if holds_wikilink(target) {
+                return Err(refusal(
+                    format!("{at_path}.synonyms"),
+                    RuleProblem::SynonymTarget {
+                        value: target.clone(),
+                        problem: ElementProblem::HoldsWikilink,
+                    },
+                ));
+            }
             if let Some(problem) = element_problem(schema, rule, field, target, true) {
                 return Err(refusal(
                     format!("{at_path}.synonyms"),

@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 
 use norn_config::schema::ForbiddenFix;
-use norn_wire::{FindingRow, SkipReason, SkippedFinding, ValueHead};
+use norn_wire::{Confidence, FindingRow, SkipReason, SkippedFinding, ValueHead};
 
 use super::{Document, Fix, Fixing, State, cited, field_of, skip, spelled_candidates};
 use crate::applier::Held;
@@ -121,7 +121,7 @@ pub(super) fn fix(
     )?;
     Ok(Fix {
         operations: edits,
-        cited: vec![cited(row, field, false)],
+        cited: vec![cited(row, Confidence::Declared, Vec::new())],
         state: composed,
     })
 }

@@ -13,8 +13,13 @@
 //! each reason such a fix is skipped for; a misplaced document moved into the
 //! folder its rule's route names, its move's link cascade with it, and each
 //! reason such a route is skipped for, a cascade that may respell a link a
-//! rule reads by value among them; and over a schema declaring every kind of
-//! fix, that the validator flags nothing a repair wrote.
+//! rule reads by value among them. Derived fixes are pinned over schemas of
+//! their own, each through a preview then an apply: a shape mismatch wrapped
+//! or unwrapped, a boolean spelled by case written as the boolean, a value
+//! differing from a closed set's member by case or white space written as the
+//! member, the excluded classes, the request's threshold taking effect alike
+//! in both modes, and a declared fix outranking the derived answer. Over a
+//! schema declaring every kind of fix, that the validator flags nothing a repair wrote.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -2439,13 +2444,13 @@ fn a_routes_move_rewrites_every_respellable_link_and_lists_the_rest_as_a_move_fo
 }
 
 /// **An unrespellable link never holds a route back, even in a field a rule
-/// reads by value**: the hub's closed `up` holds the link to the moved
+/// reads by value**: the hub's limited `up` holds the link to the moved
 /// document in a flow list, which no cascade can respell, so the route moves
 /// and its forecast advises on the link as unplaced, as a `move` of the
 /// document forecasts it.
 #[test]
 fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
-    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-unplaced-judged",
         schema,
@@ -2558,20 +2563,20 @@ fn a_route_its_respell_check_skips_claims_no_destination() {
     assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
 }
 
-/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
-/// link field over the link to `loose/a.md` as it is written now.
-const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+/// A rule routing a task into `tasks/`, and a hub rule limiting a hub's `up`
+/// link field, which reads it by value.
+const LIMITED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
 /// **A route whose cascade may respell a frontmatter link in a field a rule
 /// reads by value skips as respelling a judged link**, with its destination,
 /// noting the holder and the field, and the plan stays applicable: moving
-/// `loose/a.md` would respell the hub's closed `up`, so nothing moves and
+/// `loose/a.md` would respell the hub's limited `up`, so nothing moves and
 /// the hub stands as written.
 #[test]
 fn a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-respells-a-judged-link",
-        CLOSED_UP,
+        LIMITED_UP,
         &[
             ("loose/a.md", b"---\ntype: task\nstatus: todo\n---\n# A\n"),
             (
@@ -2606,7 +2611,7 @@ fn a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips() {
 /// skips**, noting the document and the field.
 #[test]
 fn a_route_whose_cascade_may_respell_the_moved_documents_own_judged_link_skips() {
-    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    one_of:\n      me: {values: ['[[zz-repair/loose/a]]', '[[zz-repair/tasks/a]]']}\n";
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    max_length:\n      me: 40\n";
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-self-respell",
         schema,
@@ -2641,7 +2646,7 @@ fn a_route_whose_cascade_may_respell_the_moved_documents_own_judged_link_skips()
 fn a_route_its_respell_check_skips_leaves_the_batchs_other_fixes_applied() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-respell-skipped-others-stand",
-        CLOSED_UP,
+        LIMITED_UP,
         &[
             ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
             (
@@ -2674,15 +2679,15 @@ fn a_route_its_respell_check_skips_leaves_the_batchs_other_fixes_applied() {
     );
 }
 
-/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
-/// link field over the link to `loose/a.md` as it is written now.
-const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+/// A rule routing a task into `tasks/`, and a hub rule limiting a hub's `up`
+/// link field, which reads it by value.
+const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
 /// **Of two routes whose cascades rewrite one hub, only the one respelling a
 /// judged link skips, and the other's cascade lands**: moving `loose/a.md`
-/// would respell the hub's closed `up`, moving `loose/b.md` respells its
+/// would respell the hub's limited `up`, moving `loose/b.md` respells its
 /// open `down` and its body's links, so `b` moves, the hub respelled, and
-/// `a` skips, noting the hub and `up`; a bare backlink in the closed field
+/// `a` skips, noting the hub and `up`; a bare backlink in the limited field
 /// holds no route back.
 #[test]
 fn of_two_routes_rewriting_one_hub_only_the_one_respelling_a_judged_link_skips() {
@@ -3026,4 +3031,904 @@ fn a_finding_a_fix_eliminates_is_dropped_whatever_its_kind() {
         .map(|skipped| (skipped.finding, skipped.reason))
         .collect();
     assert_eq!(skipped, [(b_tag, SkipReason::NoDeclaredFix)]);
+}
+
+/// The finding `id` as a citation carries it at the derived level, with its
+/// offending `value`.
+fn cited_derived(id: u64, value: &str) -> CitedFinding {
+    CitedFinding::new(id, Confidence::Derived).with_value(norn_store::value_head(value))
+}
+
+/// The operation `repair-<n>`, setting `field` of the document at `name` to
+/// `value`.
+fn setting_value(n: usize, name: &str, field: &str, value: AuthoredValue) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at(name)),
+        field,
+        value,
+    ))
+    .with_id(OperationId::new(format!("repair-{n}")).expect("an id"))
+}
+
+/// The plan `host` previews for the repair, then the one it applies, which
+/// must be the same whole plan: the planner is shared, and an apply holds no
+/// more than its preview.
+fn previewed_then_applied(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    request: impl Fn(RepairParams) -> RepairParams,
+) -> ResolvedPlan {
+    let preview = previewed(host.repair(request(repairing(vault, ApplyMode::Preview))));
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.repair(request(repairing(vault, ApplyMode::Apply))))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(plan, preview, "an apply plans what its preview did");
+    preview
+}
+
+/// **A scalar in a list field is wrapped as a one-item list, through preview
+/// then apply.** The plan sets the one-item list, its YAML type kept (`3` is
+/// the number in the list), cited at the derived level; the apply writes it
+/// and the validator flags nothing.
+#[test]
+fn a_scalar_in_a_list_field_is_wrapped_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-wrap",
+        "version: 1\nfields:\n  ranks: {type: number, shape: list}\n",
+        &[("a.md", b"---\nranks: 3\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_of(&host, &vault, "a.md", FindingKind::ShapeMismatch, "ranks");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting_value(
+            1,
+            "a.md",
+            "ranks",
+            AuthoredValue::List(vec![AuthoredValue::Integer(3)])
+        )]
+    );
+    let citations = &provenance(&plan).citations;
+    assert_eq!(citations.len(), 1);
+    assert_eq!(
+        citations[0]
+            .findings
+            .iter()
+            .map(|cited| (cited.finding, cited.confidence))
+            .collect::<Vec<_>>(),
+        vec![(mismatch, Confidence::Derived)]
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+    assert!(
+        written(&vault, "a.md").contains("3") && !written(&vault, "a.md").contains("\"3\""),
+        "{}",
+        written(&vault, "a.md")
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **A one-item list in a single field is unwrapped to its item, through
+/// preview then apply; a list of two items has no fix and stands reported.**
+#[test]
+fn a_one_item_list_in_a_single_field_is_unwrapped_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-unwrap",
+        "version: 1\nfields:\n  owner: {type: text, shape: single}\n",
+        &[
+            ("a.md", b"---\nowner: [drew]\n---\n# A\n"),
+            ("b.md", b"---\nowner: [drew, sam]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let a = finding_of(&host, &vault, "a.md", FindingKind::ShapeMismatch, "owner");
+    let b = finding_of(&host, &vault, "b.md", FindingKind::ShapeMismatch, "owner");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "owner", "drew")]);
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Derived
+    );
+    assert_eq!(provenance(&plan).citations[0].findings[0].finding, a);
+    assert_eq!(
+        skipped_ids(&plan),
+        vec![b],
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert_eq!(
+        provenance(&plan).skipped[0].reason,
+        SkipReason::NoDeclaredFix
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::ShapeMismatch)],
+        "{after:?}"
+    );
+}
+
+/// **A boolean spelled with another case or padding is written as the YAML
+/// boolean, through preview then apply, and a yes/no spelling is skipped as an
+/// excluded class and stands reported**: a scalar, and the elements of a
+/// list into one write.
+#[test]
+fn a_boolean_spelled_by_case_is_written_as_the_boolean_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-boolean",
+        "version: 1\nfields:\n  done: {type: boolean}\n  flags: {type: boolean, shape: list}\n",
+        &[
+            ("a.md", b"---\ndone: \"True\"\n---\n# A\n"),
+            ("b.md", b"---\nflags: [\"FALSE\", \"yes\"]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scalar = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::TypeMismatch,
+        "done",
+        "True",
+    );
+    let element = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::TypeMismatch,
+        "flags",
+        "FALSE",
+    );
+    let yes = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::TypeMismatch,
+        "flags",
+        "yes",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting_value(1, "a.md", "done", AuthoredValue::Bool(true)),
+            setting_value(
+                2,
+                "b.md",
+                "flags",
+                AuthoredValue::List(vec![
+                    AuthoredValue::Bool(false),
+                    AuthoredValue::string("yes")
+                ])
+            ),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![
+            Citation::new(
+                OperationId::new("repair-1").expect("an id"),
+                vec![cited_derived(scalar, "True")]
+            ),
+            Citation::new(
+                OperationId::new("repair-2").expect("an id"),
+                vec![cited_derived(element, "FALSE")]
+            ),
+        ]
+    );
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        (skipped[0].finding, skipped[0].reason),
+        (yes, SkipReason::ExcludedClass)
+    );
+    assert!(
+        skipped[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("yes/no coercion")),
+        "{skipped:?}"
+    );
+    assert!(
+        written(&vault, "a.md").contains("done: true"),
+        "{}",
+        written(&vault, "a.md")
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::TypeMismatch)],
+        "{after:?}"
+    );
+}
+
+/// A closed `status` over `todo`, `done` and `in progress`, a list `labels`
+/// closed over `red` and `blue`.
+const FOLDING: &str = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, 'in progress']}\n      labels: {values: [red, blue]}\n";
+
+/// **A value differing from exactly one member only by case or white space is
+/// written as that member, through preview then apply**: a scalar, and a
+/// list's element into one write beside a neighbour that stands reported.
+#[test]
+fn a_value_differing_from_a_member_by_case_or_white_space_is_written_as_the_member() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-fold",
+        FOLDING,
+        &[
+            (
+                "a.md",
+                b"---\ntype: task\nstatus: \" In   Progress \"\n---\n# A\n",
+            ),
+            ("b.md", b"---\ntype: task\nlabels: [Red, mauve]\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let scalar = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        " In   Progress ",
+    );
+    let element = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "labels",
+        "Red",
+    );
+    let mauve = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "labels",
+        "mauve",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            setting(1, "a.md", "status", "in progress"),
+            setting_list(2, "b.md", "labels", &["red", "mauve"]),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![
+            Citation::new(
+                OperationId::new("repair-1").expect("an id"),
+                vec![cited_derived(scalar, " In   Progress ")]
+            ),
+            Citation::new(
+                OperationId::new("repair-2").expect("an id"),
+                vec![cited_derived(element, "Red")]
+            ),
+        ]
+    );
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(mauve, SkipReason::NoDeclaredFix)
+                .with_value(norn_store::value_head("mauve"))
+        ]
+    );
+    assert!(
+        written(&vault, "a.md").contains("status: \"in progress\""),
+        "{}",
+        written(&vault, "a.md")
+    );
+    let after = standing(&host, &vault, |request| request);
+    let still: Vec<_> = after.values().cloned().collect();
+    assert_eq!(
+        still,
+        [(format!("{FOLDER}b.md"), FindingKind::NotOneOf)],
+        "{after:?}"
+    );
+}
+
+/// **A type mismatch on a date or a number field is skipped as an excluded
+/// class in both modes, and stands reported**: the repair writes nothing.
+#[test]
+fn a_date_or_number_type_mismatch_is_skipped_as_an_excluded_class_and_stands() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-excluded",
+        "version: 1\nfields:\n  due: {type: date}\n  points: {type: number}\n",
+        &[("a.md", b"---\ndue: 1/2/26\npoints: three\n---\n# A\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = standing(&host, &vault, |request| request);
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        provenance(&plan)
+            .skipped
+            .iter()
+            .map(|skipped| skipped.reason)
+            .collect::<Vec<_>>(),
+        vec![SkipReason::ExcludedClass, SkipReason::ExcludedClass]
+    );
+    assert_eq!(
+        standing(&host, &vault, |request| request)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        before.values().cloned().collect::<Vec<_>>()
+    );
+}
+
+/// **A derived fix below the request's threshold is skipped in both modes,
+/// carrying its value and the operation the plan would have held; the same
+/// plan at the default threshold writes it.** A declared fix is written at
+/// every threshold.
+#[test]
+fn a_derived_fix_below_the_threshold_is_skipped_in_preview_and_apply_alike() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-threshold",
+        schema,
+        &[
+            ("a.md", b"---\ntype: task\nstatus: Done\n---\n# A\n"),
+            ("b.md", b"---\ntype: task\nstatus: complete\n---\n# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let folded = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Done",
+    );
+    let synonym = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "status",
+        "complete",
+    );
+    let before = tree_bytes(vault.path());
+
+    let plan = previewed_then_applied(&host, &vault, |request| {
+        request.with_threshold(Confidence::Declared)
+    });
+
+    assert_eq!(plan.operations, vec![setting(1, "b.md", "status", "done")]);
+    assert_eq!(
+        provenance(&plan).citations,
+        vec![Citation::new(
+            OperationId::new("repair-1").expect("an id"),
+            vec![cited_valued(synonym, "complete")]
+        )]
+    );
+    let proposed = Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(at("a.md")),
+        "status",
+        AuthoredValue::string("done"),
+    ));
+    assert_eq!(
+        provenance(&plan).skipped,
+        vec![
+            SkippedFinding::new(folded, SkipReason::BelowThreshold)
+                .with_value(norn_store::value_head("Done"))
+                .with_proposed(proposed)
+        ]
+    );
+    let after = tree_bytes(vault.path());
+    assert_eq!(
+        after.get(&format!("{FOLDER}a.md")),
+        before.get(&format!("{FOLDER}a.md"))
+    );
+    assert_ne!(
+        after.get(&format!("{FOLDER}b.md")),
+        before.get(&format!("{FOLDER}b.md"))
+    );
+
+    // At the default threshold the fold is written.
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+    assert_eq!(plan.operations.len(), 1, "{:?}", plan.operations);
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: done\n---\n# A\n"
+    );
+}
+
+/// **A declared synonym decides over the fold, and the citation notes the
+/// derived answer when it differs; a declared fix the judge refuses blocks
+/// the derived answer, and the finding skips with both candidates.**
+#[test]
+fn a_declared_fix_outranks_the_derived_answer_through_preview_then_apply() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished, Todo: finished}}\n  strict:\n    match: {frontmatter: {type: task, strict: yes}}\n    one_of:\n      status: {values: [todo, done]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-precedence",
+        schema,
+        &[
+            ("a.md", b"---\ntype: task\nstatus: Done\n---\n# A\n"),
+            (
+                "b.md",
+                b"---\ntype: task\nstrict: yes\nstatus: Todo\n---\n# B\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let decided = finding_valued(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Done",
+    );
+    let blocked = finding_valued(
+        &host,
+        &vault,
+        "b.md",
+        FindingKind::NotOneOf,
+        "status",
+        "Todo",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "a.md", "status", "finished")]
+    );
+    let cited = &provenance(&plan).citations[0].findings[0];
+    assert_eq!(
+        (cited.finding, cited.confidence),
+        (decided, Confidence::Declared)
+    );
+    assert_eq!(cited.notes.len(), 1, "{:?}", cited.notes);
+    assert!(cited.notes[0].contains("`done`"), "{:?}", cited.notes);
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        (skipped[0].finding, skipped[0].reason),
+        (blocked, SkipReason::JudgeWouldRefuse)
+    );
+    let Some(SkippedCandidates::Values { head, .. }) = &skipped[0].candidates else {
+        panic!("candidates: {skipped:?}");
+    };
+    let named: Vec<(String, Option<String>)> = head
+        .candidates()
+        .iter()
+        .map(|candidate| (candidate.value.text().to_string(), candidate.rule.clone()))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            ("finished".to_string(), Some("tasks".to_string())),
+            ("todo".to_string(), None)
+        ]
+    );
+    assert_eq!(
+        written(&vault, "b.md"),
+        "---\ntype: task\nstrict: yes\nstatus: Todo\n---\n# B\n"
+    );
+}
+
+/// A `link` field `up`, which a bare value leaves a type mismatch.
+const LINKING: &str = "version: 1\nfields:\n  up: {type: link}\n";
+
+/// A document holding `up: zz-target` and the one document that value names.
+const LINKED_PAIR: [(&str, &[u8]); 2] = [
+    ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+    ("zz-target.md", b"# Target\n"),
+];
+
+/// The address resolution a repair of [`LINKED_PAIR`] records: `zz-target`,
+/// written in the holder, names the target at `lands`.
+fn linking_to(lands: &str) -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "zz-target",
+        ),
+        norn_wire::Resolves::one(at(lands)),
+    )
+}
+
+/// The refusal an apply of `plan` met, with the plan the refusal carries.
+fn apply_refused(
+    host: &attach::ServingHost,
+    mode: ApplyMode,
+    plan: &ResolvedPlan,
+) -> (ErrorEnvelope, ResolvedPlan, Vec<norn_wire::RefusedCheck>) {
+    let refusal = refused(host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone()))));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused, "{refusal:?}");
+    let ErrorDetail::PlanRefused { plan, checks, .. } = refusal.detail() else {
+        panic!("refused with {:?}", refusal.detail());
+    };
+    let (plan, checks) = (plan.clone(), checks.clone());
+    (refusal, plan, checks)
+}
+
+/// Whether `checks` fail the address resolution `condition`.
+fn fails(checks: &[norn_wire::RefusedCheck], condition: &norn_wire::PlanCondition) -> bool {
+    checks.iter().any(|check| {
+        matches!(check, norn_wire::RefusedCheck::ConditionFailed { condition: failed, .. } if failed == condition)
+    })
+}
+
+/// **A bare value is made a link through preview then apply, and the plan
+/// records the resolution of the address it wrote.** The condition reaches
+/// the resolved plan in both modes, only the link fix records one, and the
+/// validator no longer reports the finding.
+#[test]
+fn a_bare_value_is_made_a_link_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under("host-repair-bare-link", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_valued(
+        &host,
+        &vault,
+        "zz-holder.md",
+        FindingKind::TypeMismatch,
+        "up",
+        "zz-target",
+    );
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    assert_eq!(
+        plan.operations,
+        vec![setting(1, "zz-holder.md", "up", "[[zz-target]]")]
+    );
+    assert_eq!(plan.conditions, vec![linking_to("zz-target.md")]);
+    let cited = &provenance(&plan).citations[0].findings[0];
+    assert_eq!(
+        (cited.finding, cited.confidence),
+        (mismatch, Confidence::Derived)
+    );
+    assert!(
+        written(&vault, "zz-holder.md").contains("up: '[[zz-target]]'")
+            || written(&vault, "zz-holder.md").contains("up: \"[[zz-target]]\""),
+        "{}",
+        written(&vault, "zz-holder.md")
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **Deleting the target between preview and apply refuses the apply, in
+/// apply mode and in a preview that judges the previewed plan again.**
+#[test]
+fn deleting_the_target_after_the_preview_refuses_the_plan() {
+    let (_sandbox, vault, host) =
+        a_vault_under("host-repair-bare-link-deleted", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    host.delete(norn_wire::DeleteParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        at("zz-target.md"),
+    ))
+    .expect("the delete is admitted")
+    .wait()
+    .expect("the target is deleted");
+
+    for mode in [ApplyMode::Apply, ApplyMode::Preview] {
+        let (_, _, checks) = apply_refused(&host, mode, &plan);
+        assert!(
+            fails(&checks, &linking_to("zz-target.md")),
+            "{mode:?}: {checks:?}"
+        );
+    }
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nup: zz-target\n---\n# Holder\n"
+    );
+}
+
+/// **A second document of the same stem, created between preview and apply,
+/// refuses the plan**: the address names two documents now.
+#[test]
+fn a_competing_target_created_after_the_preview_refuses_the_plan() {
+    let (_sandbox, vault, host) =
+        a_vault_under("host-repair-bare-link-competitor", LINKING, &LINKED_PAIR);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        at("elsewhere/zz-target.md"),
+        "# Competitor\n",
+    ))
+    .expect("the write is admitted")
+    .wait()
+    .expect("the competitor is written");
+
+    for mode in [ApplyMode::Apply, ApplyMode::Preview] {
+        let (_, _, checks) = apply_refused(&host, mode, &plan);
+        assert!(
+            fails(&checks, &linking_to("zz-target.md")),
+            "{mode:?}: {checks:?}"
+        );
+    }
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nup: zz-target\n---\n# Holder\n"
+    );
+}
+
+/// **A refused plan's fresh plan carries the recorded resolution as it was.**
+/// A holder changed after the preview refuses the plan; where the evidence is
+/// unchanged the fresh plan applies and lands the link, and where the target
+/// is gone the fresh plan refuses again for the same condition.
+#[test]
+fn a_refused_plans_fresh_plan_carries_the_resolution_and_refuses_where_the_evidence_changed() {
+    for target_deleted in [false, true] {
+        let label = format!("host-repair-bare-link-fresh-{target_deleted}");
+        let (_sandbox, vault, host) = a_vault_under(&label, LINKING, &LINKED_PAIR);
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+        std::fs::write(
+            vault.path().join(FOLDER).join("zz-holder.md"),
+            "---\nup: zz-target\nnote: x\n---\n# Holder\n",
+        )
+        .expect("another writer changes the holder");
+        if target_deleted {
+            host.delete(norn_wire::DeleteParams::new(
+                address(&vault),
+                ApplyMode::Apply,
+                at("zz-target.md"),
+            ))
+            .expect("the delete is admitted")
+            .wait()
+            .expect("the target is deleted");
+        }
+
+        let (_, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+        assert_eq!(fresh.conditions, vec![linking_to("zz-target.md")]);
+        if target_deleted {
+            let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &fresh);
+            assert!(fails(&checks, &linking_to("zz-target.md")), "{checks:?}");
+        } else {
+            let report = planned(host.apply(ApplyParams::new(
+                ApplyMode::Apply,
+                PlanDocument::resolved(fresh),
+            )));
+            assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+            let holder = written(&vault, "zz-holder.md");
+            assert!(
+                holder.contains("[[zz-target]]") && holder.contains("note: x"),
+                "{holder}"
+            );
+        }
+    }
+}
+
+/// **A route in the same batch moving the target leaves a plan that applies
+/// with the link resolving**: the plan records the path the target lands at.
+#[test]
+fn a_route_in_the_batch_moving_the_target_leaves_a_plan_that_applies_with_the_link_resolving() {
+    let schema = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-bare-link-routed",
+        schema,
+        &[
+            ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+            ("zz-target.md", b"---\ntype: task\n---\n# Target\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+
+    // The resolution change set records the written link's own move with the
+    // target; the repair records the resolution of the address it wrote.
+    let recorded: Vec<_> = plan
+        .conditions
+        .iter()
+        .filter(|condition| {
+            matches!(
+                condition,
+                norn_wire::PlanCondition::AddressResolution { .. }
+            )
+        })
+        .collect();
+    assert_eq!(recorded, vec![&linking_to("tasks/zz-target.md")]);
+    assert!(
+        vault
+            .path()
+            .join(FOLDER)
+            .join("tasks/zz-target.md")
+            .exists()
+    );
+    assert!(written(&vault, "zz-holder.md").contains("[[zz-target]]"));
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// What the link judgments of a repair's preview cost on the store's
+/// resolution door, over a vault where a route moves `loose/x.md` and
+/// `holders` documents each hold a bare value of `up`: every even one naming
+/// a document of its own, every odd one a stem two documents share.
+fn link_judgments_of_a_preview(label: &str, holders: usize) -> u64 {
+    let mut documents: Vec<(String, Vec<u8>)> = vec![
+        ("loose/x.md".to_string(), b"---\ntype: task\n---\n".to_vec()),
+        ("a/zz-twin.md".to_string(), b"# A\n".to_vec()),
+        ("b/zz-twin.md".to_string(), b"# B\n".to_vec()),
+    ];
+    for at in 0..holders {
+        let up = if at % 2 == 0 {
+            documents.push((format!("zz-t{at}.md"), b"# T\n".to_vec()));
+            format!("zz-t{at}")
+        } else {
+            "zz-twin".to_string()
+        };
+        documents.push((
+            format!("h{at}.md"),
+            format!("---\nup: {up}\n---\n").into_bytes(),
+        ));
+    }
+    let documents: Vec<(&str, &[u8])> = documents
+        .iter()
+        .map(|(at, bytes)| (at.as_str(), bytes.as_slice()))
+        .collect();
+    let schema = format!("{TASKED}fields:\n  up: {{type: link}}\n");
+    let (_sandbox, vault, host) = a_vault_under(label, &schema, &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let account = host.read_evidence();
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    let judged = host.read_evidence().since(account).preview_link_judgments;
+    let written = plan
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.kind, OperationKind::SetFrontmatter { .. }))
+        .count();
+    assert_eq!(written, holders.div_ceil(2), "{plan:?}");
+    assert_eq!(
+        provenance(&plan).skipped.len(),
+        holders / 2,
+        "every odd holder's value names two documents"
+    );
+    judged.judgments
+}
+
+/// **A repair resolves every link its fixes write in one judgment, however
+/// many there are**: the preview of two link fixes and of six, beside a
+/// route, judges as often — once for the batch's links, once more for the
+/// heads of those naming several — so the cost of resolving them follows the
+/// links, never the links times the routes.
+#[test]
+fn every_link_a_repair_writes_is_resolved_in_one_judgment_however_many() {
+    let few = link_judgments_of_a_preview("host-repair-link-judgments-few", 2);
+    let many = link_judgments_of_a_preview("host-repair-link-judgments-many", 6);
+    assert_eq!(few, many);
+}
+
+/// A route moving `loose/x.md` into `tasks-all/`, whose longer folder name
+/// lengthens a link to it, and a rule selecting a document by the link its
+/// `up` holds, limiting its `parent` to the length of the link as written now.
+const SELECTED_BY_LINK: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks-all/**'], route: 'zz-repair/tasks-all/'}\n  projects:\n    match: {frontmatter: {up: '[[zz-projects]]'}}\n    max_length:\n      parent: 21\n";
+
+/// **A link fix bringing its holder under a rule that reads a link a route
+/// respells skips; the route moves.** Making `up` the link `[[zz-projects]]`
+/// brings `h.md` under the rule limiting `parent`, and the route of
+/// `loose/x.md` respells `parent`'s link: the two together would introduce a
+/// value past the limit. The link fix skips as one the judge would refuse,
+/// and the plan applies.
+#[test]
+fn a_link_fix_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-link-fix-respelled",
+        SELECTED_BY_LINK,
+        &[
+            ("loose/x.md", b"---\ntype: task\n---\n# X\n"),
+            (
+                "h.md",
+                b"---\nup: zz-projects\nparent: '[[zz-repair/loose/x]]'\n---\n# H\n",
+            ),
+            ("zz-projects.md", b"# Projects\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(stands(&vault, "tasks-all/x.md"));
+    let skipped: Vec<SkipReason> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skip| skip.reason)
+        .collect();
+    assert_eq!(skipped, [SkipReason::JudgeWouldRefuse], "{plan:?}");
+    assert!(written(&vault, "h.md").contains("up: zz-projects"));
+}
+
+/// **What a below-threshold skip proposes is what lowering the threshold
+/// writes, through the host**: each of a list's two folded elements proposes
+/// the one write of the field the derived threshold's plan holds.
+#[test]
+fn below_threshold_proposals_of_a_lists_elements_are_what_lowering_the_threshold_writes() {
+    let schema = "version: 1\nfields:\n  labels: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      labels: {values: [red, blue]}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-below-threshold-proposals",
+        schema,
+        &[("h.md", b"---\ntype: task\nlabels: [BLUE, RED]\n---\n# H\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let below = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Declared)),
+    );
+    let lowered = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    let proposed: Vec<Option<OperationKind>> = provenance(&below)
+        .skipped
+        .iter()
+        .map(|skipped| {
+            skipped
+                .proposed
+                .as_ref()
+                .map(|operation| operation.kind.clone())
+        })
+        .collect();
+    let written = kinds(&lowered);
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(proposed, vec![Some(written[0].clone()); 2]);
+}
+
+/// **A bare value naming a document whose route the batch refuses resolves
+/// where that document stays**: two routes land at one destination, so the
+/// later is refused as taken and its document stays; `b/zz-b`, path-qualified
+/// to it, still names it once the plan lands, and the plan applies leaving
+/// only its skips.
+#[test]
+fn a_bare_value_naming_a_document_whose_route_the_batch_refuses_resolves_where_it_stays() {
+    let schema = format!("{TASKED}fields:\n  up: {{type: link}}\n");
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-bare-link-refused-route",
+        &schema,
+        &[
+            ("a/zz-b.md", b"---\ntype: task\n---\n# First\n"),
+            ("b/zz-b.md", b"---\ntype: task\n---\n# Second\n"),
+            ("h.md", b"---\nup: b/zz-b\n---\n# H\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(stands(&vault, "b/zz-b.md"));
+    assert!(written(&vault, "h.md").contains("[[b/zz-b]]"));
+    let recorded: Vec<&norn_wire::PlanCondition> = plan
+        .conditions
+        .iter()
+        .filter(|condition| {
+            matches!(
+                condition,
+                norn_wire::PlanCondition::AddressResolution { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![&norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("h.md"), norn_wire::LinkFamily::Wikilink, "b/zz-b"),
+            norn_wire::Resolves::one(at("b/zz-b.md")),
+        )]
+    );
 }

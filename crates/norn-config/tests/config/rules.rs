@@ -798,6 +798,100 @@ fn a_synonym_target_its_own_rule_refuses_is_refused() {
     }
 }
 
+/// **A closed set never holds a wikilink**: a link is an address, and a set
+/// of addresses is drift the vault's own moves would break. A rule closing a
+/// field declared `link` is refused naming the rule and the field, whatever
+/// the members are.
+#[test]
+fn a_one_of_on_a_field_declared_link_is_refused() {
+    for values in ["['[[alpha]]']", "[alpha]"] {
+        let bytes = format!(
+            "version: 1\nfields:\n  project: {{ type: link }}\nrules:\n  t: {{ one_of: {{ project: {{ values: {values} }} }} }}\n"
+        );
+        assert_eq!(
+            rule_problem(bytes.as_bytes()),
+            (
+                "rules.t.one_of.project".to_string(),
+                RuleProblem::LinkFieldClosed
+            ),
+            "{values}"
+        );
+    }
+}
+
+/// **A `one_of` member holding a wikilink is refused**, an embed included,
+/// whether the link is the whole value or part of it.
+#[test]
+fn a_one_of_member_holding_a_wikilink_is_refused() {
+    for value in [
+        "[[alpha]]",
+        "[[alpha|Alpha]]",
+        "see [[alpha]]",
+        "![[alpha]]",
+    ] {
+        let bytes = format!(
+            "version: 1\nrules:\n  t: {{ one_of: {{ status: {{ values: [todo, '{value}'] }} }} }}\n"
+        );
+        assert_eq!(
+            rule_problem(bytes.as_bytes()),
+            (
+                "rules.t.one_of.status.values".to_string(),
+                RuleProblem::Member {
+                    value: value.to_string(),
+                    problem: ElementProblem::HoldsWikilink,
+                }
+            ),
+            "{value}"
+        );
+    }
+}
+
+/// **A synonym holds no wikilink on either side**: not its written side, and
+/// not its target.
+#[test]
+fn a_synonym_holding_a_wikilink_is_refused() {
+    let written = b"version: 1\nrules:\n  t: { one_of: { status: { values: [todo, done], synonyms: { '[[done]]': done } } } }\n";
+    assert_eq!(
+        rule_problem(written),
+        (
+            "rules.t.one_of.status.synonyms".to_string(),
+            RuleProblem::SynonymWritten {
+                value: "[[done]]".to_string(),
+                problem: ElementProblem::HoldsWikilink,
+            }
+        )
+    );
+    let target = b"version: 1\nrules:\n  t: { one_of: { status: { values: [todo, done], synonyms: { complete: '[[done]]' } } } }\n";
+    assert_eq!(
+        rule_problem(target),
+        (
+            "rules.t.one_of.status.synonyms".to_string(),
+            RuleProblem::SynonymTarget {
+                value: "[[done]]".to_string(),
+                problem: ElementProblem::HoldsWikilink,
+            }
+        )
+    );
+}
+
+/// The refusal reads as the text layer reads: brackets that parse as no
+/// wikilink are plain text, and a closed set holds them.
+#[test]
+fn a_one_of_member_the_text_layer_reads_as_no_wikilink_loads() {
+    let schema = VaultSchema::parse(
+        b"version: 1
+rules:
+  t:
+    one_of:
+      status: { values: ['[x]', 'a]]b', '[[', '[[]]', done], synonyms: { '[y]': 'a]]b' } }
+",
+    )
+    .expect("members that are no wikilink");
+    let rule = schema.rule("t").expect("the rule");
+    let (_, set) = rule.one_of().next().expect("a closed set");
+    assert_eq!(set.values(), ["[x]", "a]]b", "[[", "[[]]", "done"]);
+}
+
 /// **A route names a folder some document could stand directly inside under
 /// its own rule's allowed paths.** An untemplated route is judged exactly; a
 /// templated one with each token standing as one segment.
@@ -1707,6 +1801,23 @@ fn the_undeclared_tags_carrier_selects_under_the_tag_fold() {
         schema.equality_key("topic", "#Project"),
         Some(TypedValue::Text("#Project".to_string()))
     );
+}
+
+/// **A field compares as text exactly where its equality key is its text**:
+/// an undeclared key and one declared `text`; never the tag carrier, declared
+/// or not, a key declared `tags`, or a typed or `link` key.
+#[test]
+fn a_field_compares_as_text_where_its_key_is_its_text() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  title: {type: text}\n  topics: {type: tags}\n  n: {type: number}\n  up: {type: link}\n",
+    )
+    .expect("a schema");
+    for field in ["title", "topic"] {
+        assert!(schema.compares_as_text(field), "{field}");
+    }
+    for field in ["tags", "topics", "n", "up"] {
+        assert!(!schema.compares_as_text(field), "{field}");
+    }
 }
 
 /// **Selector identity reads the tag fold**: two selectors whose tag values

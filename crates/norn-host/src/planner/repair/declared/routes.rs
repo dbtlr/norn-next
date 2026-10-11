@@ -329,15 +329,15 @@ fn in_folder(folder: &str, name: &str) -> Result<DocumentPath, norn_wire::PathPr
 /// The citation of the misplaced finding `row` fixed by moving it to `to`,
 /// noting where the destination is the repair's own time.
 fn cited(row: &FindingRow, to: &DocumentPath, clocked: bool) -> CitedFinding {
-    let cited = CitedFinding::new(row.id, Confidence::Declared);
-    if clocked {
-        cited.with_notes(vec![format!(
+    let notes = if clocked {
+        vec![format!(
             "`{to}` is filled from a route reading the clock, so the destination is the \
              repair's time"
-        )])
+        )]
     } else {
-        cited
-    }
+        Vec::new()
+    };
+    super::cited(row, Confidence::Declared, notes)
 }
 
 /// The routes of `drafts` whose destination collides with an earlier route

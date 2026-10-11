@@ -63,11 +63,11 @@ use norn_store::{
     RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
-    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, DeleteParams,
-    DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow, Forecast,
-    MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams, ResolvedPlan,
-    RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding, TrustState,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, Confidence,
+    DeleteParams, DocumentPath, EditParams, ErrorDetail, ErrorEnvelope, FindParams, FindingRow,
+    Forecast, MoveParams, NewParams, PlanDocument, Predicate, Provenance, RepairParams,
+    ResolvedPlan, RewriteWikilinkParams, RootIdentity, RuleSet, SetParams, SkippedFinding,
+    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -191,11 +191,13 @@ fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, Erro
         .map_err(|error| unreadable(name, error))
 }
 
-/// A repair batch's findings: its rows, and the rule sets they cite.
+/// A repair batch's findings: its rows, the rule sets they cite, and the
+/// weakest confidence the request writes a fix at.
 #[derive(Clone, Copy)]
 struct Findings<'b> {
     rows: &'b [FindingRow],
     rule_sets: &'b [RuleSet],
+    threshold: Confidence,
 }
 
 /// What a repair batch plans to: the resolved plan, its forecast, the
@@ -247,6 +249,7 @@ where
         case,
         clock,
         rule_sets: batch.rule_sets,
+        threshold: batch.threshold,
     };
     let reading = repair::Over {
         view,
@@ -264,6 +267,9 @@ where
     let mut resolution =
         resolve_through(authored, ground, name, snapshot, view, clock).map_err(refused)?;
     resolution.unresolved.extend(planned.unresolved);
+    // The address resolutions the fixes record are checked at the plan's
+    // after-state; no operation resolves to them.
+    resolution.plan.conditions.extend(planned.conditions);
     let resolution = fully_resolved(resolution)?;
     Ok(Repaired {
         plan: resolution.plan,
@@ -704,6 +710,29 @@ impl LinkIndex for PlanSnapshot<'_> {
         Ok(naming)
     }
 
+    fn targets(
+        &self,
+        overlay: &PathOverlay,
+        addresses: &[&str],
+        headed: PlanSide,
+    ) -> Result<Vec<TargetNaming>, PageRefused> {
+        let (namings, work) = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .target_namings(overlay, addresses, headed, self.declared)
+                    .map(|(namings, work)| {
+                        (
+                            namings,
+                            LinkJudgmentCost::of(&work, before, snapshot.counters()),
+                        )
+                    })
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(namings)
+    }
+
     /// The links the snapshot holds for `holder`, read by its path without
     /// its body. What the read costs is the snapshot's own counters', as
     /// every read on it is; it is no link judgment, so it adds nothing to
@@ -1061,6 +1090,7 @@ where
                 Findings {
                     rows: &batch.rows,
                     rule_sets: &batch.rule_sets,
+                    threshold: params.threshold(),
                 },
                 ground,
                 name,
@@ -1320,6 +1350,7 @@ mod tests {
             Findings {
                 rows: &[missing],
                 rule_sets: &[],
+                threshold: Confidence::DEFAULT_THRESHOLD,
             },
             &ground,
             &name,
@@ -1419,6 +1450,7 @@ mod tests {
             Findings {
                 rows: &[misplaced],
                 rule_sets: &rule_sets,
+                threshold: Confidence::DEFAULT_THRESHOLD,
             },
             ground,
             &name,
@@ -1443,14 +1475,15 @@ mod tests {
         )
     }
 
-    /// A rule routing a task into `tasks/`, and one closing a hub's `up` over
+    /// A rule routing a task into `tasks-all/`, whose longer folder name
+    /// lengthens a link to it, and one limiting a hub's `up` to the length of
     /// the spelling it holds now.
-    const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[loose/a]]']}\n";
+    const LIMITED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks-all/**'], route: 'tasks-all/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 11\n";
 
     /// **The judgment of the whole plan refuses a plan its planning's local
     /// judgment got wrong, as a repair defect**: with the respell check
     /// blinded, the route moving `loose/a.md` is planned though its cascade
-    /// respells the hub's closed `up`, and the guard refuses the plan as
+    /// respells the hub's limited `up`, and the guard refuses the plan as
     /// `vault/plan-refused`, its note naming the defect and its checks the
     /// violation, and its forecast the cascade's advisories; planned with the
     /// check, the route is skipped and the plan passes.
@@ -1458,7 +1491,7 @@ mod tests {
     fn the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect() {
         let (_scratch, ground, store) = routed_vault(
             "norn-host-repair-guard-defect",
-            CLOSED_UP,
+            LIMITED_UP,
             &[
                 ("loose/a.md", "---\ntype: task\n---\n# A\n"),
                 (
@@ -1526,7 +1559,7 @@ mod tests {
     fn drift_between_planning_and_the_guard_answers_the_appliers_own_refusal() {
         let (scratch, ground, store) = routed_vault(
             "norn-host-repair-guard-drift",
-            CLOSED_UP,
+            LIMITED_UP,
             &[
                 ("loose/a.md", "---\ntype: task\n---\n# A\n"),
                 ("h.md", "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n"),
@@ -1734,10 +1767,7 @@ mod tests {
         if cited {
             repaired.citations[0]
                 .findings
-                .push(norn_wire::CitedFinding::new(
-                    99,
-                    norn_wire::Confidence::Declared,
-                ));
+                .push(norn_wire::CitedFinding::new(99, Confidence::Declared));
         }
     }
 

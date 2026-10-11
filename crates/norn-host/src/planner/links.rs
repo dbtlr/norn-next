@@ -153,6 +153,22 @@ pub(crate) trait LinkIndex {
         headed: PlanSide,
     ) -> Result<TargetNaming, Self::Error>;
 
+    /// What each of `addresses` names over the plan `overlay`, as
+    /// [`LinkIndex::target`] reads one, in their order: one judgment for
+    /// them all where the index answers so, so the plan's targets are read
+    /// once, not once per address.
+    fn targets(
+        &self,
+        overlay: &PathOverlay,
+        addresses: &[&str],
+        headed: PlanSide,
+    ) -> Result<Vec<TargetNaming>, Self::Error> {
+        addresses
+            .iter()
+            .map(|address| self.target(overlay, address, headed))
+            .collect()
+    }
+
     /// The links the index holds for the document at `holder`, beside the
     /// content hash of the bytes it derived them from; `None` where it holds
     /// no document at that spelling.
@@ -715,12 +731,33 @@ pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
         let standing = target.after.is_some();
         overlay.with(stored_path(target.path), standing, standing)
     });
-    let probed: Vec<ProbedLink> = recorded
-        .iter()
-        .filter_map(|(_, link, _)| probe_of(link))
-        .collect();
+    let links: Vec<&LinkKey> = recorded.iter().map(|(_, link, _)| *link).collect();
+    let resolved = resolved_addresses(index, &overlay, links)?;
+    Ok(recorded
+        .into_iter()
+        .filter(|(_, link, after)| resolved.get(&entry_key(link)) != Some(*after))
+        .map(|(condition, _, _)| condition.clone())
+        .collect())
+}
+
+/// What each of `links` resolves to from its holder with every target of the
+/// plan `overlay` describes at its after-state, by the link's key
+/// ([`entry_key`]), in one judgment of the index: the one probe an address
+/// resolution is recorded by — a repair's planner, for every link its fixes
+/// write — and checked by ([`failed_address_resolutions`]), so what a
+/// planner records is by construction what the applier computes again. A
+/// link of a syntax the store holds no link of has no entry.
+pub(crate) fn resolved_addresses<'l, I: LinkIndex + ?Sized>(
+    index: &I,
+    overlay: &PathOverlay,
+    links: impl IntoIterator<Item = &'l LinkKey>,
+) -> Result<BTreeMap<EntryKey, Resolves>, I::Error> {
+    let probed: Vec<ProbedLink> = links.into_iter().filter_map(probe_of).collect();
     let mut resolved: BTreeMap<EntryKey, Resolves> = BTreeMap::new();
-    index.changes(&overlay, &probed, &mut |change| {
+    if probed.is_empty() {
+        return Ok(resolved);
+    }
+    index.changes(overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
             wire_family(change.link.family),
@@ -728,11 +765,23 @@ pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
         );
         resolved.insert(entry_key(&key), change.after);
     })?;
-    Ok(recorded
+    Ok(resolved)
+}
+
+/// The overlay of a plan whose only effect on the vault's documents is
+/// `moves`, each `(from, to)`: a document gone from `from` and standing at
+/// `to`, drawn as the applier draws every target of a plan at its after-state
+/// alone ([`failed_address_resolutions`]).
+pub(crate) fn moved_overlay<'m>(
+    moves: impl IntoIterator<Item = (&'m DocumentPath, &'m DocumentPath)>,
+) -> PathOverlay {
+    moves
         .into_iter()
-        .filter(|(_, link, after)| resolved.get(&entry_key(link)) != Some(*after))
-        .map(|(condition, _, _)| condition.clone())
-        .collect())
+        .fold(PathOverlay::new(), |overlay, (from, to)| {
+            overlay
+                .with(stored_path(from), false, false)
+                .with(stored_path(to), true, true)
+        })
 }
 
 /// `link` as a link its holder's after-state writes, to be judged wherever it

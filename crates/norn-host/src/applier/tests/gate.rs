@@ -612,19 +612,16 @@ fn an_undeclared_tag_respelled_in_another_case_introduces_nothing() {
     );
 }
 
-/// A schema closing a single link, a list of links, a number and a list of
-/// tags, each to a set a standing document's value lies outside.
+/// A schema closing a number and a list of tags, each to a set a standing
+/// document's value lies outside. A closed set never holds a wikilink, so no
+/// link is closed here.
 const RESPELLED: &str = "version: 1
 fields:
-  project: { type: link, shape: single }
-  related: { type: link, shape: list }
   rank: { type: number, shape: single }
   topics: { type: tags, shape: list }
 rules:
   closed:
     one_of:
-      project: { values: ['[[alpha]]'] }
-      related: { values: ['[[alpha]]'] }
       rank: { values: [1] }
       topics: { values: [project] }
 ";
@@ -632,42 +629,13 @@ rules:
 /// **A standing violation respelled under its equality key introduces
 /// nothing, and one under another key does**: the gate tells a rule's
 /// finding apart by the key a closed set compares the offending value by, so
-/// a link keeps its identity under another alias and not under another
-/// anchor, a number under another spelling, and a tag under another case,
-/// while a second offending link, number or tag is a violation it
+/// a number keeps its identity under another spelling and a tag under another
+/// case, while a second offending number or tag is a violation it
 /// introduces.
 #[test]
 fn a_standing_violation_respelled_under_its_equality_key_introduces_nothing() {
     let float = |number: f64| AuthoredValue::float(number).expect("a finite number");
-    let cases: [(&str, &str, &str, AuthoredValue, Option<&str>); 8] = [
-        (
-            "a link under another alias",
-            "project: \"[[beta|One]]\"",
-            "project",
-            text("[[beta|Two]]"),
-            None,
-        ),
-        (
-            "a link under another anchor",
-            "project: \"[[beta|One]]\"",
-            "project",
-            text("[[beta#Plan]]"),
-            Some("[[beta#Plan]]"),
-        ),
-        (
-            "a list of links under other aliases",
-            "related: [\"[[beta|One]]\"]",
-            "related",
-            list(&["[[beta]]", "[[beta|Three]]"]),
-            None,
-        ),
-        (
-            "a list of links with another link pushed",
-            "related: [\"[[beta|One]]\"]",
-            "related",
-            list(&["[[beta|One]]", "[[gamma|G]]"]),
-            Some("[[gamma|G]]"),
-        ),
+    let cases: [(&str, &str, &str, AuthoredValue, Option<&str>); 4] = [
         (
             "a number under another spelling",
             "rank: 2",
@@ -708,6 +676,64 @@ fn a_standing_violation_respelled_under_its_equality_key_introduces_nothing() {
                 [violation(
                     "a.md",
                     FindingKind::NotOneOf,
+                    field,
+                    Some(offending)
+                )],
+                "{name}"
+            ),
+        }
+    }
+}
+
+/// **A standing link violation respelled under its link key introduces
+/// nothing, and another link does**: a link value's identity is its target
+/// and fragment, the alias dropped, so a length violation keeps its identity
+/// when only an alias changes or a duplicate alias is added, while another
+/// fragment or another target is a violation the write introduces.
+#[test]
+fn a_standing_link_violation_respelled_under_its_link_key_introduces_nothing() {
+    let schema = "version: 1\nfields:\n  project: {type: link, shape: single}\n  related: {type: link, shape: list}\nrules:\n  limited:\n    max_length: {project: 2, related: 2}\n";
+    let cases = [
+        (
+            "an alias changed",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta|Two]]"),
+            None,
+        ),
+        (
+            "a fragment added",
+            "project: \"[[beta|One]]\"",
+            "project",
+            text("[[beta#Plan]]"),
+            Some("[[beta#Plan]]"),
+        ),
+        (
+            "the same target under another alias",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta]]", "[[beta|Three]]"]),
+            None,
+        ),
+        (
+            "another target pushed",
+            "related: [\"[[beta|One]]\"]",
+            "related",
+            list(&["[[beta|One]]", "[[gamma|G]]"]),
+            Some("[[gamma|G]]"),
+        ),
+    ];
+    for (name, held, field, value, introduced) in cases {
+        let content = format!("---\n{held}\n---\n");
+        let mut fixture = Fixture::with_schema(schema, &[("a.md", content.as_str())]);
+        let outcome = fixture.apply(fixture.plan(vec![setting("a.md", field, value)]));
+        match introduced {
+            None => assert!(applied(outcome).forced.is_empty(), "{name}"),
+            Some(offending) => assert_eq!(
+                violations(&refused_for(outcome)),
+                [violation(
+                    "a.md",
+                    FindingKind::TooLong,
                     field,
                     Some(offending)
                 )],

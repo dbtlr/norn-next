@@ -321,8 +321,9 @@ impl Resolves {
 /// progress never changes it. Its link may sit in a file the plan writes — a
 /// link a cascade rewrites has an entry — so it is not a fact about a file
 /// the plan leaves alone. An address resolution is the third kind: a fact a
-/// repair's planner records about a link it writes or an address it replaces,
-/// checked at the after-state and outside the change set.
+/// repair's planner records about a link a fix writes, or an address a later
+/// layer's fix replaces, checked at the after-state and outside the change
+/// set.
 ///
 /// **An entry is keyed at the after-state.** Its key names the link
 /// as the plan leaves it: a rewritten link by its new address, its `before`
@@ -342,7 +343,13 @@ impl Resolves {
 /// **An address resolution is checked at the after-state.** From this holder,
 /// this address must resolve to `after` once the plan has been applied, in a
 /// preview and an apply alike; the address need not stand in the holder after
-/// the plan, since a repair records one it replaces.
+/// the plan. Repair records one today for every link a fix writes a value
+/// holding; the move-following and similarity fixes of a later layer record
+/// one for an address they replace, which is why the address need not stand
+/// in the holder after the plan. No fix of today replaces one: a closed set
+/// never holds a wikilink, so no fold or synonym replaces one; a rename moves
+/// a value without changing it; and a wrap, an unwrap or a bare value made a
+/// link writes an address without replacing one.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
@@ -473,7 +480,8 @@ pub enum SkipReason {
     RenameOntoOccupiedField,
     /// The link's address resolves to more than one document.
     AmbiguousLink,
-    /// The document belongs to a class a repair does not touch.
+    /// The fix would be one of a class a repair never makes: date
+    /// reformatting, or coercion of yes/no or numeric spellings.
     ExcludedClass,
     /// The write would be refused when the plan is applied.
     JudgeWouldRefuse,
@@ -512,10 +520,12 @@ pub enum SkippedCandidates {
     /// The values a repair could have written: a field's defaults or
     /// synonym members, the destinations a document's routes name, or the
     /// remedies a forbidden field's rules declare, spelled `remove` and
-    /// `rename_to: <field>`.
+    /// `rename_to: <field>`; and the values a derived fix would have written,
+    /// which no rule proposes.
     #[non_exhaustive]
     Values {
-        /// The head of the values, each with the rule that proposed it.
+        /// The head of the values, each with the rule that proposed it,
+        /// where a rule did.
         head: ValueCandidateHead,
     },
 }

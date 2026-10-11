@@ -6,7 +6,7 @@
 //! wikilink spelling an editor's property recognizes, whole and untrimmed, so
 //! each spelling that reads and each that does not is a case of its own.
 
-use norn_config::schema::{Breach, CaseFold, ElementProblem, FieldType, RuleProblem, VaultSchema};
+use norn_config::schema::{Breach, CaseFold, FieldType, VaultSchema};
 use norn_config::schema::{RuleFinding, TypedValue, VaultSchemaError};
 use norn_wire::{AuthoredValue, ValueMap};
 
@@ -281,124 +281,6 @@ fn padding_inside_the_brackets_is_no_part_of_a_links_key() {
 fn a_string_that_is_no_link_has_no_key() {
     assert_eq!(key_of("alpha"), None);
     assert_eq!(key_of("![[alpha]]"), None);
-}
-
-// ---- the key where a closed set and a finding identity compare ----
-
-const PROJECTS: &str = "version: 1
-fields:
-  project: { type: link, shape: single }
-rules:
-  task:
-    one_of:
-      project: { values: ['[[alpha]]'] }
-";
-
-fn not_one_of(value: &str) -> usize {
-    judged(&schema(PROJECTS), text(value))
-        .iter()
-        .filter(|finding| finding.breach() == Breach::NotOneOf)
-        .count()
-}
-
-#[test]
-fn a_closed_set_admits_a_link_by_its_key_whatever_its_alias() {
-    assert_eq!(not_one_of("[[alpha]]"), 0);
-    assert_eq!(not_one_of("[[alpha|Alpha]]"), 0);
-}
-
-#[test]
-fn a_closed_set_refuses_a_link_with_another_anchor_case_or_target() {
-    for other in [
-        "[[alpha#Plan]]",
-        "[[Alpha]]",
-        "[[projects/alpha]]",
-        "[[beta]]",
-    ] {
-        assert_eq!(not_one_of(other), 1, "`{other}`");
-    }
-}
-
-#[test]
-fn a_closed_set_member_that_is_no_link_is_refused_at_schema_read() {
-    let refused = VaultSchema::parse(
-        b"version: 1
-fields:
-  project: { type: link }
-rules:
-  task:
-    one_of:
-      project: { values: [alpha] }
-",
-    )
-    .expect_err("a member that is no link");
-    match refused {
-        VaultSchemaError::Rule {
-            problem:
-                RuleProblem::Member {
-                    value,
-                    problem: ElementProblem::NotType(FieldType::Link),
-                },
-            ..
-        } => assert_eq!(value, "alpha"),
-        other => panic!("a member refusal: {other}"),
-    }
-}
-
-#[test]
-fn a_closed_set_synonym_reads_a_link_by_its_key() {
-    let schema = schema(
-        "version: 1
-fields:
-  project: { type: link }
-rules:
-  task:
-    one_of:
-      project: { values: ['[[alpha]]'], synonyms: { '[[a]]': '[[alpha|Alpha]]' } }
-",
-    );
-    assert!(
-        judged(&schema, text("[[alpha]]"))
-            .iter()
-            .all(|finding| finding.breach() != Breach::NotOneOf)
-    );
-}
-
-#[test]
-fn two_spellings_of_one_offending_link_are_one_finding_naming_the_first() {
-    let findings = judged(
-        &schema(PROJECTS.replace("shape: single", "shape: list").as_str()),
-        AuthoredValue::list([
-            text("[[beta|First]]"),
-            text("[[beta|Second]]"),
-            text("[[beta]]"),
-        ]),
-    );
-    assert_eq!(
-        findings
-            .iter()
-            .map(|finding| (
-                finding.breach(),
-                finding.value().and_then(|v| v.scalar_text())
-            ))
-            .collect::<Vec<_>>(),
-        [(Breach::NotOneOf, Some("[[beta|First]]".to_string()))]
-    );
-}
-
-#[test]
-fn a_findings_identity_is_the_links_key_whatever_its_alias() {
-    let identity = |value: &str| {
-        let findings = judged(&schema(PROJECTS), text(value));
-        findings
-            .iter()
-            .find(|finding| finding.breach() == Breach::NotOneOf)
-            .expect("an offending link")
-            .identity()
-            .clone()
-    };
-    assert_eq!(identity("[[beta|One]]"), identity("[[beta|Two]]"));
-    assert_ne!(identity("[[beta]]"), identity("[[beta#Plan]]"));
 }
 
 // ---- the key where a selector compares ----

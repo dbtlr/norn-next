@@ -244,8 +244,9 @@ impl PathNormalizer {
     /// on it, so a shipped build has no way to state one: a caller deciding
     /// names against a real root takes [`Vault::normalizer`](crate::Vault::normalizer)
     /// or [`detect`](Self::detect). This crate's own tests reach it under
-    /// `cfg(test)`, and another crate's tests through the `test-support`
-    /// feature its dev-dependency on this crate turns on.
+    /// `cfg(test)`, and another crate's tests and harness-reachable surface
+    /// through the `test-support` feature: a dev-dependency on this crate
+    /// turns it on, and so does `norn-host`'s `induced-failure` feature.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_sensitivity(sensitivity: CaseSensitivity) -> Self {
         Self { sensitivity }
