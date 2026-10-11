@@ -171,9 +171,12 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         leave_out_what_falls_with(&operations, &mut left_out, view);
         if left_out.len() == standing {
             // A cascade names only holders that stand, so it composes
-            // wherever its operation did. Should one not, its operation is
-            // left out in the composition's words, in every build, rather
-            // than planned with a transition its cascade does not make.
+            // wherever its operation did, but for a holder whose batch the
+            // text layer cannot prove within its reads
+            // (`norn_text::REWRITE_PROOF_READS`). Where one does not, its
+            // operation is left out in the composition's words, in every
+            // build, rather than planned with a transition its cascade does
+            // not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
             if read_carried_links(
                 &operations,

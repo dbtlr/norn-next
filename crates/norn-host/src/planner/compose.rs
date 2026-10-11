@@ -237,9 +237,11 @@ pub(crate) fn compose<V: VaultView>(
         }
     }
     for (holder, (rewrites, mut carriers)) in holders {
-        // A holder's bytes are held, but for a file changed while the plan
-        // was read ([`Simulated::held`]): then every operation writing into
-        // it is left out, as one whose text no longer occurs.
+        // A holder's bytes are held and its batch proven, but for a file
+        // gone or changed while the plan was read ([`Simulated::held`]) or a
+        // batch the text layer cannot prove within its reads
+        // ([`Simulated::rewrite`]): then every operation writing into it is
+        // left out, as one whose text no longer occurs.
         if let Err(detail) = vault.rewrite(&holder, &rewrites) {
             carriers.sort_unstable();
             carriers.dedup();
@@ -873,7 +875,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 "the link rewrites into `{spelling}` were not proven, so none is written: {unproven}; plan fewer moves or link rewrites into `{spelling}` at once, or lower a repair's limit, and retry"
             )
         })?;
-        let kept = kept_at_written(&links, rewrites);
+        let kept = kept_at_written(&links, &BatchAddresses::of(rewrites));
         self.target(spelling).after = After::Bytes(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),
@@ -903,33 +905,44 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     }
 }
 
+/// The addresses a holder's batch of rewrites matches links by and writes
+/// them as, by syntax: each rewrite read once, so what the batch does to a
+/// link is a lookup however many rewrites the holder takes.
+struct BatchAddresses<'r> {
+    matched: HashSet<(LinkFamily, &'r str)>,
+    written: HashSet<(LinkFamily, &'r str)>,
+}
+
+impl<'r> BatchAddresses<'r> {
+    fn of(rewrites: &[&'r LinkRewrite]) -> Self {
+        let mut matched = HashSet::with_capacity(rewrites.len());
+        let mut written = HashSet::with_capacity(rewrites.len());
+        for rewrite in rewrites {
+            #[cfg(test)]
+            tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
+            matched.insert((rewrite.syntax, rewrite.from.as_str()));
+            written.insert((rewrite.syntax, rewrite.to.as_str()));
+        }
+        BatchAddresses { matched, written }
+    }
+}
+
 /// The syntax and address of each of `links`, as the change set reads them,
-/// that no rewrite of `rewrites` matches and that one of them writes: what a
-/// batch over the holder of `links` keeps under a key it also writes.
-///
-/// Each rewrite is read once, into the addresses the batch matches and the
-/// ones it writes, so each link is two lookups however many rewrites the
-/// holder takes.
+/// that `batch` matches no link by and writes one as: what a batch over the
+/// holder of `links` keeps under a key it also writes, each once, in the
+/// order the holder holds them.
 fn kept_at_written(
     links: &[norn_store::LinkFact],
-    rewrites: &[&LinkRewrite],
+    batch: &BatchAddresses<'_>,
 ) -> Vec<(LinkFamily, String)> {
-    let mut matched: HashSet<(LinkFamily, &str)> = HashSet::with_capacity(rewrites.len());
-    let mut written: HashSet<(LinkFamily, &str)> = HashSet::with_capacity(rewrites.len());
-    for rewrite in rewrites {
-        #[cfg(test)]
-        tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
-        matched.insert((rewrite.syntax, rewrite.from.as_str()));
-        written.insert((rewrite.syntax, rewrite.to.as_str()));
-    }
     let mut seen: HashSet<(LinkFamily, String)> = HashSet::new();
     let mut kept: Vec<(LinkFamily, String)> = Vec::new();
     for link in links {
         let syntax = wire_family(link.family);
         let address = links::address(link);
         let key = (syntax, address.as_str());
-        if written.contains(&key)
-            && !matched.contains(&key)
+        if batch.written.contains(&key)
+            && !batch.matched.contains(&key)
             && seen.insert((syntax, address.clone()))
         {
             kept.push((syntax, address));
@@ -1134,7 +1147,7 @@ mod tests {
     }
 
     thread_local! {
-        /// Rewrites [`kept_at_written`] read on this thread.
+        /// Rewrites [`BatchAddresses::of`] read on this thread.
         pub(super) static REWRITES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
