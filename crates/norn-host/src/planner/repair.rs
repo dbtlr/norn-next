@@ -17,7 +17,10 @@
 //! value resolves to one document at the plan's after-state is written as
 //! the link; and a `field/not-one-of` value differing from exactly one member
 //! only by case and white space is replaced by that member. Every link a fix
-//! writes is recorded with what it resolves to at the after-state. All are
+//! writes is recorded with what it resolves to at the after-state; none
+//! replaces a link address, since a closed set never holds a wikilink, a
+//! rename moves a value without changing it, and a wrap, an unwrap or a bare
+//! value made a link writes an address without replacing one. All are
 //! filled and judged by [`declared`], one operation per fix (a rename is
 //! two), numbered `repair-1`, `repair-2` and on in plan order, each cited at
 //! the [`Confidence`] of its fix with the findings it fixes. A fix below the
@@ -28,15 +31,15 @@
 //! or defaults that disagree, a capture bound several ways, a rename onto an
 //! occupied field, a destination already taken, a route whose cascade may
 //! respell a link a rule reads by value, a fix that would bring in required
-//! fields, or one the write gate would refuse. A finding the rules conflict over (`field/rules-conflict`,
-//! `document/rules-conflict`) is skipped as [`SkipReason::RulesConflict`]. A
-//! finding of a document that does not read — a path derived state cannot
-//! hold (not UTF-8, or spelling no document path), a body that does not
-//! decode, or a frontmatter block nothing read — is skipped as
-//! [`SkipReason::Unreadable`]; an ambiguous link is skipped as
+//! fields, or one the write gate would refuse. A finding the rules conflict
+//! over (`field/rules-conflict`, `document/rules-conflict`) is skipped as
+//! [`SkipReason::RulesConflict`]. A finding of a document that does not read —
+//! a path derived state cannot hold (not UTF-8, or spelling no document path),
+//! a body that does not decode, or a frontmatter block nothing read — is
+//! skipped as [`SkipReason::Unreadable`]; an ambiguous link is skipped as
 //! [`SkipReason::AmbiguousLink`], with the candidates its row carries; every
-//! other finding is skipped as [`SkipReason::NoDeclaredFix`], with the value
-//! it judged where it carries one. A type mismatch on a `date`, `number` or
+//! other finding is skipped as [`SkipReason::NoDeclaredFix`], with the value it
+//! judged where it carries one. A type mismatch on a `date`, `number` or
 //! `boolean` field that no derived fix answers is skipped as
 //! [`SkipReason::ExcludedClass`]. A misplaced finding no rule its row cites
 //! routes is decided from the batch's rule sets, so a document holding only

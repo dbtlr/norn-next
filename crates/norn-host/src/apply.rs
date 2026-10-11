@@ -1475,14 +1475,15 @@ mod tests {
         )
     }
 
-    /// A rule routing a task into `tasks/`, and one closing a hub's `up` over
+    /// A rule routing a task into `tasks-all/`, whose longer folder name
+    /// lengthens a link to it, and one limiting a hub's `up` to the length of
     /// the spelling it holds now.
-    const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks/**'], route: 'tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[loose/a]]']}\n";
+    const LIMITED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['tasks-all/**'], route: 'tasks-all/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 11\n";
 
     /// **The judgment of the whole plan refuses a plan its planning's local
     /// judgment got wrong, as a repair defect**: with the respell check
     /// blinded, the route moving `loose/a.md` is planned though its cascade
-    /// respells the hub's closed `up`, and the guard refuses the plan as
+    /// respells the hub's limited `up`, and the guard refuses the plan as
     /// `vault/plan-refused`, its note naming the defect and its checks the
     /// violation, and its forecast the cascade's advisories; planned with the
     /// check, the route is skipped and the plan passes.
@@ -1490,7 +1491,7 @@ mod tests {
     fn the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect() {
         let (_scratch, ground, store) = routed_vault(
             "norn-host-repair-guard-defect",
-            CLOSED_UP,
+            LIMITED_UP,
             &[
                 ("loose/a.md", "---\ntype: task\n---\n# A\n"),
                 (
@@ -1558,7 +1559,7 @@ mod tests {
     fn drift_between_planning_and_the_guard_answers_the_appliers_own_refusal() {
         let (scratch, ground, store) = routed_vault(
             "norn-host-repair-guard-drift",
-            CLOSED_UP,
+            LIMITED_UP,
             &[
                 ("loose/a.md", "---\ntype: task\n---\n# A\n"),
                 ("h.md", "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n"),

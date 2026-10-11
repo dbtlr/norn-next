@@ -95,6 +95,13 @@
 //!   target, outside the rule's own `values`. A collection's shape is judged
 //!   on the composed field alone, so a `shape: list` field takes scalar
 //!   members;
+//! - **a closed set that holds a wikilink**: a `one_of` on a field declared
+//!   `link`, or any member, synonym written side or synonym target holding a
+//!   wikilink the text layer parses, an embed included
+//!   ([`typed::holds_wikilink`]). A closed set is a list of values the vault
+//!   spells out, and a link is an address the vault's own moves respell, so a
+//!   set of them is drift; brackets the text layer reads as no wikilink, such
+//!   as `[x]` or `a]]b`, are plain text and load;
 //! - a route no document directly inside it could stand at under the rule's
 //!   own `allowed_paths`: the route's text, each token standing as a `*` and
 //!   a file name `*.md` after it, is a glob sharing no document path with
@@ -615,6 +622,17 @@ pub enum RuleProblem {
         /// Why the rule refuses it.
         problem: ElementProblem,
     },
+    /// A synonym's written side its rule refuses: a closed set holds no
+    /// wikilink on either side of a synonym.
+    SynonymWritten {
+        /// The written value, as written.
+        value: String,
+        /// Why the rule refuses it.
+        problem: ElementProblem,
+    },
+    /// A closed set on a field declared `link`: a closed set never holds a
+    /// wikilink, so it cannot close a field whose values are all links.
+    LinkFieldClosed,
     /// A synonym's target its own rule refuses as an element.
     SynonymTarget {
         /// The target, as written.
@@ -690,6 +708,8 @@ pub enum ElementProblem {
     TooLong(u64),
     /// It is not a member of the rule's closed set for the field.
     OutsideOneOf,
+    /// It holds a wikilink, which a closed set never holds.
+    HoldsWikilink,
 }
 
 impl fmt::Display for ElementProblem {
@@ -704,6 +724,9 @@ impl fmt::Display for ElementProblem {
             ),
             ElementProblem::OutsideOneOf => {
                 formatter.write_str("is not one of the rule's `one_of` values")
+            }
+            ElementProblem::HoldsWikilink => {
+                formatter.write_str("holds a wikilink, and a closed set never holds one")
             }
         }
     }
@@ -734,6 +757,12 @@ impl fmt::Display for RuleProblem {
             RuleProblem::SynonymTarget { value, problem } => {
                 write!(formatter, "maps a synonym onto `{value}`, which {problem}")
             }
+            RuleProblem::SynonymWritten { value, problem } => {
+                write!(formatter, "writes a synonym `{value}`, which {problem}")
+            }
+            RuleProblem::LinkFieldClosed => formatter.write_str(
+                "closes a field declared `link`, and a closed set never holds a wikilink",
+            ),
             RuleProblem::Template(error) => write!(formatter, "{error}"),
             RuleProblem::InadmissibleToken { token } => write!(
                 formatter,

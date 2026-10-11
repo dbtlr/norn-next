@@ -4,12 +4,15 @@
 //!
 //! **A value qualifies only where `[[value]]` reads back as exactly one plain
 //! wikilink.** The element is a non-empty string — and so is every element of
-//! the field the finding names, so a YAML number, boolean, date or null is
-//! never linked, nor a string sharing its text — with no surrounding white
-//! space and no `#` fragment, `|` alias, `[` or `]`, or line break, and
-//! `[[value]]` is, to the `link` reader ([`link_key`]) and the text layer, one
-//! wikilink of that address and nothing else. Any other value has no
-//! declared fix: a repair never respells a value to make it qualify.
+//! the field the finding names, so a YAML number, boolean or null is never
+//! linked, nor a string sharing its text — with no surrounding white space and
+//! no `#` fragment, `|` alias, `[` or `]`, or line break, and `[[value]]` is,
+//! to the `link` reader ([`link_key`]) and the text layer, one wikilink of
+//! that address and nothing else. A date is a string in norn's value model,
+//! which has no date type (an unquoted `2026-10-11` reads as the string), so a
+//! bare date naming one document, a daily note say, is linked like any other
+//! string. Any other value has no declared fix: a repair never respells a
+//! value to make it qualify.
 //!
 //! **The answer rests on the link's resolution, so the fix is decided last.**
 //! A route of the batch moves its target, so the path a link resolves to, and
@@ -523,8 +526,8 @@ mod tests {
 
     /// **Only a string is made a link**: a YAML number, boolean or null
     /// never is, and a string sharing its text with one is left too, since
-    /// the finding names them both; a quoted date is a string, and is made a
-    /// link.
+    /// the finding names them both. A date is a string in the value model, so
+    /// an unquoted `2026-10-11` is made a link, as a daily note is named.
     #[test]
     fn only_a_string_is_made_a_link_and_one_sharing_its_text_with_a_scalar_stays() {
         let planned = planned(
@@ -532,7 +535,7 @@ mod tests {
             &[
                 (
                     "a.md",
-                    "---\nups: [3, '3', true, 'true', null, '2026-10-11']\n---\n",
+                    "---\nups: [3, '3', true, 'true', null, 2026-10-11]\n---\n",
                 ),
                 ("3.md", "# 3\n"),
                 ("true.md", "# True\n"),
@@ -830,46 +833,30 @@ mod tests {
         );
     }
 
-    /// **A fold and a declared default writing a link record its resolution
-    /// too**: ` [[b]] ` folds to the member `[[b]]`, and `next` fills from a
-    /// default naming `[[c]]`.
+    /// **A declared default writing a link records its resolution too**:
+    /// `next` fills from a default naming `[[c]]`.
     #[test]
-    fn a_fold_and_a_default_writing_a_link_record_its_resolution() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      parent: {values: ['[[b]]']}\n    required:\n      next: {default: '[[c]]'}\n";
+    fn a_declared_default_writing_a_link_records_its_resolution() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      next: {default: '[[c]]'}\n";
         let planned = planned(
             schema,
-            &[
-                ("a.md", "---\ntype: task\nparent: ' [[b]] '\n---\n"),
-                ("b.md", "# B\n"),
-                ("c.md", "# C\n"),
-            ],
-            &[
-                finding(1, FindingKind::NotOneOf, "a.md", "parent", " [[b]] "),
-                FindingRow::new(
-                    2,
-                    FindingKind::RequiredMissing,
-                    Severity::Warning,
-                    DocumentPath::new("a.md").expect("a document path"),
-                    Some("next".to_string()),
-                    None,
-                    CandidateHead::new([], 0).expect("an empty head"),
-                    None,
-                    "a finding",
-                    1,
-                ),
-            ],
+            &[("a.md", "---\ntype: task\n---\n"), ("c.md", "# C\n")],
+            &[FindingRow::new(
+                1,
+                FindingKind::RequiredMissing,
+                Severity::Warning,
+                DocumentPath::new("a.md").expect("a document path"),
+                Some("next".to_string()),
+                None,
+                CandidateHead::new([], 0).expect("an empty head"),
+                None,
+                "a finding",
+                1,
+            )],
         );
 
-        assert_eq!(planned.operations.len(), 2, "{:?}", planned.skipped);
-        let mut recorded = planned.conditions.clone();
-        recorded.sort_by_key(|condition| format!("{condition:?}"));
-        assert_eq!(
-            recorded,
-            vec![
-                resolving("a.md", "b", "b.md"),
-                resolving("a.md", "c", "c.md")
-            ]
-        );
+        assert_eq!(planned.operations.len(), 1, "{:?}", planned.skipped);
+        assert_eq!(planned.conditions, vec![resolving("a.md", "c", "c.md")]);
     }
 
     /// **A link fix's one write of its field records every link the field

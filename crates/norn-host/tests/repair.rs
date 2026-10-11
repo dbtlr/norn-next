@@ -2444,13 +2444,13 @@ fn a_routes_move_rewrites_every_respellable_link_and_lists_the_rest_as_a_move_fo
 }
 
 /// **An unrespellable link never holds a route back, even in a field a rule
-/// reads by value**: the hub's closed `up` holds the link to the moved
+/// reads by value**: the hub's limited `up` holds the link to the moved
 /// document in a flow list, which no cascade can respell, so the route moves
 /// and its forecast advises on the link as unplaced, as a `move` of the
 /// document forecasts it.
 #[test]
 fn an_unrespellable_link_in_a_field_read_by_value_never_holds_a_route_back() {
-    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+    let schema = "version: 1\nfields:\n  up: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-unplaced-judged",
         schema,
@@ -2563,20 +2563,20 @@ fn a_route_its_respell_check_skips_claims_no_destination() {
     assert_eq!(skipped, [SkipReason::RespellsAJudgedLink]);
 }
 
-/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
-/// link field over the link to `loose/a.md` as it is written now.
-const CLOSED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+/// A rule routing a task into `tasks/`, and a hub rule limiting a hub's `up`
+/// link field, which reads it by value.
+const LIMITED_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
 /// **A route whose cascade may respell a frontmatter link in a field a rule
 /// reads by value skips as respelling a judged link**, with its destination,
 /// noting the holder and the field, and the plan stays applicable: moving
-/// `loose/a.md` would respell the hub's closed `up`, so nothing moves and
+/// `loose/a.md` would respell the hub's limited `up`, so nothing moves and
 /// the hub stands as written.
 #[test]
 fn a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-respells-a-judged-link",
-        CLOSED_UP,
+        LIMITED_UP,
         &[
             ("loose/a.md", b"---\ntype: task\nstatus: todo\n---\n# A\n"),
             (
@@ -2611,7 +2611,7 @@ fn a_route_whose_cascade_may_respell_a_judged_frontmatter_link_skips() {
 /// skips**, noting the document and the field.
 #[test]
 fn a_route_whose_cascade_may_respell_the_moved_documents_own_judged_link_skips() {
-    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    one_of:\n      me: {values: ['[[zz-repair/loose/a]]', '[[zz-repair/tasks/a]]']}\n";
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n    max_length:\n      me: 40\n";
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-self-respell",
         schema,
@@ -2646,7 +2646,7 @@ fn a_route_whose_cascade_may_respell_the_moved_documents_own_judged_link_skips()
 fn a_route_its_respell_check_skips_leaves_the_batchs_other_fixes_applied() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-route-respell-skipped-others-stand",
-        CLOSED_UP,
+        LIMITED_UP,
         &[
             ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
             (
@@ -2679,15 +2679,15 @@ fn a_route_its_respell_check_skips_leaves_the_batchs_other_fixes_applied() {
     );
 }
 
-/// A rule routing a task into `tasks/`, and a hub rule closing a hub's `up`
-/// link field over the link to `loose/a.md` as it is written now.
-const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[zz-repair/loose/a]]']}\n";
+/// A rule routing a task into `tasks/`, and a hub rule limiting a hub's `up`
+/// link field, which reads it by value.
+const HUB_UP: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
 /// **Of two routes whose cascades rewrite one hub, only the one respelling a
 /// judged link skips, and the other's cascade lands**: moving `loose/a.md`
-/// would respell the hub's closed `up`, moving `loose/b.md` respells its
+/// would respell the hub's limited `up`, moving `loose/b.md` respells its
 /// open `down` and its body's links, so `b` moves, the hub respelled, and
-/// `a` skips, noting the hub and `up`; a bare backlink in the closed field
+/// `a` skips, noting the hub and `up`; a bare backlink in the limited field
 /// holds no route back.
 #[test]
 fn of_two_routes_rewriting_one_hub_only_the_one_respelling_a_judged_link_skips() {
@@ -3819,45 +3819,17 @@ fn every_link_a_repair_writes_is_resolved_in_one_judgment_however_many() {
     assert_eq!(few, many);
 }
 
-/// **A fold never re-cases a link, so a repair introduces no link-health
-/// finding**: `[[zz-TARGET]]` folds to the closed set's `[[zz-target]]`,
-/// which would name no document on a root telling case apart; the finding
-/// skips as having no declared fix, and the plan applies leaving only its
-/// skips.
-#[test]
-fn a_fold_never_recases_a_link_so_no_link_health_finding_is_introduced() {
-    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]']}\n";
-    let (_sandbox, vault, host) = a_vault_under(
-        "host-repair-fold-recasing-a-link",
-        schema,
-        &[
-            ("a.md", b"---\ntype: task\nup: '[[zz-TARGET]]'\n---\n"),
-            ("zz-TARGET.md", b"# Target\n"),
-        ],
-    );
-    let _lease = attach::attach_and_wait(&host, vault.name());
-
-    let plan = applied_leaving_only_its_skips(&host, &vault);
-
-    assert!(plan.operations.is_empty(), "{plan:?}");
-    let skipped: Vec<SkipReason> = provenance(&plan)
-        .skipped
-        .iter()
-        .map(|skip| skip.reason)
-        .collect();
-    assert_eq!(skipped, [SkipReason::NoDeclaredFix]);
-}
-
-/// A route moving `loose/x.md` into `tasks/`, and a rule selecting a
-/// document by the link its `up` holds, reading its `parent` by value.
-const SELECTED_BY_LINK: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  projects:\n    match: {frontmatter: {up: '[[zz-projects]]'}}\n    one_of:\n      parent: {values: ['[[zz-repair/loose/x]]']}\n";
+/// A route moving `loose/x.md` into `tasks-all/`, whose longer folder name
+/// lengthens a link to it, and a rule selecting a document by the link its
+/// `up` holds, limiting its `parent` to the length of the link as written now.
+const SELECTED_BY_LINK: &str = "version: 1\nfields:\n  up: {type: link}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks-all/**'], route: 'zz-repair/tasks-all/'}\n  projects:\n    match: {frontmatter: {up: '[[zz-projects]]'}}\n    max_length:\n      parent: 21\n";
 
 /// **A link fix bringing its holder under a rule that reads a link a route
 /// respells skips; the route moves.** Making `up` the link `[[zz-projects]]`
-/// brings `h.md` under the rule reading `parent` by value, and the route of
+/// brings `h.md` under the rule limiting `parent`, and the route of
 /// `loose/x.md` respells `parent`'s link: the two together would introduce a
-/// value outside the closed set. The link fix skips as one the judge would
-/// refuse, and the plan applies.
+/// value past the limit. The link fix skips as one the judge would refuse,
+/// and the plan applies.
 #[test]
 fn a_link_fix_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
     let (_sandbox, vault, host) = a_vault_under(
@@ -3876,7 +3848,7 @@ fn a_link_fix_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() 
 
     let plan = applied_leaving_only_its_skips(&host, &vault);
 
-    assert!(stands(&vault, "tasks/x.md"));
+    assert!(stands(&vault, "tasks-all/x.md"));
     let skipped: Vec<SkipReason> = provenance(&plan)
         .skipped
         .iter()

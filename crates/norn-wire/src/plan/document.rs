@@ -346,7 +346,10 @@ impl Resolves {
 /// the plan. Repair records one today for every link a fix writes a value
 /// holding; the move-following and similarity fixes of a later layer record
 /// one for an address they replace, which is why the address need not stand
-/// in the holder after the plan.
+/// in the holder after the plan. No fix of today replaces one: a closed set
+/// never holds a wikilink, so no fold or synonym replaces one; a rename moves
+/// a value without changing it; and a wrap, an unwrap or a bare value made a
+/// link writes an address without replacing one.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,

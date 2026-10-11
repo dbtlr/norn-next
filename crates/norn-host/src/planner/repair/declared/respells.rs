@@ -47,13 +47,15 @@
 //! the tags field, or a field declared a type other than text or link — a
 //! respelled `[[x]]` is a new spelling a type mismatch names — or where, at
 //! any of the holder's candidate states, the combined constraint of the rules
-//! selecting it holds a closed set, a length limit or a forbiddance on the
-//! field (a rules conflict on a field is one of these), or the state holds a
-//! finding on the field. A holder's candidate states are its before-state;
-//! its fixes composed where it stands, where the batch makes fixes to it; and
-//! its route's move and fixes composed where it lands, where its route passes
-//! its own judgment. Judging the union makes each route's answer independent
-//! of whether its holder's own route is made, so routes need no order here.
+//! selecting it holds a length limit or a forbiddance on the field (a rules
+//! conflict on a field is one of these), or the state holds a finding on the
+//! field — a closed set is read through its finding, since a closed set never
+//! holds a wikilink and so a link under one always stands as a finding. A
+//! holder's candidate states are its before-state; its fixes composed where it
+//! stands, where the batch makes fixes to it; and its route's move and fixes
+//! composed where it lands, where its route passes its own judgment. Judging
+//! the union makes each route's answer independent of whether its holder's own
+//! route is made, so routes need no order here.
 //!
 //! **A holder's link fixes are judged against the routes, not the other way
 //! about.** They compose after the routes are settled (`super::bare_link`),
@@ -494,8 +496,8 @@ fn respelled<'a>(
 struct ValueRead<'s> {
     schema: &'s VaultSchema,
     selector_keys: &'s BTreeSet<&'s str>,
-    /// The fields a closed set, a length limit or a forbiddance constrains,
-    /// or a finding stands on, at some candidate state.
+    /// The fields a length limit or a forbiddance constrains, or a finding
+    /// stands on, at some candidate state.
     judged: BTreeSet<String>,
 }
 
@@ -516,10 +518,7 @@ impl<'s> ValueRead<'s> {
                 schema.selecting_rules(state.at.as_str(), &frontmatter, repairing.case, &mut work);
             count_rule_work(work);
             for (field, constraint) in schema.combined(&selecting).fields() {
-                if constraint.one_of().is_some()
-                    || constraint.max_length().is_some()
-                    || constraint.is_forbidden()
-                {
+                if constraint.max_length().is_some() || constraint.is_forbidden() {
                     judged.insert(field.to_string());
                 }
             }
@@ -700,8 +699,9 @@ mod tests {
     /// **A route whose cascade may respell a frontmatter wikilink in a field
     /// a rule reads by value skips as respelling a judged link, naming the
     /// holder and the field** — whichever way the field is read: a selector
-    /// key, a closed set, a length limit, a forbiddance, the tags, a type
-    /// other than text or link, or a finding standing on it.
+    /// key, a closed set (through the finding a link under it is), a length
+    /// limit, a forbiddance, the tags, a type other than text or link, or a
+    /// finding standing on it.
     #[test]
     fn a_route_respelling_a_frontmatter_link_in_a_field_read_by_value_skips() {
         let cases: [(&str, &str, &str); 7] = [
@@ -711,8 +711,8 @@ mod tests {
                 "---\nup: \"[[loose/a]]\"\n---\n",
             ),
             (
-                "a closed set",
-                "  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[loose/a]]']}\n",
+                "a closed set, which a link is always outside",
+                "  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: [todo]}\n",
                 "---\ntype: hub\nup: \"[[loose/a]]\"\n---\n",
             ),
             (
@@ -765,8 +765,9 @@ mod tests {
         }
     }
 
-    /// The rule closing a hub's `up` over the links it may hold.
-    const CLOSED_UP: &str = "  hubs:\n    match: {frontmatter: {type: hub}}\n    one_of:\n      up: {values: ['[[a]]', '[[loose/a]]', '[[tasks/a]]']}\n";
+    /// The rule limiting a hub's `up`, which reads it by value.
+    const LIMITED_UP: &str =
+        "  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
     /// **A bare-stem frontmatter backlink in a field read by value does not
     /// skip the route**: the route keeps the file name, so `[[a]]` names the
@@ -774,7 +775,7 @@ mod tests {
     #[test]
     fn a_bare_stem_backlink_in_a_field_read_by_value_does_not_skip() {
         let planned = planned(
-            &routing(CLOSED_UP),
+            &routing(LIMITED_UP),
             &[TASK, ("h.md", "---\ntype: hub\nup: \"[[a]]\"\n---\n")],
             &["loose/a.md"],
         );
@@ -789,7 +790,7 @@ mod tests {
     #[test]
     fn a_bare_stem_carried_across_the_ambiguity_ignore_set_skips() {
         let schema = format!(
-            "version: 1\npaths:\n  ambiguity_ignore: ['archive/**']\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['archive/**'], route: 'archive/'}}\n{CLOSED_UP}"
+            "version: 1\npaths:\n  ambiguity_ignore: ['archive/**']\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['archive/**'], route: 'archive/'}}\n{LIMITED_UP}"
         );
 
         let planned = planned(
@@ -815,7 +816,7 @@ mod tests {
     /// level down keeps out what stands deeper, and a document at the root
     /// is its whole place, so a bare link names it whatever glob matches it.
     /// Each route here carries `[[a]]`'s document out of what the stem
-    /// counts, so the hub's closed `up` would no longer name it.
+    /// counts, so the hub's limited `up` would no longer name it.
     #[test]
     fn a_bare_stem_crossing_the_ambiguity_ignore_set_is_read_by_the_stores_rule() {
         let cases: [(&str, &str, &str, (&str, &str)); 3] = [
@@ -830,7 +831,7 @@ mod tests {
         ];
         for (case, ignored, route, task) in cases {
             let schema = format!(
-                "version: 1\npaths:\n  ambiguity_ignore: ['{ignored}']\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['{route}**'], route: '{route}'}}\n{CLOSED_UP}"
+                "version: 1\npaths:\n  ambiguity_ignore: ['{ignored}']\nrules:\n  tasks:\n    match: {{frontmatter: {{type: task}}}}\n    allowed_paths: {{paths: ['{route}**'], route: '{route}'}}\n{LIMITED_UP}"
             );
 
             let planned = planned(
@@ -851,10 +852,6 @@ mod tests {
             );
         }
     }
-
-    /// The rule limiting a hub's `up`, which reads it by value.
-    const LIMITED_UP: &str =
-        "  hubs:\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
 
     /// **A `vault://` wikilink may be respelled however few segments it
     /// spells**: `[[vault://a]]` names the root document `a.md` by its path,
@@ -908,7 +905,7 @@ mod tests {
     #[test]
     fn a_frontmatter_link_the_text_layer_cannot_place_never_skips_the_route() {
         let planned = planned(
-            &routing(CLOSED_UP),
+            &routing(LIMITED_UP),
             &[
                 TASK,
                 ("h.md", "---\ntype: hub\nup: [\"[[loose/a]]\"]\n---\n"),
@@ -954,7 +951,7 @@ mod tests {
     /// exactly what it pays with no hub at all.
     #[test]
     fn a_body_only_holder_is_never_judged() {
-        let schema = routing(CLOSED_UP);
+        let schema = routing(LIMITED_UP);
         let alone = tallied(&schema, &[TASK], &["loose/a.md"]);
 
         let held = tallied(
@@ -1010,7 +1007,7 @@ mod tests {
     #[test]
     fn a_body_backlink_or_one_in_a_field_no_rule_reads_by_value_never_skips() {
         let planned = planned(
-            &routing(CLOSED_UP),
+            &routing(LIMITED_UP),
             &[
                 TASK,
                 (
@@ -1027,14 +1024,14 @@ mod tests {
 
     /// **A holder its own route moves is judged at every state it may end
     /// in**: `h.md` holds `up: [[loose/a]]`, which no rule reads where it
-    /// stands, but its route takes it into `shelf/`, where a rule closes
+    /// stands, but its route takes it into `shelf/`, where a rule limits
     /// `up`, so the route moving `loose/a.md` skips whether or not `h.md`'s
     /// own route is made; `h.md`'s does not, since nothing respells a link
     /// to it.
     #[test]
     fn a_holder_its_own_route_moves_is_judged_by_every_state_it_may_end_in() {
         let schema = routing(
-            "  hubs:\n    match: {frontmatter: {type: hub}}\n    allowed_paths: {paths: ['shelf/**'], route: 'shelf/'}\n  shelved:\n    match: {path: 'shelf/**'}\n    one_of:\n      up: {values: ['[[loose/a]]', '[[tasks/a]]']}\n",
+            "  hubs:\n    match: {frontmatter: {type: hub}}\n    allowed_paths: {paths: ['shelf/**'], route: 'shelf/'}\n  shelved:\n    match: {path: 'shelf/**'}\n    max_length:\n      up: 40\n",
         );
 
         let planned = planned(
@@ -1055,12 +1052,12 @@ mod tests {
     }
 
     /// **A routed document's own frontmatter link to another routed document
-    /// is a holder's link too**: `b.md`'s closed `up` names `a.md`, and both
+    /// is a holder's link too**: `b.md`'s limited `up` names `a.md`, and both
     /// are routed, so `a.md`'s route skips and `b.md`'s moves.
     #[test]
     fn a_routed_documents_own_frontmatter_link_to_another_routed_document_is_judged() {
         let schema = routing(
-            "  ups:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[loose/a]]', '[[tasks/a]]']}\n",
+            "  ups:\n    match: {frontmatter: {type: task}}\n    max_length:\n      up: 40\n",
         );
 
         let planned = planned(

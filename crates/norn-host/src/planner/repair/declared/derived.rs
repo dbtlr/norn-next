@@ -6,10 +6,12 @@
 //! one.** It is composed and judged as a declared fix is (`Document::admit`),
 //! so a fix the applier would refuse, or that brings required fields in, is
 //! skipped with the reason the judge gives. A fix whose level the request's
-//! threshold does not admit is judged too, then skipped as
-//! [`SkipReason::BelowThreshold`], carrying the operation lowering the
-//! threshold writes for it: its document composed again at the derived
-//! level, where the batch's routes leave it (`Reckoned::propose_lowered`).
+//! threshold does not admit is skipped as [`SkipReason::BelowThreshold`]
+//! before it is judged where it stands, carrying the operation lowering the
+//! threshold writes for it. `Reckoned::propose_lowered` is the one place that
+//! decides such a fix: it composes the document again at the derived level,
+//! where the batch's routes leave it, and judges the fix there, so a fix that
+//! composition refuses skips with the judge's reason in place of this one.
 //!
 //! - **Wrap and unwrap** answer a `field/shape-mismatch`. A field declared a
 //!   list holding a scalar is set to the one-item list of that scalar, its
@@ -21,13 +23,15 @@
 //!   written as the YAML boolean, element by element for a list.
 //! - **Case and white space** answer a `field/not-one-of` on a field whose
 //!   values compare as text ([`Folds`]), every element the finding names a
-//!   string — a YAML boolean or number is never re-typed: the one member of the combined closed
-//!   set that folds equal to the value — Unicode lower case, the ends trimmed
-//!   and each run of white space inside one space — is written as the schema
-//!   writes it. Several members folding equal are a tie. A word join or split
-//!   (`inprogress` for `in progress`) is not a fold, and neither is one that
-//!   would change the address of a wikilink the value holds
-//!   ([`recases_a_link`]).
+//!   string — a YAML boolean or number is never re-typed. The one member of
+//!   the combined closed set that folds equal to the value — Unicode lower
+//!   case, the ends trimmed and each run of white space inside one space — is
+//!   written as the schema writes it. Several members folding equal are a
+//!   tie. A word join or split (`inprogress` for `in progress`) is not a
+//!   fold. A fold never re-cases a wikilink, with no guard needed: a closed
+//!   set holds no wikilink (the schema refuses one at load), and the fold
+//!   keeps whether a text holds one (see [`fold`]), so a value that folds
+//!   equal to a member holds none.
 //!
 //! **A type mismatch no derived fix answers is an excluded class** where the
 //! field is declared `date`, `number` or `boolean`: a fix would reformat a
@@ -92,6 +96,7 @@ pub(super) fn reshape(
         return Err(Box::new(crate::planner::repair::skipped(row)));
     };
     let set = document.set(&state.at, field, reshaped.clone());
+    document.within_threshold(Confidence::Derived, row, &set)?;
     let composed = document.admit(
         state,
         std::slice::from_ref(&set),
@@ -101,7 +106,6 @@ pub(super) fn reshape(
             candidates: &candidate_of(&reshaped),
         },
     )?;
-    document.within_threshold(Confidence::Derived, row, &set)?;
     Ok(Fix {
         operations: vec![set],
         cited: vec![cited(row, Confidence::Derived, Vec::new())],
@@ -173,24 +177,18 @@ pub(super) fn excluded(row: &FindingRow, schema: &VaultSchema) -> Option<Skipped
     )))
 }
 
-/// Whether writing `member` in the place of `value` would change the address
-/// of a wikilink the value holds: a link of the member whose address — its
-/// protocol and target — differs from the value's link at the same position,
-/// or a different number of links. A fold that only re-cases a link's alias
-/// or anchor keeps every address. A fold never re-cases a link: what the
-/// link names is resolution's to say, and case is no part of a fold's proof.
-pub(super) fn recases_a_link(value: &str, member: &str) -> bool {
-    let addresses = |text: &str| -> Vec<(Option<String>, String)> {
-        norn_text::parse_wikilinks_in_text(text)
-            .into_iter()
-            .map(|link| (link.protocol, link.target))
-            .collect()
-    };
-    addresses(value) != addresses(member)
-}
-
 /// What a value folds to when it is compared as text: lower-cased by Unicode,
 /// the ends trimmed and each run of white space inside one space.
+///
+/// **The fold keeps whether a text holds a wikilink.** A wikilink is `[[`, one
+/// or more characters none of which is `]`, then `]]`. The fold never adds,
+/// moves or removes a `[` or a `]`; it maps each other character to
+/// characters that are not `]`, and a white space run to a space, so the
+/// characters between the brackets of a link stay at least one and stay free of
+/// `]`, and the characters of a fold that read as a link come from the
+/// characters that read as one. Two texts folding equal therefore both hold a
+/// wikilink or neither does, and since a closed set holds none, a value that
+/// folds equal to a member holds none.
 fn fold(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
@@ -269,5 +267,54 @@ impl FoldCache {
             self.0 = Some(Folds::of(schema, field, rules));
         }
         self.0.as_ref().expect("the folds were just built")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fold;
+
+    /// Whether the text layer reads a wikilink anywhere in `text`.
+    fn holds_wikilink(text: &str) -> bool {
+        !norn_text::parse_wikilinks_in_text(text).is_empty()
+    }
+
+    /// **The fold keeps whether a text holds a wikilink**, so a value
+    /// folding equal to a member of a closed set, which holds none, holds
+    /// none: the fold never re-cases a link, and needs no guard to say so.
+    /// The cases are the ones a fold could disturb: white space inside and
+    /// around a link, a line break between its brackets, upper case and an
+    /// expanding lower case in its target, an embed, and brackets that read
+    /// as no link.
+    #[test]
+    fn the_fold_keeps_whether_a_text_holds_a_wikilink() {
+        let texts = [
+            "[[a]]",
+            "[[A]]",
+            " [[ A  B ]] ",
+            "[[a\nb]]",
+            "[[a\u{a0}\u{2003}b]]",
+            "[[İ]]",
+            "![[A]]",
+            "see\t[[A|X]]\n",
+            "[[",
+            "[[]]",
+            "[[ ]]",
+            "[ [a]]",
+            "[[a] ]",
+            "a]]b",
+            "[x]",
+            "[[a]",
+            "[[a]]]",
+            "[[[a]]",
+        ];
+        for text in texts {
+            assert_eq!(
+                holds_wikilink(&fold(text)),
+                holds_wikilink(text),
+                "{text:?} folds to {:?}",
+                fold(text)
+            );
+        }
     }
 }

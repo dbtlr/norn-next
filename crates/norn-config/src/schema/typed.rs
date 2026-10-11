@@ -389,6 +389,13 @@ pub fn link_key(raw: &str) -> Option<String> {
     Some(format!("[[{protocol}{}{fragment}]]", link.target))
 }
 
+/// Whether `raw` holds a wikilink anywhere in it, an embed included: the
+/// text layer parses one link or more out of it ([`link_key`] reads a string
+/// that is exactly one).
+pub fn holds_wikilink(raw: &str) -> bool {
+    !parse_wikilinks_in_text(raw).is_empty()
+}
+
 /// The bit pattern whose unsigned order is `number`'s numeric order.
 fn orderable_float(number: f64) -> u64 {
     let bits = number.to_bits();

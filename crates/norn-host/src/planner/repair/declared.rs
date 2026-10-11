@@ -48,12 +48,13 @@
 //! even where it fails the combined constraint or the judge: it blocks the
 //! derived answer, and the finding skips with every candidate. Where a
 //! declared fix decides and the derived answer differs, the citation notes
-//! the derived answer. A derived fix the threshold does not admit is judged
-//! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
-//! operation lowering the threshold writes for it: the document composed
-//! again at the derived level ([`Reckoned::propose_lowered`]), so each
-//! element of a list proposes the one write of the field every admitted
-//! element composes into.
+//! the derived answer. A derived fix the threshold does not admit is skipped
+//! as [`SkipReason::BelowThreshold`] before it is judged, carrying the
+//! operation lowering the threshold writes for it. [`Reckoned::propose_lowered`]
+//! is the one place that decides it: the document is composed again at the
+//! derived level, where the fix is judged, so each element of a list proposes
+//! the one write of the field every admitted element composes into, and a fix
+//! that composition refuses skips with its reason.
 //!
 //! **A document is drafted alone, its routes judged together.** Each
 //! document's draft composes its fixes where it stands and, where its route
@@ -1012,11 +1013,12 @@ impl Document<'_> {
         }
     }
 
-    /// `Ok` where a fix made at `level`, judged and admitted, is one the
-    /// threshold writes; otherwise the skip of the finding `row` as below
-    /// the threshold, carrying `proposed`, the fix's own operation, which the
-    /// write lowering the threshold makes replaces
-    /// ([`Reckoned::propose_lowered`]).
+    /// `Ok` where a fix made at `level` is one the threshold writes;
+    /// otherwise the skip of the finding `row` as below the threshold,
+    /// carrying `proposed`, the fix's own operation, before the fix is judged:
+    /// [`Reckoned::propose_lowered`] judges it on the lowered composition and
+    /// replaces `proposed` with the write lowering the threshold makes, or the
+    /// skip is replaced by that composition's.
     fn within_threshold(
         &self,
         level: Confidence,
@@ -3981,50 +3983,6 @@ mod tests {
         );
     }
 
-    /// **A fold never re-cases a wikilink**: `[[ZZ-target]]` folds to the
-    /// member `[[zz-target]]`, whose address differs, so the finding skips
-    /// with no declared fix and a note saying why; a fold changing only a
-    /// link's alias, `[[b|X]]` to `[[b|x]]`, keeps its address and is made.
-    #[test]
-    fn a_fold_that_would_recase_a_link_skips_and_one_keeping_its_address_is_made() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]', '[[b|x]]']}\n";
-        let vault = Vault::of(
-            schema,
-            &[
-                ("a.md", "---\ntype: task\nup: '[[ZZ-target]]'\n---\n"),
-                ("c.md", "---\ntype: task\nup: '[[b|X]]'\n---\n"),
-            ],
-        );
-
-        let planned = vault.plan(&[
-            offending(1, NOT_ONE_OF, "a.md", "up", "[[ZZ-target]]"),
-            offending(2, NOT_ONE_OF, "c.md", "up", "[[b|X]]"),
-        ]);
-
-        assert_eq!(planned.operations, vec![set(1, "c.md", "up", "[[b|x]]")]);
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
-        let note = note_of(&planned, 1);
-        assert!(note.contains("re-case"), "{note}");
-    }
-
-    /// **A declared synonym re-casing a link is the owner's answer, and is
-    /// made.**
-    #[test]
-    fn a_declared_synonym_recasing_a_link_is_made() {
-        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      up: {values: ['[[zz-target]]'], synonyms: {'[[ZZ-target]]': '[[zz-target]]'}}\n";
-        let vault = Vault::of(
-            schema,
-            &[("a.md", "---\ntype: task\nup: '[[ZZ-target]]'\n---\n")],
-        );
-
-        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "up", "[[ZZ-target]]")]);
-
-        assert_eq!(
-            planned.operations,
-            vec![set(1, "a.md", "up", "[[zz-target]]")]
-        );
-    }
-
     /// **The tag carrier is never folded, declared or not**: `A  B` folds
     /// to the member `a b` as text, but the tags compare under the tag fold.
     #[test]
@@ -4210,6 +4168,40 @@ mod tests {
         )]);
 
         assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
+    }
+
+    /// **A below-threshold fix the lowered composition refuses skips with
+    /// that composition's reason**, though it passes the judge where the
+    /// document stands: at a `declared` threshold neither derived fix is
+    /// made, and `flag`'s boolean case is judged on the document with `kind`
+    /// folded to `task` first, where the `tasks` rule selects it and closes
+    /// `flag` over `false`. `kind` stays below the threshold with the write
+    /// lowering makes.
+    #[test]
+    fn a_below_threshold_fix_the_lowered_composition_refuses_skips_with_its_reason() {
+        let schema = "version: 1\nfields:\n  flag: {type: boolean}\nrules:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [task]}\n  tasks:\n    match: {frontmatter: {kind: task}}\n    one_of:\n      flag: {values: [false]}\n";
+        let docs = [("a.md", "---\nkind: Task\nflag: 'TRUE'\n---\n")];
+        let rows = [
+            offending(1, NOT_ONE_OF, "a.md", "kind", "Task"),
+            offending(2, TYPE_MISMATCH, "a.md", "flag", "TRUE"),
+        ];
+
+        let planned = Vault::of(schema, &docs)
+            .at(Confidence::Declared)
+            .plan(&rows);
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::BelowThreshold),
+                (2, SkipReason::JudgeWouldRefuse)
+            ]
+        );
+        assert_eq!(
+            planned.skipped[0].proposed,
+            Some(proposing("a.md", "kind", AuthoredValue::string("task")))
+        );
     }
 
     /// **A declared synonym agreeing with the fold needs no note.**
