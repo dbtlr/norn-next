@@ -58,7 +58,7 @@ pub struct RewrittenLinks {
 /// searched for the edits to leave as written, and each read of that search
 /// costs the whole document: one read for an edit left as written beside
 /// the last, and a few plus one per doubling of the spacing for one standing
-/// apart ([`Proof::kept_in_runs`]), so a batch where most edits fail would
+/// apart, so a batch where most edits fail would
 /// otherwise read the document once per edit, quadratic in a holder's links.
 /// Past this many reads the rewrite answers [`RewriteUnproven`] and writes
 /// nothing: where most edits fail, and where about ten stand apart in a
