@@ -158,9 +158,12 @@ pub(crate) struct Unresolvable {
 /// over the holder's final bytes ([`edit::rewritten`]), each link matched as
 /// those bytes write it, so no rewrite respells a link another one wrote and
 /// the order the operations compose in says nothing about what a holder
-/// reads. A cascade's rewrite never fails; a cascade naming a holder that
-/// holds no document leaves its operation unresolvable whole, its rewrites
-/// composing nowhere, since planning names only holders that stand.
+/// reads. A cascade naming a holder that holds no document leaves its
+/// operation unresolvable whole, its rewrites composing nowhere, since
+/// planning names only holders that stand; and a holder whose batch the text
+/// layer cannot prove within its reads ([`norn_text::REWRITE_PROOF_READS`])
+/// leaves every operation writing into it unresolvable, the detail telling
+/// its author to send fewer at once.
 ///
 /// **An authored link rewrite joins its holder's batch.** A `rewrite_link`
 /// names its document where the plan leaves it, as a cascade's rewrite
@@ -234,9 +237,11 @@ pub(crate) fn compose<V: VaultView>(
         }
     }
     for (holder, (rewrites, mut carriers)) in holders {
-        // A holder's bytes are held, but for a file changed while the plan
-        // was read ([`Simulated::held`]): then every operation writing into
-        // it is left out, as one whose text no longer occurs.
+        // A holder's bytes are held and its batch proven, but for a file
+        // gone or changed while the plan was read ([`Simulated::held`]) or a
+        // batch the text layer cannot prove within its reads
+        // ([`Simulated::rewrite`]): then every operation writing into it is
+        // left out, as one whose text no longer occurs.
         if let Err(detail) = vault.rewrite(&holder, &rewrites) {
             carriers.sort_unstable();
             carriers.dedup();
@@ -853,7 +858,8 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// `rewrites` names, all at once, recording each matching link the text
     /// layer leaves as written under the address it is still written with,
     /// and each link no rewrite matches at an address one of them writes; or
-    /// say why its bytes cannot be had ([`Self::held`]).
+    /// say why its bytes cannot be had ([`Self::held`]), or why the batch
+    /// cannot be proven and what a retry should send instead.
     fn rewrite(
         &mut self,
         spelling: &DocumentPath,
@@ -864,8 +870,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             bytes: rewritten,
             skipped,
             links,
-        } = edit::rewritten(&bytes, rewrites.iter().copied());
-        let kept = kept_at_written(&links, rewrites);
+        } = edit::rewritten(&bytes, rewrites.iter().copied()).map_err(|unproven| {
+            format!(
+                "the link rewrites into `{spelling}` were not proven, so none is written: {unproven}; plan fewer moves or link rewrites into `{spelling}` at once, or lower a repair's limit, and retry"
+            )
+        })?;
+        let kept = kept_at_written(&links, batch::Addresses::of(rewrites));
         self.target(spelling).after = After::Bytes(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),
@@ -896,34 +906,66 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 }
 
 /// The syntax and address of each of `links`, as the change set reads them,
-/// that no rewrite of `rewrites` matches and that one of them writes: what a
-/// batch over the holder of `links` keeps under a key it also writes.
+/// that `batch` matches no link by and writes one as: what a batch over the
+/// holder of `links` keeps under a key it also writes, each once, in the
+/// order the holder holds them.
 fn kept_at_written(
     links: &[norn_store::LinkFact],
-    rewrites: &[&LinkRewrite],
+    mut batch: batch::Addresses<'_>,
 ) -> Vec<(LinkFamily, String)> {
-    let matches = |syntax: LinkFamily, address: &str| {
-        rewrites
-            .iter()
-            .any(|rewrite| rewrite.syntax == syntax && rewrite.from == address)
-    };
-    let writes = |syntax: LinkFamily, address: &str| {
-        rewrites
-            .iter()
-            .any(|rewrite| rewrite.syntax == syntax && rewrite.to == address)
-    };
     let mut kept: Vec<(LinkFamily, String)> = Vec::new();
     for link in links {
         let syntax = wire_family(link.family);
         let address = links::address(link);
-        if writes(syntax, &address)
-            && !matches(syntax, &address)
-            && !kept.contains(&(syntax, address.clone()))
-        {
+        if batch.keeps(syntax, &address) {
             kept.push((syntax, address));
         }
     }
     kept
+}
+
+/// A holder's batch of rewrites as the addresses it matches links by and
+/// writes them as, answering for one link at a time and offering no pass
+/// over them, so what the batch does to a link is a lookup however many
+/// rewrites the holder takes.
+mod batch {
+    use std::collections::HashSet;
+
+    use norn_wire::{LinkFamily, LinkRewrite};
+
+    pub(super) struct Addresses<'r> {
+        matched: HashSet<(LinkFamily, &'r str)>,
+        written: HashSet<(LinkFamily, &'r str)>,
+        kept: HashSet<(LinkFamily, String)>,
+    }
+
+    impl<'r> Addresses<'r> {
+        /// The addresses `rewrites` match and write, each rewrite read once.
+        pub(super) fn of(rewrites: &[&'r LinkRewrite]) -> Self {
+            let mut matched = HashSet::with_capacity(rewrites.len());
+            let mut written = HashSet::with_capacity(rewrites.len());
+            for rewrite in rewrites {
+                #[cfg(test)]
+                super::tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
+                matched.insert((rewrite.syntax, rewrite.from.as_str()));
+                written.insert((rewrite.syntax, rewrite.to.as_str()));
+            }
+            Addresses {
+                matched,
+                written,
+                kept: HashSet::new(),
+            }
+        }
+
+        /// Whether a link of `syntax` at `address` is one the batch keeps
+        /// under a key it writes — matched by no rewrite, at an address one
+        /// writes — and is the first such link asked about at that key.
+        pub(super) fn keeps(&mut self, syntax: LinkFamily, address: &str) -> bool {
+            self.written.contains(&(syntax, address))
+                && !self.matched.contains(&(syntax, address))
+                && self.kept.insert((syntax, address.to_owned()))
+        }
+    }
 }
 
 /// `identity` at the spelling its operation asked for, normalized.
@@ -1119,6 +1161,102 @@ mod tests {
             Some("[me](a.md), [[b]] and [[z]]\n")
         );
         assert_eq!(crate::derivation::PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    thread_local! {
+        /// Rewrites [`batch::Addresses::of`] read on this thread.
+        pub(super) static REWRITES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A hub linking `documents` documents by path, each in its own list
+    /// item, and a move of each into `to/` whose cascade respells the hub's
+    /// link to it, `to/` spelled as `folder`.
+    fn hub_moves(documents: usize, folder: &str) -> (Vec<(String, String)>, Vec<Operation>) {
+        let hub: String = (0..documents)
+            .map(|document| format!("- [[notes/d{document}]]\n"))
+            .collect();
+        let mut files = vec![("hub.md".to_string(), hub)];
+        let mut operations = Vec::new();
+        for document in 0..documents {
+            files.push((format!("notes/d{document}.md"), format!("d{document}\n")));
+            operations.push(
+                Operation::new(OperationKind::move_document(
+                    path(&format!("notes/d{document}.md")),
+                    path(&format!("{folder}/d{document}.md")),
+                ))
+                .with_cascade(vec![rewrite(
+                    "hub.md",
+                    &format!("notes/d{document}"),
+                    &format!("{folder}/d{document}"),
+                )]),
+            );
+        }
+        (files, operations)
+    }
+
+    fn composed(files: &[(String, String)], operations: &[Operation]) -> Composition {
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(at, text)| (at.as_str(), text.as_str()))
+            .collect();
+        let vault = MemoryVault::with(&files);
+        compose(operations, &in_order(operations), &vault).expect("an infallible view")
+    }
+
+    /// **A hub's batch reads each of its rewrites once**, however many links
+    /// the hub holds: which links it keeps at an address it writes is a
+    /// lookup per link, never a pass over the batch.
+    #[test]
+    fn a_hubs_batch_reads_each_of_its_rewrites_once() {
+        for documents in [100, 200] {
+            let (files, operations) = hub_moves(documents, "moved");
+            REWRITES_READ.with(|reads| reads.set(0));
+            let composition = composed(&files, &operations);
+            assert!(composition.unresolvable.is_empty());
+            assert!(composition.skipped.is_empty());
+            assert_eq!(REWRITES_READ.with(std::cell::Cell::get), documents);
+            assert_eq!(
+                after_text(&composition, "hub.md").as_deref(),
+                Some(
+                    (0..documents)
+                        .map(|document| format!("- [[moved/d{document}]]\n"))
+                        .collect::<String>()
+                        .as_str()
+                )
+            );
+        }
+    }
+
+    /// **A holder whose batch the text layer cannot prove within its reads
+    /// leaves every operation writing into it unresolvable**, the detail
+    /// telling its author to send fewer at once, and is written nowhere: a
+    /// hub of one paragraph whose links each move into a folder named with
+    /// a backtick, every respelled link after the first pairing its backtick
+    /// with one before it.
+    #[test]
+    fn a_holder_unproven_within_its_reads_leaves_its_writers_unresolvable_and_says_to_send_fewer() {
+        let documents = 2 * norn_text::REWRITE_PROOF_READS;
+        let (mut files, operations) = hub_moves(documents, "odd`");
+        files[0].1 = (0..documents)
+            .map(|document| format!("[[notes/d{document}]] "))
+            .collect::<String>()
+            + "\n";
+        let composition = composed(&files, &operations);
+        let positions: Vec<usize> = composition
+            .unresolvable
+            .iter()
+            .map(|unresolvable| unresolvable.position)
+            .collect();
+        assert_eq!(positions, (0..documents).collect::<Vec<_>>());
+        let detail = &composition.unresolvable[0].detail;
+        assert!(
+            detail.contains("`hub.md`") && detail.contains("fewer") && detail.contains("retry"),
+            "{detail}"
+        );
+        assert_eq!(
+            after_text(&composition, "hub.md").as_deref(),
+            Some(files[0].1.as_str())
+        );
     }
 
     /// **A cascade composes after every operation of the plan**, each

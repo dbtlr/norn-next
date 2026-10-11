@@ -31,11 +31,13 @@ fn respelled(raw: &str, stem: &str) -> RewrittenLinks {
         Some(protocol) => format!("{protocol}://{stem}"),
         None => stem.to_string(),
     };
-    Document::parse(raw).rewrite_links(&[AddressRewrite::new(
-        LinkFamily::Wikilink,
-        address(&link.target),
-        address(stem),
-    )])
+    Document::parse(raw)
+        .rewrite_links(&[AddressRewrite::new(
+            LinkFamily::Wikilink,
+            address(&link.target),
+            address(stem),
+        )])
+        .expect("a batch proven within its reads")
 }
 
 /// [`respelled`]'s text, asserting the one link was rewritten.
@@ -210,11 +212,9 @@ fn a_rewrite_to_an_unrepresentable_target_leaves_the_document_alone() {
         "> quoted [[old]] here\n> still quoted\n",
     ] {
         for bad in ["a\nb", "", " padded "] {
-            let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
-                LinkFamily::Wikilink,
-                "old",
-                bad,
-            )]);
+            let out = Document::parse(body)
+                .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, "old", bad)])
+                .expect("a batch proven within its reads");
             assert_eq!(out.text, body, "rewriting {body:?} to {bad:?}");
             assert_eq!(out.rewritten, 0, "rewriting {body:?} to {bad:?}");
         }

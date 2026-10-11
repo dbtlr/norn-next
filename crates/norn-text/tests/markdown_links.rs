@@ -382,11 +382,9 @@ fn a_markdown_link_is_not_rewritten_as_a_wikilink() {
     assert_eq!(link.stem_range, Some(4..12));
 
     let body = "[t](./old.md) and [[./old.md]]\n";
-    let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
-        LinkFamily::Wikilink,
-        "./old.md",
-        "new",
-    )]);
+    let out = Document::parse(body)
+        .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, "./old.md", "new")])
+        .expect("a batch proven within its reads");
     assert_eq!(out.text, "[t](./old.md) and [[new]]\n");
 }
 

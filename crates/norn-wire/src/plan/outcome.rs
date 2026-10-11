@@ -203,7 +203,9 @@ pub enum UnresolvedReason {
     PartLanded {},
     /// It no longer resolves against what the vault holds: an edit whose
     /// text no longer occurs once, a move whose destination is taken, a
-    /// condition its author observed that the vault no longer meets — or it
+    /// condition its author observed that the vault no longer meets, a link
+    /// rewrite into a document whose batch could not be proven within its
+    /// reads, which a plan sending fewer at once may resolve — or it
     /// touches a file an unresolved operation touches, since operations on
     /// one file stand or fall together, and `detail` names that operation.
     #[non_exhaustive]

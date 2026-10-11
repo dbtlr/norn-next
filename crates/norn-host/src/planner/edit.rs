@@ -28,7 +28,9 @@
 
 use std::sync::Arc;
 
-use norn_text::{AddressRewrite, Document, EditError, Mapping, SectionError, SkippedLink, Value};
+use norn_text::{
+    AddressRewrite, Document, EditError, Mapping, RewriteUnproven, SectionError, SkippedLink, Value,
+};
 use norn_wire::{
     AuthoredValue, DocumentPath, ExpectedField, LinkFamily, LinkRewrite, OperationKind, WriteTarget,
 };
@@ -172,12 +174,16 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// cascades name the holder ([`super::compose::compose`]), so the order the
 /// operations compose in says nothing about what the holder reads.
 ///
-/// **A rewrite never fails here.** A rewrite matching no link composes its
-/// document unchanged — composition refuses an authored one that matches
-/// none before it gets here ([`super::compose::compose`]): the applier recomposes a cascade over the stand-in for
-/// a holder already holding its change, where nothing matches, and a link a
-/// foreign edit took away since planning is the change set's to notice, not
-/// composition's. Bytes that do not decode as a vault document
+/// **A rewrite fails here only past its proof's reads.** Where finding the
+/// rewrites of the batch that read back takes more reads of the holder than
+/// the text layer spends ([`norn_text::REWRITE_PROOF_READS`]), nothing is
+/// rewritten and the batch answers [`RewriteUnproven`]. Otherwise a rewrite
+/// matching no link composes its document unchanged — composition refuses
+/// an authored one that matches none before it gets here
+/// ([`super::compose::compose`]): the applier recomposes a cascade over the
+/// stand-in for a holder already holding its change, where nothing matches,
+/// and a link a foreign edit took away since planning is the change set's to
+/// notice, not composition's. Bytes that do not decode as a vault document
 /// ([`document_source`]) hold no link the index derives, so they are returned
 /// as they are, and a rewrite of a syntax the text layer reads no link of
 /// matches nothing.
@@ -189,7 +195,7 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
     rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
-) -> Rewritten {
+) -> Result<Rewritten, RewriteUnproven> {
     let batch: Vec<AddressRewrite> = rewrites
         .into_iter()
         .filter_map(|rewrite| {
@@ -207,15 +213,15 @@ pub(crate) fn rewritten<'r>(
         links,
     };
     let Ok(text) = document_source(bytes) else {
-        return unchanged(Vec::new());
+        return Ok(unchanged(Vec::new()));
     };
     let document = crate::derivation::parsed(text);
     let links = crate::derivation::parsed_links(&document);
     if batch.is_empty() {
-        return unchanged(links);
+        return Ok(unchanged(links));
     }
-    let rewritten = document.rewrite_links(&batch);
-    Rewritten {
+    let rewritten = document.rewrite_links(&batch)?;
+    Ok(Rewritten {
         bytes: if rewritten.rewritten == 0 {
             bytes.clone()
         } else {
@@ -223,7 +229,7 @@ pub(crate) fn rewritten<'r>(
         },
         skipped: rewritten.skipped,
         links,
-    }
+    })
 }
 
 /// What a holder's batch of rewrites came to ([`rewritten`]).

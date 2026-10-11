@@ -3228,7 +3228,13 @@ landing the document it names — a moved document's own relative links ride tha
 document's own move — at its holder's after-state path, and composes after every
 operation on the holder's final bytes through `norn-text`'s link rewriter — the bytes
 planning read it from — every rewrite naming one holder in one batch over one parse, so no
-rewrite respells a link another wrote, whichever move carries which. A cascade's holder is
+rewrite respells a link another wrote, whichever move carries which. A batch costs time
+linear in the holder and its rewrites, up to a logarithmic factor, and is proven by one read
+of the rewritten holder back; one that does not read back whole is searched for the
+rewrites to leave as written, its reads following the rewrites refused, and past a bounded
+number of reads of the holder
+(`norn_text::REWRITE_PROOF_READS`) nothing is written there and every operation writing
+into it does not resolve, its detail saying to send fewer at once. A cascade's holder is
 a file its move touches: the two stand or fall together, and a holder an operation that
 does not resolve touches takes the move down with it, while a move that falls takes down
 only what shares a file its own kind names, since its cascade falls with it. The forecast

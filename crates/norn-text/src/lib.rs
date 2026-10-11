@@ -160,7 +160,9 @@ pub use frontmatter::{
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
 pub use link::{BlockId, Link, LinkFamily, Resolution, RewriteSkip, parse_wikilinks_in_text};
-pub use rewrite::{AddressRewrite, RewrittenLinks, SkippedLink};
+pub use rewrite::{
+    AddressRewrite, REWRITE_PROOF_READS, RewriteUnproven, RewrittenLinks, SkippedLink,
+};
 pub use section::{
     AnchorReadings, Duplicates, SectionAddress, SectionError, SectionSpan, anchor_readings,
     heading_reading, resolve_section,
