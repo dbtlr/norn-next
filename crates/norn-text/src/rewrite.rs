@@ -2,8 +2,8 @@
 //! of its family whose address it is, respelled to its own target — the pure
 //! text half of a link cascade. See [`Document::rewrite_links`].
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::document::{Document, splice_all};
@@ -50,6 +50,37 @@ pub struct RewrittenLinks {
     /// first, as the index numbers them — each with why.
     pub skipped: Vec<SkippedLink>,
 }
+
+/// The most whole-document reads one [`Document::rewrite_links`] spends
+/// proving which of its edits read back.
+///
+/// A batch that reads back whole is proven by one read. One that does not is
+/// searched for the edits to leave as written, and each read of that search
+/// costs the whole document; a batch where most edits fail would otherwise
+/// read the document once per edit, quadratic in a holder's links. Past this
+/// many reads the rewrite answers [`RewriteUnproven`] and writes nothing.
+pub const REWRITE_PROOF_READS: usize = 128;
+
+/// Why [`Document::rewrite_links`] rewrote nothing: proving which of the
+/// batch's edits read back took more than [`REWRITE_PROOF_READS`] reads of
+/// the document. A smaller batch is proven in fewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewriteUnproven {
+    /// The reads spent before the rewrite stopped.
+    pub reads: usize,
+}
+
+impl std::fmt::Display for RewriteUnproven {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "proving which of the batch's link rewrites read back took more than {} reads of the document",
+            self.reads
+        )
+    }
+}
+
+impl std::error::Error for RewriteUnproven {}
 
 /// A link that matched a rewrite and was left exactly as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +191,16 @@ impl Document<'_> {
     /// text reads a Markdown link as its bracket text alone, so one holding a
     /// rewritten Markdown link reads exactly as it did. An edit that does not
     /// read back is skipped where it stands rather than returned.
-    pub fn rewrite_links(&self, rewrites: &[AddressRewrite]) -> RewrittenLinks {
+    ///
+    /// # Errors
+    ///
+    /// [`RewriteUnproven`] where finding the edits that read back takes more
+    /// than [`REWRITE_PROOF_READS`] reads of the document: nothing is
+    /// rewritten, and a smaller batch may be proven.
+    pub fn rewrite_links(
+        &self,
+        rewrites: &[AddressRewrite],
+    ) -> Result<RewrittenLinks, RewriteUnproven> {
         let rules = Rules::of(rewrites);
         let mut edits = Vec::new();
         let mut skipped = Skips::default();
@@ -188,90 +228,169 @@ impl Document<'_> {
         }
         let mut edits = disjoint(edits, &mut skipped);
 
-        let mut text = self.spliced(&edits);
+        let mut text = self.spliced(edits.iter());
         if !edits.is_empty() {
-            let before = Reading::of(self);
-            if !self.reads_as_rewritten(&before, &text, &edits) {
-                edits = self.kept_in_order(&before, edits, &mut skipped);
-                text = self.spliced(&edits);
+            let mut proof = Proof::of(self);
+            if !proof.reads_back(&edits.iter().collect::<Vec<_>>())? {
+                edits = proof.kept_in_runs(edits, &mut skipped)?;
+                text = self.spliced(edits.iter());
             }
         }
-        RewrittenLinks {
+        Ok(RewrittenLinks {
             text,
             rewritten: edits.len(),
             skipped: skipped.in_document_order(),
-        }
-    }
-
-    /// Whether `text` — this document with `edits` spliced in — reads as this
-    /// document with exactly those edits' links respelled.
-    ///
-    /// What the index derives from a document is read back from `text` and
-    /// compared with what this document's own [`Reading`] becomes under the
-    /// edits ([`Reading::respelled`]): the links of both families, frontmatter
-    /// ones included, in the same order, with only the rewritten ones' targets
-    /// changed, each to its own edit's; the headings and the tags of both
-    /// sources as they were, a heading or link title holding a rewritten
-    /// wikilink with only that link's token changed; and the code ranges,
-    /// which decide which bytes can be any of those. Each is compared where
-    /// its bytes moved to, so a fact that survives one byte further on is a
-    /// fact that moved, and the proof fails.
-    ///
-    /// This is the proof every rewrite returns under, and it is about the whole
-    /// document because what a target's bytes mean depends on what surrounds
-    /// them: a backtick in a wikilink stem can pair with one later in the
-    /// paragraph and turn the text between into code, a backslash can escape
-    /// the bracket closing the Markdown link around it, a space ends a bare
-    /// destination, `<!--` opens a comment that hides every tag after it, and
-    /// a quote ends the frontmatter scalar quoted with it.
-    fn reads_as_rewritten(&self, before: &Reading, text: &str, edits: &[Edit]) -> bool {
-        let respelling = Respelling::of(edits, before);
-        before
-            .respelled(&respelling)
-            .is_some_and(|expected| Reading::of(&Document::parse(text)) == expected)
-    }
-
-    /// The edits kept greedily in document order: each is kept when it reads
-    /// back alongside the ones kept before it, and every other edit's link is
-    /// skipped.
-    ///
-    /// The answer depends on that order. Two edits that each read back alone
-    /// may not read back together — two frontmatter links that each fit the
-    /// block's byte bound, a backtick in one stem pairing with one in another
-    /// — and then the first is kept and the second skipped, though the
-    /// opposite choice would have read back as well. Document order is the
-    /// tie-break because it is the one a reader of the skips can predict.
-    ///
-    /// This is the path a rewrite takes only when the edits together did not
-    /// read back, which is rare and is what the extra reads are spent on. An
-    /// edit refused here is one whose target bytes read as something else where
-    /// they were written, so a frontmatter one is skipped as corrupting its
-    /// value and a body one as unrepresentable there.
-    fn kept_in_order(&self, before: &Reading, edits: Vec<Edit>, skipped: &mut Skips) -> Vec<Edit> {
-        let mut kept = Vec::with_capacity(edits.len());
-        for edit in edits {
-            kept.push(edit);
-            if !self.reads_as_rewritten(before, &self.spliced(&kept), &kept) {
-                let refused = kept.pop().expect("the edit just kept");
-                let reason = if refused.in_frontmatter {
-                    RewriteSkip::WouldCorruptFrontmatter
-                } else {
-                    RewriteSkip::Unrepresentable
-                };
-                skipped.push(refused.ordinal, refused.link, reason);
-            }
-        }
-        kept
+        })
     }
 
     /// This document's source with each edit's stem written as its target.
     /// The edits are in document order and do not overlap.
-    fn spliced(&self, edits: &[Edit]) -> String {
+    fn spliced<'e>(&self, edits: impl Iterator<Item = &'e Edit>) -> String {
         let runs: Vec<(Range<usize>, &str)> = edits
-            .iter()
             .map(|edit| (edit.range.clone(), edit.to.as_str()))
             .collect();
         splice_all(self.source(), &runs)
+    }
+}
+
+/// The read-back proof of one document's edits, and the whole-document reads
+/// it has spent ([`REWRITE_PROOF_READS`]).
+struct Proof<'a, 'd> {
+    document: &'a Document<'d>,
+    before: Reading,
+    reads: usize,
+}
+
+impl<'a, 'd> Proof<'a, 'd> {
+    fn of(document: &'a Document<'d>) -> Self {
+        Proof {
+            document,
+            before: Reading::of(document),
+            reads: 0,
+        }
+    }
+
+    /// Whether this document with `edits` spliced in reads as this document
+    /// with exactly those edits' links respelled; `edits` are in document
+    /// order.
+    ///
+    /// What the index derives from a document is read back from the spliced
+    /// text and compared with what this document's own [`Reading`] becomes
+    /// under the edits ([`Reading::respelled`]): the links of both families,
+    /// frontmatter ones included, in the same order, with only the rewritten
+    /// ones' targets changed, each to its own edit's; the headings and the
+    /// tags of both sources as they were, a heading or link title holding a
+    /// rewritten wikilink with only that link's token changed; and the code
+    /// ranges, which decide which bytes can be any of those. Each is compared
+    /// where its bytes moved to, so a fact that survives one byte further on
+    /// is a fact that moved, and the proof fails.
+    ///
+    /// This is the proof every rewrite returns under, and it is about the
+    /// whole document because what a target's bytes mean depends on what
+    /// surrounds them: a backtick in a wikilink stem can pair with one later
+    /// in the paragraph and turn the text between into code, a backslash can
+    /// escape the bracket closing the Markdown link around it, a space ends a
+    /// bare destination, `<!--` opens a comment that hides every tag after
+    /// it, and a quote ends the frontmatter scalar quoted with it. So each
+    /// call is one read of the whole document, and the
+    /// [`REWRITE_PROOF_READS`]th is the last a rewrite may spend.
+    fn reads_back(&mut self, edits: &[&Edit]) -> Result<bool, RewriteUnproven> {
+        if self.reads == REWRITE_PROOF_READS {
+            return Err(RewriteUnproven { reads: self.reads });
+        }
+        self.reads += 1;
+        #[cfg(test)]
+        tests::PROOF_READS.with(|reads| reads.set(reads.get() + 1));
+        let respelling = Respelling::of(edits, &self.before);
+        let text = self.document.spliced(edits.iter().copied());
+        Ok(self
+            .before
+            .respelled(&respelling)
+            .is_some_and(|expected| Reading::of(&Document::parse(&text)) == expected))
+    }
+
+    /// The edits kept in runs in document order, where `edits` together do
+    /// not read back: from the first edit not yet decided, the longest run
+    /// found to read back alongside the edits kept before it is kept, and the
+    /// edit ending it is skipped. Each run is found by doubling its length
+    /// until it fails to read back, then halving the gap between the longest
+    /// that did and the shortest that did not, so the reads follow the edits
+    /// skipped — about two for each per doubling of the run before it — rather
+    /// than the edits in the batch.
+    ///
+    /// The answer is the one keeping each edit in turn when it reads back
+    /// alongside the ones kept before it would give, wherever an edit that
+    /// spoils a run spoils every longer one. Document order is the tie-break
+    /// because it is the one a reader of the skips can predict: two edits
+    /// that each read back alone may not read back together — two frontmatter
+    /// links that each fit the block's byte bound, a backtick in one stem
+    /// pairing with one in another — and then the first is kept and the
+    /// second skipped, though the opposite choice would have read back as
+    /// well.
+    ///
+    /// This is the path a rewrite takes only when the edits together did not
+    /// read back, which is rare and is what the extra reads are spent on. An
+    /// edit refused here is one whose target bytes read as something else
+    /// where they were written, so a frontmatter one is skipped as corrupting
+    /// its value and a body one as unrepresentable there.
+    fn kept_in_runs(
+        &mut self,
+        edits: Vec<Edit>,
+        skipped: &mut Skips,
+    ) -> Result<Vec<Edit>, RewriteUnproven> {
+        let mut kept: Vec<&Edit> = Vec::with_capacity(edits.len());
+        let mut refused = vec![false; edits.len()];
+        let mut next = 0;
+        while next < edits.len() {
+            let rest = &edits[next..];
+            // The longest run known to read back, and the shortest known not
+            // to.
+            let mut good = 0;
+            let mut bad = None;
+            let mut run = 1;
+            while bad.is_none() && good < rest.len() {
+                let length = run.min(rest.len());
+                if self.reads_back_with(&kept, &rest[..length])? {
+                    good = length;
+                    run *= 2;
+                } else {
+                    bad = Some(length);
+                }
+            }
+            if let Some(mut bad) = bad {
+                while bad - good > 1 {
+                    let length = good + (bad - good) / 2;
+                    if self.reads_back_with(&kept, &rest[..length])? {
+                        good = length;
+                    } else {
+                        bad = length;
+                    }
+                }
+                refused[next + good] = true;
+            }
+            kept.extend(&rest[..good]);
+            next += good + usize::from(bad.is_some());
+        }
+        let mut kept = Vec::with_capacity(edits.len());
+        for (edit, refused) in edits.into_iter().zip(refused) {
+            if !refused {
+                kept.push(edit);
+                continue;
+            }
+            let reason = if edit.in_frontmatter {
+                RewriteSkip::WouldCorruptFrontmatter
+            } else {
+                RewriteSkip::Unrepresentable
+            };
+            skipped.push(edit.ordinal, edit.link, reason);
+        }
+        Ok(kept)
+    }
+
+    /// Whether `kept`, then `run`, read back together.
+    fn reads_back_with(&mut self, kept: &[&Edit], run: &[Edit]) -> Result<bool, RewriteUnproven> {
+        let edits: Vec<&Edit> = kept.iter().copied().chain(run).collect();
+        self.reads_back(&edits)
     }
 }
 
@@ -588,8 +707,23 @@ impl LinkReading {
 
 /// The links a set of edits respells, in document order: exactly what the
 /// edits replace, so where every other byte moves to follows.
+///
+/// A proof asks it, for each fact of the document, which link it is, where
+/// its bytes moved and which respelled links its text holds, so each answer
+/// is a lookup rather than a pass over the stems: by the link's name, by a
+/// search of the stems in order, and by a search of them ordered by where
+/// their tokens begin.
 struct Respelling<'t> {
     stems: Vec<RespelledStem<'t>>,
+    /// Each stem's place in `stems`, by the family and token start naming its
+    /// link.
+    named: HashMap<(LinkFamily, usize), usize>,
+    /// The bytes the first `k` stems write and the bytes they replace, at
+    /// `k`: so where a byte moves is one search away.
+    written: Vec<(usize, usize)>,
+    /// The places in `stems`, ordered by the byte each token begins at and
+    /// then by place.
+    by_token: Vec<usize>,
 }
 
 /// One link a respelling rewrites: its family and the byte its token begins
@@ -606,19 +740,42 @@ struct RespelledStem<'t> {
 
 impl<'t> Respelling<'t> {
     /// The links `edits` respell, each to its own edit's target, each read
-    /// against `before`, the document's reading before the edits.
-    fn of(edits: &'t [Edit], before: &Reading) -> Self {
-        let stems = edits
+    /// against `before`, the document's reading before the edits. The edits
+    /// are in document order and do not overlap.
+    fn of(edits: &[&'t Edit], before: &Reading) -> Self {
+        let markdown_starts: HashSet<usize> = before
+            .links
             .iter()
-            .map(|edit| RespelledStem {
+            .filter(|link| link.family == LinkFamily::Markdown)
+            .filter_map(|link| link.at.as_ref().map(|at| at.start))
+            .collect();
+        let stems: Vec<RespelledStem<'t>> = edits
+            .iter()
+            .map(|&edit| RespelledStem {
                 family: edit.link.family,
                 at: edit.at,
                 stem: edit.range.clone(),
                 to: &edit.to,
-                read_as: Self::read_as(&edit.link, edit.at, &edit.token, before),
+                read_as: Self::read_as(&edit.link, &edit.token, markdown_starts.contains(&edit.at)),
             })
             .collect();
-        Respelling { stems }
+        let mut named = HashMap::with_capacity(stems.len());
+        let mut written = Vec::with_capacity(stems.len() + 1);
+        written.push((0, 0));
+        for (place, stem) in stems.iter().enumerate() {
+            count_stem_read();
+            named.insert((stem.family, stem.at), place);
+            let (grown, shrunk) = written[place];
+            written.push((grown + stem.to.len(), shrunk + stem.stem.len()));
+        }
+        let mut by_token: Vec<usize> = (0..stems.len()).collect();
+        by_token.sort_by_key(|&place| (stems[place].at, place));
+        Respelling {
+            stems,
+            named,
+            written,
+            by_token,
+        }
     }
 
     /// What a heading or link title holding `link` reads it as, before and
@@ -628,21 +785,13 @@ impl<'t> Respelling<'t> {
     /// alone, so its destination — the only bytes a rewrite changes — never
     /// stands in it, and respelling one changes no text (`None`). A wikilink
     /// reads as its token, except where it is the bracket text of a Markdown
-    /// link beginning at the same byte — `[[a]](b)` — and the two share the
-    /// outer brackets: the text holds the token inside them, `[a]`.
-    fn read_as(
-        link: &'t Link,
-        at: usize,
-        new: &'t str,
-        before: &Reading,
-    ) -> Option<(&'t str, &'t str)> {
+    /// link beginning at the same byte — `[[a]](b)`, `shares_brackets` — and
+    /// the two share the outer brackets: the text holds the token inside
+    /// them, `[a]`.
+    fn read_as(link: &'t Link, new: &'t str, shares_brackets: bool) -> Option<(&'t str, &'t str)> {
         if link.family == LinkFamily::Markdown {
             return None;
         }
-        let shares_brackets = before.links.iter().any(|other| {
-            other.family == LinkFamily::Markdown
-                && other.at.as_ref().is_some_and(|other| other.start == at)
-        });
         if !shares_brackets {
             return Some((&link.raw, new));
         }
@@ -655,32 +804,30 @@ impl<'t> Respelling<'t> {
     /// The target the link of `family` whose token begins at `at` is
     /// respelled to, where this respelling rewrites it.
     fn target_of(&self, family: LinkFamily, at: usize) -> Option<&'t str> {
-        self.stems
-            .iter()
-            .find(|stem| (stem.family, stem.at) == (family, at))
-            .map(|stem| stem.to)
+        let place = *self.named.get(&(family, at))?;
+        count_stem_read();
+        Some(self.stems[place].to)
     }
 
     /// Where the source byte at `at` stands once every stem ending at or
-    /// before it is written as its target.
+    /// before it is written as its target. The stems do not overlap, so
+    /// their ends ascend in document order.
     fn moved(&self, at: usize) -> usize {
-        let (grown, shrunk) = self
-            .stems
-            .iter()
-            .filter(|respelled| respelled.stem.end <= at)
-            .fold((0, 0), |(grown, shrunk), respelled| {
-                (grown + respelled.to.len(), shrunk + respelled.stem.len())
-            });
+        let ended = self.stems.partition_point(|respelled| {
+            count_stem_read();
+            respelled.stem.end <= at
+        });
+        let (grown, shrunk) = self.written[ended];
         at + grown - shrunk
     }
 
     /// `text`, the text of a fact whose bytes span `range`, as it reads once
     /// every respelled link other than `except` beginning inside `range` is
     /// rewritten: what the text reads each such link as replaced by what it
-    /// reads it as respelled ([`Respelling::read_as`]), in order, each found
-    /// after the one before. A respelled Markdown link leaves the text as it
-    /// was; the read-back of the links themselves is what proves its new
-    /// destination still reads as one.
+    /// reads it as respelled ([`Respelling::read_as`]), in document order,
+    /// each found after the one before. A respelled Markdown link leaves the
+    /// text as it was; the read-back of the links themselves is what proves
+    /// its new destination still reads as one.
     ///
     /// `None` where `text` does not hold a wikilink as it should read — the
     /// link holding markup the text flattens, say — so the proof cannot say
@@ -693,14 +840,27 @@ impl<'t> Respelling<'t> {
         range: &Range<usize>,
         except: Option<(LinkFamily, usize)>,
     ) -> Option<String> {
+        let begins_before = |bound: usize| {
+            self.by_token.partition_point(|&place| {
+                count_stem_read();
+                self.stems[place].at < bound
+            })
+        };
+        let mut inside: Vec<usize> = self.by_token
+            [begins_before(range.start)..begins_before(range.end)]
+            .iter()
+            .copied()
+            .filter(|&place| {
+                count_stem_read();
+                let stem = &self.stems[place];
+                except != Some((stem.family, stem.at))
+            })
+            .collect();
+        inside.sort_unstable();
         let mut expected = String::with_capacity(text.len());
         let mut rest = text;
-        for respelled in self
-            .stems
-            .iter()
-            .filter(|stem| range.contains(&stem.at) && except != Some((stem.family, stem.at)))
-        {
-            let Some((old, new)) = &respelled.read_as else {
+        for place in inside {
+            let Some((old, new)) = &self.stems[place].read_as else {
                 continue;
             };
             let found = rest.find(old)?;
@@ -710,5 +870,268 @@ impl<'t> Respelling<'t> {
         }
         expected.push_str(rest);
         Some(expected)
+    }
+}
+
+/// Count one respelled stem a proof's lookup read ([`tests::STEMS_READ`]).
+fn count_stem_read() {
+    #[cfg(test)]
+    tests::STEMS_READ.with(|reads| reads.set(reads.get() + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    thread_local! {
+        /// Respelled stems the proofs on this thread read
+        /// ([`count_stem_read`]).
+        pub(super) static STEMS_READ: Cell<usize> = const { Cell::new(0) };
+        /// Whole-document reads the proofs on this thread spent
+        /// ([`Proof::reads_back`]).
+        pub(super) static PROOF_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// What `rewrites` make of `source`, the respelled stems its proof read,
+    /// and the whole-document reads it spent.
+    fn counted(
+        source: &str,
+        rewrites: &[AddressRewrite],
+    ) -> (Result<RewrittenLinks, RewriteUnproven>, usize, usize) {
+        STEMS_READ.with(|reads| reads.set(0));
+        PROOF_READS.with(|reads| reads.set(0));
+        let rewritten = Document::parse(source).rewrite_links(rewrites);
+        (
+            rewritten,
+            STEMS_READ.with(Cell::get),
+            PROOF_READS.with(Cell::get),
+        )
+    }
+
+    fn wikilink(from: &str, to: &str) -> AddressRewrite {
+        AddressRewrite::new(LinkFamily::Wikilink, from, to)
+    }
+
+    /// A hub of `entries` entries, each a heading holding a wikilink, a list
+    /// item linking a document beside a tag and a code span, and a Markdown
+    /// link whose text holds a wikilink; and a rewrite of every link it
+    /// holds into `moved/`.
+    fn hub(entries: usize) -> (String, Vec<AddressRewrite>) {
+        let mut source = String::new();
+        let mut rewrites = Vec::new();
+        for entry in 0..entries {
+            source.push_str(&format!(
+                "## See [[h{entry}]]\n\n- [[d{entry}]] #tag{entry} `c{entry}`\n- [about [[t{entry}]]](x{entry}.md)\n\n"
+            ));
+            for stem in ["h", "d", "t"] {
+                rewrites.push(wikilink(
+                    &format!("{stem}{entry}"),
+                    &format!("moved/{stem}{entry}"),
+                ));
+            }
+            rewrites.push(AddressRewrite::new(
+                LinkFamily::Markdown,
+                format!("x{entry}.md"),
+                format!("moved/x{entry}.md"),
+            ));
+        }
+        (source, rewrites)
+    }
+
+    /// **A hub's read-back reads its respelled stems in time linear in its
+    /// rewrites**: every link, heading, tag and code span is placed, named
+    /// and carried by a lookup, so doubling the hub's entries doubles the
+    /// stems read, give or take a search's one more step — where a pass over
+    /// every stem per fact quadruples them.
+    #[test]
+    fn a_hubs_read_back_reads_its_stems_in_time_linear_in_its_rewrites() {
+        let stems_read = |entries| {
+            let (source, rewrites) = hub(entries);
+            let (rewritten, stems, reads) = counted(&source, &rewrites);
+            let rewritten = rewritten.expect("a batch reading back is proven");
+            assert!(rewritten.skipped.is_empty(), "{:?}", rewritten.skipped);
+            assert_eq!(rewritten.rewritten, rewrites.len());
+            assert_eq!(reads, 1, "a batch reading back whole is one read");
+            stems
+        };
+        let (few, many) = (stems_read(128), stems_read(256));
+        assert!(
+            many * 10 <= few * 25,
+            "doubling a hub's rewrites took the stems read from {few} to {many}"
+        );
+    }
+
+    /// A hub of `entries` list items, each linking a document, where the
+    /// item at `spoiled` also holds a lone backtick, so a backtick written in
+    /// its link's target pairs with it; and a rewrite of every link into
+    /// `moved/`, the spoiled one's target holding a backtick.
+    fn spoiled_hub(entries: usize, spoiled: usize) -> (String, Vec<AddressRewrite>) {
+        let mut source = String::new();
+        let mut rewrites = Vec::new();
+        for entry in 0..entries {
+            if entry == spoiled {
+                source.push_str(&format!("- [[d{entry}]] and a lone ` tick\n"));
+                rewrites.push(wikilink(&format!("d{entry}"), &format!("odd`/d{entry}")));
+            } else {
+                source.push_str(&format!("- [[d{entry}]]\n"));
+                rewrites.push(wikilink(&format!("d{entry}"), &format!("moved/d{entry}")));
+            }
+        }
+        (source, rewrites)
+    }
+
+    /// **One edit that does not read back costs a hub reads logarithmic in
+    /// its rewrites**, not one per rewrite: the runs either side of it are
+    /// found by doubling and halving, every other link is respelled, and the
+    /// one is skipped as unrepresentable.
+    #[test]
+    fn one_edit_not_reading_back_costs_reads_logarithmic_in_the_hubs_rewrites() {
+        for entries in [256_usize, 1024] {
+            let (source, rewrites) = spoiled_hub(entries, entries / 2 + 1);
+            let (rewritten, _, reads) = counted(&source, &rewrites);
+            let rewritten = rewritten.expect("a proof within its reads");
+            assert_eq!(rewritten.rewritten, entries - 1);
+            let [skipped] = rewritten.skipped.as_slice() else {
+                panic!("one skip: {:?}", rewritten.skipped);
+            };
+            assert_eq!(skipped.link.target, format!("d{}", entries / 2 + 1));
+            assert_eq!(skipped.reason, RewriteSkip::Unrepresentable);
+            let bound = 4 * entries.ilog2() as usize + 1;
+            assert!(
+                reads <= bound,
+                "{entries} rewrites with one spoiled took {reads} reads, past {bound}"
+            );
+        }
+    }
+
+    /// One paragraph of `links` wikilinks, each rewritten to a target holding
+    /// a backtick: alone, the first reads back, its backtick unpaired; every
+    /// later one pairs with a backtick before it.
+    fn backticked(links: usize) -> (String, Vec<AddressRewrite>) {
+        let source: String = (0..links).map(|link| format!("[[d{link}]] ")).collect();
+        let rewrites = (0..links)
+            .map(|link| wikilink(&format!("d{link}"), &format!("odd`{link}")))
+            .collect();
+        (format!("{}\n", source.trim_end()), rewrites)
+    }
+
+    /// **A batch whose edits mostly do not read back is searched within
+    /// [`REWRITE_PROOF_READS`] reads of the document, and past them rewrites
+    /// nothing**: under the bound the first link is respelled and every
+    /// other skipped, one read each; past it the rewrite answers
+    /// [`RewriteUnproven`], having spent exactly the bound.
+    #[test]
+    fn a_batch_mostly_not_reading_back_is_searched_within_its_reads_and_past_them_rewrites_nothing()
+    {
+        let (source, rewrites) = backticked(REWRITE_PROOF_READS - 28);
+        let (rewritten, _, reads) = counted(&source, &rewrites);
+        let rewritten = rewritten.expect("a proof within its reads");
+        assert_eq!(rewritten.rewritten, 1);
+        assert_eq!(rewritten.skipped.len(), rewrites.len() - 1);
+        assert!(
+            rewritten
+                .skipped
+                .iter()
+                .all(|skip| skip.reason == RewriteSkip::Unrepresentable)
+        );
+        assert!(reads <= REWRITE_PROOF_READS, "{reads}");
+
+        let (source, rewrites) = backticked(2 * REWRITE_PROOF_READS);
+        let (rewritten, _, reads) = counted(&source, &rewrites);
+        assert_eq!(
+            rewritten,
+            Err(RewriteUnproven {
+                reads: REWRITE_PROOF_READS
+            })
+        );
+        assert_eq!(reads, REWRITE_PROOF_READS);
+    }
+
+    /// `source` rewritten by `rewrites` keeping each edit in turn where it
+    /// reads back alongside the ones kept before it: the rule the runs answer
+    /// for, read one edit at a time.
+    fn kept_one_at_a_time(source: &str, rewrites: &[AddressRewrite]) -> String {
+        let document = Document::parse(source);
+        let rules = Rules::of(rewrites);
+        let mut skipped = Skips::default();
+        let mut edits = Vec::new();
+        let frontmatter = document
+            .frontmatter_wikilinks()
+            .into_iter()
+            .map(|link| (link, true));
+        let body = document.links().into_iter().map(|link| (link, false));
+        for (ordinal, (link, in_frontmatter)) in frontmatter.chain(body).enumerate() {
+            let Some(Ok(to)) = rules.for_link(&link) else {
+                continue;
+            };
+            if let Ok((at, range, token)) = to.respell(&link) {
+                edits.push(Edit {
+                    ordinal,
+                    at,
+                    range,
+                    to: to.target.clone(),
+                    token,
+                    link,
+                    in_frontmatter,
+                });
+            }
+        }
+        let edits = disjoint(edits, &mut skipped);
+        let mut proof = Proof::of(&document);
+        let mut kept: Vec<&Edit> = Vec::new();
+        for edit in &edits {
+            kept.push(edit);
+            if !proof.reads_back(&kept).expect("within the reads") {
+                kept.pop();
+            }
+        }
+        document.spliced(kept.into_iter())
+    }
+
+    /// **The runs keep what keeping each edit in turn keeps** wherever an
+    /// edit spoiling a run spoils every longer one: backticks pairing across
+    /// links, a lone backtick a single target pairs with, and frontmatter
+    /// links whose targets would end their quoted scalars.
+    #[test]
+    fn the_runs_keep_what_keeping_each_edit_in_turn_keeps() {
+        let cases: Vec<(String, Vec<AddressRewrite>)> = vec![
+            backticked(9),
+            spoiled_hub(40, 0),
+            spoiled_hub(40, 17),
+            spoiled_hub(40, 39),
+            (
+                "---\nup: \"[[a]]\"\nside: \"[[b]]\"\nnext: '[[c]]'\n---\n[[a]] `x [[b]] and [[c]]\n"
+                    .to_string(),
+                vec![
+                    wikilink("a", "q\"a"),
+                    wikilink("b", "b`b"),
+                    wikilink("c", "c'c"),
+                ],
+            ),
+            (
+                "[[a]] [[b]] [[c]] [[d]] ` [[e]] [[f]]\n".to_string(),
+                vec![
+                    wikilink("a", "a`"),
+                    wikilink("b", "b"),
+                    wikilink("c", "`c"),
+                    wikilink("d", "d`d"),
+                    wikilink("e", "e"),
+                    wikilink("f", "f`"),
+                ],
+            ),
+        ];
+        for (source, rewrites) in cases {
+            let rewritten = Document::parse(&source)
+                .rewrite_links(&rewrites)
+                .expect("within the reads");
+            assert!(!rewritten.skipped.is_empty(), "{source}");
+            assert_eq!(
+                rewritten.text,
+                kept_one_at_a_time(&source, &rewrites),
+                "{source}"
+            );
+        }
     }
 }

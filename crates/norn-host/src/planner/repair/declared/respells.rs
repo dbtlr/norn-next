@@ -1114,7 +1114,8 @@ mod tests {
             for family in [LinkFamily::Wikilink, LinkFamily::Markdown] {
                 for to in targets {
                     let rewritten = Document::parse(body)
-                        .rewrite_links(&[AddressRewrite::new(family, "a", to)]);
+                        .rewrite_links(&[AddressRewrite::new(family, "a", to)])
+                        .expect("a batch proven within its reads");
                     assert_eq!(
                         tags(&rewritten.text),
                         tags(body),

@@ -129,11 +129,9 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
 
     // Rewriting the two that carry a target keeps the empty part they carry.
     for (raw, expected) in [("[[a#]]", "[[new#]]"), ("[[a|]]", "[[new|]]")] {
-        let out = Document::parse(raw).rewrite_links(&[AddressRewrite::new(
-            LinkFamily::Wikilink,
-            "a",
-            "new",
-        )]);
+        let out = Document::parse(raw)
+            .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, "a", "new")])
+            .expect("a batch proven within its reads");
         assert_eq!(out.text, expected, "rewriting {raw:?}");
     }
 }
@@ -159,11 +157,9 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
     let link = only(straddling);
     assert_eq!(link.target, "Target\nOther");
     for to in ["new", link.target.as_str()] {
-        let out = Document::parse(straddling).rewrite_links(&[AddressRewrite::new(
-            LinkFamily::Wikilink,
-            &link.target,
-            to,
-        )]);
+        let out = Document::parse(straddling)
+            .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, &link.target, to)])
+            .expect("a batch proven within its reads");
         assert_eq!(out.text, straddling, "rewriting to {to:?}");
         assert_eq!(
             out.skipped
@@ -184,11 +180,13 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
 fn a_token_that_swallowed_two_paragraphs_is_never_rewritten() {
     let body = "an unclosed [[link here\n\nand a later ]] closer\n\nplus [[Real]]\n";
     let swallowed = BodyScan::new(body).wikilinks().remove(0);
-    let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
-        LinkFamily::Wikilink,
-        &swallowed.target,
-        "new",
-    )]);
+    let out = Document::parse(body)
+        .rewrite_links(&[AddressRewrite::new(
+            LinkFamily::Wikilink,
+            &swallowed.target,
+            "new",
+        )])
+        .expect("a batch proven within its reads");
     assert_eq!(out.text, body);
     assert_eq!(out.rewritten, 0);
     assert_eq!(out.skipped.len(), 1);
@@ -207,6 +205,7 @@ fn a_bare_caret_is_an_ordinary_target_character() {
     let rewrite = |from: &str, to: &str| {
         Document::parse("[[a^b]]")
             .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, from, to)])
+            .expect("a batch proven within its reads")
             .text
     };
     assert_eq!(rewrite("a^b", "renamed"), "[[renamed]]");

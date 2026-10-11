@@ -727,7 +727,7 @@ impl std::error::Error for ElsewhereNamesDocuments {}
 /// The written form a link was recognized from.
 ///
 /// On the wire a family is the flat string itself: `"wikilink"`, `"markdown"`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LinkFamily {

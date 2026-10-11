@@ -24,7 +24,9 @@ fn batch(source: &str, rewrites: &[(LinkFamily, &str, &str)]) -> RewrittenLinks 
         .iter()
         .map(|&(family, from, to)| AddressRewrite::new(family, from, to))
         .collect();
-    Document::parse(source).rewrite_links(&rewrites)
+    Document::parse(source)
+        .rewrite_links(&rewrites)
+        .expect("a batch proven within its reads")
 }
 
 fn reasons(rewritten: &RewrittenLinks) -> Vec<RewriteSkip> {
@@ -571,7 +573,9 @@ fn a_rewritten_document_reads_back_with_to_at_every_rewritten_link() {
                   # Head\n[[Old#Head|t]] [t](Old) [[#Head]] ![[Old]] [[Other]]\n";
     let before = Document::parse(source);
     let to_new = [AddressRewrite::new(LinkFamily::Wikilink, "Old", "Sub/New")];
-    let out = before.rewrite_links(&to_new);
+    let out = before
+        .rewrite_links(&to_new)
+        .expect("a batch proven within its reads");
     assert_eq!(out.rewritten, 3);
 
     let after = Document::parse(&out.text);
@@ -605,7 +609,9 @@ fn a_rewritten_document_reads_back_with_to_at_every_rewritten_link() {
         );
     }
 
-    let again = after.rewrite_links(&to_new);
+    let again = after
+        .rewrite_links(&to_new)
+        .expect("a batch proven within its reads");
     assert_eq!(again.text, out.text);
     assert_eq!(again.rewritten, 0);
 }
@@ -985,7 +991,9 @@ fn one_batch_rewrites_each_key_independently() {
 #[test]
 fn an_empty_batch_returns_the_input_unchanged() {
     let source = "---\nup: '[[a]]'\n---\n[[a]] [t](a)\n";
-    let out = Document::parse(source).rewrite_links(&[]);
+    let out = Document::parse(source)
+        .rewrite_links(&[])
+        .expect("a batch proven within its reads");
     assert_eq!(out.text, source);
     assert_eq!(out.rewritten, 0);
     assert!(out.skipped.is_empty());

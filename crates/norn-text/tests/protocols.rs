@@ -23,7 +23,9 @@ fn only(text: &str) -> Link {
 /// `raw` rewritten through the one link rewrite, wikilinks addressed `from`
 /// respelled `to`.
 fn rewrite(raw: &str, from: &str, to: &str) -> RewrittenLinks {
-    Document::parse(raw).rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, from, to)])
+    Document::parse(raw)
+        .rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, from, to)])
+        .expect("a batch proven within its reads")
 }
 
 fn only_markdown(body: &str) -> Link {
