@@ -3918,3 +3918,45 @@ fn below_threshold_proposals_of_a_lists_elements_are_what_lowering_the_threshold
     assert_eq!(written.len(), 1, "{written:?}");
     assert_eq!(proposed, vec![Some(written[0].clone()); 2]);
 }
+
+/// **A bare value naming a document whose route the batch refuses resolves
+/// where that document stays**: two routes land at one destination, so the
+/// later is refused as taken and its document stays; `b/zz-b`, path-qualified
+/// to it, still names it once the plan lands, and the plan applies leaving
+/// only its skips.
+#[test]
+fn a_bare_value_naming_a_document_whose_route_the_batch_refuses_resolves_where_it_stays() {
+    let schema = format!("{TASKED}fields:\n  up: {{type: link}}\n");
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-bare-link-refused-route",
+        &schema,
+        &[
+            ("a/zz-b.md", b"---\ntype: task\n---\n# First\n"),
+            ("b/zz-b.md", b"---\ntype: task\n---\n# Second\n"),
+            ("h.md", b"---\nup: b/zz-b\n---\n# H\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(stands(&vault, "b/zz-b.md"));
+    assert!(written(&vault, "h.md").contains("[[b/zz-b]]"));
+    let recorded: Vec<&norn_wire::PlanCondition> = plan
+        .conditions
+        .iter()
+        .filter(|condition| {
+            matches!(
+                condition,
+                norn_wire::PlanCondition::AddressResolution { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![&norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("h.md"), norn_wire::LinkFamily::Wikilink, "b/zz-b"),
+            norn_wire::Resolves::one(at("b/zz-b.md")),
+        )]
+    );
+}

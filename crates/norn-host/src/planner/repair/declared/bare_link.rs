@@ -65,27 +65,20 @@ pub(super) fn is_link_mismatch(schema: &VaultSchema, row: &FindingRow) -> bool {
 /// The wikilink address `value` is, written as `[[value]]`, where that reads
 /// back as exactly one plain wikilink of that address; `None` for any other
 /// value.
+///
+/// **One round trip defines it**: the `link` reader's key of `[[value]]`
+/// ([`link_key`]) is `[[value]]` itself — one wikilink, no embed, no alias,
+/// nothing the parser trims or drops, which an empty value, surrounding white
+/// space, a `|` or a `]` each break. What the round trip keeps is excluded
+/// beside it: a `#` fragment, which the key holds though it names a place in
+/// a document rather than a document, and an opening `[` or a line break,
+/// which the parser reads past.
 fn bare_address(value: &str) -> Option<&str> {
-    if value.is_empty() || value != value.trim() || value.contains(['#', '|', '[', ']', '\n', '\r'])
-    {
+    if value.contains(['#', '[', '\n', '\r']) {
         return None;
     }
     let written = format!("[[{value}]]");
-    let [link] = norn_text::parse_wikilinks_in_text(&written)
-        .try_into()
-        .ok()?;
-    let protocol = link
-        .protocol
-        .as_deref()
-        .map_or_else(String::new, |scheme| format!("{scheme}://"));
-    let plain = link.family == norn_text::LinkFamily::Wikilink
-        && !link.embed
-        && link.raw == written
-        && link.title.is_none()
-        && link.anchor.is_none()
-        && link.block_ref.is_none()
-        && format!("{protocol}{}", link.target) == value;
-    (plain && link_key(&written).as_deref() == Some(written.as_str())).then_some(value)
+    (link_key(&written).as_deref() == Some(written.as_str())).then_some(value)
 }
 
 /// What the document standing at `holder` makes of the offending element
@@ -470,6 +463,24 @@ mod tests {
         assert!(planned.operations.is_empty());
         assert!(planned.conditions.is_empty());
         assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **Each spelling qualifies or not by the one round trip and the
+    /// exclusions beside it**: a fragment, an opening bracket and a line
+    /// break are excluded though the key would keep them; an alias, a
+    /// closing bracket, surrounding white space and nothing at all fail the
+    /// round trip; a path, a protocol, an extension, inner white space and
+    /// any script qualify.
+    #[test]
+    fn a_spelling_qualifies_by_the_round_trip_and_the_exclusions_beside_it() {
+        for value in [
+            "b#h", "b#^x", "a[b", "[b]", "a\nb", "a\rb", "b|c", "b]", "a]b", " b", "b ", "",
+        ] {
+            assert_eq!(bare_address(value), None, "{value:?}");
+        }
+        for value in ["b", "a/b", "vault://b", "a.md", "b c", "日本"] {
+            assert_eq!(bare_address(value), Some(value), "{value:?}");
+        }
     }
 
     /// **A value that does not read back as exactly one plain wikilink is

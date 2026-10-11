@@ -3754,6 +3754,34 @@ mod tests {
         assert!(read.is_empty(), "read {read:?}");
     }
 
+    /// **Only a type mismatch is an excluded class**: a value too long, or a
+    /// rules conflict, on a date, number or boolean field is skipped for its
+    /// own reason, its document unread.
+    #[test]
+    fn only_a_type_mismatch_is_an_excluded_class() {
+        let schema = "version: 1\nfields:\n  due: {type: date}\n  points: {type: number}\n  done: {type: boolean}\n";
+        let vault = Vault::of(schema, &[]);
+
+        let (planned, read) = vault.planned(
+            &[
+                offending(1, FindingKind::TooLong, "a.md", "due", "2026-10-11"),
+                offending(2, FindingKind::FieldRulesConflict, "a.md", "points", "3"),
+                offending(3, FindingKind::TooLong, "a.md", "done", "true"),
+            ],
+            &Cell::new(0),
+        );
+
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::NoDeclaredFix),
+                (2, SkipReason::RulesConflict),
+                (3, SkipReason::NoDeclaredFix),
+            ]
+        );
+        assert!(read.is_empty(), "read {read:?}");
+    }
+
     const MEMBERS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, 'in progress']}\n";
 
     /// **A value differing from exactly one member only by case is written as
@@ -3997,6 +4025,97 @@ mod tests {
         );
     }
 
+    /// **The tag carrier is never folded, declared or not**: `A  B` folds
+    /// to the member `a b` as text, but the tags compare under the tag fold.
+    #[test]
+    fn the_tag_carrier_is_never_folded() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      tags: {values: ['a b']}\n";
+        let vault = Vault::of(
+            schema,
+            &[("a.md", "---\ntype: task\ntags: ['A  B']\n---\n")],
+        );
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "tags", "A  B")]);
+
+        assert!(planned.operations.is_empty(), "{:?}", planned.operations);
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **White space folds by Unicode, not by ASCII alone**: a no-break
+    /// space, a tab and an ideographic space each pad and separate as a
+    /// space does, in a closed set's value and a boolean's alike.
+    #[test]
+    fn unicode_white_space_folds_as_a_space_does() {
+        for space in ["\u{a0}", "\t", "\u{3000}"] {
+            let text =
+                format!("---\ntype: task\nstatus: '{space}In{space}{space}Progress{space}'\n---\n");
+            let vault = Vault::of(MEMBERS, &[("a.md", text.as_str())]);
+            let value = format!("{space}In{space}{space}Progress{space}");
+            let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", &value)]);
+            assert_eq!(
+                planned.operations,
+                vec![set(1, "a.md", "status", "in progress")],
+                "{space:?}"
+            );
+
+            let text = format!("---\ndone: '{space}TrUe{space}'\n---\n");
+            let vault = Vault::of(FLAGS, &[("a.md", text.as_str())]);
+            let value = format!("{space}TrUe{space}");
+            let planned = vault.plan(&[offending(1, TYPE_MISMATCH, "a.md", "done", &value)]);
+            assert_eq!(
+                planned.operations,
+                vec![set_to(1, "a.md", "done", AuthoredValue::Bool(true))],
+                "{space:?}"
+            );
+        }
+    }
+
+    /// **A lower case that changes a value's length still folds**: `İ`
+    /// lower-cases to `i` and a combining dot, the member `i̇`; `STRASSE` is
+    /// no `straße`, which lower case alone never makes it.
+    #[test]
+    fn a_lower_case_changing_length_folds_and_no_other_mapping_does() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: ['i\u{307}', 'straße']}\n";
+        let vault = Vault::of(
+            schema,
+            &[
+                ("a.md", "---\ntype: task\nstatus: İ\n---\n"),
+                ("b.md", "---\ntype: task\nstatus: STRASSE\n---\n"),
+            ],
+        );
+
+        let planned = vault.plan(&[
+            offending(1, NOT_ONE_OF, "a.md", "status", "İ"),
+            offending(2, NOT_ONE_OF, "b.md", "status", "STRASSE"),
+        ]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set(1, "a.md", "status", "i\u{307}")]
+        );
+        assert_eq!(reasons(&planned), vec![(2, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **Members folding together under a threshold not admitting the
+    /// derived level are no tie**: the derived level decides nothing, so the
+    /// finding has no declared fix.
+    #[test]
+    fn a_derived_tie_under_a_declared_threshold_has_no_declared_fix() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [Todo, TODO]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: todo\n---\n")])
+            .at(Confidence::Declared);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "todo")]);
+
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::NoDeclaredFix)
+                    .with_value(norn_store::value_head("todo"))
+            ]
+        );
+    }
+
     const DECLARED_AND_FOLDED: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done, finished], synonyms: {Done: finished}}\n";
 
     /// **A declared synonym decides over the fold, and the cited fix notes the
@@ -4021,6 +4140,76 @@ mod tests {
         assert_eq!(cited.confidence, Confidence::Declared);
         assert_eq!(cited.notes.len(), 1, "{:?}", cited.notes);
         assert!(cited.notes[0].contains("`done`"), "{:?}", cited.notes);
+    }
+
+    /// **Under a threshold not admitting the derived level, the derived
+    /// answer leaks into no declared fix**: the synonym's `finished` is
+    /// written with no note, and where the judge refuses it the finding skips
+    /// with the declared candidate alone.
+    #[test]
+    fn under_a_declared_threshold_no_derived_note_or_candidate_reaches_a_declared_fix() {
+        let vault = Vault::of(
+            DECLARED_AND_FOLDED,
+            &[("a.md", "---\ntype: task\nstatus: Done\n---\n")],
+        )
+        .at(Confidence::Declared);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set(1, "a.md", "status", "finished")]
+        );
+        assert!(planned.citations[0].findings[0].notes.is_empty());
+
+        let strict = format!(
+            "{DECLARED_AND_FOLDED}  strict:\n    match: {{frontmatter: {{type: task}}}}\n    one_of:\n      status: {{values: [todo, done]}}\n"
+        );
+        let vault = Vault::of(&strict, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")])
+            .at(Confidence::Declared);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
+                    .with_value(norn_store::value_head("Done"))
+                    .with_candidates(values(&[("finished", "tasks")]))
+            ]
+        );
+    }
+
+    /// **Declared synonyms that tie note the differing derived answer**:
+    /// `Done` maps to `finished` and to `complete`, and folds to `done`.
+    #[test]
+    fn a_declared_tie_notes_the_differing_derived_answer() {
+        let schema = "version: 1\nrules:\n  a:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [done, finished, complete], synonyms: {Done: finished}}\n  b:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [done, finished, complete], synonyms: {Done: complete}}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: Done\n---\n")]);
+
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "Done")]);
+
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::Tie)]);
+        let note = note_of(&planned, 1);
+        assert!(note.contains("`done`"), "{note}");
+    }
+
+    /// **A below-threshold wrap the judge refuses skips as one the judge
+    /// would refuse**, not as below the threshold.
+    #[test]
+    fn a_below_threshold_wrap_the_judge_refuses_skips_as_judge_would_refuse() {
+        let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")])
+            .at(Confidence::Declared);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "priority",
+            &AuthoredValue::string("abc"),
+        )]);
+
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
     }
 
     /// **A declared synonym agreeing with the fold needs no note.**

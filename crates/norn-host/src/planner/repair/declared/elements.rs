@@ -169,14 +169,15 @@ pub(super) fn fix_field(
         return Mapped { fix: None, skipped };
     }
     let set = document.set(&state.at, field, working);
-    if cites.len() > 1 {
-        // Each element was composed onto the one before it; the operation
-        // the plan carries is one set of the field, so the state is what that
-        // one set composes to.
-        if let Ok(bytes) = edited(&set, &state.bytes) {
-            current.bytes = bytes;
-        }
-    }
+    // The elements were composed one by one, and the plan carries one set
+    // of the field: the two write the same bytes, since a flat list set over
+    // a flat list is rewritten where it stands in its author's spelling and
+    // any other set replaces the field's whole entry, so the state the
+    // elements composed to is the one set's.
+    debug_assert!(
+        cites.len() == 1 || edited(&set, &state.bytes).ok().as_deref() == Some(&*current.bytes),
+        "one set of `{field}` writes what its elements composed to"
+    );
     Mapped {
         fix: Some(Fix {
             operations: vec![set],
