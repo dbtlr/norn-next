@@ -54,19 +54,19 @@
 //! link is gone (NORN-389). It is the only fix that removes a link: a rename
 //! keeps the link in its new field, and a closed set never holds a wikilink.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use norn_store::FindingLink;
 use norn_wire::{
-    DocumentPath, FindingKind, FindingRow, LinkFamily, LinkKey, Operation, OperationKind,
-    PlanCondition, Resolves, SkippedFinding,
+    DocumentPath, FindingKind, FindingRow, LinkAdvisory, LinkFamily, LinkKey, Operation,
+    OperationKind, PlanCondition, Resolves, SkippedFinding,
 };
 
 use crate::planner::links::wire_family;
 
 /// What the plan changes about where links stand: the batch's routes, the
-/// cascade's respellings and the resolution change set, each read off the
-/// resolved plan once.
+/// cascade's respellings, the resolution change set and the links the
+/// forecast advises on, each read off the resolved plan once.
 pub(crate) struct Landing {
     /// Where each routed document goes, by where it stood.
     routes: HashMap<DocumentPath, DocumentPath>,
@@ -76,12 +76,20 @@ pub(crate) struct Landing {
     /// What each link the plan changes resolved to before it and resolves to
     /// after it, by its key at the after-state.
     resolutions: HashMap<(DocumentPath, LinkFamily, String), (Resolves, Resolves)>,
+    /// The keys, at the after-state, the forecast advises on. A key a cascade
+    /// respells that is advised on holds a link the batch left as written.
+    advised: HashSet<(DocumentPath, LinkFamily, String)>,
 }
 
 impl Landing {
-    /// What `operations`, a resolved plan's, route and respell, and what its
-    /// `conditions` record the plan changes the resolution of.
-    pub(crate) fn of(operations: &[Operation], conditions: &[PlanCondition]) -> Self {
+    /// What `operations`, a resolved plan's, route and respell, what its
+    /// `conditions` record the plan changes the resolution of, and what its
+    /// forecast `advisories` say of the links.
+    pub(crate) fn of(
+        operations: &[Operation],
+        conditions: &[PlanCondition],
+        advisories: &[LinkAdvisory],
+    ) -> Self {
         let mut routes = HashMap::new();
         let mut respelled = HashMap::new();
         for operation in operations {
@@ -106,10 +114,15 @@ impl Landing {
                 PlanCondition::ContentHash { .. } | PlanCondition::AddressResolution { .. } => None,
             })
             .collect();
+        let advised = advisories
+            .iter()
+            .map(|advisory| keyed(advisory.link()))
+            .collect();
         Landing {
             routes,
             respelled,
             resolutions,
+            advised,
         }
     }
 
@@ -118,23 +131,33 @@ impl Landing {
         self.routes.get(path).unwrap_or(path)
     }
 
-    /// The change the plan makes to the resolution of `link`, a link as the
-    /// document at `holder` holds it before the plan: what it resolved to
-    /// before and what it resolves to after, and `None` where the plan does
-    /// not change it.
-    fn change_of(
+    /// The readings of the change the plan makes to the resolution of `link`,
+    /// a link as the document at `holder` holds it before the plan; each is
+    /// what the plan changes about it — what it resolved to before and what it
+    /// resolves to after — and `None` where the plan does not change it.
+    ///
+    /// **A reading is the link read as the plan may leave it.** A link no
+    /// cascade respells is read under its own key. A respelled one is read
+    /// under the key of the address it is respelled to, where the forecast
+    /// advises on no link of the old key, since then the batch respelled every
+    /// link of it. Where the forecast does advise on one, the batch left some
+    /// links of that key as written and the plan does not say which this is,
+    /// so it is read both ways: respelled, and as written under the old key.
+    fn readings(
         &self,
         holder: &DocumentPath,
         link: &FindingLink,
-    ) -> Option<&(Resolves, Resolves)> {
+    ) -> impl Iterator<Item = Option<&(Resolves, Resolves)>> {
         let syntax = wire_family(link.family);
         let holder = self.placed(holder).clone();
-        let address = self
-            .respelled
-            .get(&(holder.clone(), syntax, link.address.clone()))
-            .cloned()
-            .unwrap_or_else(|| link.address.clone());
-        self.resolutions.get(&(holder, syntax, address))
+        let old = (holder, syntax, link.address.clone());
+        let respelled = self.respelled.get(&old).map(|to| {
+            let (holder, syntax, _) = &old;
+            self.resolutions.get(&(holder.clone(), *syntax, to.clone()))
+        });
+        let as_written = (respelled.is_none() || self.advised.contains(&old))
+            .then(|| self.resolutions.get(&old));
+        respelled.into_iter().chain(as_written)
     }
 }
 
@@ -170,12 +193,18 @@ pub(crate) fn skipped_still_held(
 }
 
 /// Whether the link finding `row`, about `link`, still holds once the plan
-/// `landing` describes has landed.
+/// `landing` describes has landed: where any reading of the link says it does,
+/// since a finding is dropped only where every reading drops it.
 fn standing(row: &FindingRow, link: &FindingLink, landing: &Landing) -> bool {
-    let Some((_, after)) = landing.change_of(&row.path, link) else {
-        return true;
-    };
-    match row.kind {
+    landing
+        .readings(&row.path, link)
+        .any(|change| change.is_none_or(|(_, after)| holds_after(row.kind, after)))
+}
+
+/// Whether a link finding of `kind` still holds about a link that resolves to
+/// `after`.
+fn holds_after(kind: FindingKind, after: &Resolves) -> bool {
+    match kind {
         FindingKind::Broken => matches!(after, Resolves::None {}),
         FindingKind::Ambiguous => matches!(after, Resolves::Several {}),
         // A link resolving to one document keeps its finding, whether it is
@@ -245,11 +274,22 @@ mod tests {
 
     /// The ids of the findings `skipped_still_held` keeps among the link findings `of`,
     /// each `(id, kind, holder, link)`, under the plan `operations` and
-    /// `conditions` describe.
+    /// `conditions` describe, whose forecast advises on nothing.
     fn kept(
         of: &[(u64, FindingKind, &str, FindingLink)],
         operations: &[Operation],
         conditions: &[PlanCondition],
+    ) -> Vec<u64> {
+        kept_advised(of, operations, conditions, &[])
+    }
+
+    /// The ids kept as [`kept`] keeps them, under a plan whose forecast
+    /// carries `advisories`.
+    fn kept_advised(
+        of: &[(u64, FindingKind, &str, FindingLink)],
+        operations: &[Operation],
+        conditions: &[PlanCondition],
+        advisories: &[LinkAdvisory],
     ) -> Vec<u64> {
         let rows: Vec<FindingRow> = of
             .iter()
@@ -263,7 +303,8 @@ mod tests {
             .iter()
             .map(|(id, ..)| SkippedFinding::new(*id, SkipReason::NoDeclaredFix))
             .collect();
-        skipped_still_held(skipped, &rows, &links, &Landing::of(operations, conditions))
+        let landing = Landing::of(operations, conditions, advisories);
+        skipped_still_held(skipped, &rows, &links, &landing)
             .into_iter()
             .map(|skip| skip.finding)
             .collect()
@@ -521,12 +562,132 @@ mod tests {
         ];
 
         let kept: Vec<u64> =
-            skipped_still_held(skipped, &rows, &links, &Landing::of(&[], &conditions))
+            skipped_still_held(skipped, &rows, &links, &Landing::of(&[], &conditions, &[]))
                 .into_iter()
                 .map(|skip| skip.finding)
                 .collect();
 
         // 5 is dropped; 3 is no link finding; 9 has no link; 7 still stands.
         assert_eq!(kept, vec![7, 3, 9]);
+    }
+
+    /// A route whose cascade respells the wikilink `from` of `h.md` to `to`.
+    fn respelling(from: &str, to: &str) -> Operation {
+        let mut moving = route("loose/a.md", "tasks/a.md");
+        moving.cascade = vec![LinkRewrite::new(
+            path("h.md"),
+            LinkFamily::Wikilink,
+            from,
+            to,
+        )];
+        moving
+    }
+
+    /// Whether the broken-link finding about the wikilink `old` of `h.md` is
+    /// kept, where a cascade respells it to `new`, the forecast advises on
+    /// `old` if `advised`, and the plan records `new_entry` under `new` and
+    /// `old_entry` under `old`.
+    fn kept_beside(
+        advised: bool,
+        new_entry: Option<Resolves>,
+        old_entry: Option<Resolves>,
+    ) -> bool {
+        let entry = |address: &str, after: Option<Resolves>| {
+            after.map(|after| {
+                changed(
+                    "h.md",
+                    LinkFamily::Wikilink,
+                    address,
+                    Resolves::none(),
+                    after,
+                )
+            })
+        };
+        let conditions: Vec<PlanCondition> = [entry("new", new_entry), entry("old", old_entry)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let advisories = if advised {
+            vec![LinkAdvisory::skipped_not_rewritable(LinkKey::new(
+                path("h.md"),
+                LinkFamily::Wikilink,
+                "old",
+            ))]
+        } else {
+            Vec::new()
+        };
+        let finding = [(1, FindingKind::Broken, "h.md", wikilink("old"))];
+        !kept_advised(
+            &finding,
+            &[respelling("old", "new")],
+            &conditions,
+            &advisories,
+        )
+        .is_empty()
+    }
+
+    /// **A link no cascade respells is read under its own key**, whatever the
+    /// forecast advises on and whatever is recorded under another address.
+    #[test]
+    fn a_link_no_cascade_respells_is_read_under_its_own_key() {
+        let conditions = [
+            changed(
+                "h.md",
+                LinkFamily::Wikilink,
+                "a",
+                Resolves::none(),
+                one("a.md"),
+            ),
+            changed(
+                "h.md",
+                LinkFamily::Wikilink,
+                "b",
+                Resolves::none(),
+                Resolves::none(),
+            ),
+        ];
+        let advisories = [LinkAdvisory::skipped_not_rewritable(LinkKey::new(
+            path("h.md"),
+            LinkFamily::Wikilink,
+            "a",
+        ))];
+        let finding = [(1, FindingKind::Broken, "h.md", wikilink("a"))];
+
+        assert!(kept_advised(&finding, &[], &conditions, &advisories).is_empty());
+    }
+
+    /// **Where the forecast advises on no link of the old key, every link of
+    /// it was respelled**, so the finding is read under the new address alone.
+    #[test]
+    fn a_respelled_link_the_forecast_does_not_advise_on_is_read_under_its_new_address() {
+        // The old key's entry would keep the finding; it is not read.
+        assert!(!kept_beside(
+            false,
+            Some(one("a.md")),
+            Some(Resolves::none())
+        ));
+        assert!(kept_beside(
+            false,
+            Some(Resolves::none()),
+            Some(one("a.md"))
+        ));
+    }
+
+    /// **Where the forecast advises on a link of the old key, some links of
+    /// it were left as written and which this is is not known**, so the
+    /// finding is dropped only where the respelled and the as-written reading
+    /// both drop it, and no entry under the old key is a link that stands.
+    #[test]
+    fn a_respelled_link_beside_one_left_as_written_is_dropped_only_where_both_readings_drop_it() {
+        // Both readings drop it.
+        assert!(!kept_beside(true, Some(one("a.md")), Some(one("b.md"))));
+        // The respelled reading drops it, the as-written one keeps it.
+        assert!(kept_beside(true, Some(one("a.md")), Some(Resolves::none())));
+        // The as-written reading has no entry: that link resolves as it did.
+        assert!(kept_beside(true, Some(one("a.md")), None));
+        // The as-written reading drops it, the respelled one keeps it.
+        assert!(kept_beside(true, Some(Resolves::none()), Some(one("a.md"))));
+        // The respelled reading has no entry.
+        assert!(kept_beside(true, None, Some(one("a.md"))));
     }
 }

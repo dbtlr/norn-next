@@ -4301,3 +4301,52 @@ fn a_routed_holders_respelled_link_a_second_route_resolves_is_dropped() {
     assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
     assert!(link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty());
 }
+
+/// **A link the cascade leaves as written beside a respelled twin keeps its
+/// finding.** `loose/zz-h.md` is routed to `tasks/` and holds `[m](zz-peer.md)`
+/// and `[n](zz\-peer.md)`, two links of one address that find nothing at
+/// `loose/`; the note `elsewhere/zz-peer.md` is routed to `loose/zz-peer.md`.
+/// The holder's move respells `[m]` to `../loose/zz-peer.md`, which resolves
+/// once the plan lands, but the text layer leaves the escaped `[n]` as
+/// written, so it still names nothing from `tasks/`. The plan does not say
+/// which link of the address it respelled, so neither finding is dropped on
+/// the strength of the respelled one alone: `[n]`'s stays skipped, as the
+/// validator, which still reports it, shows.
+#[test]
+fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_finding() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-left-as-written-beside-twin",
+        TWO_ROUTES,
+        &[
+            (
+                "loose/zz-h.md",
+                b"---\ntype: task\n---\nSee [m](zz-peer.md) and [n](zz\\-peer.md).\n",
+            ),
+            ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "loose/zz-h.md");
+    let [_, escaped] = linked.as_slice() else {
+        panic!("two link findings: {linked:?}");
+    };
+    assert!(linked.iter().all(|row| row.kind == FindingKind::Broken));
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    let skipped: Vec<u64> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| skipped.finding)
+        .collect();
+    assert!(
+        skipped.contains(&escaped.id),
+        "the escaped link still names nothing, so its finding stays skipped: {skipped:?}"
+    );
+    assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
+    assert!(written(&vault, "tasks/zz-h.md").contains("zz\\-peer.md"));
+    assert!(
+        !link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty(),
+        "the validator still reports the escaped link"
+    );
+}

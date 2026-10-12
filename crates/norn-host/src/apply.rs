@@ -275,7 +275,11 @@ where
     let resolution = fully_resolved(resolution)?;
     // A link finding the resolved plan no longer holds is dropped: only the
     // whole resolution says which links the plan changed.
-    let landing = repair::Landing::of(&resolution.plan.operations, &resolution.plan.conditions);
+    let landing = repair::Landing::of(
+        &resolution.plan.operations,
+        &resolution.plan.conditions,
+        &resolution.forecast.links,
+    );
     let skipped = repair::skipped_still_held(planned.skipped, batch.rows, batch.links, &landing);
     Ok(Repaired {
         plan: resolution.plan,
