@@ -17,7 +17,8 @@
 //! limit, the batch is the `limit` findings and more remain; when it stands at
 //! the same path, the document is cut, and the rest of its findings are read
 //! ([`ValidateStatement::DocumentTail`]) and joined on, so a batch runs past its
-//! limit only by its boundary document's remaining findings. Paths are compared
+//! limit only by its boundary document's remaining findings, which carry it past
+//! [`crate::MAX_PAGE`] where one document holds more. Paths are compared
 //! bytewise: on a root that tells spellings apart `A.md` and `a.md` fold
 //! together and stand adjacent in this order, but they are two documents. When
 //! a document was cut, one more finding read past it tells whether more

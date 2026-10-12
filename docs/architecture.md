@@ -2694,7 +2694,12 @@ untrusted refusal.
 **`repair` plans a batch of findings into one resolved plan.** `Host::repair` reads the
 next batch of the findings its request selects — validate's predicates, kinds, severity and
 rule — as whole documents in path order (the builder's repair batch), under one read hold.
-`limit` is a soft target, and a batch is never cut inside a document. The same hold plans the
+`limit` is a soft target, and a batch is never cut inside a document, so the limit bounds
+neither the findings a batch consumes nor its plan. Two batch parameters are declared beside
+it: the selected findings of the batch's boundary document, which the batch carries whole, so
+one document holding more than the host's page ceiling makes a batch past that ceiling; and
+the provenance block's bytes, which grow with the decision data of the findings it skips. A
+route is priced as a move is, by the links its cascade touches. The same hold plans the
 batch's findings into operations, resolves them on its snapshot as a preview does, and
 judges the resolved plan by the applier's own preview judgment, once: a preview answers
 that judgment on the hold, as a preview of the same resolved plan sent to `Host::apply`
