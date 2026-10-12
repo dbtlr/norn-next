@@ -3888,9 +3888,11 @@ const GATE_RULE: &str = "gate";
 /// The folder the repair-batch bars plant their gate documents in.
 const GATE_FOLDER: &str = "zz-repair-gate";
 
-/// What one gate document holds: how many closed-set breaches it states (the
-/// findings of one document, F_d) and how long each offending value is (the
-/// bytes its skip's decision data carries, up to a value head's 256).
+/// What one gate document holds: how many closed-set breaches with no fix it
+/// states, each skipped, and how long each offending value is (the bytes its
+/// skip's decision data carries, up to a value head's 256). Beside them every
+/// gate document holds one breach a declared synonym fixes, so a batch plans a
+/// fix as well as its skips: its findings, F_d, are `fields + 1`.
 #[derive(Clone, Copy, Debug)]
 struct Gate {
     fields: usize,
@@ -3898,21 +3900,29 @@ struct Gate {
 }
 
 impl Gate {
-    /// The schema: one rule, citing every breach of its closed sets.
+    /// The schema: one rule, citing every breach of its closed sets, and
+    /// mapping the synonym `okay` onto `ok` in the one it fixes.
     fn schema(self) -> String {
         let closed: String = (0..self.fields)
             .map(|at| format!("      f{at}: {{values: [ok]}}\n"))
             .collect();
         format!(
             "version: 1\nrules:\n  {GATE_RULE}:\n    severity: error\n    match: {{frontmatter: \
-             {{type: gate}}}}\n    one_of:\n{closed}"
+             {{type: gate}}}}\n    one_of:\n      fix: {{values: [ok], synonyms: {{okay: ok}}}}\n\
+             {closed}"
         )
     }
 
-    /// Gate document `at`: every breach holds a value of its own, padded to
-    /// the configured length. The first [`MARKED_GATES`] documents also carry
-    /// a tag and a field a document part can name, the same documents at every
-    /// scale.
+    /// The findings one gate document holds, F_d: its skipped breaches and
+    /// the one a synonym fixes.
+    fn findings(self) -> usize {
+        self.fields + 1
+    }
+
+    /// Gate document `at`: the synonym in the field it fixes, and every other
+    /// breach a value of its own, padded to the configured length. The first
+    /// [`MARKED_GATES`] documents also carry a tag and a field a document part
+    /// can name, the same documents at every scale.
     fn document(self, at: usize) -> String {
         let breaches: String = (0..self.fields)
             .map(|field| {
@@ -3925,7 +3935,7 @@ impl Gate {
         } else {
             ""
         };
-        format!("---\ntype: gate\n{marks}{breaches}---\n# Gate {at}\n")
+        format!("---\ntype: gate\n{marks}fix: okay\n{breaches}---\n# Gate {at}\n")
     }
 }
 
@@ -4170,22 +4180,25 @@ fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_
 }
 
 /// One configuration of the continuation bar: what a gate document holds,
-/// and the limit that sizes the batch.
+/// the limit that sizes the batch, and how many documents the batch covers.
 #[derive(Clone, Copy, Debug)]
 struct Continuation {
     name: &'static str,
     gate: Gate,
     limit: u32,
+    documents: usize,
 }
 
 /// The configurations the continuation bar repeats every selection at, each
-/// planning six skipped findings: the base, three documents of two findings
-/// at 100 value bytes; **F_d raised**, one document of six findings at the
-/// same 100 bytes, so the boundary document's findings triple and the
-/// provenance block's size holds; and **annotation bytes raised**, three
-/// documents of two findings at 250 bytes, so the block's size grows and F_d
-/// holds. The limit is `2 * fields + 1` where the batch is three documents,
-/// and one where it is one: a batch is never cut inside a document.
+/// planning six skipped findings and a fix in each document it covers: the
+/// base, three documents of three findings, two skipped at 100 value bytes;
+/// **F_d raised**, one document of seven findings, six skipped at the same 100
+/// bytes, so the boundary document's findings more than double and the
+/// skipped findings' block holds its size; and **annotation bytes raised**,
+/// three documents of three findings, two skipped at 250 bytes, so the block's
+/// size grows and F_d holds. The limit is `2 * F_d + 1` where the batch is
+/// three documents, and one where it is one: a batch is never cut inside a
+/// document.
 const CONTINUATIONS: [Continuation; 3] = [
     Continuation {
         name: "base",
@@ -4193,7 +4206,8 @@ const CONTINUATIONS: [Continuation; 3] = [
             fields: 2,
             value_bytes: 100,
         },
-        limit: 5,
+        limit: 7,
+        documents: 3,
     },
     Continuation {
         name: "F_d raised",
@@ -4202,6 +4216,7 @@ const CONTINUATIONS: [Continuation; 3] = [
             value_bytes: 100,
         },
         limit: 1,
+        documents: 1,
     },
     Continuation {
         name: "annotation bytes raised",
@@ -4209,13 +4224,14 @@ const CONTINUATIONS: [Continuation; 3] = [
             fields: 2,
             value_bytes: 250,
         },
-        limit: 5,
+        limit: 7,
+        documents: 3,
     },
 ];
 
-/// How many findings every configuration of [`CONTINUATIONS`] plans in a
-/// batch.
-const CONTINUATION_FINDINGS: usize = 6;
+/// How many skipped findings every configuration of [`CONTINUATIONS`] plans
+/// in a batch.
+const CONTINUATION_SKIPPED: usize = 6;
 
 /// Which gate documents a rule narrowing admits: every one, so they grow
 /// with the vault, or the [`MARKED_GATES`] a document part names, the same at
@@ -4382,7 +4398,7 @@ fn read_the_continuations(
             &gated,
             &admitted.reached_by(&gated),
             admitted.documents(profile),
-            configuration.gate.fields,
+            configuration.gate.findings(),
         );
         (admitted, cursor)
     });
@@ -4398,15 +4414,26 @@ fn read_the_continuations(
             let name = narrowing.name;
             let params = narrowing.params.with_limit(configuration.limit);
             let (counters, continued) = gated.repair(params.with_after(cursor));
-            let planned = continued.skipped.len();
+            let fixed: usize = continued
+                .citations
+                .iter()
+                .map(|citation| citation.findings.len())
+                .sum();
+            let planned = continued.skipped.len() + fixed;
             assert_eq!(continued.remaining, None, "a continuation counts none");
             if narrowing.by_the_roots_fold && planned == 0 {
                 // A root that tells spellings apart: the part admits nothing.
                 assert!(continued.cursor.is_none(), "`{name}` admits nothing");
             } else {
                 assert_eq!(
-                    planned, CONTINUATION_FINDINGS,
-                    "the continuation of `{name}` plans the findings of its batch's documents"
+                    (continued.skipped.len(), fixed, counters.get("operations")),
+                    (
+                        CONTINUATION_SKIPPED,
+                        configuration.documents,
+                        configuration.documents as u64
+                    ),
+                    "the continuation of `{name}` skips its documents' breaches and fixes each \
+                     document's synonym"
                 );
                 assert!(
                     continued.cursor.is_some(),
@@ -4430,8 +4457,10 @@ fn read_the_continuations(
 /// `ambiguous` (300 documents) and `realistic` (2000), each with a tenth of
 /// its documents planted as gate documents, runs the same statements, rows,
 /// VM steps, document opens and holds at both sizes: the batch is six skipped
-/// findings of the same three or one documents either way, no link is in its
-/// neighbourhood (no judgment is run), and the same
+/// findings and a synonym's fix in each of the same three or one documents
+/// either way, so the fix is planned, composed and judged inside the measured
+/// continuation; no link is in its neighbourhood (no judgment is run), and
+/// the same
 /// [`LEFT_AFTER_THE_CURSOR`] admitted documents stand after the cursor.
 ///
 /// **The cursor is deep**: every admitted gate document but the last five
