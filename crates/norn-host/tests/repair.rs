@@ -4787,8 +4787,9 @@ fn a_repair_plan_previewed_before_a_reload_applies_where_the_new_declaration_fla
 
 /// **A repair plan previewed before a schema reload is refused where the new
 /// declaration makes the value it writes a violation.** The reload drops
-/// `todo` from the closed set, and the default that wrote it; the apply refuses with the schema violation the
-/// plan would introduce, and the document is left as it was.
+/// `todo` from the closed set, and the default that wrote it; the apply refuses
+/// with the schema violation the plan would introduce, and the document is left
+/// as it was.
 #[test]
 fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_rejects_its_value()
 {
