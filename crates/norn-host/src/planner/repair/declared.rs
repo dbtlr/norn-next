@@ -116,8 +116,9 @@
 //! fixed nor skipped, whichever the judgment concludes: a rule's, an
 //! undeclared tag, or one about the document whole, each decided against the
 //! document as the last fix leaves it. A link finding is no conclusion of it,
-//! and is skipped as its row reads, though another route's move may resolve
-//! the link (NORN-381).
+//! and is skipped here as its row reads; the resolved plan settles it
+//! afterwards, dropping the finding where a route's move changes what its link
+//! resolves to ([`super::settle`]).
 //!
 //! **A list's elements are fixed one by one into one change to the field**
 //! ([`elements`]). Every selected `field/not-one-of` finding of one field, and

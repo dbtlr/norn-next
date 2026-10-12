@@ -2862,8 +2862,16 @@ concludes — a rule's, an undeclared tag, one about the document whole — is d
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
 and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
-judgment, so a broken or ambiguous link another route's move resolves stays skipped as its
-row reads. Each fix is judged where its document
+judgment, so planning skips every one from its row, and the resolved plan settles them after
+the whole resolution: the batch hands back, with each link finding, the family and address of
+the link at the finding's ordinal in its holder (read beside the finding by two index seeks,
+no statement of its own), and the finding is dropped where the plan's resolution change set —
+keyed at the after-state, the holder as the batch's routes leave it and the address as the
+cascade respells it — shows that link no longer holds it: a broken link that now resolves,
+an ambiguous link that now names one document or none, a missing-anchor link that now names
+none or several. A link the plan does not change keeps its finding. A missing-anchor link that
+now names another single document stands, as a declared limit: judging it would need the
+store's anchor predicate asked of the new document. Each fix is judged where its document
 ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
