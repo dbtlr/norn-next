@@ -3898,8 +3898,9 @@ impl Gate {
     }
 
     /// Gate document `at`: every breach holds a value of its own, padded to
-    /// the configured length, and the document carries a tag and a field a
-    /// selection can name.
+    /// the configured length. The first [`MARKED_GATES`] documents also carry
+    /// a tag and a field a document part can name, the same documents at every
+    /// scale.
     fn document(self, at: usize) -> String {
         let breaches: String = (0..self.fields)
             .map(|field| {
@@ -3907,9 +3908,24 @@ impl Gate {
                 format!("f{field}: {value:x<width$}\n", width = self.value_bytes)
             })
             .collect();
-        format!("---\ntype: gate\ntags: [draft]\nregion: east\n{breaches}---\n# Gate {at}\n")
+        let marks = if at < MARKED_GATES {
+            "tags: [zz-gate-tag]\nzz_region: east\n"
+        } else {
+            ""
+        };
+        format!("---\ntype: gate\n{marks}{breaches}---\n# Gate {at}\n")
     }
 }
+
+/// How many gate documents carry the tag and the field a document part
+/// selects by. **They are the same at every scale**: a document part is
+/// driven by the documents it matches, and a statement driven by a set that
+/// grows with the vault costs that set: a continuation by the gate rule and a
+/// tag, planting the tag on every gate document, took 35,338 VM steps over
+/// `ambiguous`'s 30 and 221,828 over `realistic`'s 200, with 57 sorts at
+/// both. The bar holds the other half of the claim, that the vault around the
+/// matched documents costs nothing.
+const MARKED_GATES: usize = 12;
 
 /// How many gate documents stand beside `profile`'s tree: a tenth of its
 /// documents, so the findings a rule selects grow with the vault.
@@ -4134,6 +4150,221 @@ fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_
     assert!(
         failures.is_empty(),
         "the first batch's count failed the lane:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// One configuration of the continuation bar: what a gate document holds,
+/// and the limit that sizes the batch.
+#[derive(Clone, Copy, Debug)]
+struct Continuation {
+    name: &'static str,
+    gate: Gate,
+    limit: u32,
+}
+
+/// The configurations the continuation bar repeats every selection at, each
+/// planning six skipped findings: the base, three documents of two findings
+/// at 100 value bytes; **F_d raised**, one document of six findings at the
+/// same 100 bytes, so the boundary document's findings triple and the
+/// provenance block's size holds; and **annotation bytes raised**, three
+/// documents of two findings at 250 bytes, so the block's size grows and F_d
+/// holds. The limit is `2 * fields + 1` where the batch is three documents,
+/// and one where it is one: a batch is never cut inside a document.
+const CONTINUATIONS: [Continuation; 3] = [
+    Continuation {
+        name: "base",
+        gate: Gate {
+            fields: 2,
+            value_bytes: 100,
+        },
+        limit: 5,
+    },
+    Continuation {
+        name: "F_d raised",
+        gate: Gate {
+            fields: 6,
+            value_bytes: 100,
+        },
+        limit: 1,
+    },
+    Continuation {
+        name: "annotation bytes raised",
+        gate: Gate {
+            fields: 2,
+            value_bytes: 250,
+        },
+        limit: 5,
+    },
+];
+
+/// How many findings every configuration of [`CONTINUATIONS`] plans in a
+/// batch.
+const CONTINUATION_FINDINGS: usize = 6;
+
+/// The gate rule's findings selected with each other part of a selection in
+/// turn: a kind, a severity, a path part, and a document part that is a field
+/// equality and one that is a tag. Every one admits the same gate documents.
+fn rule_narrowings(gated: &Gated) -> Vec<(&'static str, norn_wire::RepairParams)> {
+    let by_rule = || gated.params().with_rule(GATE_RULE);
+    vec![
+        (
+            "kind",
+            by_rule().with_kinds([norn_wire::FindingKind::NotOneOf]),
+        ),
+        (
+            "severity",
+            by_rule().with_severity(norn_wire::Severity::Error),
+        ),
+        (
+            "path part",
+            by_rule().with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))]),
+        ),
+        (
+            "field equality",
+            by_rule().with_predicates([Predicate::equal_to("zz_region", "east")]),
+        ),
+        (
+            "tag",
+            by_rule().with_predicates([Predicate::tag("zz-gate-tag")]),
+        ),
+    ]
+}
+
+/// What a continuation of one narrowing cost, and the bytes of the skipped
+/// findings' decision data its provenance carries.
+struct ContinuationReading {
+    narrowing: &'static str,
+    counters: CounterSnapshot,
+    annotation_bytes: usize,
+}
+
+/// Attach `profile` under `configuration` and read the continuation of every
+/// rule narrowing, each after a real cursor its own first batch answered.
+fn read_the_continuations(
+    label: &str,
+    profile: &norn_fixtures::Profile,
+    configuration: Continuation,
+) -> Vec<ContinuationReading> {
+    let gated = Gated::attach(label, profile, configuration.gate);
+    rule_narrowings(&gated)
+        .into_iter()
+        .map(|(narrowing, params)| {
+            let params = params.with_limit(configuration.limit);
+            let (_, first) = gated.repair(params.clone());
+            let cursor = first
+                .cursor
+                .expect("the first batch of a rule's narrowing leaves more");
+            let (counters, continued) = gated.repair(params.with_after(*cursor));
+            assert_eq!(
+                continued.skipped.len(),
+                CONTINUATION_FINDINGS,
+                "the continuation of `{narrowing}` plans the findings of its batch's documents"
+            );
+            assert_eq!(continued.remaining, None, "a continuation counts none");
+            ContinuationReading {
+                narrowing,
+                counters,
+                annotation_bytes: serde_json::to_string(&continued.skipped)
+                    .expect("the skipped findings serialize")
+                    .len(),
+            }
+        })
+        .collect()
+}
+
+/// **A repair's continuation costs the batch, not the vault (NORN-376).**
+/// `Host::repair` in a preview with `after` set to the cursor a first batch
+/// answered, over `ambiguous` (300 documents) and `realistic` (2000), each
+/// with a tenth of its documents planted as gate documents, runs the same
+/// statements, rows, VM steps, document opens and holds at both sizes: the
+/// batch is six skipped findings of the same three or one documents either
+/// way, no link is in its neighbourhood (no judgment is run), and only the
+/// gate documents after it differ. The pair is held for the gate rule
+/// combined with each of a kind, a severity, a path part, a field equality
+/// and a tag, at the three [`CONTINUATIONS`]: the base, F_d raised with the
+/// annotation bytes held, and the annotation bytes raised with F_d held. The
+/// bytes are the serialized skipped findings, which the bar reads off the
+/// plan so a configuration that did not vary what it names fails.
+///
+/// The harness runs the host's one path-order root, as its sibling bars do.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let mut failures = Vec::new();
+    let mut bytes = Vec::new();
+    for configuration in CONTINUATIONS {
+        let at_small = read_the_continuations(
+            &format!(
+                "counter-gate-continued-{}-ambiguous",
+                configuration.name.replace(' ', "-")
+            ),
+            &small,
+            configuration,
+        );
+        let at_large = read_the_continuations(
+            &format!(
+                "counter-gate-continued-{}-realistic",
+                configuration.name.replace(' ', "-")
+            ),
+            &large,
+            configuration,
+        );
+        for (at_small, at_large) in at_small.into_iter().zip(at_large) {
+            let heading = format!(
+                "a repair continuation by rule and {}, {}",
+                at_small.narrowing, configuration.name
+            );
+            record_the_counters(&heading, &at_large.counters);
+            failures.extend(
+                SizeIndependencePair::new(
+                    &heading,
+                    ScaleObservation::new(&small, at_small.counters),
+                    ScaleObservation::new(&large, at_large.counters),
+                )
+                .violations(),
+            );
+            // The same documents at both sizes, so the block differs only by
+            // the digits of the finding identities.
+            if at_small
+                .annotation_bytes
+                .abs_diff(at_large.annotation_bytes)
+                > at_small.annotation_bytes / 50
+            {
+                failures.push(format!(
+                    "{heading}: the annotation held {} bytes at the small size and {} at the large",
+                    at_small.annotation_bytes, at_large.annotation_bytes
+                ));
+            }
+            bytes.push((configuration.name, at_small.annotation_bytes));
+        }
+    }
+    let of = |name: &str| {
+        bytes
+            .iter()
+            .find(|(at, _)| *at == name)
+            .expect("a configuration")
+            .1
+    };
+    let base = of("base");
+    if of("F_d raised").abs_diff(base) > base / 20 {
+        failures.push(format!(
+            "raising F_d moved the annotation from {base} bytes to {}, and it is to hold",
+            of("F_d raised")
+        ));
+    }
+    if of("annotation bytes raised") < base * 3 / 2 {
+        failures.push(format!(
+            "raising the annotation bytes moved it from {base} bytes to {} only",
+            of("annotation bytes raised")
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "the repair continuation failed the lane:\n{}",
         failures.join("\n")
     );
 }
