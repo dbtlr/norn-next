@@ -52,15 +52,15 @@
 //! stands and cannot be read.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
 use norn_store::{
-    ContentModel, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink,
-    RepairSelection, Snapshot, TargetNaming,
+    ContentModel, FindingLink, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide,
+    ProbedLink, RepairSelection, Snapshot, TargetNaming,
 };
 use norn_wire::{
     AnswerReading, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, Citation, Confidence,
@@ -196,6 +196,8 @@ fn planning_view(ground: &PlanGround, name: &VaultName) -> Result<TreeView, Erro
 #[derive(Clone, Copy)]
 struct Findings<'b> {
     rows: &'b [FindingRow],
+    /// The link each link finding among `rows` is about, by the finding's id.
+    links: &'b BTreeMap<u64, FindingLink>,
     rule_sets: &'b [RuleSet],
     threshold: Confidence,
 }
@@ -271,10 +273,18 @@ where
     // after-state; no operation resolves to them.
     resolution.plan.conditions.extend(planned.conditions);
     let resolution = fully_resolved(resolution)?;
+    // A link finding the resolved plan no longer holds is dropped: only the
+    // whole resolution says which links the plan changed.
+    let landing = repair::Landing::of(
+        &resolution.plan.operations,
+        &resolution.plan.conditions,
+        &resolution.forecast.links,
+    );
+    let skipped = repair::skipped_still_held(planned.skipped, batch.rows, batch.links, &landing);
     Ok(Repaired {
         plan: resolution.plan,
         forecast: resolution.forecast,
-        skipped: planned.skipped,
+        skipped,
         citations: planned.citations,
         claims: planned.claims,
     })
@@ -1089,6 +1099,7 @@ where
             let repaired = repaired(
                 Findings {
                     rows: &batch.rows,
+                    links: &batch.links,
                     rule_sets: &batch.rule_sets,
                     threshold: params.threshold(),
                 },
@@ -1349,6 +1360,7 @@ mod tests {
         let answered = repaired(
             Findings {
                 rows: &[missing],
+                links: &BTreeMap::new(),
                 rule_sets: &[],
                 threshold: Confidence::DEFAULT_THRESHOLD,
             },
@@ -1449,6 +1461,7 @@ mod tests {
         repaired(
             Findings {
                 rows: &[misplaced],
+                links: &BTreeMap::new(),
                 rule_sets: &rule_sets,
                 threshold: Confidence::DEFAULT_THRESHOLD,
             },

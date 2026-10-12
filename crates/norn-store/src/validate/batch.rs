@@ -44,6 +44,8 @@
 //! another order, so each is refused as naming no position among the other's
 //! rows.
 
+use std::collections::BTreeMap;
+
 use norn_wire::{
     AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, Moved, PagedRows, Predicate,
     RepairParams, RuleSet, Severity, Unsatisfied,
@@ -53,7 +55,9 @@ use super::statement::{Findings, compose_findings};
 use super::{Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
-use crate::read::{FindingBase, Lookups, PageRefusal, Ran, finding_base, page_limit};
+use crate::read::{
+    FindingBase, FindingLink, Lookups, PageRefusal, Ran, linked_finding_base, page_limit,
+};
 use crate::store::Snapshot;
 
 /// What a repair batch selects findings by, and where it resumes.
@@ -99,6 +103,12 @@ pub struct RepairBatch {
     /// The selected findings of the documents the batch covers, in `(path
     /// COLLATE NOCASE, path, position, id)` order.
     pub rows: Vec<FindingRow>,
+    /// The link each link finding among `rows` is about, by the finding's row
+    /// id: the family and address of the link at the finding's ordinal in its
+    /// holder. A finding about its document, and one whose holder holds no
+    /// link at its ordinal, has none. It is read in the statements that read
+    /// the rows, so it costs no statement of its own.
+    pub links: BTreeMap<u64, FindingLink>,
     /// Every rule set the rows cite, each once, in the order of its identity;
     /// empty where no row cites one.
     pub rule_sets: Vec<RuleSet>,
@@ -222,6 +232,16 @@ impl Snapshot {
                 )
             }
         };
+        let links =
+            bases
+                .iter()
+                .filter_map(|base| {
+                    let link = base.link.clone()?;
+                    Some(u64::try_from(base.id).map(|id| (id, link)).map_err(|_| {
+                        crate::request::unreadable("findings.id", &base.id.to_string())
+                    }))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
         let rows = self.finding_rows(&mut lookups.ran, bases)?;
         let rule_sets = self.rule_sets(&mut lookups.ran, &rows)?;
         let advisories =
@@ -230,6 +250,7 @@ impl Snapshot {
         work.statements = self.counters().statements_executed() - started;
         Ok(RepairBatch {
             rows,
+            links,
             rule_sets,
             next,
             remaining,
@@ -332,7 +353,7 @@ impl Snapshot {
         });
         let merged = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let found: Vec<FindingBase> = self
-            .run_statement(&mut lookups.ran, merged, finding_base)
+            .run_statement(&mut lookups.ran, merged, linked_finding_base)
             .map_err(|problem| error::sql("reading a batch of findings", problem))?
             .into_iter()
             .collect::<Result<_, _>>()?;

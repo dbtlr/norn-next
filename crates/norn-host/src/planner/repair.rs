@@ -58,9 +58,27 @@
 //! judgment of a document's bytes concludes — a rule's, an undeclared tag,
 //! one about the document whole — that the composed document no longer holds
 //! is dropped: it is neither fixed nor skipped — a route out of a rule's area
-//! drops that rule's findings. **A link finding is not settled so**: link
-//! health is no conclusion of that judgment, so a broken or ambiguous link
-//! another route's move resolves stays skipped as its row reads (NORN-381).
+//! drops that rule's findings. **A link finding is settled by the resolved
+//! plan instead** ([`skipped_still_held`]): link health is no conclusion of
+//! that judgment, so planning skips every link finding from its row, and the
+//! step that follows the whole resolution drops those the plan's resolution
+//! change set shows no longer hold. A broken link a route's move makes resolve, an
+//! ambiguous link it makes name one document or none, and a link naming a
+//! heading that is not there which the plan makes resolve to no document or
+//! to several, are dropped, each judged by the link at the finding's ordinal
+//! (its syntax and its address, with its holder and address as the plan's
+//! routes and cascade leave them); a link with no entry in
+//! that set keeps its finding, whether the plan leaves its resolution as it
+//! was or removes the link with a declared `field/forbidden` removal
+//! (NORN-389).
+//! **A declared limit**: a missing-anchor link that now resolves to
+//! another single document stands, since whether that document holds the
+//! anchor is the store's anchor predicate and not asked here.
+//! **A declared limit**: in a holder whose cascade respells some links of an
+//! address and leaves others as written, the plan does not say which of them a
+//! finding is about, so it is read both ways and dropped only where it holds
+//! under neither; one may stay listed though it no longer holds, and none is
+//! dropped that holds.
 //! The skipped findings keep the batch's order.
 //!
 //! **A route's link cascade is judged by construction, not by generation.**
@@ -91,9 +109,11 @@
 //! resolution, the provenance around it and the backstop.
 
 mod declared;
+mod held_links;
 
 #[cfg(test)]
 pub(crate) use declared::blinded as blinding_the_respell_check;
+pub(crate) use held_links::{Landing, skipped_still_held};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -119,7 +139,8 @@ pub(crate) struct Planned {
     pub(crate) operations: Vec<Operation>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
-    /// The findings left alone, in batch order.
+    /// The findings left alone, in batch order: every link finding among
+    /// them, which the host settles against the resolved plan ([`skipped_still_held`]).
     pub(crate) skipped: Vec<SkippedFinding>,
     /// The operations a fix would have been that cannot be resolved because
     /// the clock gives no reading, numbered in the operations' sequence. The

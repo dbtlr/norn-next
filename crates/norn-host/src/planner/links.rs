@@ -42,7 +42,8 @@
 //! plan removes is no entry: its disappearance is the plan's own transition.
 //!
 //! **An entry is a link whose resolution changes, whose text the plan
-//! writes, or that is left behind** ([`left_behind`]). The vocabulary an
+//! writes, that is left behind** ([`left_behind`]), **or that named a document
+//! the plan removes.** The vocabulary an
 //! entry records a resolution in names paths, so a link left naming a path
 //! the plan vacates and refills is recorded naming that path on both sides:
 //! what changed is the document there, which the entry's presence in the set

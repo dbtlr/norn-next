@@ -55,8 +55,10 @@ pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, a
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::{Binder, Filter, PathPart};
 pub use filter::{READ_FILTERS, ReadFilter};
+pub use finding::FindingLink;
 pub(crate) use finding::{
-    FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base, projected_findings,
+    FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base,
+    linked_finding_base, projected_findings,
 };
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;

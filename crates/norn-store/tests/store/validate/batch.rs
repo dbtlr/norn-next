@@ -401,6 +401,131 @@ fn a_batch_has_no_next_cursor_when_nothing_remains() {
     assert_eq!(batch.next, None);
 }
 
+/// **A batch hands back the family and address of the link each link finding
+/// is about, and none for any other finding.** The link is the one the
+/// finding's ordinal names in its holder; its address is spelled as the host
+/// spells a link's, the protocol prefix then the target and no anchor, empty
+/// for an anchor-only link. A finding about its document, and a link finding
+/// whose holder holds no link at its ordinal, have none.
+#[test]
+fn a_batch_hands_back_the_family_and_address_of_each_link_findings_link() {
+    use norn_store::{LinkAnchor, LinkFact, LinkFamily};
+
+    let mut store = Validating::new("batch-links");
+    let link = |family, protocol: Option<&str>, target: &str, anchor| LinkFact {
+        family,
+        embed: false,
+        protocol: protocol.map(str::to_string),
+        target: target.to_string(),
+        title: None,
+        anchor,
+        span: None,
+    };
+    let mut holder = crate::common::document("holder.md", "hash-holder", "a body\n");
+    holder.links = vec![
+        link(LinkFamily::Wikilink, None, "notes/a", None),
+        link(LinkFamily::Markdown, Some("vault"), "notes/b", None),
+        link(
+            LinkFamily::Wikilink,
+            None,
+            "",
+            crate::common::heading_anchor("Part"),
+        ),
+        link(
+            LinkFamily::Wikilink,
+            None,
+            "notes/c",
+            Some(LinkAnchor::Block {
+                id: "blk".to_string(),
+            }),
+        ),
+    ];
+    {
+        let mut request = store.store.begin_request();
+        crate::common::write_documents(&mut request, &[holder]);
+    }
+    // The store files the link-health findings of the links it writes: one
+    // per link here, the first two broken and the last two naming a place the
+    // document does not hold. Beside them stand a finding about the document
+    // and one about an ordinal no link holds.
+    for (ordinal, target) in [(None, "the document"), (Some(9), "no such link")] {
+        let mut finding = undeclared("holder.md", target);
+        finding.kind = FindingKind::Broken;
+        finding.ordinal = ordinal;
+        store.stand(&finding);
+    }
+
+    let batch = store.batch(&repairing().with_limit(1000));
+
+    let at_holder: Vec<_> = batch
+        .rows
+        .iter()
+        .filter(|row| row.path.as_str() == "holder.md")
+        .collect();
+    let held = |target: &str| {
+        let row = at_holder
+            .iter()
+            .find(|row| row.target.as_deref() == Some(target))
+            .unwrap_or_else(|| panic!("a finding of `{target}`"));
+        batch.links.get(&row.id).cloned()
+    };
+    let linked = |family, address: &str| {
+        Some(norn_store::FindingLink {
+            family,
+            address: address.to_string(),
+        })
+    };
+    assert_eq!(held("notes/a"), linked(LinkFamily::Wikilink, "notes/a"));
+    assert_eq!(
+        held("vault://notes/b"),
+        linked(LinkFamily::Markdown, "vault://notes/b")
+    );
+    assert_eq!(held("#Part"), linked(LinkFamily::Wikilink, ""));
+    assert_eq!(
+        held("notes/c#^blk"),
+        linked(LinkFamily::Wikilink, "notes/c")
+    );
+    assert_eq!(
+        held("the document"),
+        None,
+        "a document's finding has no link"
+    );
+    assert_eq!(held("no such link"), None, "no link stands at the ordinal");
+    assert_eq!(
+        batch.links.len(),
+        4,
+        "nothing but the link findings has a link: {:?}",
+        batch.links
+    );
+    // A batch cut inside the document reads the rest of its findings as a
+    // tail, and the tail hands back the same links.
+    let mut cut: Vec<_> = Vec::new();
+    let mut after: Option<Cursor> = None;
+    loop {
+        let mut request = repairing().with_limit(1);
+        if let Some(cursor) = after.take() {
+            request = request.with_after(cursor);
+        }
+        let batch = store.batch(&request);
+        cut.extend(
+            batch
+                .rows
+                .iter()
+                .filter(|row| row.path.as_str() == "holder.md")
+                .map(|row| (row.target.clone(), batch.links.get(&row.id).cloned())),
+        );
+        match batch.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    let whole: Vec<_> = at_holder
+        .iter()
+        .map(|row| (row.target.clone(), batch.links.get(&row.id).cloned()))
+        .collect();
+    assert_eq!(cut, whole);
+}
+
 /// How many findings `params` selects, as a validate's tally counts them:
 /// the independent account of what a first batch's count must equal.
 fn selected(store: &Validating, params: &RepairParams) -> u64 {
@@ -787,6 +912,29 @@ fn judge_merge(
         statement.rows(),
         statement.sql()
     );
+    // Each arm reaches its finding's link through two unique seeks, behind
+    // the arm's own, so the joins neither scan nor reorder what the merge
+    // hands back.
+    for (alias, table, index, constraint) in [
+        ("dl", "documents", "documents_path", "(path=?)"),
+        (
+            "lk",
+            "links",
+            "links_document_ordinal",
+            "(document=? AND ordinal=?)",
+        ),
+    ] {
+        let joined = rows_of(statement, alias);
+        joined.assert_searches_through(table, Access::Index(index));
+        joined.assert_search_constraint(table, constraint);
+        assert_eq!(
+            joined.searches_of(table).len(),
+            arms,
+            "one seek of `{table}` per kind read: {:?}\nemitted SQL: {}",
+            statement.rows(),
+            statement.sql()
+        );
+    }
 }
 
 /// The kinds a request names, or all, as the registry counts them.

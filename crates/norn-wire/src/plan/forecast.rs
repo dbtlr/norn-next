@@ -238,6 +238,20 @@ pub enum LinkAdvisory {
 }
 
 impl LinkAdvisory {
+    /// The link the advisory is about, whatever it says of it.
+    pub const fn link(&self) -> &LinkKey {
+        match self {
+            LinkAdvisory::SkippedAmbiguous { link }
+            | LinkAdvisory::SkippedUnrepresentable { link }
+            | LinkAdvisory::SkippedWouldCorruptFrontmatter { link }
+            | LinkAdvisory::SkippedNotRewritable { link }
+            | LinkAdvisory::SkippedUnplaced { link }
+            | LinkAdvisory::LeftBroken { link }
+            | LinkAdvisory::MadeAmbiguous { link }
+            | LinkAdvisory::Retargeted { link } => link,
+        }
+    }
+
     /// `link` is ambiguous, and left as written.
     pub const fn skipped_ambiguous(link: LinkKey) -> Self {
         LinkAdvisory::SkippedAmbiguous { link }

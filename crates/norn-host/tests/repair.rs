@@ -3932,3 +3932,421 @@ fn a_bare_value_naming_a_document_whose_route_the_batch_refuses_resolves_where_i
         )]
     );
 }
+
+// ---- link findings a plan settles ----
+
+/// The `link/*` findings standing over the document at `name`, in id order.
+fn link_findings_of(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    name: &str,
+) -> Vec<norn_wire::FindingRow> {
+    let mut rows: Vec<_> = findings_beneath(host, vault)
+        .into_iter()
+        .filter(|row| {
+            row.path == at(name)
+                && matches!(
+                    row.kind,
+                    FindingKind::Broken | FindingKind::MissingAnchor | FindingKind::Ambiguous
+                )
+        })
+        .collect();
+    rows.sort_by_key(|row| row.id);
+    rows
+}
+
+/// **A broken link a route's move makes resolve is dropped, neither fixed nor
+/// skipped.** `h.md` names `tasks/zz-land`, which nothing ends with until the
+/// route lands `loose/zz-land.md` at `tasks/zz-land.md`; the plan applies,
+/// and the validator then flags nothing.
+#[test]
+fn a_broken_link_a_routes_move_resolves_is_dropped_from_the_skipped_findings() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-broken",
+        TASKED,
+        &[
+            ("loose/zz-land.md", b"---\ntype: task\n---\n# Land\n"),
+            ("h.md", b"See [[tasks/zz-land]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let misplaced = misplaced_of(&host, &vault, "loose/zz-land.md");
+    let linked = link_findings_of(&host, &vault, "h.md");
+    let [broken] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(broken.kind, FindingKind::Broken);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&preview).citations,
+        vec![citing(1, &[misplaced])]
+    );
+    assert!(
+        provenance(&preview).skipped.is_empty(),
+        "the broken link resolves once the route lands: {:?}",
+        provenance(&preview).skipped
+    );
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+    assert!(provenance(&plan).skipped.is_empty());
+    assert!(stands(&vault, "tasks/zz-land.md"));
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **An ambiguous link a route's move makes name one document is dropped.**
+/// `h.md` names `sub/zz-twin`, which two documents end with until the route
+/// takes `other/sub/zz-twin.md` away; the link is no backlink of either, so
+/// the move's cascade leaves it as written.
+#[test]
+fn an_ambiguous_link_a_routes_move_makes_name_one_document_is_dropped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-ambiguous",
+        TASKED,
+        &[
+            ("sub/zz-twin.md", b"# Stays\n"),
+            ("other/sub/zz-twin.md", b"---\ntype: task\n---\n# Leaves\n"),
+            ("h.md", b"See [[sub/zz-twin]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    let [ambiguous] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(ambiguous.kind, FindingKind::Ambiguous);
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(
+        provenance(&plan).skipped.is_empty(),
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert!(stands(&vault, "tasks/zz-twin.md"));
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **Two links of one address in one holder are two links: the route that
+/// resolves one drops that one's finding and not the other's.** `sub/h.md`
+/// holds a wikilink and a Markdown link written `tasks/zz-land.md`; the
+/// wikilink is read by suffix and the Markdown link from the holder's folder,
+/// so the route landing `loose/zz-land.md` at `tasks/zz-land.md` resolves the
+/// wikilink and leaves the Markdown link broken.
+#[test]
+fn only_the_link_a_route_resolves_is_dropped_when_two_syntaxes_share_an_address() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-syntaxes",
+        TASKED,
+        &[
+            ("loose/zz-land.md", b"---\ntype: task\n---\n# Land\n"),
+            (
+                "sub/h.md",
+                b"Wiki [[tasks/zz-land.md]].\n\nMark [m](tasks/zz-land.md).\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "sub/h.md");
+    let [wiki, mark] = linked.as_slice() else {
+        panic!("two link findings");
+    };
+    assert_eq!(
+        (wiki.kind, mark.kind),
+        (FindingKind::Broken, FindingKind::Broken)
+    );
+    assert!(
+        wiki.span.map(|span| span.line) < mark.span.map(|span| span.line),
+        "the wikilink is written first"
+    );
+    let (wiki, mark) = (wiki.id, mark.id);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+
+    assert_eq!(preview.operations, plan.operations);
+    for plan in [&preview, &plan] {
+        assert_eq!(
+            provenance(plan).skipped,
+            vec![SkippedFinding::new(mark, SkipReason::NoDeclaredFix)],
+            "wikilink {wiki} resolves and the Markdown link does not"
+        );
+    }
+    // The validator agrees: of the two links, the Markdown one stands.
+    let after = link_findings_of(&host, &vault, "sub/h.md");
+    assert_eq!(
+        after
+            .iter()
+            .map(|row| row.span.map(|s| s.line))
+            .collect::<Vec<_>>(),
+        vec![Some(3)]
+    );
+}
+
+/// **A broken link held by a document the batch routes is dropped when the
+/// plan makes it resolve.** `loose/zz-holder.md` and `loose/zz-peer.md` are
+/// both routed to `tasks/`; the holder's `tasks/zz-peer` resolves once the
+/// peer lands, and the plan's change set keys that link at the holder's
+/// destination.
+#[test]
+fn a_broken_link_a_routed_holder_holds_is_dropped_where_the_plan_makes_it_resolve() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-routed-holder",
+        TASKED,
+        &[
+            (
+                "loose/zz-holder.md",
+                b"---\ntype: task\n---\nSee [[tasks/zz-peer]].\n",
+            ),
+            ("loose/zz-peer.md", b"---\ntype: task\n---\n# Peer\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "loose/zz-holder.md");
+    let [broken] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(broken.kind, FindingKind::Broken);
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(
+        provenance(&plan).skipped.is_empty(),
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert!(stands(&vault, "tasks/zz-holder.md"));
+    assert!(stands(&vault, "tasks/zz-peer.md"));
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+/// **A missing-anchor link whose target a route's landing makes ambiguous is
+/// dropped.** The heading `Nope` is in no document. `tasks/zz-twin` names
+/// `other/tasks/zz-twin.md` alone, with a missing anchor, until the route
+/// lands a second document at `tasks/zz-twin.md`; the link then names two
+/// documents, and the finding about its anchor is no longer the link's state.
+/// The ambiguity the plan makes is a new finding, which the validator reports
+/// beside the repair and no selected finding accounts for.
+#[test]
+fn a_missing_anchor_link_a_route_makes_ambiguous_is_dropped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-anchor-ambiguous",
+        TASKED,
+        &[
+            ("other/tasks/zz-twin.md", b"# Real\n"),
+            ("loose/zz-twin.md", b"---\ntype: task\n---\n# Lands\n"),
+            ("h.md", b"See [[tasks/zz-twin#Nope]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    let [anchor] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(anchor.kind, FindingKind::MissingAnchor);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert!(
+        provenance(&preview).skipped.is_empty(),
+        "{:?}",
+        provenance(&preview).skipped
+    );
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(preview.operations, plan.operations);
+    assert!(provenance(&plan).skipped.is_empty());
+    let after: Vec<FindingKind> = link_findings_of(&host, &vault, "h.md")
+        .iter()
+        .map(|row| row.kind)
+        .collect();
+    assert_eq!(after, vec![FindingKind::Ambiguous]);
+}
+
+/// **A missing-anchor link whose target is itself routed stays skipped**: the
+/// link still names the one document it named, and repair edits no heading.
+#[test]
+fn a_missing_anchor_link_whose_target_is_routed_stays_skipped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-anchor-routed",
+        TASKED,
+        &[
+            ("other/tasks/zz-twin.md", b"---\ntype: task\n---\n# Real\n"),
+            ("h.md", b"See [[other/tasks/zz-twin#Nope]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    let [anchor] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(anchor.kind, FindingKind::MissingAnchor);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(skipped_ids(&preview), vec![anchor.id]);
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(preview.operations, plan.operations);
+    assert_eq!(skipped_ids(&plan), vec![anchor.id]);
+    assert!(stands(&vault, "tasks/zz-twin.md"));
+    // The move's cascade respelled the link to name the document where it
+    // lands, and its anchor is still missing there.
+    assert!(written(&vault, "h.md").contains("[[tasks/zz-twin#Nope]]"));
+    let after: Vec<FindingKind> = link_findings_of(&host, &vault, "h.md")
+        .iter()
+        .map(|row| row.kind)
+        .collect();
+    assert_eq!(after, vec![FindingKind::MissingAnchor]);
+}
+
+/// **A link finding whose link the plan does not change stays skipped as its
+/// row reads**, beside a route that changes others: a broken link, an
+/// ambiguous one and one naming a heading that is not there, none of them
+/// about the moved document.
+#[test]
+fn a_link_finding_whose_link_the_plan_does_not_change_stays_skipped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-unchanged",
+        TASKED,
+        &[
+            ("loose/zz-land.md", b"---\ntype: task\n---\n# Land\n"),
+            ("p/zz-two.md", b"# P\n"),
+            ("q/zz-two.md", b"# Q\n"),
+            ("zz-solo.md", b"# Solo\n"),
+            (
+                "h.md",
+                b"See [[zz-nowhere]], [[zz-two]] and [[zz-solo#Nope]].\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    let reasons: Vec<(FindingKind, u64)> = linked.iter().map(|row| (row.kind, row.id)).collect();
+    assert_eq!(
+        reasons.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+        vec![
+            FindingKind::Broken,
+            FindingKind::Ambiguous,
+            FindingKind::MissingAnchor
+        ]
+    );
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.finding, skipped.reason))
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![
+            (reasons[0].1, SkipReason::NoDeclaredFix),
+            (reasons[1].1, SkipReason::AmbiguousLink),
+            (reasons[2].1, SkipReason::NoDeclaredFix),
+        ]
+    );
+}
+
+/// Two rules, each placing and routing its own kind of document beneath
+/// [`FOLDER`]: tasks in `tasks/` and notes in `loose/`.
+const TWO_ROUTES: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  notes:\n    match: {frontmatter: {type: note}}\n    allowed_paths: {paths: ['zz-repair/loose/**'], route: 'zz-repair/loose/'}\n";
+
+/// **A routed holder's relative link the cascade respells, and a second
+/// route's landing makes resolve, is dropped.** `loose/zz-h.md` is routed to
+/// `tasks/` and holds `[m](zz-peer.md)`, which names `loose/zz-peer.md` and
+/// finds nothing there. The holder's move respells the link to
+/// `../loose/zz-peer.md`, and the note `elsewhere/zz-peer.md` is routed to
+/// `loose/zz-peer.md`, so the respelled link resolves once the plan lands. The
+/// respelling is found under the holder where the plan leaves it, not where it
+/// stood.
+#[test]
+fn a_routed_holders_respelled_link_a_second_route_resolves_is_dropped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-respelled-routed-holder",
+        TWO_ROUTES,
+        &[
+            (
+                "loose/zz-h.md",
+                b"---\ntype: task\n---\nSee [m](zz-peer.md).\n",
+            ),
+            ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "loose/zz-h.md");
+    let [broken] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(broken.kind, FindingKind::Broken);
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(
+        provenance(&plan).skipped.is_empty(),
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert!(stands(&vault, "tasks/zz-h.md"));
+    assert!(stands(&vault, "loose/zz-peer.md"));
+    assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
+    assert!(link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty());
+}
+
+/// **A link the cascade leaves as written beside a respelled twin keeps its
+/// finding.** `loose/zz-h.md` is routed to `tasks/` and holds `[m](zz-peer.md)`
+/// and `[n](zz\-peer.md)`, two links of one address that find nothing at
+/// `loose/`; the note `elsewhere/zz-peer.md` is routed to `loose/zz-peer.md`.
+/// The holder's move respells `[m]` to `../loose/zz-peer.md`, which resolves
+/// once the plan lands, but the text layer leaves the escaped `[n]` as
+/// written, so it still names nothing from `tasks/`. The plan does not say
+/// which link of the address it respelled, so neither finding is dropped on
+/// the strength of the respelled one alone: `[n]`'s stays skipped, as the
+/// validator, which still reports it, shows.
+#[test]
+fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_finding() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-left-as-written-beside-twin",
+        TWO_ROUTES,
+        &[
+            (
+                "loose/zz-h.md",
+                b"---\ntype: task\n---\nSee [m](zz-peer.md) and [n](zz\\-peer.md).\n",
+            ),
+            ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "loose/zz-h.md");
+    let [_, escaped] = linked.as_slice() else {
+        panic!("two link findings: {linked:?}");
+    };
+    assert!(linked.iter().all(|row| row.kind == FindingKind::Broken));
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    let skipped: Vec<u64> = provenance(&plan)
+        .skipped
+        .iter()
+        .map(|skipped| skipped.finding)
+        .collect();
+    assert!(
+        skipped.contains(&escaped.id),
+        "the escaped link still names nothing, so its finding stays skipped: {skipped:?}"
+    );
+    assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
+    assert!(written(&vault, "tasks/zz-h.md").contains("zz\\-peer.md"));
+    assert!(
+        !link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty(),
+        "the validator still reports the escaped link"
+    );
+}

@@ -14,8 +14,8 @@ use norn_wire::Severity;
 
 use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, PathPart, Term, answer_ordering, answer_place,
-    answer_range,
+    AnswerSeek, Binder, FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, Filter, PathPart, Term,
+    answer_ordering, answer_place, answer_range,
 };
 
 /// Every statement shape the validate builder runs, named.
@@ -102,7 +102,9 @@ pub enum ValidateStatement {
     /// own orders, so nothing sorts and a bounded read costs the rows it hands
     /// back. A path part bounds every arm as it bounds a section; a document
     /// part that keeps what it seeks drives each arm instead, and those are
-    /// sorted.
+    /// sorted. Each arm also reaches the link its finding is about, where it
+    /// is about one, by two seeks behind its own (`documents_path`, then
+    /// `links_document_ordinal`), which neither sort nor reorder the merge.
     MergedPage,
     /// The findings of one document after a place in it, merged across the
     /// kinds read: [`ValidateStatement::MergedPage`] bounded to exactly one
@@ -112,7 +114,8 @@ pub enum ValidateStatement {
     /// and seeks past the finding's position and id; the arms are ordered by
     /// position and id, which the index hands back within the one path, and
     /// nothing sorts. A document part that keeps what it seeks drives each arm
-    /// as it does a merged page's.
+    /// as it does a merged page's, and each arm reaches its finding's link as
+    /// a merged page's does.
     DocumentTail,
 }
 
@@ -213,6 +216,14 @@ impl Findings<'_> {
 const MERGE_PATH: &str = "order_path";
 const MERGE_POSITION: &str = "order_position";
 const MERGE_ID: &str = "order_id";
+
+/// The link a merged read's arms add last ([`FINDING_LINK_COLUMNS`]). The
+/// finding reaches its link as every read of a finding's link does — its
+/// holder by path, then the holder's link by the finding's ordinal — through
+/// the unique `documents_path` and `links_document_ordinal` indexes, so each
+/// finding costs two seeks and the arm's order, which the joins sit behind,
+/// is untouched.
+const MERGE_LINK_JOINS: &str = "\n                     LEFT JOIN documents AS dl ON dl.path = f.path\n                     LEFT JOIN links AS lk ON lk.document = dl.id AND lk.ordinal = f.ordinal";
 
 /// The table one arm seeks, the alias it takes, and the column that holds the
 /// finding's id there.
@@ -574,6 +585,12 @@ fn compose_arm(
         }
         format!("FROM {table} AS {seek}{reached}")
     };
+    let from = match statement {
+        ValidateStatement::MergedPage | ValidateStatement::DocumentTail => {
+            format!("{from}{MERGE_LINK_JOINS}")
+        }
+        _ => from,
+    };
 
     let conditions = conditions.join("\n                       AND ");
     let selected = match statement {
@@ -582,7 +599,7 @@ fn compose_arm(
         }
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail => format!(
             "{FINDING_ROW_COLUMNS}, {path_column} AS {MERGE_PATH}, \
-             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}"
+             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {FINDING_LINK_COLUMNS}"
         ),
         ValidateStatement::Summary | ValidateStatement::RuleSummary => {
             format!("{}, {}, COUNT(*)", column("kind"), column("severity"))
