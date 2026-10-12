@@ -4256,3 +4256,48 @@ fn a_link_finding_whose_link_the_plan_does_not_change_stays_skipped() {
         ]
     );
 }
+
+/// Two rules, each placing and routing its own kind of document beneath
+/// [`FOLDER`]: tasks in `tasks/` and notes in `loose/`.
+const TWO_ROUTES: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  notes:\n    match: {frontmatter: {type: note}}\n    allowed_paths: {paths: ['zz-repair/loose/**'], route: 'zz-repair/loose/'}\n";
+
+/// **A routed holder's relative link the cascade respells, and a second
+/// route's landing makes resolve, is dropped.** `loose/zz-h.md` is routed to
+/// `tasks/` and holds `[m](zz-peer.md)`, which names `loose/zz-peer.md` and
+/// finds nothing there. The holder's move respells the link to
+/// `../loose/zz-peer.md`, and the note `elsewhere/zz-peer.md` is routed to
+/// `loose/zz-peer.md`, so the respelled link resolves once the plan lands. The
+/// respelling is found under the holder where the plan leaves it, not where it
+/// stood.
+#[test]
+fn a_routed_holders_respelled_link_a_second_route_resolves_is_dropped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-respelled-routed-holder",
+        TWO_ROUTES,
+        &[
+            (
+                "loose/zz-h.md",
+                b"---\ntype: task\n---\nSee [m](zz-peer.md).\n",
+            ),
+            ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "loose/zz-h.md");
+    let [broken] = linked.as_slice() else {
+        panic!("one link finding");
+    };
+    assert_eq!(broken.kind, FindingKind::Broken);
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert!(
+        provenance(&plan).skipped.is_empty(),
+        "{:?}",
+        provenance(&plan).skipped
+    );
+    assert!(stands(&vault, "tasks/zz-h.md"));
+    assert!(stands(&vault, "loose/zz-peer.md"));
+    assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
+    assert!(link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty());
+}
