@@ -28,7 +28,9 @@ mod attach;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use norn_host::ReloadRefusal;
 use norn_testkit::process::Sandbox;
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Citation, CitedFinding,
     Confidence, Cursor, DocumentPath, ErrorDetail, ErrorEnvelope, FieldChange, FindingKind,
@@ -4446,4 +4448,139 @@ fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_findin
         !link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty(),
         "the validator still reports the escaped link"
     );
+}
+
+/// The schema the reload cases preview under: a task's `status` is required,
+/// defaulting to `todo`, and one of `todo` and `done`.
+const FILLING_STATUS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done]}\n";
+
+/// Rewrite the vault's schema to `schema` and wait for the host to reload it.
+fn reloaded_under(host: &attach::ServingHost, vault: &attach::Vault, schema: &str) {
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("rewrite the schema");
+    wait_until(
+        "the reload to activate the rewritten schema",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.reload(vault.name()) {
+            Ok(_) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(standing)) => {
+                Observed::pending(format!("the entry stands at {standing:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// The plan [`FILLING_STATUS`] previews for `vault`'s task missing its
+/// `status` (one operation, setting `status: todo`), the vault reloaded under
+/// `schema` before the plan is returned to be sent back to apply.
+fn previewed_across_a_reload_to(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    schema: &str,
+) -> ResolvedPlan {
+    let plan = previewed(host.repair(repairing(vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "status", "todo")]);
+    reloaded_under(host, vault, schema);
+    plan
+}
+
+/// A vault holding one task missing its `status`, under [`FILLING_STATUS`].
+fn a_vault_missing_a_status(label: &str) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(
+        label,
+        FILLING_STATUS,
+        &[("a.md", b"---\ntype: task\n---\n# A\n")],
+    )
+}
+
+/// **A repair plan previewed before a schema reload applies where the new
+/// declaration still admits the value it writes.** The reload widens the
+/// closed set; the plan, sent back unchanged, lands its `status`.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_applies_where_the_new_declaration_admits_its_value() {
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-admits");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS.replace("[todo, done]", "[todo, done, blocked]"),
+    );
+
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+}
+
+/// **A repair plan previewed before a schema reload applies where the new
+/// declaration adds a violation on a field the plan leaves alone.** The
+/// reload requires `priority`, which the task lacks and the plan does not
+/// write: that violation stood in the document before the plan, so the plan
+/// introduces none.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_applies_where_the_new_declaration_flags_another_field() {
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-other-field");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS.replace(
+            "      status: {default: todo}\n",
+            "      status: {default: todo}\n      priority:\n",
+        ),
+    );
+
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+    // The unwritten field's finding stands: `finding_of` finds exactly one.
+    finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "priority",
+    );
+}
+
+/// **A repair plan previewed before a schema reload is refused where the new
+/// declaration makes the value it writes a violation.** The reload drops
+/// `todo` from the closed set, and the default that wrote it; the apply refuses with the schema violation the
+/// plan would introduce, and the document is left as it was.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_rejects_its_value()
+{
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-rejects");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS
+            .replace("[todo, done]", "[done]")
+            .replace(": {default: todo}", ":"),
+    );
+
+    let (_refusal, _plan, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("one introduced schema violation: {checks:?}");
+    };
+    assert_eq!(violation.path, at("a.md"));
+    assert_eq!(violation.kind, FindingKind::NotOneOf);
+    assert_eq!(violation.target.as_deref(), Some("status"));
+    assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
 }
