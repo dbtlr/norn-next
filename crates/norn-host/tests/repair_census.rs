@@ -430,10 +430,17 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 ///   read in path order off the change-feed index, which does not say a path
 ///   is one document's, so the links of one path, which the changeset wrote,
 ///   are sorted by ordinal.
-/// - A statement a document part drives (`ValidateStatement::MergedPage`,
-///   `ValidateStatement::Summary` and their rule forms): the matched
-///   documents are reached by row id from the part's own seek, so what is
-///   sorted is what the part matched.
+/// - **A statement a document part drives, until NORN-390.** The merged page
+///   and the document's tail (`ValidateStatement::MergedPage` and
+///   `ValidateStatement::DocumentTail`, and their rule forms) sort their
+///   `ORDER BY`, and the summary (`ValidateStatement::Summary` and its rule
+///   form) its `GROUP BY`, into a temporary b-tree when a part on a field or
+///   a tag drives the selection: the matched documents are reached by row id
+///   from the part's own seek, and what is sorted is what the part matched.
+///   That cost is the quadratic NORN-390 removes, and **its fix removes this
+///   exemption**; the exemption is therefore held to the statements that
+///   carry it, recognised by the select list their families open with, and a
+///   sort in any other statement that searches those indexes is found.
 fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
     let searched_through = |table: &str, indexes: &[&str]| {
         plan.searches_of(table)
@@ -442,6 +449,13 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
     };
     let driven = searched_through("document_fields", &["document_fields_raw"])
         || !plan.searches_of("document_tags").is_empty();
+    let opens_with = |select_list: &str| {
+        let spelled: Vec<&str> = plan.sql().split_whitespace().collect();
+        spelled.join(" ").starts_with(select_list)
+    };
+    let a_page = opens_with("SELECT f.id, f.kind, f.severity, f.path,");
+    let a_summary = opens_with("SELECT f.kind, f.severity, COUNT(*)")
+        || opens_with("SELECT fr.kind, fr.severity, COUNT(*)");
     match sort.detail.as_str() {
         "USE TEMP B-TREE FOR ORDER BY"
             if searched_through(
@@ -459,8 +473,11 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
         {
             Some("LinkHealthWrittenLinks")
         }
-        "USE TEMP B-TREE FOR ORDER BY" | "USE TEMP B-TREE FOR GROUP BY" if driven => {
-            Some("a statement a document part drives")
+        "USE TEMP B-TREE FOR ORDER BY" if driven && a_page => {
+            Some("a page or tail a document part drives")
+        }
+        "USE TEMP B-TREE FOR GROUP BY" if driven && a_summary => {
+            Some("a summary a document part drives")
         }
         _ => None,
     }
