@@ -1383,6 +1383,143 @@ fn a_batch_costs_the_batch_not_the_vault() {
     }
 }
 
+impl Validating {
+    /// [`Validating::with_rules_under`] with one more finding over each bulk
+    /// document: a closed-set breach at error citing `tasks`. So the findings
+    /// of `tasks` at one kind, at one severity and under `bulk/` each grow
+    /// with the vault, and a cursor among them can stand behind as many
+    /// selected documents as the vault holds.
+    fn with_tasks_in_the_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
+        let mut validating_store = Self::with_rules_under(label, bulk, order);
+        let mut request = validating_store.store.begin_request();
+        for at in 0..bulk {
+            request
+                .record_finding(&super::judged(
+                    FindingKind::NotOneOf,
+                    Severity::Error,
+                    &format!("bulk/{at:04}.md"),
+                    Some("status"),
+                    &["tasks"],
+                    Some("filed"),
+                ))
+                .expect("recording a bulk breach citing `tasks`");
+        }
+        validating_store
+    }
+}
+
+/// How many bulk documents stand after a deep cursor: the batch's and the
+/// one its probe reads past it.
+const LEFT_IN_THE_BULK: usize = 4;
+
+/// What a batch of `params` costs continuing from a cursor at `after`, minted
+/// on the snapshot a first batch was answered from: its work, and the paths
+/// it covers.
+fn continued_from(
+    store: &Validating,
+    params: &RepairParams,
+    after: &str,
+) -> (ValidateWork, Vec<String>, bool) {
+    let first = store.batch(params);
+    let cursor = Cursor::new(first.snapshot, CursorKey::repair_document(after));
+    let batch = store.batch(&params.clone().with_after(cursor));
+    let paths = documents(&batch.rows)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    (batch.work, paths, batch.next.is_some())
+}
+
+/// **A continuation costs the batch, not what stands before its cursor, on
+/// either root.** Beside 50 and then 500 bulk documents, each holding a
+/// breach at error citing `tasks` and a missing field citing `tasks` and
+/// `bulk`, a batch of three selecting `tasks` with a kind, with a severity,
+/// with a path part spelled as the bulk is and in upper case, continues from
+/// a cursor at the bulk document four before the last: 46 then 496 selected
+/// documents stand before it, and the same four after. It costs the same at
+/// both sizes, sorts nothing and steps through no full scan. A path part in
+/// upper case admits the bulk where the root folds ASCII case and nothing
+/// where it tells spellings apart, and costs the same at both sizes either
+/// way. A document part's continuation is held over the documents it matches,
+/// `a.md` before its cursor and `notes/c.md` after, the same at both sizes: a
+/// statement a document part drives reads every document it matched
+/// (NORN-390), so the pair that grows the matched set is that defect's.
+///
+/// Control: the rule's kind index dropped on the larger vault, a
+/// continuation by the kind reaches what stands before its cursor, and the
+/// bar fails.
+#[test]
+fn a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor() {
+    let (fewer, more) = (50, 500);
+    let deep = |bulk: usize| format!("bulk/{:04}.md", bulk - LEFT_IN_THE_BULK - 1);
+    for order in ROOTS {
+        let small = Validating::with_tasks_in_the_bulk_under("batch-deep-small", fewer, order);
+        let mut large = Validating::with_tasks_in_the_bulk_under("batch-deep-large", more, order);
+        let tasks = || repairing().with_rule("tasks").with_limit(3);
+        let by_kind = tasks().with_kinds([FindingKind::NotOneOf]);
+        let in_the_bulk = [
+            by_kind.clone(),
+            tasks().with_severity(Severity::Error),
+            tasks().with_predicates([Predicate::path("bulk/**")]),
+            tasks().with_predicates([Predicate::path("BULK/**")]),
+        ];
+        let judge = |large: &Validating, params: &RepairParams, after: [&str; 2]| {
+            let (at_small, small_paths, _) = continued_from(&small, params, after[0]);
+            let (at_large, large_paths, more_remain) = continued_from(large, params, after[1]);
+            assert_eq!(
+                at_small, at_large,
+                "a continuation of {params:?} grew with what stands before its cursor under \
+                 {order:?}"
+            );
+            assert_eq!(
+                small_paths.len(),
+                large_paths.len(),
+                "a continuation of {params:?} covered other documents at the two sizes"
+            );
+            (at_large, large_paths, more_remain)
+        };
+        for params in &in_the_bulk {
+            let (at_large, paths, more_remain) = judge(&large, params, [&deep(fewer), &deep(more)]);
+            assert_eq!(
+                (at_large.sorts, at_large.full_scan_steps),
+                (0, 0),
+                "a continuation of {params:?} sorted or scanned under {order:?}: {at_large:?}"
+            );
+            let folds = order == StoredPathOrder::AsciiCaseInsensitive;
+            if params.predicates == [Predicate::path("BULK/**")] && !folds {
+                assert!(
+                    paths.is_empty(),
+                    "{params:?} admits nothing under {order:?}"
+                );
+            } else {
+                assert!(
+                    !paths.is_empty()
+                        && paths.len() < LEFT_IN_THE_BULK
+                        && paths.iter().all(|path| path.starts_with("bulk/"))
+                        && more_remain,
+                    "a continuation of {params:?} covers bulk documents and leaves more under \
+                     {order:?}: {paths:?}"
+                );
+            }
+        }
+        let driven = tasks().with_predicates([Predicate::equal_to("status", "open")]);
+        let (_, paths, _) = judge(&large, &driven, ["a.md", "a.md"]);
+        assert_eq!(
+            paths,
+            ["notes/c.md"],
+            "the part's matched documents after `a.md`"
+        );
+
+        large.drop_index(RULE_KIND_INDEX);
+        failure_of(
+            &format!("{RULE_KIND_INDEX} dropped under {order:?}"),
+            || {
+                judge(&large, &by_kind, [&deep(fewer), &deep(more)]);
+            },
+        );
+    }
+}
+
 /// **A batch's counters read like a validate's**: the statements it ran, the
 /// rows its merged statements handed back — one past the limit where it
 /// reads on, and the probe's row — the tallies a first batch's count read,

@@ -4220,7 +4220,7 @@ const CONTINUATION_FINDINGS: usize = 6;
 /// Which gate documents a rule narrowing admits: every one, so they grow
 /// with the vault, or the [`MARKED_GATES`] a document part names, the same at
 /// every scale.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Admitted {
     EveryGate,
     Marked,
@@ -4234,35 +4234,79 @@ impl Admitted {
             Admitted::Marked => MARKED_GATES,
         }
     }
+
+    /// The selection whose batches reach a continuation's cursor among these
+    /// documents. A repair cursor names a path and no selection, so every
+    /// narrowing admitting the same documents continues from the one cursor.
+    fn reached_by(self, gated: &Gated) -> norn_wire::RepairParams {
+        let by_rule = gated.params().with_rule(GATE_RULE);
+        match self {
+            Admitted::EveryGate => {
+                by_rule.with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))])
+            }
+            Admitted::Marked => by_rule.with_predicates([Predicate::tag("zz-gate-tag")]),
+        }
+    }
+}
+
+/// One rule narrowing of the continuation bar: what it selects, which gate
+/// documents it admits, and whether that rests on the root's fold.
+struct RuleNarrowing {
+    name: &'static str,
+    params: norn_wire::RepairParams,
+    admitted: Admitted,
+    /// A path part spelled otherwise than the gate folder: it admits the
+    /// documents where the root folds ASCII case, and none where it tells
+    /// spellings apart.
+    by_the_roots_fold: bool,
 }
 
 /// The gate rule's findings selected with each other part of a selection in
-/// turn: a kind, a severity, a path part, and a document part that is a field
-/// equality and one that is a tag.
-fn rule_narrowings(gated: &Gated) -> Vec<(&'static str, norn_wire::RepairParams, Admitted)> {
+/// turn: a kind, a severity, a path part spelled as the gate folder is and
+/// one spelled in upper case, and a document part that is a field equality
+/// and one that is a tag. The upper-case part's seek steps through the gate
+/// folder's folded range from the cursor on either root.
+fn rule_narrowings(gated: &Gated) -> Vec<RuleNarrowing> {
     let by_rule = || gated.params().with_rule(GATE_RULE);
+    let narrowing = |name, params, admitted| RuleNarrowing {
+        name,
+        params,
+        admitted,
+        by_the_roots_fold: false,
+    };
     vec![
-        (
+        narrowing(
             "kind",
             by_rule().with_kinds([norn_wire::FindingKind::NotOneOf]),
             Admitted::EveryGate,
         ),
-        (
+        narrowing(
             "severity",
             by_rule().with_severity(norn_wire::Severity::Error),
             Admitted::EveryGate,
         ),
-        (
+        narrowing(
             "path part",
             by_rule().with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))]),
             Admitted::EveryGate,
         ),
-        (
+        RuleNarrowing {
+            by_the_roots_fold: true,
+            ..narrowing(
+                "path part in upper case",
+                by_rule().with_predicates([Predicate::path(format!(
+                    "{}/**",
+                    GATE_FOLDER.to_ascii_uppercase()
+                ))]),
+                Admitted::EveryGate,
+            )
+        },
+        narrowing(
             "field equality",
             by_rule().with_predicates([Predicate::equal_to("zz_region", "east")]),
             Admitted::Marked,
         ),
-        (
+        narrowing(
             "tag",
             by_rule().with_predicates([Predicate::tag("zz-gate-tag")]),
             Admitted::Marked,
@@ -4314,11 +4358,13 @@ fn cursor_leaving_the_last(
     after.expect("the cursor passes at least one document")
 }
 
-/// What a continuation of one narrowing cost, and the bytes of the skipped
-/// findings' decision data its provenance carries.
+/// What a continuation of one narrowing cost, how many findings it planned,
+/// and the bytes of the skipped findings' decision data its provenance
+/// carries.
 struct ContinuationReading {
     narrowing: &'static str,
     counters: CounterSnapshot,
+    planned: usize,
     annotation_bytes: usize,
 }
 
@@ -4331,30 +4377,46 @@ fn read_the_continuations(
     configuration: Continuation,
 ) -> Vec<ContinuationReading> {
     let gated = Gated::attach(label, profile, configuration.gate);
+    let cursors = [Admitted::EveryGate, Admitted::Marked].map(|admitted| {
+        let cursor = cursor_leaving_the_last(
+            &gated,
+            &admitted.reached_by(&gated),
+            admitted.documents(profile),
+            configuration.gate.fields,
+        );
+        (admitted, cursor)
+    });
     rule_narrowings(&gated)
         .into_iter()
-        .map(|(narrowing, params, admitted)| {
-            let cursor = cursor_leaving_the_last(
-                &gated,
-                &params,
-                admitted.documents(profile),
-                configuration.gate.fields,
-            );
-            let params = params.with_limit(configuration.limit);
+        .map(|narrowing| {
+            let cursor = cursors
+                .iter()
+                .find(|(admitted, _)| *admitted == narrowing.admitted)
+                .expect("a cursor among every narrowing's documents")
+                .1
+                .clone();
+            let name = narrowing.name;
+            let params = narrowing.params.with_limit(configuration.limit);
             let (counters, continued) = gated.repair(params.with_after(cursor));
-            assert_eq!(
-                continued.skipped.len(),
-                CONTINUATION_FINDINGS,
-                "the continuation of `{narrowing}` plans the findings of its batch's documents"
-            );
+            let planned = continued.skipped.len();
             assert_eq!(continued.remaining, None, "a continuation counts none");
-            assert!(
-                continued.cursor.is_some(),
-                "the continuation of `{narrowing}` leaves documents after it"
-            );
+            if narrowing.by_the_roots_fold && planned == 0 {
+                // A root that tells spellings apart: the part admits nothing.
+                assert!(continued.cursor.is_none(), "`{name}` admits nothing");
+            } else {
+                assert_eq!(
+                    planned, CONTINUATION_FINDINGS,
+                    "the continuation of `{name}` plans the findings of its batch's documents"
+                );
+                assert!(
+                    continued.cursor.is_some(),
+                    "the continuation of `{name}` leaves documents after it"
+                );
+            }
             ContinuationReading {
-                narrowing,
+                narrowing: name,
                 counters,
+                planned,
                 annotation_bytes: serde_json::to_string(&continued.skipped)
                     .expect("the skipped findings serialize")
                     .len(),
@@ -4378,13 +4440,15 @@ fn read_the_continuations(
 /// stepped through what precedes its cursor, costs the larger vault more. A
 /// document part's prefix is its seven marked documents at both sizes
 /// ([`MARKED_GATES`]). The pair is held for the gate rule
-/// combined with each of a kind, a severity, a path part, a field equality
-/// and a tag, at the three [`CONTINUATIONS`]: the base, F_d raised with the
+/// combined with each of a kind, a severity, a path part in either case, a
+/// field equality and a tag, at the three [`CONTINUATIONS`]: the base, F_d raised with the
 /// annotation bytes held, and the annotation bytes raised with F_d held. The
 /// bytes are the serialized skipped findings, which the bar reads off the
 /// plan so a configuration that did not vary what it names fails.
 ///
-/// The harness runs the host's one path-order root, as its sibling bars do.
+/// The harness runs the host's one path-order root, as its sibling bars do;
+/// `a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor` in the
+/// store suite holds the same narrowings over both.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing() {
@@ -4424,6 +4488,12 @@ fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing(
                 )
                 .violations(),
             );
+            if at_small.planned != at_large.planned {
+                failures.push(format!(
+                    "{heading}: planned {} findings at the small size and {} at the large",
+                    at_small.planned, at_large.planned
+                ));
+            }
             // The same documents at both sizes, so the block differs only by
             // the digits of the finding identities.
             if at_small
