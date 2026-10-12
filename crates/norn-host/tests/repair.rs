@@ -431,6 +431,55 @@ fn the_first_batch_records_the_generation_the_findings_stand_at() {
     assert_eq!(provenance(&after).finding_generation, moved_to);
 }
 
+/// **An apply's first batch counts what remains as its preview did, before
+/// its own writes change the findings.** a.md's missing `status` fills from
+/// its default and its broken link stays, so the first batch (a.md, at a limit
+/// of two) fixes one selected finding and skips one; the three tasks after it
+/// each stand under one. The count is the selection's total before the batch
+/// less the batch's findings, though the apply leaves the selection one
+/// smaller.
+#[test]
+fn an_applys_first_batch_counts_what_remains_before_its_own_writes() {
+    let defaulting = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-remaining-before-writes",
+        defaulting,
+        &[
+            ("a.md", b"---\ntype: task\n---\nSee [[nowhere-a]].\n"),
+            ("b.md", b"---\ntype: task\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+            ("d.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let selected = standing(&host, &vault, |request| request).len() as u64;
+    assert_eq!(selected, 5);
+
+    let preview = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(2)));
+    let ApplyReport::Applied { plan: apply, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply).with_limit(2)))
+    else {
+        panic!("the repair applies");
+    };
+
+    let in_batch = |plan: &ResolvedPlan| {
+        let cited: usize = provenance(plan)
+            .citations
+            .iter()
+            .map(|citation| citation.findings.len())
+            .sum();
+        (cited + provenance(plan).skipped.len()) as u64
+    };
+    assert_eq!(in_batch(&apply), 2, "{:?}", provenance(&apply));
+    assert_eq!(provenance(&apply).remaining, provenance(&preview).remaining);
+    assert_eq!(
+        provenance(&apply).remaining,
+        Some(selected - in_batch(&apply))
+    );
+    let after = standing(&host, &vault, |request| request).len() as u64;
+    assert_eq!(after, selected - 1, "the apply changed no finding");
+}
+
 /// **A cursor survives the findings it covered being derived again.** After
 /// a batch minted its cursor at a.md, a write to a.md files its findings anew
 /// under new identities at a later generation; the continuation reads only the
