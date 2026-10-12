@@ -3805,6 +3805,28 @@ fn repair_cost(
         norn_wire::ApplyMode::Preview,
     )
     .with_predicates(predicates);
+    let (counters, provenance) = repair_reading(host, params);
+    if rows > 0 {
+        assert_eq!(
+            provenance.skipped.len(),
+            rows,
+            "the narrowed batch's findings"
+        );
+        assert_eq!(
+            provenance.remaining,
+            Some(0),
+            "the narrowed batch counts none left"
+        );
+    }
+    counters
+}
+
+/// What the preview of `params` cost the host, read off its read account in a
+/// read window on this thread, and the provenance its plan carries.
+fn repair_reading(
+    host: &attach::ServingHost,
+    params: norn_wire::RepairParams,
+) -> (CounterSnapshot, norn_wire::Provenance) {
     let account = host.read_evidence();
     let window = ReadWindow::open();
     let previewed = host
@@ -3820,22 +3842,10 @@ fn repair_cost(
     let provenance = plan
         .provenance
         .expect("a repair plan carries its provenance");
-    if rows > 0 {
-        assert_eq!(
-            provenance.skipped.len(),
-            rows,
-            "the narrowed batch's findings"
-        );
-        assert_eq!(
-            provenance.remaining,
-            Some(0),
-            "the narrowed batch counts none left"
-        );
-    }
     let batch = spent.repair_batches;
     let held = spent.planning_holds;
     let judged = spent.preview_link_judgments;
-    [
+    let counters = [
         ("repair_batches", batch.batches),
         ("validate_statements", batch.validate_statements),
         ("validate_rows_read", batch.validate_rows_read),
@@ -3856,7 +3866,276 @@ fn repair_cost(
         ("walk_dirents", read.walk_dirents),
     ]
     .into_iter()
-    .collect()
+    .collect();
+    (counters, provenance)
+}
+
+/// The rule every document the repair-batch bars plant cites.
+const GATE_RULE: &str = "gate";
+
+/// The folder the repair-batch bars plant their gate documents in.
+const GATE_FOLDER: &str = "zz-repair-gate";
+
+/// What one gate document holds: how many closed-set breaches it states (the
+/// findings of one document, F_d) and how long each offending value is (the
+/// bytes its skip's decision data carries, up to a value head's 256).
+#[derive(Clone, Copy, Debug)]
+struct Gate {
+    fields: usize,
+    value_bytes: usize,
+}
+
+impl Gate {
+    /// The schema: one rule, citing every breach of its closed sets.
+    fn schema(self) -> String {
+        let closed: String = (0..self.fields)
+            .map(|at| format!("      f{at}: {{values: [ok]}}\n"))
+            .collect();
+        format!(
+            "version: 1\nrules:\n  {GATE_RULE}:\n    severity: error\n    match: {{frontmatter: \
+             {{type: gate}}}}\n    one_of:\n{closed}"
+        )
+    }
+
+    /// Gate document `at`: every breach holds a value of its own, padded to
+    /// the configured length, and the document carries a tag and a field a
+    /// selection can name.
+    fn document(self, at: usize) -> String {
+        let breaches: String = (0..self.fields)
+            .map(|field| {
+                let value = format!("v{at:05}-{field:02}-");
+                format!("f{field}: {value:x<width$}\n", width = self.value_bytes)
+            })
+            .collect();
+        format!("---\ntype: gate\ntags: [draft]\nregion: east\n{breaches}---\n# Gate {at}\n")
+    }
+}
+
+/// How many gate documents stand beside `profile`'s tree: a tenth of its
+/// documents, so the findings a rule selects grow with the vault.
+fn gates(profile: &norn_fixtures::Profile) -> usize {
+    profile.docs / 10
+}
+
+/// A live host over `profile`'s tree with [`gates`] gate documents planted
+/// beside it, under the gate rule's schema.
+struct Gated {
+    // Dropped first: the lease, then the host it was taken through.
+    _lease: norn_host::DemandLease<norn_host::ProductionEntryOps>,
+    host: attach::ServingHost,
+    vault: attach::Vault,
+    _sandbox: Sandbox,
+}
+
+impl Gated {
+    fn attach(label: &str, profile: &norn_fixtures::Profile, gate: Gate) -> Self {
+        let sandbox =
+            Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+        std::fs::write(vault.path().join(".norn/schema.yaml"), gate.schema())
+            .expect("the gate schema");
+        let folder = vault.path().join(GATE_FOLDER);
+        std::fs::create_dir_all(&folder).expect("the gate folder");
+        for at in 0..gates(profile) {
+            std::fs::write(folder.join(format!("g{at:05}.md")), gate.document(at))
+                .expect("a gate document");
+        }
+        let host = vault.host();
+        let lease = attach::attach_and_wait(&host, vault.name());
+        Gated {
+            _lease: lease,
+            host,
+            vault,
+            _sandbox: sandbox,
+        }
+    }
+
+    fn params(&self) -> norn_wire::RepairParams {
+        norn_wire::RepairParams::new(
+            VaultAddress::name(self.vault.name().clone()),
+            norn_wire::ApplyMode::Preview,
+        )
+    }
+
+    fn repair(&self, params: norn_wire::RepairParams) -> (CounterSnapshot, norn_wire::Provenance) {
+        repair_reading(&self.host, params)
+    }
+}
+
+/// What a first batch's count may cost per selected finding, in VM steps,
+/// across the pair below: its marginal cost between the two vault sizes, the
+/// floor that shows the count read the findings and the ceiling it must stay
+/// under. Measured at 10 per finding for a rule's selection and 8.3 for the
+/// unnarrowed one, with headroom both ways.
+const COUNT_STEPS_PER_FINDING: std::ops::RangeInclusive<u64> = 4..=12;
+
+/// What a first batch costs beyond that per-finding share, in VM steps: its
+/// own keyset arms and probe, and the statements' set-up. What a first batch
+/// costs less 8 to 10 steps per selected finding is about 400 for a rule's
+/// selection and 4,400 for the unnarrowed one, which seeks every kind's arm.
+const FIRST_BATCH_STEPS_BASE: u64 = 4000;
+
+/// How many selected findings a first batch's provenance accounts for: the
+/// ones it plans and the ones it counts remaining.
+fn selected_findings(provenance: &norn_wire::Provenance) -> u64 {
+    let planned = provenance.skipped.len()
+        + provenance
+            .citations
+            .iter()
+            .map(|citation| citation.findings.len())
+            .sum::<usize>();
+    planned as u64
+        + provenance
+            .remaining
+            .expect("a first batch counts what remains")
+}
+
+/// The first batch of `limit` findings `gated`'s repair plans, narrowed to the
+/// rule `narrowing` names where it names one, and the batch that continues it:
+/// how many findings the selection holds, what the first batch cost, and what
+/// its continuation cost.
+fn first_and_continuation(
+    gated: &Gated,
+    narrowing: Option<&str>,
+    limit: u32,
+) -> (u64, CounterSnapshot, CounterSnapshot) {
+    let mut params = gated.params().with_limit(limit);
+    params.rule = narrowing.map(str::to_string);
+    let (first, provenance) = gated.repair(params.clone());
+    let cursor = provenance
+        .cursor
+        .clone()
+        .expect("a first batch of this limit leaves more");
+    let (continuation, _) = gated.repair(params.with_after(*cursor));
+    (selected_findings(&provenance), first, continuation)
+}
+
+/// **A repair's first batch counts its selection, and the count is a declared
+/// limit (NORN-376).** The first batch of `Host::repair` also runs a
+/// `Summary`/`RuleSummary` statement over the selected set, so the cost of
+/// that count is the findings the selection admits and not the batch. This
+/// drives `Host::repair` over `ambiguous` (300 documents) and `realistic`
+/// (2000), each with a tenth of its documents planted as gate documents
+/// stating two findings of the gate rule apiece, so the rule's selected set
+/// is 60 findings at one size and 400 at the other and the unnarrowed
+/// selection is 779 and 1653, and holds three things.
+///
+/// The count is seen by the batch read's `validate_statements` (one more than
+/// a continuation's) and its `validate_vm_steps`. Its steps grow with the
+/// selected set by 4 to 12 per selected finding between the two sizes
+/// ([`COUNT_STEPS_PER_FINDING`]), and a first batch stays under 12 steps per
+/// selected finding beyond [`FIRST_BATCH_STEPS_BASE`]. A continuation of the
+/// same selection at the same limit runs no count: one statement fewer, and
+/// at most a fixed number of steps whatever the selection holds. Measured
+/// (first batch against its continuation, `validate_vm_steps`), the rule's
+/// selection: 3431 against 2432 at 60 findings and 6831 against 2432 at 400;
+/// the unnarrowed selection: 10908 against 2756 at 779 and 18142 against
+/// 1171 at 1653.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_a_continuation_pays_none_of_it()
+ {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let gate = Gate {
+        fields: 2,
+        value_bytes: 100,
+    };
+    // One host at a time: the real-watcher lease is the process's, so the
+    // first vault is detached before the second attaches.
+    let readings = |label: &str, profile: &norn_fixtures::Profile| {
+        let gated = Gated::attach(label, profile, gate);
+        [None, Some(GATE_RULE)].map(|narrowing| first_and_continuation(&gated, narrowing, 5))
+    };
+    let at_small = readings("counter-gate-count-ambiguous", &small);
+    let at_large = readings("counter-gate-count-realistic", &large);
+
+    let mut failures = Vec::new();
+    for (selection, narrowing, small_reading, large_reading) in [
+        ("the unnarrowed selection", None, &at_small[0], &at_large[0]),
+        (
+            "the gate rule's selection",
+            Some(GATE_RULE),
+            &at_small[1],
+            &at_large[1],
+        ),
+    ] {
+        let (selected_small, first_small, next_small) = small_reading.clone();
+        let (selected_large, first_large, next_large) = large_reading.clone();
+        eprintln!(
+            "{selection}: {selected_small} selected findings, first batch {} steps and {} \
+             statements, continuation {} steps and {}; {selected_large} findings, first batch \
+             {} steps and {} statements, continuation {} steps and {}",
+            first_small.get("validate_vm_steps"),
+            first_small.get("validate_statements"),
+            next_small.get("validate_vm_steps"),
+            next_small.get("validate_statements"),
+            first_large.get("validate_vm_steps"),
+            first_large.get("validate_statements"),
+            next_large.get("validate_vm_steps"),
+            next_large.get("validate_statements"),
+        );
+        if selected_large <= selected_small {
+            failures.push(format!(
+                "{selection} did not grow with the vault: {selected_small} findings, then \
+                 {selected_large}"
+            ));
+            continue;
+        }
+        let grown = first_large
+            .get("validate_vm_steps")
+            .saturating_sub(first_small.get("validate_vm_steps"));
+        let added = selected_large - selected_small;
+        if !COUNT_STEPS_PER_FINDING.contains(&(grown / added)) {
+            failures.push(format!(
+                "{selection}: a first batch's count grew {grown} steps over {added} more selected \
+                 findings, outside {COUNT_STEPS_PER_FINDING:?} per finding"
+            ));
+        }
+        for (size, selected, first, next) in [
+            ("small", selected_small, &first_small, &next_small),
+            ("large", selected_large, &first_large, &next_large),
+        ] {
+            let steps = first.get("validate_vm_steps");
+            let bound = COUNT_STEPS_PER_FINDING.end() * selected + FIRST_BATCH_STEPS_BASE;
+            if steps > bound {
+                failures.push(format!(
+                    "{selection} at the {size} size: a first batch took {steps} steps, over \
+                     {bound} for {selected} selected findings"
+                ));
+            }
+            if first.get("validate_statements") != next.get("validate_statements") + 1 {
+                failures.push(format!(
+                    "{selection} at the {size} size: a first batch ran {} statements and its \
+                     continuation {}, and the count is one statement",
+                    first.get("validate_statements"),
+                    next.get("validate_statements")
+                ));
+            }
+            if next.get("validate_vm_steps") >= FIRST_BATCH_STEPS_BASE {
+                failures.push(format!(
+                    "{selection} at the {size} size: a continuation took {} steps, and it pays \
+                     no count",
+                    next.get("validate_vm_steps")
+                ));
+            }
+        }
+        if narrowing.is_some() {
+            failures.extend(
+                SizeIndependencePair::new(
+                    "a continuation of the gate rule's selection",
+                    ScaleObservation::new(&small, next_small),
+                    ScaleObservation::new(&large, next_large),
+                )
+                .violations(),
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the first batch's count failed the lane:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// The directory the planted documents sit in, beside the generated tree.
