@@ -19,10 +19,11 @@
 //! its syntax as stored, and its address as the cascade that respells it
 //! leaves it ([`Landing`]). The plan's resolution change set is keyed at the
 //! after-state and exact: it holds an entry for every link whose resolution
-//! the plan changes, every link whose text the plan writes and every link a
-//! cascade leaves behind, and no other. A link with no entry is one the plan
-//! leaves resolving as it did, or one it removes, and its finding stands.
-//! Which of the three put a link in the set does not matter here: an entry
+//! the plan changes, every link whose text the plan writes, every link a
+//! cascade leaves behind and every link that named a document the plan
+//! removes, and no other. A link with no entry is one the plan leaves
+//! resolving as it did, or one it removes, and its finding stands. Which of
+//! the four put a link in the set does not matter here: an entry
 //! records what the link resolves to at the plan's after-state, and the verdict
 //! below reads only that.
 //!
