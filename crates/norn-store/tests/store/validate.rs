@@ -18,15 +18,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, document, drained_parts,
-    driving_parts, matched_by_every_part, narrowable, path_names_no_document_for_target,
-    path_names_no_document_in_class, reads_of, unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, conjoined_parts, document,
+    drained_parts, driving_parts, matched_by_every_part, mixed_documents, narrowable,
+    path_names_no_document_for_target, path_names_no_document_in_class, reads_of, unread_block,
+    violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, FindingFacts, IN_VALUES_CEILING, PageRefusal, ReadStatement, Snapshot,
-    SnapshotReader, Store, StoreError, StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS,
-    ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation, induced_failure,
+    ContentModel, FindingFacts, IN_VALUES_CEILING, MAX_PAGE, MERGED_SOURCE_VALUES, PageRefusal,
+    ReadStatement, Snapshot, SnapshotReader, Store, StoreError, StoredPathOrder, TagFact,
+    TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated,
+    Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -2134,38 +2136,148 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
     }
 }
 
-/// **A membership naming as many values as a part may drives a page and a
-/// batch from its source (NORN-390).** Over the fixture and twelve bulk
-/// documents every part of [`drained_parts`] matches, a membership naming
-/// `open` among [`IN_VALUES_CEILING`] values — one seek per value, merged —
-/// answers the page and the batch an equality on `open` answers.
+/// **A page a document part drives reads no document past a path part's
+/// range (NORN-390).** Over the fixture and 50, then 500, bulk documents every
+/// part matches, all under `bulk/`, a page narrowed by an equality and by
+/// `a*` — whose range ends before `bulk/` — costs the same at both sizes: the
+/// equality's source stops where the path part's range does.
 #[test]
-fn a_membership_at_its_ceiling_drives_a_page_and_a_batch_from_its_source() {
+fn a_driven_page_stops_where_a_path_parts_range_does() {
+    for order in ROOTS {
+        let small = Validating::with_matched_bulk_under("validate-ranged-small", 50, order);
+        let large = Validating::with_matched_bulk_under("validate-ranged-large", 500, order);
+        let params = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::equal_to("status", "open"), Predicate::path("a*")]);
+        assert_eq!(
+            small.validate(&params).work,
+            large.validate(&params).work,
+            "a page beside a path part read past its range under {order:?}"
+        );
+    }
+}
+
+/// **Two document parts together admit exactly the findings whose document
+/// both admit, whichever drives, on either root (NORN-390).** Over the
+/// fixture, six bulk documents every part matches and the [`mixed_documents`]
+/// the parts admit apart, each with an undeclared-tag warning — `twice.md`
+/// two — a page of every such finding and a repair batch of every finding,
+/// narrowed by every pair of [`conjoined_parts`], answer the first part's
+/// findings standing at a document the second admits, in their order.
+#[test]
+fn a_conjunction_answers_the_findings_both_its_parts_admit_whichever_drives() {
+    for order in ROOTS {
+        let mut validating_store =
+            Validating::with_matched_bulk_under("validate-conjoined", 6, order);
+        let (mixed, twice) = mixed_documents(&declared());
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &mixed);
+        for document in &mixed {
+            request
+                .record_finding(&undeclared(document.path.as_str(), "mixed"))
+                .expect("recording a mixed finding");
+        }
+        request
+            .record_finding(&undeclared(twice, "again"))
+            .expect("recording it twice");
+        let parts = conjoined_parts(FindingKind::UndeclaredTag);
+        let paged = |parts: &[Predicate]| {
+            let (rows, _) = validating_store.page(
+                &validating()
+                    .with_kinds([FindingKind::UndeclaredTag])
+                    .with_predicates(parts.to_vec())
+                    .with_limit(MAX_PAGE as u32),
+            );
+            rows.iter().map(named).collect::<Vec<_>>()
+        };
+        let batched = |parts: &[Predicate]| {
+            let batch = validating_store.batch(
+                &batch::selecting(&validating().with_predicates(parts.to_vec()))
+                    .with_limit(MAX_PAGE as u32),
+            );
+            batch.rows.iter().map(named).collect::<Vec<_>>()
+        };
+        for first in &parts {
+            for second in &parts {
+                if first == second {
+                    continue;
+                }
+                let pair = [first.clone(), second.clone()];
+                for read in [&paged as &dyn Fn(&[Predicate]) -> Vec<_>, &batched] {
+                    let admitted: Vec<String> = read(std::slice::from_ref(second))
+                        .into_iter()
+                        .map(|(_, path, _)| path)
+                        .collect();
+                    let both: Vec<_> = read(std::slice::from_ref(first))
+                        .into_iter()
+                        .filter(|(_, path, _)| admitted.contains(path))
+                        .collect();
+                    assert_eq!(read(&pair), both, "{pair:?} under {order:?}");
+                }
+            }
+        }
+    }
+}
+
+/// **A membership drives a page and a batch from its source up to
+/// [`MERGED_SOURCE_VALUES`] values, and answers what an equality does at any
+/// width (NORN-390).** Over the fixture and twelve bulk documents every part
+/// of [`drained_parts`] matches, a membership naming `open` among
+/// [`MERGED_SOURCE_VALUES`] values drives its kind page from its source, one
+/// seek per value, merged; one naming a value more, and one naming
+/// [`IN_VALUES_CEILING`], is driven another way. At every width the page and
+/// the batch answer what an equality on `open` answers.
+#[test]
+fn a_membership_merges_its_values_up_to_its_source_ceiling() {
     let validating_store = Validating::with_matched_bulk_under(
         "validate-membership-ceiling",
         12,
         StoredPathOrder::Sensitive,
     );
-    let values: Vec<String> = std::iter::once("open".to_string())
-        .chain((1..IN_VALUES_CEILING).map(|at| format!("value-{at:03}")))
-        .collect();
-    let member = Predicate::in_any("status", values);
+    let naming = |count: usize| {
+        let values: Vec<String> = std::iter::once("open".to_string())
+            .chain((1..count).map(|at| format!("value-{at:03}")))
+            .collect();
+        Predicate::in_any("status", values)
+    };
     let equality = Predicate::equal_to("status", "open");
     let narrowed = |part: &Predicate| validating().with_predicates([part.clone()]).with_limit(7);
     let paged = |part: &Predicate| {
         let (rows, _) = validating_store.page(&narrowed(part));
         rows.iter().map(named).collect::<Vec<_>>()
     };
-    assert_eq!(paged(&member), paged(&equality));
     let batched = |part: &Predicate| {
         let batch = validating_store.batch(&batch::selecting(&narrowed(part)));
         batch.rows.iter().map(named).collect::<Vec<_>>()
     };
-    assert_eq!(batched(&member), batched(&equality));
-    assert!(!batched(&member).is_empty());
-    for plan in validating_store.plans(&narrowed(&member)) {
-        if plan.statement == ReadStatement::Validate(ValidateStatement::KindPage) {
-            judge_ordered(&emitted_plan(&plan.plan), "f");
+    let sourced = |part: &Predicate| {
+        validating_store
+            .plans(&narrowed(part))
+            .iter()
+            .filter(|plan| plan.statement == ReadStatement::Validate(ValidateStatement::KindPage))
+            .map(|plan| emitted_plan(&plan.plan))
+            .collect::<Vec<QueryPlan>>()
+    };
+    assert!(!batched(&equality).is_empty());
+    for count in [
+        MERGED_SOURCE_VALUES,
+        MERGED_SOURCE_VALUES + 1,
+        IN_VALUES_CEILING,
+    ] {
+        let member = naming(count);
+        assert_eq!(paged(&member), paged(&equality), "{count} values");
+        assert_eq!(batched(&member), batched(&equality), "{count} values");
+        for page in sourced(&member) {
+            let driven_by_its_source = page.rows().iter().any(|row| row.detail == "CO-ROUTINE dv");
+            assert_eq!(
+                driven_by_its_source,
+                count <= MERGED_SOURCE_VALUES,
+                "a membership of {count} values: {:?}",
+                page.rows()
+            );
+            if driven_by_its_source {
+                judge_ordered(&page, "f");
+            }
         }
     }
 }

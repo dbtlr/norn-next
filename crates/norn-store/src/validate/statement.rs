@@ -290,7 +290,7 @@ impl<'a> Narrowed<'a> {
             driven: documents.iter().any(|filter| !filter.shape().excludes()),
             ordered: documents
                 .iter()
-                .position(|filter| filter.shape().is_path_ordered(false)),
+                .position(|filter| filter.is_path_ordered(false)),
             documents,
         }
     }
@@ -577,7 +577,7 @@ fn compose_arm(
         descending: false,
         from: (Value::Text(folded.clone()), Value::Text(path.clone())),
         inclusive: true,
-        before: upper.clone(),
+        until: upper.clone(),
     };
     if statement == ValidateStatement::DocumentTail {
         // The tail is the one path's findings after a position and an id, so

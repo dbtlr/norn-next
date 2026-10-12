@@ -433,6 +433,76 @@ pub fn matched_by_every_part(at: &str, declared: &ContentModel) -> DocumentFacts
     facts
 }
 
+/// Documents under `mixed/` that the parts of [`conjoined_parts`] admit
+/// differently, and which of them stands its kind twice: `open.md` holds
+/// `status: open` and nothing else, `tagged.md` the tag `draft` and `status:
+/// closed`, `listed.md` and `mapped.md` both, with `noted` as a list and as a
+/// map, `twice.md` both, and `plain.md` neither.
+pub fn mixed_documents(declared: &ContentModel) -> (Vec<DocumentFacts>, &'static str) {
+    let string = |text: &str| FrontmatterValue::String(text.to_string());
+    let tagged = |mut facts: DocumentFacts| {
+        facts.tags.push(TagFact {
+            name: "draft".to_string(),
+            source: TagSource::Body,
+            span: None,
+        });
+        facts
+    };
+    let with = |at: &str, fields: Vec<(&str, FrontmatterValue)>| {
+        document(at, &format!("hash-{at}"), "a body\n").with_frontmatter(
+            Some(FrontmatterValue::Map(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            )),
+            declared,
+        )
+    };
+    (
+        vec![
+            with("mixed/open.md", vec![("status", string("open"))]),
+            tagged(with("mixed/tagged.md", vec![("status", string("closed"))])),
+            tagged(with(
+                "mixed/listed.md",
+                vec![
+                    ("status", string("open")),
+                    ("noted", FrontmatterValue::Sequence(vec![string("yes")])),
+                ],
+            )),
+            tagged(with(
+                "mixed/mapped.md",
+                vec![
+                    ("status", string("open")),
+                    (
+                        "noted",
+                        FrontmatterValue::Map(vec![("why".to_string(), string("yes"))]),
+                    ),
+                ],
+            )),
+            tagged(with("mixed/twice.md", vec![("status", string("open"))])),
+            with("mixed/plain.md", vec![]),
+        ],
+        "mixed/twice.md",
+    )
+}
+
+/// Every part a conjunction is judged under (NORN-390): each part of
+/// [`drained_parts`] alone, a path part, an inequality and an absence.
+pub fn conjoined_parts(kind: FindingKind) -> Vec<Predicate> {
+    let mut parts: Vec<Predicate> = drained_parts(kind)
+        .into_iter()
+        .filter(|(_, parts)| parts.len() == 1)
+        .flat_map(|(_, parts)| parts)
+        .collect();
+    parts.extend([
+        Predicate::path("mixed/**"),
+        Predicate::not_equal_to("status", "closed"),
+        Predicate::missing("noted"),
+    ]);
+    parts
+}
+
 /// Every selection a drain by cursor is judged under (NORN-390), each
 /// admitting every [`matched_by_every_part`] document, beside the shape of the
 /// part that drives it: an equality, a membership, a tag, a presence and a

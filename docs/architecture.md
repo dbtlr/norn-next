@@ -860,11 +860,15 @@ drain pays that walk at most twice, because a page reads one row past its bound 
 page resumes from the row it kept, and it is the price of ordering a document missing the
 sort field as `NULL` orders: first ascending, last descending. A path page narrowed by a
 part whose documents stand in the answer's path order — an equality, a tag, a finding or a
-path part either way, and a membership or a presence ascending — drives from that part's
-source: the part's index holds the path after its key and value, so the page seeks the
-part's documents from the place it resumes at, sorts nothing, and costs the documents it
-reads, never the ones the part matched before or after it; every other part tests each
-document at its key. A page any other filter that keeps what it seeks narrows — a range, a
+path part either way, and a membership naming at most sixteen values or a presence
+ascending — drives from the first such part's source: the part's index holds the path after
+its key and value, so the page seeks the part's documents from the place it resumes at and
+within every path part's range, sorts nothing, and costs the documents it reads, never the
+ones the part matched before its place or past its last row; every other part tests each
+document at its key. Those it reads include the ones another part then rejects, each read
+once over a drain; which part drives is the first in the request's order, not the rarest.
+A wider membership merges too many seeks to prepare for every page and drives no page from
+its source. A page any other filter that keeps what it seeks narrows — a range, a
 full-text match, a resolution or a links-to part, a membership or a presence descending,
 and any such part on a field sort's page — drives from the filter's seek and sorts the
 matched set: its cost is bounded by the match count. Inequality and absence seek the
@@ -972,7 +976,8 @@ severity — over the indexes that hold the path under `NOCASE` with a bytewise 
 a path part's folded range bounds on every root, and that a document part keeping its
 documents in the answer's path order drives instead from its source — the part's documents
 sought from the page's place and each one's findings at its path, so a continuation costs
-its page however many documents the part matched — while any other document part keeping
+the documents it reads from its place to its last finding however many the part matched,
+those holding no finding the page selects included, each read once over a drain — while any other document part keeping
 what it seeks drives from the documents it matched; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks

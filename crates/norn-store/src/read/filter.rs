@@ -266,6 +266,18 @@ impl Filter {
         }
     }
 
+    /// Whether this filter hands the documents it keeps back in the answer's
+    /// path order, running `descending` or not: its shape does
+    /// ([`ReadFilter::is_path_ordered`]), and a membership names at most
+    /// [`MERGED_SOURCE_VALUES`] values.
+    pub(crate) fn is_path_ordered(&self, descending: bool) -> bool {
+        let merges_few = match self {
+            Filter::Bound { members, .. } => members.len() <= MERGED_SOURCE_VALUES,
+            Filter::Path(_) => true,
+        };
+        self.shape().is_path_ordered(descending) && merges_few
+    }
+
     /// The documents this filter keeps, in the answer's path order from
     /// `reach`'s place on, each once, as a statement's `FROM` names one: the
     /// columns `folded`, `path` and `id`, ordered by the first two and
@@ -283,7 +295,7 @@ impl Filter {
     /// SQLite merges in either direction but hands back in order only
     /// ascending.
     pub(crate) fn source(&self, reach: &Reach, binder: &mut Binder) -> Option<String> {
-        if !self.shape().is_path_ordered(reach.descending) {
+        if !self.is_path_ordered(reach.descending) {
             return None;
         }
         match self {
@@ -327,8 +339,11 @@ pub(crate) struct Reach {
     pub(crate) from: (Value, Value),
     /// Whether the document at `from` is read too.
     pub(crate) inclusive: bool,
-    /// The folded path an ascending source stops before, or `None`.
-    pub(crate) before: Option<Value>,
+    /// The folded path the source stops at, or `None`: an ascending source
+    /// reads the paths folding below it, and a descending one the paths
+    /// folding at or above it — a path part's range, from the end the source
+    /// runs toward.
+    pub(crate) until: Option<Value>,
 }
 
 impl Reach {
@@ -365,9 +380,10 @@ impl Reach {
         conditions.push(format!(
             "({path}, {path}) {comparison} ({folded} COLLATE NOCASE, {bytewise})"
         ));
-        if let Some(before) = &self.before {
-            let before = binder.bind(before.clone());
-            conditions.push(format!("{path} < {before} COLLATE NOCASE"));
+        if let Some(until) = &self.until {
+            let until = binder.bind(until.clone());
+            let comparison = if self.descending { ">=" } else { "<" };
+            conditions.push(format!("{path} {comparison} {until} COLLATE NOCASE"));
         }
         format!(
             "SELECT {path} COLLATE NOCASE AS folded, {path} AS path, {document} AS id FROM {table}
@@ -730,6 +746,15 @@ fn source_bound(
         }
     }
 }
+
+/// The most values a membership drives a page from its source with, one seek
+/// of each merged.
+///
+/// Every read prepares its statement afresh, and a merge of one arm per value
+/// costs its preparation per arm: at 256 values a page spent about 9 ms
+/// preparing a source whose rows took a fraction of that, so a wider
+/// membership drives a page as a part in no page's order does.
+pub const MERGED_SOURCE_VALUES: usize = 16;
 
 /// How many values a links-to filter binds after the keys it seeks: the
 /// ignore set, the path order it is matched under, and the named document's

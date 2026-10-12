@@ -15,7 +15,7 @@ use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::SuffixKey;
 use crate::read::{
     AnswerSeek, Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term, answer_ordering,
-    answer_place, key_walk,
+    answer_place, answer_range, key_walk,
 };
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
@@ -333,11 +333,10 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         .iter()
         .any(|filter| !filter.shape().excludes());
     if let FindStatement::PathPage(direction) = section.statement
-        && let Some(at) = section.filters.iter().position(|filter| {
-            filter
-                .shape()
-                .is_path_ordered(direction == PageDirection::Descending)
-        })
+        && let Some(at) = section
+            .filters
+            .iter()
+            .position(|filter| filter.is_path_ordered(direction == PageDirection::Descending))
     {
         return compose_ordered_path_page(section, direction, at, binder);
     }
@@ -475,20 +474,7 @@ fn compose_ordered_path_page(
     mut binder: Binder,
 ) -> (String, Vec<Value>) {
     let descending = direction == PageDirection::Descending;
-    let from = match section.start.path {
-        Some(path) => {
-            let (folded, path) = answer_place(path);
-            (Value::Text(folded), Value::Text(path))
-        }
-        None if descending => (Value::Blob(Vec::new()), Value::Blob(Vec::new())),
-        None => (Value::Text(String::new()), Value::Text(String::new())),
-    };
-    let reach = Reach {
-        descending,
-        from,
-        inclusive: false,
-        before: None,
-    };
+    let reach = path_page_reach(section, descending);
     let source = section.filters[at]
         .source(&reach, &mut binder)
         .expect("a filter that keeps its documents in path order has a source");
@@ -518,6 +504,76 @@ fn compose_ordered_path_page(
                      LIMIT {limit}"
     );
     (sql, binder.into_values())
+}
+
+/// Where a path page's source reads from and stops: past the place the page
+/// resumes at, and within every path part's folded range in the answer order
+/// ([`answer_range`]) — from the range's near end where that stands past the
+/// place, and to its far end — so a source driven beside a path part reads no
+/// document the part's range leaves out, whichever part drives.
+fn path_page_reach(section: &Section<'_>, descending: bool) -> Reach {
+    let place = section.start.path.map(answer_place);
+    let ranges: Vec<(String, Value)> = section
+        .filters
+        .iter()
+        .filter_map(Filter::path_part)
+        .map(|part| answer_range(&part.pattern))
+        .collect();
+    let text = |text: String| Value::Text(text);
+    if descending {
+        // A range's near end is its upper bound, exclusive: the paths folding
+        // below it. The least of them, where it stands below the place, is
+        // where the source starts; the greatest lower bound is where it stops.
+        let near = ranges
+            .iter()
+            .filter_map(|(_, upper)| match upper {
+                Value::Text(upper) => Some(upper.clone()),
+                _ => None,
+            })
+            .min();
+        let from = match (place, near) {
+            (Some(place), Some(near)) if (near.clone(), String::new()) < place => {
+                (text(near), text(String::new()))
+            }
+            (Some((folded, path)), _) => (text(folded), text(path)),
+            (None, Some(near)) => (text(near), text(String::new())),
+            (None, None) => (Value::Blob(Vec::new()), Value::Blob(Vec::new())),
+        };
+        let until = ranges.iter().map(|(lower, _)| lower.clone()).max();
+        Reach {
+            descending,
+            from,
+            inclusive: false,
+            until: until.map(text),
+        }
+    } else {
+        // A range's near end is its lower bound, inclusive: every path folding
+        // to it or past it. The greatest of them, where it stands past the
+        // place, is where the source starts; the least upper bound is where it
+        // stops.
+        let near = ranges.iter().map(|(lower, _)| lower.clone()).max();
+        let (from, inclusive) = match (place, near) {
+            (Some(place), Some(near)) if (near.clone(), String::new()) > place => {
+                ((text(near), text(String::new())), true)
+            }
+            (Some((folded, path)), _) => ((text(folded), text(path)), false),
+            (None, Some(near)) => ((text(near), text(String::new())), true),
+            (None, None) => ((text(String::new()), text(String::new())), false),
+        };
+        let until = ranges
+            .iter()
+            .filter_map(|(_, upper)| match upper {
+                Value::Text(upper) => Some(upper.clone()),
+                _ => None,
+            })
+            .min();
+        Reach {
+            descending,
+            from,
+            inclusive,
+            until: until.map(text),
+        }
+    }
 }
 
 /// The documents past `place` in the answer order, in the direction

@@ -14,8 +14,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use crate::common::{
-    Scratch, document, drained_parts, matched_by_every_part, path_names_no_document_in_class,
-    violation, write_documents,
+    Scratch, conjoined_parts, document, drained_parts, matched_by_every_part, mixed_documents,
+    path_names_no_document_in_class, violation, write_documents,
 };
 use norn_store::{
     BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldMatch,
@@ -2299,7 +2299,10 @@ fn a_continuation_resumes_exactly_where_its_page_stopped() {
 
 /// `seeded` holding each of `written` — a path under `readings/` and its
 /// frontmatter fields — derived under [`declared_readings`], and the paths a
-/// find of `part` among them answers under it.
+/// find of `part` among them answers under it: the same whether the part is
+/// named before the path part, so a part that keeps its documents in path
+/// order drives the page from its source, or after it, so the path part drives
+/// and the part tests each document.
 fn found_among_readings(
     seeded: &mut Seeded,
     written: &[(&str, Vec<(&str, FrontmatterValue)>)],
@@ -2314,17 +2317,24 @@ fn found_among_readings(
     write_documents(&mut seeded.store.begin_request(), &documents);
     let reader = Arc::clone(&seeded.reader);
     move |part: Predicate| {
-        let found = reader
-            .try_take()
-            .expect("an idle reader")
-            .establish()
-            .expect("a snapshot")
-            .find(
-                &request().with_predicates([Predicate::path("readings/**"), part]),
-                &declared_readings(),
-            )
-            .expect("a find");
-        row_paths(&found)
+        let found = |predicates: [Predicate; 2]| {
+            let found = reader
+                .try_take()
+                .expect("an idle reader")
+                .establish()
+                .expect("a snapshot")
+                .find(&request().with_predicates(predicates), &declared_readings())
+                .expect("a find");
+            row_paths(&found)
+        };
+        let within = Predicate::path("readings/**");
+        let tested = found([within.clone(), part.clone()]);
+        assert_eq!(
+            found([part.clone(), within]),
+            tested,
+            "{part:?} answered otherwise driving the page than tested at each document"
+        );
+        tested
     }
 }
 
@@ -2702,6 +2712,103 @@ fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
                         drained(&seeded, &params, limit),
                         whole,
                         "{part:?} {direction:?} drained {limit} at a time under {order:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **A path page a part drives reads no document past a path part's range,
+/// either way (NORN-390).** Over the fixture and 50, then 500, bulk documents
+/// every part matches, all under `bulk/`, a path page narrowed by an equality
+/// and by a path part whose range stands before `bulk/` ascending, `a*`, or
+/// after it descending, `z*`, costs the same at both sizes: the equality's
+/// source starts and stops within the path part's range.
+#[test]
+fn a_driven_path_page_reads_within_a_path_parts_range() {
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let small = Seeded::with_matched_bulk_under("find-ranged-small", 50, order);
+        let large = Seeded::with_matched_bulk_under("find-ranged-large", 500, order);
+        for (direction, glob) in [(Direction::Ascending, "a*"), (Direction::Descending, "z*")] {
+            let params = sorted(SortKey::path(), direction)
+                .with_predicates([Predicate::equal_to("status", "open"), Predicate::path(glob)]);
+            assert_eq!(
+                small.page(&params).work,
+                large.page(&params).work,
+                "a {direction:?} page beside `{glob}` read past its range under {order:?}"
+            );
+        }
+    }
+}
+
+/// **Two parts together admit exactly the documents both admit, whichever
+/// drives, either way, on either root (NORN-390).** Over the fixture, six
+/// bulk documents every part matches and the [`mixed_documents`] the parts
+/// admit apart — `twice.md` with its finding stood twice — each part of
+/// [`conjoined_parts`] alone answers each document it admits once, in the
+/// answer's path order, and every pair of them answers the first part's
+/// documents the second admits, in that order, a row at a time as in one page.
+#[test]
+fn a_conjunction_answers_what_both_its_parts_admit_whichever_drives() {
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let mut seeded = Seeded::with_matched_bulk_under("find-conjoined", 6, order);
+        let (mixed, twice) = mixed_documents(&declared());
+        let mut request = seeded.store.begin_request();
+        write_documents(&mut request, &mixed);
+        for document in &mixed {
+            request
+                .record_finding(&violation(document.path.as_str()))
+                .expect("recording a mixed finding");
+        }
+        let mut again = violation(twice);
+        again.message = "a second finding of the kind".to_string();
+        request.record_finding(&again).expect("recording it twice");
+        let parts = conjoined_parts(FindingKind::BodyBytesNotUtf8);
+        for direction in [Direction::Ascending, Direction::Descending] {
+            let whole = |parts: &[Predicate]| {
+                seeded.paths(
+                    &sorted(SortKey::path(), direction)
+                        .with_predicates(parts.to_vec())
+                        .with_limit(MAX_PAGE as u32),
+                )
+            };
+            for part in &parts {
+                let alone = whole(std::slice::from_ref(part));
+                let mut ordered = alone.clone();
+                ordered.sort_by_key(|path| (path.to_ascii_lowercase(), path.clone()));
+                if direction == Direction::Descending {
+                    ordered.reverse();
+                }
+                ordered.dedup();
+                assert_eq!(alone, ordered, "{part:?} {direction:?} under {order:?}");
+            }
+            for first in &parts {
+                for second in &parts {
+                    if first == second {
+                        continue;
+                    }
+                    let admitted = whole(std::slice::from_ref(second));
+                    let both: Vec<String> = whole(std::slice::from_ref(first))
+                        .into_iter()
+                        .filter(|path| admitted.contains(path))
+                        .collect();
+                    let pair = [first.clone(), second.clone()];
+                    assert_eq!(whole(&pair), both, "{pair:?} {direction:?} under {order:?}");
+                    assert_eq!(
+                        drained(
+                            &seeded,
+                            &sorted(SortKey::path(), direction).with_predicates(pair.clone()),
+                            1
+                        ),
+                        both,
+                        "{pair:?} {direction:?} drained a row at a time under {order:?}"
                     );
                 }
             }
