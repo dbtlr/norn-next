@@ -4245,7 +4245,7 @@ fn a_link_finding_whose_link_the_plan_does_not_change_stays_skipped() {
     let skipped: Vec<(u64, SkipReason)> = provenance(&plan)
         .skipped
         .iter()
-        .map(|skipped| (skipped.finding, skipped.reason.clone()))
+        .map(|skipped| (skipped.finding, skipped.reason))
         .collect();
     assert_eq!(
         skipped,
