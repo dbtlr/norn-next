@@ -1750,44 +1750,138 @@ fn every_route_and_default_a_repair_plan_fills_comes_from_one_clock_reading() {
 /// plain default, a fix that reads no clock.
 const STAMPED_ROUTED_AND_PLAIN: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n    allowed_paths: {paths: ['zz-repair/log/**'], route: 'zz-repair/log/{{date}}/'}\n  reviews:\n    match: {frontmatter: {type: review}}\n    required:\n      status: {default: todo}\n";
 
-/// `plan` with every position a clock reading fills set to one marker: the
-/// value of a `created` or `day` default, the destination of a route's move
-/// and the transition that lands there. Also the clock-filled values, in plan
-/// order, and how many moves were masked.
-fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, Vec<String>, usize) {
+/// The folder a route files a stamped document under, before its date.
+const ROUTE_ROOT: &str = "zz-repair/log/";
+
+/// Whether `text` reads as a `YYYY-MM-DD` date.
+fn is_a_date(text: &str) -> bool {
+    let b = text.as_bytes();
+    let number = |from: usize, to: usize| text.get(from..to)?.parse::<u32>().ok();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+        && matches!(number(5, 7), Some(1..=12))
+        && matches!(number(8, 10), Some(1..=31))
+}
+
+/// Whether `text` reads as an RFC 3339 instant to the second, `Z` or with an
+/// offset: `YYYY-MM-DDTHH:MM:SS+HH:MM`.
+fn is_an_instant(text: &str) -> bool {
+    let Some((date, time)) = text.split_once('T') else {
+        return false;
+    };
+    let (clock, offset) = match time.strip_suffix('Z') {
+        Some(clock) => (clock, None),
+        None => match time.rfind(['+', '-']) {
+            Some(at) => (&time[..at], Some(&time[at + 1..])),
+            None => return false,
+        },
+    };
+    let pair =
+        |text: &str, bound: u32| text.len() == 2 && text.parse::<u32>().is_ok_and(|n| n < bound);
+    let parts: Vec<&str> = clock.split(':').collect();
+    let offset_parts: Vec<&str> = offset.map_or_else(Vec::new, |o| o.split(':').collect());
+    is_a_date(date)
+        && matches!(parts.as_slice(), [h, m, s] if pair(h, 24) && pair(m, 60) && pair(s, 61))
+        && (offset.is_none()
+            || matches!(offset_parts.as_slice(), [h, m] if pair(h, 24) && pair(m, 60)))
+}
+
+/// What the clock filled in a plan, read off it while masking, and how much
+/// of the plan was masked for it.
+struct ClockFilled {
+    /// Each `created` value, in plan order.
+    instants: Vec<String>,
+    /// Each `day` value, in plan order.
+    days: Vec<String>,
+    /// The date folder of each route's destination, in plan order.
+    folders: Vec<String>,
+    /// The after-state of each stamped document's transition, as planned.
+    stamped_after: Vec<norn_wire::FileState>,
+}
+
+/// `path` with the date folder a route reads the clock for set to `DATE`, the
+/// rest of the path as planned; the date it replaced is pushed to `folders`.
+/// Panics where a path under the route's root holds no date there.
+fn without_the_route_date(path: &DocumentPath, folders: &mut Vec<String>) -> DocumentPath {
+    let Some(under) = path.as_str().strip_prefix(ROUTE_ROOT) else {
+        return path.clone();
+    };
+    let (date, rest) = under.split_once('/').expect("a document under a date");
+    assert!(is_a_date(date), "a route's folder is a date: {path:?}");
+    folders.push(date.to_string());
+    DocumentPath::new(format!("{ROUTE_ROOT}DATE/{rest}")).expect("a document path")
+}
+
+/// `plan` with only what the clock fills set apart: the date folder in a
+/// route's paths (a move's destination, a write's target, the transitions
+/// landing there), the value of a `created` or `day` default, and the
+/// after-state of a document stamped with an instant, whose bytes hold it.
+/// Each masked value is checked to be a well-formed clock reading. Everything
+/// else, the rest of each destination path included, stays as planned.
+fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
     let mut masked = plan.clone();
-    let mut filled = Vec::new();
-    let mut moves = 0;
+    let mut filled = ClockFilled {
+        instants: Vec::new(),
+        days: Vec::new(),
+        folders: Vec::new(),
+        stamped_after: Vec::new(),
+    };
+    let mut stamped = BTreeSet::new();
     for operation in &mut masked.operations {
         match &mut operation.kind {
             OperationKind::MoveDocument { to, .. } => {
-                *to = at("masked.md");
-                moves += 1;
+                assert!(
+                    to.as_str().starts_with(ROUTE_ROOT),
+                    "a route's destination is under its dated root: {to:?}"
+                );
+                *to = without_the_route_date(to, &mut filled.folders);
             }
-            OperationKind::SetFrontmatter { field, value, .. }
-                if field == "created" || field == "day" =>
-            {
-                filled.push(format!("{field}={value:?}"));
-                *value = AuthoredValue::string("masked");
+            OperationKind::SetFrontmatter {
+                target: WriteTarget::Path(path),
+                field,
+                value,
+            } => {
+                if field == "created" || field == "day" {
+                    let reading = value.scalar_text().expect("a clock reading");
+                    if field == "created" {
+                        assert!(is_an_instant(&reading), "an instant: {reading}");
+                        stamped.insert(path.as_str().to_string());
+                        filled.instants.push(reading);
+                    } else {
+                        assert!(is_a_date(&reading), "a date: {reading}");
+                        filled.days.push(reading);
+                    }
+                    *value = AuthoredValue::string("masked");
+                }
+                *path = without_the_route_date(path, &mut Vec::new());
             }
             _ => {}
         }
     }
     for transition in &mut masked.transitions {
-        if transition.before == norn_wire::FileState::absent() {
-            transition.path = at("masked.md");
-            transition.after = norn_wire::FileState::absent();
+        let was = transition.path.as_str().to_string();
+        transition.path = without_the_route_date(&transition.path, &mut Vec::new());
+        if stamped.contains(&was) {
+            filled.stamped_after.push(transition.after.clone());
+            transition.after =
+                norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
         }
     }
-    (masked, filled, moves)
+    (masked, filled)
 }
 
 /// **An apply plans what its preview did, apart from what the clock fills.**
 /// Three routes and five clock defaults across three tasks, beside a review
 /// whose default reads no clock: a second apart, the preview and the apply
 /// read the clock at different instants, so the `created` instants differ.
-/// With the clock-filled values masked (each default's value, each route's
-/// destination and the transition landing there) the two plans are equal in
+/// With only what the clock fills masked (each default's value, the date
+/// folder of each route's paths, and the after-state of the two documents
+/// stamped with an instant), each checked to be a well-formed reading, and the
+/// rest of every destination path left as planned, the two plans are equal in
 /// operations, transitions, conditions and provenance (citations, skipped
 /// findings, remaining count and cursor), and the review's fix stands alike
 /// in both.
@@ -1819,14 +1913,58 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
     };
     assert_eq!(changeset, ChangesetOutcome::Committed);
 
-    let (preview_masked, preview_filled, preview_moves) = with_the_clock_masked(&preview);
-    let (apply_masked, apply_filled, apply_moves) = with_the_clock_masked(&apply);
-    assert_eq!((preview_moves, preview_filled.len()), (3, 5), "{preview:?}");
-    assert_eq!((apply_moves, apply_filled.len()), (3, 5), "{apply:?}");
+    let (preview_masked, preview_filled) = with_the_clock_masked(&preview);
+    let (apply_masked, apply_filled) = with_the_clock_masked(&apply);
+    for (plan, filled) in [(&preview, &preview_filled), (&apply, &apply_filled)] {
+        assert_eq!(
+            (
+                filled.folders.len(),
+                filled.instants.len(),
+                filled.days.len()
+            ),
+            (3, 2, 3),
+            "{plan:?}"
+        );
+        // One reading of the clock fills a plan: every route's folder is the
+        // day every `day` default holds.
+        let day = &filled.days[0];
+        assert!(filled.days.iter().chain(&filled.folders).all(|d| d == day));
+        assert!(
+            filled
+                .instants
+                .iter()
+                .all(|at| at.starts_with(day.as_str()))
+        );
+    }
     assert_ne!(
-        preview_filled, apply_filled,
+        preview_filled.instants, apply_filled.instants,
         "the two readings of the clock are one instant"
     );
+    // The stamped documents' bytes hold the instant, so their hashes differ
+    // between the plans; the unstamped `b.md` is not masked.
+    assert_eq!(preview_filled.stamped_after.len(), 2);
+    assert!(
+        preview_filled
+            .stamped_after
+            .iter()
+            .zip(&apply_filled.stamped_after)
+            .all(|(then, now)| then != now),
+        "a stamped document's hash is its instant's"
+    );
+    // A difference that is not the clock's is not masked: the apply landing
+    // a document under another name, or in a subfolder, is a difference.
+    for altered in ["zz-repair/log/DATE/other.md", "zz-repair/log/DATE/sub/a.md"] {
+        let mut other = apply.clone();
+        let OperationKind::MoveDocument { to, .. } = &mut other.operations[0].kind else {
+            panic!("the first operation is a move");
+        };
+        *to = DocumentPath::new(altered.replace("DATE", "2026-01-01")).expect("a path");
+        assert_ne!(
+            with_the_clock_masked(&other).0,
+            preview_masked,
+            "{altered} passed the mask"
+        );
+    }
     assert!(
         preview
             .operations
