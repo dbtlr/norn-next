@@ -164,10 +164,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     // way SQLite plans by a bound value.
     let patterned: Vec<&String> = statements
         .iter()
-        .filter(|sql| {
-            let spelled = sql.to_ascii_uppercase();
-            spelled.contains(" LIKE ") || spelled.contains(" GLOB ")
-        })
+        .filter(|sql| names_a_word(sql, "LIKE") || names_a_word(sql, "GLOB"))
         .collect();
     assert!(
         patterned.is_empty(),
@@ -323,6 +320,14 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
         "the census's apply wrote something"
     );
     ran
+}
+
+/// Whether `sql` spells `word` as a word of its own, in any case and beside
+/// whatever separates it: a space, a newline, a parenthesis or a bracket. A
+/// longer name that holds it, `norn_glob` among them, is not the word.
+fn names_a_word(sql: &str, word: &str) -> bool {
+    sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|token| token.eq_ignore_ascii_case(word))
 }
 
 /// How many findings a repair plan's batch covers: those its operations fix
