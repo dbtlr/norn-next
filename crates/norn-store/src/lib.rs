@@ -176,9 +176,9 @@ pub use json::{
 };
 pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
 pub use read::{
-    DEFAULT_PAGE, FieldMatch, FieldOrder, FindingLink, IN_VALUES_CEILING, MERGED_SOURCE_VALUES,
-    MatchedColumn, PageRefusal, READ_FILTERS, ReadBound, ReadFilter, ReadStatement,
-    TargetAmbiguity, page_limit,
+    DEFAULT_PAGE, FieldMatch, FieldOrder, FindingLink, IN_VALUES_CEILING, MATCHED_DRIVE_FACTOR,
+    MERGED_SOURCE_VALUES, MatchedColumn, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
+    ReadStatement, TargetAmbiguity, page_limit,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

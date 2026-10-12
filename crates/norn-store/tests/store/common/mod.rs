@@ -507,8 +507,10 @@ pub fn conjoined_parts(kind: FindingKind) -> Vec<Predicate> {
 
 /// Every selection a drain by cursor is judged under (NORN-390), each
 /// admitting every [`matched_by_every_part`] document, beside the shape of the
-/// part that drives it: an equality, a membership, a tag, a presence and a
-/// finding of `kind`, which the caller stands over each; an equality beside a
+/// part that drives it: an equality, a membership, a tag, a presence, a
+/// finding of `kind`, which the caller stands over each, a range and a
+/// full-text match, which keep their documents in no page's order; an
+/// equality beside a
 /// tag, a full-text match and a range, each of which matches the documents
 /// the equality does; and a tag beside an inequality that excludes none of
 /// them.
@@ -528,6 +530,11 @@ pub fn drained_parts(kind: FindingKind) -> Vec<(ReadFilter, Vec<Predicate>)> {
         (ReadFilter::Tag, vec![Predicate::tag("draft")]),
         (ReadFilter::Present, vec![Predicate::has("noted")]),
         (ReadFilter::Finding, vec![Predicate::has_finding(kind)]),
+        (
+            ReadFilter::Before(FieldOrder::Raw),
+            vec![Predicate::before("status", "p")],
+        ),
+        (ReadFilter::FullText, vec![Predicate::matches("body")]),
         (
             ReadFilter::Equal(FieldMatch::RAW),
             vec![

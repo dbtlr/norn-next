@@ -56,9 +56,10 @@
 //! hands back. Where a document part keeps its documents in the answer's path
 //! order, the read is one arm driven from the part's source at the batch's
 //! place, each document seeking every kind read at its path, so a
-//! continuation costs its batch however many documents the part matched; any
-//! other document part that keeps what it seeks drives each arm, which then
-//! sorts what that part matched, as a page's section does. No index is added
+//! continuation costs its batch however many documents the part matched;
+//! otherwise a document part keeping few enough documents drives each arm,
+//! which then sorts what that part matched, as a page's section does, and
+//! where none does each arm seeks its kind and tests each document. No index is added
 //! for the merge: the indexes a page seeks are the ones behind it. A batch holds about `limit` findings and **never splits a
 //! document's selected findings**: a limit falling inside a document reads the
 //! document's remaining findings on ([`ValidateStatement::DocumentTail`]), so a
@@ -128,8 +129,8 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Conjunction, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement, ResolvesPart,
-    Stepped, cursor_position, finding_base, page_limit,
+    Conjunction, Driver, Filter, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
+    ResolvesPart, Stepped, cursor_position, finding_base, page_limit,
 };
 use crate::request::unreadable;
 use crate::store::Snapshot;
@@ -481,6 +482,25 @@ impl Snapshot {
         })
     }
 
+    /// How a page or a batch reading `rows` findings reaches the documents
+    /// `narrowing`'s document parts keep ([`Snapshot::choose_driver`]): its
+    /// findings stand in the answer's path order, so a part keeping its
+    /// documents in that order drives it.
+    fn page_driver(
+        &self,
+        narrowing: &Narrowing,
+        rows: usize,
+        lookups: &mut Lookups,
+    ) -> Result<Driver, StoreError> {
+        let parts: Vec<&Filter> = narrowing
+            .conjunction
+            .filters
+            .iter()
+            .filter(|filter| filter.path_part().is_none())
+            .collect();
+        self.choose_driver(&parts, Some(false), rows, lookups)
+    }
+
     /// One page of findings: at most `limit`, and the finding the next page
     /// continues after.
     fn page_findings(
@@ -502,6 +522,11 @@ impl Snapshot {
             Some(_) => ValidateStatement::RulePage,
             None => ValidateStatement::KindPage,
         };
+        let driver = if sections.is_empty() {
+            Driver::Walked
+        } else {
+            self.page_driver(narrowing, limit + 1, lookups)?
+        };
         let page = self.read_page(
             sections,
             limit,
@@ -515,6 +540,7 @@ impl Snapshot {
                     severities: narrowing.severities.as_deref(),
                     after,
                     filters: &narrowing.conjunction.filters,
+                    driver: Some(driver),
                     rows,
                 });
                 let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
@@ -551,6 +577,7 @@ impl Snapshot {
             severities: narrowing.severities.as_deref(),
             after: None,
             filters: &narrowing.conjunction.filters,
+            driver: None,
             rows: 0,
         });
         let summary = Ran::new(statement, composed).narrowed_by(narrowing.shapes());

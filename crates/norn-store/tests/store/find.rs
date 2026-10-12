@@ -437,6 +437,9 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         | FindStatement::ClassTotal
         | FindStatement::CandidateSuffixes
         | FindStatement::LinkTargets => "a_read_of_targets_seeks_the_class_or_the_path_each_names",
+        FindStatement::PartCeiling => {
+            "a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling"
+        }
     }
 }
 
@@ -495,8 +498,8 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
 /// one bar judges each. The path-page bar judges the statements [`PAGE_BARS`]
 /// names and the fingerprint read; the field-sort bar judges both sections of
 /// every [`FIELD_BARS`] entry; the key-probe bar judges [`KEY_PROBES`]; the
-/// bare-directory bar, the match-probe bar and the offset-spelling bar their
-/// one probe each; the
+/// bare-directory bar, the match-probe bar, the offset-spelling bar and the
+/// part-ceiling bar their one probe each; the
 /// hydration bar [`hydration_statements`]; the filter bar judges [`filter_bars`]. A bar
 /// ranges over the order and the direction a statement carries, and those are
 /// not slots, so each bar's statements are read as the set of slots it
@@ -508,7 +511,7 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
 /// bars claim fills a slot twice.
 #[test]
 fn the_find_bars_cover_every_statement_and_filter_once() {
-    let per_bar: [Vec<FindStatement>; 8] = [
+    let per_bar: [Vec<FindStatement>; 9] = [
         std::iter::once(FindStatement::ActiveFingerprint)
             .chain(PAGE_BARS.iter().map(|(statement, ..)| *statement))
             .collect(),
@@ -522,6 +525,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         crate::find_advisory::OFFSET_PROBES.to_vec(),
         hydration_statements(),
         crate::links::LINK_READS.to_vec(),
+        vec![FindStatement::PartCeiling],
     ];
     let mut slots: Vec<usize> = Vec::new();
     for statements in &per_bar {
@@ -583,6 +587,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
             "a_match_probe_reads_the_full_text_index_through_its_selection",
+            "a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling",
             "a_path_page_seeks_the_case_insensitive_index_in_either_direction",
             "a_read_of_targets_seeks_the_class_or_the_path_each_names",
             "every_filter_seeks_the_index_its_values_are_bounds_for",
@@ -1847,6 +1852,108 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     }
 }
 
+/// **A part ceiling probe reads the part's own seek and stops one row past the
+/// ceiling (NORN-390).** A page no part drives from its documents in the
+/// page's order — a field sort's — asks, part by part, whether one keeps at
+/// most [`norn_store::MATCHED_DRIVE_FACTOR`] documents per row it reads: one
+/// [`FindStatement::PartCeiling`] per part asked, each the seek the filter
+/// bar names for its part and no full scan. Over 64, then 640, bulk documents
+/// the tag `bulk` stands on, a page of one row asks the tag's probe at the same
+/// VM steps either way: the probe stops one row past the ceiling, 16 rows, so
+/// it costs that whatever the part keeps. **The answer decides the drive**: a
+/// part keeping more than the ceiling is tested at each document the page
+/// walks, and one keeping fewer drives the page from what it matched.
+///
+/// Control: a probe rebuilt to read its table end to end fails the bar.
+#[test]
+fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
+    let roots = [
+        Seeded::under("find-ceiling", StoredPathOrder::Sensitive),
+        Seeded::under("find-ceiling-folded", StoredPathOrder::AsciiCaseInsensitive),
+    ];
+    let on = |shape: ReadFilter| match root_of(shape) {
+        StoredPathOrder::Sensitive => &roots[0],
+        StoredPathOrder::AsciiCaseInsensitive => &roots[1],
+    };
+    let field_page = || sorted(SortKey::field("status"), Direction::Ascending);
+    let mut judged = None;
+    for bar in filter_bars() {
+        for (part, shape, seek) in &bar.probes {
+            let plans = on(*shape).plans_under(
+                &field_page().with_predicates([part.clone()]),
+                &declared_readings(),
+            );
+            let probes: Vec<&FindPlan> = plans
+                .iter()
+                .filter(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
+                .collect();
+            if shape.excludes() {
+                assert!(
+                    probes.is_empty(),
+                    "an excluding {part:?} was asked what it keeps"
+                );
+                continue;
+            }
+            assert_eq!(probes.len(), 1, "{part:?} was asked other than once");
+            let probe = plan(probes[0]);
+            judge_filter(&probe, seek);
+            judged.get_or_insert(probe);
+        }
+    }
+    let judged = judged.expect("a probe was judged");
+    let scanned = QueryPlan::new(
+        judged.sql(),
+        judged
+            .rows()
+            .iter()
+            .map(|row| {
+                let detail = match row.detail.split_whitespace().nth(1) {
+                    Some(alias) if row.detail.starts_with("SEARCH ") => format!("SCAN {alias}"),
+                    _ => row.detail.clone(),
+                };
+                PlanRow::new(row.id, row.parent, detail)
+            })
+            .collect(),
+    );
+    failure_of("a probe read end to end", || scanned.assert_no_full_scan());
+
+    let tagged = |seeded: &Seeded| {
+        let params = field_page()
+            .with_predicates([Predicate::tag("bulk")])
+            .with_limit(1);
+        let plans = seeded.plans(&params);
+        let probe = plans
+            .iter()
+            .find(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
+            .expect("the tag's probe")
+            .vm_steps;
+        let page = plan_of(
+            &plans,
+            FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
+        );
+        (probe, page.sql().to_string())
+    };
+    let (fewer, fewer_page) = tagged(&Seeded::with_bulk("find-ceiling-fewer", 64));
+    let (more, more_page) = tagged(&Seeded::with_bulk("find-ceiling-more", 640));
+    assert_eq!(
+        fewer, more,
+        "the probe's steps grew with what the tag keeps"
+    );
+    for page in [fewer_page, more_page] {
+        assert!(
+            page.contains("EXISTS (SELECT 1 FROM document_tags AS tg")
+                && !page.contains("IN (SELECT tg.document"),
+            "a page past the ceiling was driven from what the tag matched: {page}"
+        );
+    }
+    // Within the ceiling, the tag drives the page from what it matched.
+    let (_, within) = tagged(&Seeded::with_bulk("find-ceiling-within", 4));
+    assert!(
+        within.contains("IN (SELECT tg.document"),
+        "a page within the ceiling was not driven from what the tag matched: {within}"
+    );
+}
+
 // ---- the work bar ----
 
 /// Whether `statement` is a page section rather than a probe or a hydration.
@@ -2583,43 +2690,47 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
         let small = Seeded::with_matched_bulk_under("find-matched-small", fewer, order);
         let mut large = Seeded::with_matched_bulk_under("find-matched-large", more, order);
         for (shape, part) in drained_parts(FindingKind::BodyBytesNotUtf8) {
-            for direction in [Direction::Ascending, Direction::Descending] {
-                // A part ordered only ascending is not yet held descending.
-                if !shape.is_path_ordered(direction == Direction::Descending) {
-                    continue;
-                }
-                let params = sorted(SortKey::path(), direction)
-                    .with_predicates(part.clone())
-                    .with_limit(3);
-                // Near the bulk's start and near its end, each from the
-                // direction the page runs.
-                let near = |bulk: usize, start: bool| {
-                    let at = match (direction, start) {
-                        (Direction::Ascending, true) => 1,
-                        (Direction::Ascending, false) => bulk - 5,
-                        (_, true) => bulk - 2,
-                        (_, false) => 4,
+            // The path order, which a part keeping its documents in it can
+            // drive, and a field's, which no part can: every bulk document's
+            // `status` is `open`, so its continuation stands at that value.
+            for (key, sort) in [
+                (SortKey::path(), None),
+                (SortKey::field("status"), Some("open")),
+            ] {
+                for direction in [Direction::Ascending, Direction::Descending] {
+                    let params = sorted(key.clone(), direction)
+                        .with_predicates(part.clone())
+                        .with_limit(3);
+                    // Near the bulk's start and near its end, each from the
+                    // direction the page runs.
+                    let near = |bulk: usize, start: bool| {
+                        let at = match (direction, start) {
+                            (Direction::Ascending, true) => 1,
+                            (Direction::Ascending, false) => bulk - 5,
+                            (_, true) => bulk - 2,
+                            (_, false) => 4,
+                        };
+                        format!("bulk/{at:04}.md")
                     };
-                    format!("bulk/{at:04}.md")
-                };
-                for after in [
-                    [near(fewer, true), near(more, true)],
-                    [near(fewer, false), near(more, false)],
-                ] {
-                    let (at_small, at_large) = (
-                        small.page(&small.resumed(&params, None, &after[0])),
-                        large.page(&large.resumed(&params, None, &after[1])),
-                    );
-                    assert_eq!(
-                        at_small.work, at_large.work,
-                        "a page after {after:?} a {shape:?} part drives {direction:?} grew with \
-                         the documents it matched under {order:?}"
-                    );
-                    assert_eq!(at_large.rows.len(), 3, "{params:?} after {after:?}");
-                    assert_eq!(
-                        at_large.work.page_full_scan_steps, 0,
-                        "a page of {params:?} stepped through a full scan under {order:?}"
-                    );
+                    for after in [
+                        [near(fewer, true), near(more, true)],
+                        [near(fewer, false), near(more, false)],
+                    ] {
+                        let (at_small, at_large) = (
+                            small.page(&small.resumed(&params, sort, &after[0])),
+                            large.page(&large.resumed(&params, sort, &after[1])),
+                        );
+                        assert_eq!(
+                            at_small.work, at_large.work,
+                            "a page by {key:?} after {after:?} a {shape:?} part narrows \
+                             {direction:?} grew with the documents it matched under {order:?}"
+                        );
+                        assert_eq!(at_large.rows.len(), 3, "{params:?} after {after:?}");
+                        assert_eq!(
+                            at_large.work.page_full_scan_steps, 0,
+                            "a page of {params:?} stepped through a full scan under {order:?}"
+                        );
+                    }
                 }
             }
         }
@@ -2685,11 +2796,8 @@ fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
             bulk.extend(variants.iter().map(|at| at.to_string()));
         }
         let answer_order = |path: &String| (path.to_ascii_lowercase(), path.clone());
-        for (shape, part) in drained_parts(FindingKind::BodyBytesNotUtf8) {
+        for (_, part) in drained_parts(FindingKind::BodyBytesNotUtf8) {
             for direction in [Direction::Ascending, Direction::Descending] {
-                if !shape.is_path_ordered(direction == Direction::Descending) {
-                    continue;
-                }
                 let params = sorted(SortKey::path(), direction).with_predicates(part.clone());
                 let whole = seeded.paths(&params.clone().with_limit(MAX_PAGE as u32));
                 let mut ordered = whole.clone();

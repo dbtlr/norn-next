@@ -226,14 +226,59 @@ impl Filter {
     }
 
     /// This filter's fragment: a membership test of `id`, the column holding
-    /// the page's document id, its placeholders numbered by `binder`. A path
-    /// part binds its glob's range under the root's order, then the glob and
-    /// the order.
+    /// the page's document id, against the set of documents the filter keeps,
+    /// its placeholders numbered by `binder`.
     pub(crate) fn spell(&self, id: &str, binder: &mut Binder) -> String {
+        let Rows {
+            table,
+            document,
+            condition,
+            ..
+        } = self.kept_rows(binder);
+        let membership = if self.shape().excludes() {
+            "NOT IN"
+        } else {
+            "IN"
+        };
+        format!(
+            "{id} {membership} (SELECT {document} FROM {table}
+                     WHERE {condition})"
+        )
+    }
+
+    /// Whether the documents this filter keeps are at most `ceiling` rows of
+    /// its seek, as one statement answers it: the rows counted, stopping one
+    /// past the ceiling, so the count costs at most the ceiling whatever the
+    /// filter keeps. A document reached by several rows counts once per row,
+    /// so a filter is never taken to keep fewer documents than it does.
+    pub(crate) fn kept_within(&self, ceiling: usize) -> (String, Vec<Value>) {
+        let mut binder = Binder::default();
+        let Rows {
+            table, condition, ..
+        } = self.kept_rows(&mut binder);
+        let ceiling = i64::try_from(ceiling).expect("a ceiling fits i64");
+        let (within, past) = (
+            binder.bind(Value::Integer(ceiling)),
+            binder.bind(Value::Integer(ceiling + 1)),
+        );
+        (
+            format!(
+                "SELECT count(*) <= {within} FROM (SELECT 1 FROM {table}
+                     WHERE {condition}
+                     LIMIT {past})"
+            ),
+            binder.into_values(),
+        )
+    }
+
+    /// The rows this filter's seek reads for the set of documents it keeps:
+    /// a path part's glob range under the root's order, then the glob and the
+    /// order; every other part its own rows.
+    fn kept_rows(&self, binder: &mut Binder) -> Rows {
         match self {
             Filter::Path(part) => {
                 let (lower, upper) = super::glob::path_range(&part.pattern, part.order);
-                spell_bound(
+                rows_of(
                     self.shape(),
                     &[
                         Value::Text(lower),
@@ -241,11 +286,11 @@ impl Filter {
                         Value::Text(part.pattern.as_str().to_string()),
                         Value::Text(part.order.as_str().to_string()),
                     ],
-                    id,
+                    Reached::Set,
                     binder,
                 )
             }
-            Filter::Bound { shape, values, .. } => spell_bound(*shape, values, id, binder),
+            Filter::Bound { shape, values, .. } => rows_of(*shape, values, Reached::Set, binder),
         }
     }
 
@@ -413,23 +458,6 @@ impl Reach {
             self.ordering()
         )
     }
-}
-
-/// The fragment of a filter of `shape` binding `values`: a membership test
-/// of `id` against the set of documents the filter keeps, its placeholders
-/// numbered by `binder`.
-fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder) -> String {
-    let Rows {
-        table,
-        document,
-        condition,
-        ..
-    } = rows_of(shape, values, Reached::Set, binder);
-    let membership = if shape.excludes() { "NOT IN" } else { "IN" };
-    format!(
-        "{id} {membership} (SELECT {document} FROM {table}
-                     WHERE {condition})"
-    )
 }
 
 /// The test of a filter of `shape` binding `values` on the one document `id`

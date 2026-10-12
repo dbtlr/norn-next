@@ -24,6 +24,7 @@
 mod advisory;
 mod answer_order;
 mod conjunction;
+mod drive;
 mod filter;
 mod finding;
 mod glob;
@@ -53,6 +54,8 @@ use crate::validate::ValidateStatement;
 pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
+pub(crate) use drive::Driver;
+pub use drive::MATCHED_DRIVE_FACTOR;
 pub(crate) use filter::{Binder, Filter, PathPart, Reach};
 pub use filter::{MERGED_SOURCE_VALUES, READ_FILTERS, ReadFilter};
 pub use finding::FindingLink;
