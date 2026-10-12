@@ -19,8 +19,8 @@
 //! its syntax as stored, and its address as the cascade that respells it
 //! leaves it ([`Landing`]). The plan's resolution change set is keyed at the
 //! after-state and exact, with an entry for every link whose resolution the
-//! plan changes and no other, so a link with no entry resolves as it did and
-//! its finding stands.
+//! plan changes and no other, so a link with no entry is one whose resolution
+//! the plan does not change, or one it removes, and its finding stands.
 //!
 //! **An entry says whether the finding still holds.** A `link/broken` finding
 //! stands only where the link still resolves to nothing; a `link/ambiguous`
@@ -38,6 +38,21 @@
 //! a second predicate or a new statement; until that is asked the finding
 //! stands as skipped, so it may be reported for an anchor the new document
 //! holds.
+//!
+//! **Declared limit: a cascade rewrite is mapped for every link of its holder
+//! with that syntax and address, though the batch may rewrite only some.** A
+//! holder's rewrite batch can leave some links of that address as written;
+//! they keep their own entry under the old address. A missing-anchor finding on
+//! such a link is read under the new address, so it stands where its own entry
+//! may say it resolves to none or to several. The error keeps a finding listed
+//! and never drops one that holds.
+//!
+//! **Declared limit: a link finding about a link the plan removes stands.** The
+//! change set has no entry for a link the after-state no longer holds, so a
+//! declared `field/forbidden` fix with `remove` deletes a frontmatter field,
+//! and a link finding on a wikilink that field held stays skipped though the
+//! link is gone (NORN-389). It is the only fix that removes a link: a rename
+//! keeps the link in its new field, and a closed set never holds a wikilink.
 
 use std::collections::{BTreeMap, HashMap};
 

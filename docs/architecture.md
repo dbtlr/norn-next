@@ -2869,9 +2869,15 @@ no statement of its own), and the finding is dropped where the plan's resolution
 keyed at the after-state, the holder as the batch's routes leave it and the address as the
 cascade respells it — shows that link no longer holds it: a broken link that now resolves,
 an ambiguous link that now names one document or none, a missing-anchor link that now names
-none or several. A link the plan does not change keeps its finding. A missing-anchor link that
-now names another single document stands, as a declared limit: judging it would need the
-store's anchor predicate asked of the new document. Each fix is judged where its document
+none or several. A link with no entry in that set, one whose resolution the plan does not change or one it
+removes, keeps its finding. A
+missing-anchor link that now names another single document stands, as a declared limit:
+judging it would need the store's anchor predicate asked of the new document. The change
+set has no entry for a link the after-state no longer holds, so a link finding on a
+wikilink that a declared `field/forbidden` fix with `remove` deleted along with its field
+stays skipped though the link is gone, as a declared limit (NORN-389); it is the only fix
+that removes a link, since a rename keeps the link in its new field and a closed set never
+holds a wikilink. Each fix is judged where its document
 ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where

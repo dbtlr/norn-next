@@ -67,8 +67,11 @@
 //! heading that is not there which the plan makes resolve to no document or
 //! to several, are dropped, each judged by the link at the finding's ordinal
 //! (its syntax and its address, with its holder and address as the plan's
-//! routes and cascade leave them); a link the plan does not change keeps its
-//! finding. **A declared limit**: a missing-anchor link that now resolves to
+//! routes and cascade leave them); a link with no entry in
+//! that set keeps its finding, whether the plan leaves its resolution as it
+//! was or removes the link with a declared `field/forbidden` removal
+//! (NORN-389).
+//! **A declared limit**: a missing-anchor link that now resolves to
 //! another single document stands, since whether that document holds the
 //! anchor is the store's anchor predicate and not asked here.
 //! The skipped findings keep the batch's order.
