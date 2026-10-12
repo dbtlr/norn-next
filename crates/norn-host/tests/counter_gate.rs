@@ -3921,10 +3921,10 @@ impl Gate {
 
     /// Planted document `at` of `kind`: the synonym in the field the gate
     /// rule fixes, and every other breach a value of its own, padded to the
-    /// configured length. The first [`MARKED_GATES`] documents also carry a
-    /// tag and a field a document part can name, the same documents at every
-    /// scale. Of kind `gate` it is a gate document; of another kind the gate
-    /// rule does not select it, and it holds no finding.
+    /// configured length, beside a tag and a field a document part can name,
+    /// so the documents a part matches grow with the vault as the gate
+    /// documents do. Of kind `gate` it is a gate document; of another kind the
+    /// gate rule does not select it, and it holds no finding.
     fn planted(self, at: usize, kind: &str) -> String {
         let breaches: String = (0..self.fields)
             .map(|field| {
@@ -3932,27 +3932,12 @@ impl Gate {
                 format!("f{field}: {value:x<width$}\n", width = self.value_bytes)
             })
             .collect();
-        let marks = if at < MARKED_GATES {
-            "tags: [zz-gate-tag]\nzz_region: east\n"
-        } else {
-            ""
-        };
-        format!("---\ntype: {kind}\n{marks}fix: okay\n{breaches}---\n# Gate {at}\n")
+        format!(
+            "---\ntype: {kind}\ntags: [zz-gate-tag]\nzz_region: east\nfix: okay\n{breaches}---\n\
+             # Gate {at}\n"
+        )
     }
 }
-
-/// How many gate documents carry the tag and the field a document part
-/// selects by. **They are the same at every scale**: a document part is
-/// driven by the documents it matches, and a statement driven by a set that
-/// grows with the vault costs that set: a continuation by the gate rule and a
-/// tag, planting the tag on every gate document, took 35,338 VM steps over
-/// `ambiguous`'s 30 and 221,828 over `realistic`'s 200, with 57 sorts at
-/// both. The bar holds the other half of the claim, that the vault around the
-/// matched documents costs nothing. That a continuation pays for every matched
-/// document, those before its cursor included, is a defect rather than a
-/// declared cost (NORN-390): draining such a selection is quadratic in the
-/// matched set, and its fix owns the pair that varies that set.
-const MARKED_GATES: usize = 12;
 
 /// How many gate documents stand beside `profile`'s tree: a tenth of its
 /// documents, so the findings a rule selects grow with the vault.
@@ -4312,44 +4297,12 @@ const CONTINUATIONS: [Continuation; 3] = [
 /// in a batch.
 const CONTINUATION_SKIPPED: usize = 6;
 
-/// Which gate documents a rule narrowing admits: every one, so they grow
-/// with the vault, or the [`MARKED_GATES`] a document part names, the same at
-/// every scale.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Admitted {
-    EveryGate,
-    Marked,
-}
-
-impl Admitted {
-    /// How many gate documents beside `profile`'s tree this narrowing admits.
-    fn documents(self, profile: &norn_fixtures::Profile) -> usize {
-        match self {
-            Admitted::EveryGate => gates(profile),
-            Admitted::Marked => MARKED_GATES,
-        }
-    }
-
-    /// The selection whose batches reach a continuation's cursor among these
-    /// documents. A repair cursor names a path and no selection, so every
-    /// narrowing admitting the same documents continues from the one cursor.
-    fn reached_by(self, gated: &Gated) -> norn_wire::RepairParams {
-        let by_rule = gated.params().with_rule(GATE_RULE);
-        match self {
-            Admitted::EveryGate => {
-                by_rule.with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))])
-            }
-            Admitted::Marked => by_rule.with_predicates([Predicate::tag("zz-gate-tag")]),
-        }
-    }
-}
-
-/// One rule narrowing of the continuation bar: what it selects, which gate
-/// documents it admits, and whether that rests on the root's fold.
+/// One rule narrowing of the continuation bar: what it selects, and whether
+/// the gate documents it admits rest on the root's fold. Every narrowing
+/// admits every gate document, so they grow with the vault.
 struct RuleNarrowing {
     name: &'static str,
     params: norn_wire::RepairParams,
-    admitted: Admitted,
     /// A path part spelled otherwise than the gate folder: it admits the
     /// documents where the root folds ASCII case, and none where it tells
     /// spellings apart.
@@ -4363,27 +4316,23 @@ struct RuleNarrowing {
 /// folder's folded range from the cursor on either root.
 fn rule_narrowings(gated: &Gated) -> Vec<RuleNarrowing> {
     let by_rule = || gated.params().with_rule(GATE_RULE);
-    let narrowing = |name, params, admitted| RuleNarrowing {
+    let narrowing = |name, params| RuleNarrowing {
         name,
         params,
-        admitted,
         by_the_roots_fold: false,
     };
     vec![
         narrowing(
             "kind",
             by_rule().with_kinds([norn_wire::FindingKind::NotOneOf]),
-            Admitted::EveryGate,
         ),
         narrowing(
             "severity",
             by_rule().with_severity(norn_wire::Severity::Error),
-            Admitted::EveryGate,
         ),
         narrowing(
             "path part",
             by_rule().with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))]),
-            Admitted::EveryGate,
         ),
         RuleNarrowing {
             by_the_roots_fold: true,
@@ -4393,18 +4342,15 @@ fn rule_narrowings(gated: &Gated) -> Vec<RuleNarrowing> {
                     "{}/**",
                     GATE_FOLDER.to_ascii_uppercase()
                 ))]),
-                Admitted::EveryGate,
             )
         },
         narrowing(
             "field equality",
             by_rule().with_predicates([Predicate::equal_to("zz_region", "east")]),
-            Admitted::Marked,
         ),
         narrowing(
             "tag",
             by_rule().with_predicates([Predicate::tag("zz-gate-tag")]),
-            Admitted::Marked,
         ),
     ]
 }
@@ -4472,24 +4418,21 @@ fn read_the_continuations(
     configuration: Continuation,
 ) -> Vec<ContinuationReading> {
     let gated = Gated::attach(label, profile, configuration.gate);
-    let cursors = [Admitted::EveryGate, Admitted::Marked].map(|admitted| {
-        let cursor = cursor_leaving_the_last(
-            &gated,
-            &admitted.reached_by(&gated),
-            admitted.documents(profile),
-            configuration.gate.findings(),
-        );
-        (admitted, cursor)
-    });
+    // A repair cursor names a path and no selection, so every narrowing,
+    // admitting every gate document, continues from the one cursor.
+    let cursor = cursor_leaving_the_last(
+        &gated,
+        &gated
+            .params()
+            .with_rule(GATE_RULE)
+            .with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))]),
+        gates(profile),
+        configuration.gate.findings(),
+    );
     rule_narrowings(&gated)
         .into_iter()
         .map(|narrowing| {
-            let cursor = cursors
-                .iter()
-                .find(|(admitted, _)| *admitted == narrowing.admitted)
-                .expect("a cursor among every narrowing's documents")
-                .1
-                .clone();
+            let cursor = cursor.clone();
             let name = narrowing.name;
             let params = narrowing.params.with_limit(configuration.limit);
             let (counters, continued) = gated.repair(params.with_after(cursor));
@@ -4543,21 +4486,25 @@ fn read_the_continuations(
 /// the same
 /// [`LEFT_AFTER_THE_CURSOR`] admitted documents stand after the cursor.
 ///
-/// **The cursor is deep**: every admitted gate document but the last five
-/// stands before it, 25 over `ambiguous` and 195 over `realistic`, so a
-/// continuation that re-read the selection from its first document, or
-/// stepped through what precedes its cursor, costs the larger vault more. A
-/// document part's prefix is its seven marked documents at both sizes
-/// ([`MARKED_GATES`]). The pair is held for the gate rule
-/// combined with each of a kind, a severity, a path part in either case, a
-/// field equality and a tag, at the three [`CONTINUATIONS`]: the base, F_d raised with the
-/// annotation bytes held, and the annotation bytes raised with F_d held. The
-/// bytes are the serialized skipped findings, which the bar reads off the
-/// plan so a configuration that did not vary what it names fails.
+/// **The cursor is deep**: every gate document but the last five stands
+/// before it, 25 over `ambiguous` and 195 over `realistic`, so a continuation
+/// that re-read the selection from its first document, or stepped through
+/// what precedes its cursor, costs the larger vault more. **Every narrowing
+/// admits every gate document**, a document part's included — each gate
+/// document carries the tag and the field it names — so the documents a part
+/// matches grow with the vault, and a continuation that paid for them, as
+/// one driven by the documents a part matched did before NORN-390, fails.
+/// The pair is held for the gate rule combined with each of a kind, a
+/// severity, a path part in either case, a field equality and a tag, at the
+/// three [`CONTINUATIONS`]: the base, F_d raised with the annotation bytes
+/// held, and the annotation bytes raised with F_d held. The bytes are the
+/// serialized skipped findings, which the bar reads off the plan so a
+/// configuration that did not vary what it names fails.
 ///
 /// The harness runs the host's one path-order root, as its sibling bars do;
-/// `a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor` in the
-/// store suite holds the same narrowings over both.
+/// `a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor` and
+/// `a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set`
+/// in the store suite hold the same narrowings over both.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing() {

@@ -404,6 +404,89 @@ pub fn assert_covers_every_driving_shape(table: &[(ReadFilter, Predicate)]) {
     );
 }
 
+/// A document at `at` every part of [`drained_parts`] admits: a `status` list
+/// holding `open` twice, the key `noted`, and the tag `draft` written twice,
+/// in the body and in the frontmatter. So a part whose seek reaches a document
+/// once per matching row reaches each of these twice.
+pub fn matched_by_every_part(at: &str, declared: &ContentModel) -> DocumentFacts {
+    let open = || FrontmatterValue::String("open".to_string());
+    let mut facts = document(at, &format!("hash-{at}"), "a body\n").with_frontmatter(
+        Some(FrontmatterValue::Map(vec![
+            (
+                "status".to_string(),
+                FrontmatterValue::Sequence(vec![open(), open()]),
+            ),
+            (
+                "noted".to_string(),
+                FrontmatterValue::String("yes".to_string()),
+            ),
+        ])),
+        declared,
+    );
+    for source in [TagSource::Body, TagSource::Frontmatter] {
+        facts.tags.push(TagFact {
+            name: "draft".to_string(),
+            source,
+            span: None,
+        });
+    }
+    facts
+}
+
+/// Every selection a drain by cursor is judged under (NORN-390), each
+/// admitting every [`matched_by_every_part`] document, beside the shape of the
+/// part that drives it: an equality, a membership, a tag, a presence and a
+/// finding of `kind`, which the caller stands over each; an equality beside a
+/// tag, a full-text match and a range, each of which matches the documents
+/// the equality does; and a tag beside an inequality that excludes none of
+/// them.
+pub fn drained_parts(kind: FindingKind) -> Vec<(ReadFilter, Vec<Predicate>)> {
+    vec![
+        (
+            ReadFilter::Equal(FieldMatch::RAW),
+            vec![Predicate::equal_to("status", "open")],
+        ),
+        (
+            ReadFilter::Member(FieldMatch::RAW),
+            vec![Predicate::in_any(
+                "status",
+                ["open".to_string(), "closed".to_string()],
+            )],
+        ),
+        (ReadFilter::Tag, vec![Predicate::tag("draft")]),
+        (ReadFilter::Present, vec![Predicate::has("noted")]),
+        (ReadFilter::Finding, vec![Predicate::has_finding(kind)]),
+        (
+            ReadFilter::Equal(FieldMatch::RAW),
+            vec![
+                Predicate::equal_to("status", "open"),
+                Predicate::tag("draft"),
+            ],
+        ),
+        (
+            ReadFilter::Equal(FieldMatch::RAW),
+            vec![
+                Predicate::equal_to("status", "open"),
+                Predicate::matches("body"),
+            ],
+        ),
+        (
+            ReadFilter::Equal(FieldMatch::RAW),
+            vec![
+                Predicate::equal_to("status", "open"),
+                Predicate::before("status", "p"),
+            ],
+        ),
+        (
+            ReadFilter::Tag,
+            vec![
+                Predicate::tag("draft"),
+                Predicate::not_equal_to("status", "closed"),
+            ],
+        ),
+    ]
+}
+
 /// A document carrying one of every fact shape the store holds, including the
 /// ones whose optional fields are absent.
 pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {

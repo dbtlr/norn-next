@@ -91,13 +91,15 @@
 //! table is `WITHOUT ROWID`, so each index also carries the primary key: a read
 //! that wants the document id reads it off the index.
 //!
-//! - `document_fields_raw` holds the value rows, by `(key, raw)`: an equality,
-//!   a membership and a `before`/`after` bound on a key with no typed order are
-//!   one seek on it.
+//! - `document_fields_raw` holds the value rows, by `(key, raw, path COLLATE
+//!   NOCASE, path)`: an equality, a membership and a `before`/`after` bound on
+//!   a key with no typed order are one seek on it, and an equality's or a
+//!   membership's documents stand in the answer's path order at each value, so
+//!   a page they drive seeks its documents from where it resumes.
 //! - `document_fields_typed` holds the rows that carry a typed value, by
-//!   `(key, typed)`: the same parts on a key with a typed order seek it, and it
-//!   is the set a pin clears, so the clear reads that index and never the rest
-//!   of the table.
+//!   `(key, typed, path COLLATE NOCASE, path)`: the same parts on a key with a
+//!   typed order seek it, and it is the set a pin clears, so the clear reads
+//!   that index and never the rest of the table.
 //! - `document_fields_least_raw` and `document_fields_least_typed` hold the
 //!   marker rows alone, one per document and key, by `(key, value, path
 //!   COLLATE NOCASE, path)`: a field sort's valued section pages one of them
@@ -105,17 +107,22 @@
 //!   one value in the answer's path order, and a document
 //!   whose field holds a set is read once.
 //! - `document_fields_presence` holds the presence rows alone, by `(key,
-//!   container)`: `has` and `missing` are one seek on its leading column, the
-//!   keys the vault holds are its distinct leading column, and whether any
-//!   document holds a key in a container is one seek of both — so the
-//!   containers a key is observed in are read off the index, never the rows.
+//!   container, path COLLATE NOCASE, path)`: `has` and `missing` are one seek
+//!   on its leading column, the keys the vault holds are its distinct leading
+//!   column, and whether any document holds a key in a container is one seek
+//!   of both — so the containers a key is observed in are read off the index,
+//!   never the rows — and the documents holding a key in one container stand
+//!   in the answer's path order, so a page `has` drives seeks them from where
+//!   it resumes, one container after another, merged.
 //! - `document_fields_offset` holds the typed dates alone, by `(key,
 //!   offset_stated)`: whether a date key holds a value of either spelling is
 //!   one seek of it, which is how a read learns that an order or a comparison
 //!   over the key met both.
 //! - `document_fields_folded` holds a folding key's value rows alone, by `(key,
-//!   folded)`: an equality, an inequality and a membership on a tag key or a
-//!   link key are one seek of it, and the folds a pin clears are read off it.
+//!   folded, path COLLATE NOCASE, path)`: an equality, an inequality and a
+//!   membership on a tag key or a link key are one seek of it, its documents
+//!   in the answer's path order at each fold, and the folds a pin clears are
+//!   read off it.
 
 use crate::fields::FieldContainer;
 
@@ -148,10 +155,14 @@ pub(crate) fn statements() -> Vec<String> {
     CHECK (folded IS NULL OR raw IS NOT NULL)
 ) WITHOUT ROWID"
         ),
-        "CREATE INDEX document_fields_raw ON document_fields(key, raw)
+        "CREATE INDEX document_fields_raw ON document_fields(
+    key, raw, path COLLATE NOCASE, path
+)
     WHERE raw IS NOT NULL"
             .to_string(),
-        "CREATE INDEX document_fields_typed ON document_fields(key, typed)
+        "CREATE INDEX document_fields_typed ON document_fields(
+    key, typed, path COLLATE NOCASE, path
+)
     WHERE typed IS NOT NULL"
             .to_string(),
         "CREATE INDEX document_fields_least_raw ON document_fields(
@@ -162,13 +173,17 @@ pub(crate) fn statements() -> Vec<String> {
     key, typed, path COLLATE NOCASE, path
 ) WHERE least_typed = 1"
             .to_string(),
-        "CREATE INDEX document_fields_presence ON document_fields(key, container)
+        "CREATE INDEX document_fields_presence ON document_fields(
+    key, container, path COLLATE NOCASE, path
+)
     WHERE ordinal = 0"
             .to_string(),
         "CREATE INDEX document_fields_offset ON document_fields(key, offset_stated)
     WHERE offset_stated IS NOT NULL"
             .to_string(),
-        "CREATE INDEX document_fields_folded ON document_fields(key, folded)
+        "CREATE INDEX document_fields_folded ON document_fields(
+    key, folded, path COLLATE NOCASE, path
+)
     WHERE folded IS NOT NULL"
             .to_string(),
     ]

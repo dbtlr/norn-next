@@ -14,7 +14,8 @@ use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::SuffixKey;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, Term, answer_ordering, key_walk,
+    AnswerSeek, Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term, answer_ordering,
+    answer_place, key_walk,
 };
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
@@ -26,7 +27,9 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 /// filters are spelled inside the page statement they narrow, and are named by
 /// [`crate::ReadFilter`]. Each page statement below is named by the index it seeks
 /// with no filter; a filter that keeps what it seeks drives the statement
-/// instead, and the statement sorts what that seek handed it.
+/// instead — a path page from the filter's source where the filter keeps its
+/// documents in the answer's path order, and otherwise from the filter's seek,
+/// the statement sorting what that seek handed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
@@ -311,27 +314,34 @@ pub(crate) struct Section<'a> {
 /// blob, which SQLite orders after every text. So the text does not branch on
 /// whether the section resumes, and the plan is the same either way.
 ///
-/// **A section narrowed by a filter that keeps what it seeks is driven from
-/// that seek.** The section's own order index is spelled out of reach — the
-/// term that would seek it stands behind a unary `+`, which SQLite reads as
-/// the same value and never as an index constraint — so the section reaches
-/// each document the filter's seek handed it by that document's key and sorts
-/// them: its cost is the filter's matches, not the order index's rows. A
-/// section with no filter, or narrowed only by filters that exclude
-/// ([`crate::ReadFilter::excludes`]), seeks its order index and tests each row it
-/// reads.
+/// **A path page narrowed by a filter keeping its documents in the answer's
+/// path order is driven from that filter's source**
+/// ([`compose_ordered_path_page`]). **Any other section narrowed by a filter
+/// that keeps what it seeks is driven from that seek.** The section's own
+/// order index is spelled out of reach — the term that would seek it stands
+/// behind a unary `+`, which SQLite reads as the same value and never as an
+/// index constraint — so the section reaches each document the filter's seek
+/// handed it by that document's key and sorts them: its cost is the filter's
+/// matches, not the order index's rows. A section with no filter, or narrowed
+/// only by filters that exclude ([`crate::ReadFilter::excludes`]), seeks its
+/// order index and tests each row it reads at that document's key.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let text = |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.into()));
-    let order_seek = if section
+    let keeps = section
         .filters
         .iter()
-        .any(|filter| !filter.shape().excludes())
+        .any(|filter| !filter.shape().excludes());
+    if let FindStatement::PathPage(direction) = section.statement
+        && let Some(at) = section.filters.iter().position(|filter| {
+            filter
+                .shape()
+                .is_path_ordered(direction == PageDirection::Descending)
+        })
     {
-        "+"
-    } else {
-        ""
-    };
+        return compose_ordered_path_page(section, direction, at, binder);
+    }
+    let order_seek = if keeps { "+" } else { "" };
     let (head, ordering, id) = match section.statement {
         FindStatement::ActiveFingerprint
         | FindStatement::KnownKey
@@ -425,14 +435,19 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             )
         }
     };
+    // Where a filter keeps what it seeks, the filters' sets drive the section;
+    // where every filter excludes, each row the order index hands back is
+    // tested at its key.
     let filters: String = section
         .filters
         .iter()
         .map(|filter| {
-            format!(
-                "\n                       AND {}",
+            let spelled = if keeps {
                 filter.spell(id, &mut binder)
-            )
+            } else {
+                filter.test(id, &mut binder)
+            };
+            format!("\n                       AND {spelled}")
         })
         .collect();
     let limit = binder.bind(Value::Integer(
@@ -441,6 +456,65 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let sql = format!(
         "{head}{filters}
                      ORDER BY {ordering}
+                     LIMIT {limit}"
+    );
+    (sql, binder.into_values())
+}
+
+/// A path page the filter at `at` drives from its source ([`Filter::source`]):
+/// the documents it keeps, in the answer's path order the page's way, from
+/// past the place the page resumes at, each reaching its row by its id and
+/// tested against every other filter at its key. So a page reads the
+/// documents the filter keeps from where it resumes until it is full, sorts
+/// nothing, and costs the same however many the filter keeps before it or
+/// after it.
+fn compose_ordered_path_page(
+    section: &Section<'_>,
+    direction: PageDirection,
+    at: usize,
+    mut binder: Binder,
+) -> (String, Vec<Value>) {
+    let descending = direction == PageDirection::Descending;
+    let from = match section.start.path {
+        Some(path) => {
+            let (folded, path) = answer_place(path);
+            (Value::Text(folded), Value::Text(path))
+        }
+        None if descending => (Value::Blob(Vec::new()), Value::Blob(Vec::new())),
+        None => (Value::Text(String::new()), Value::Text(String::new())),
+    };
+    let reach = Reach {
+        descending,
+        from,
+        inclusive: false,
+        before: None,
+    };
+    let source = section.filters[at]
+        .source(&reach, &mut binder)
+        .expect("a filter that keeps its documents in path order has a source");
+    let tests: Vec<String> = section
+        .filters
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != at)
+        .map(|(_, filter)| filter.test("d.id", &mut binder))
+        .collect();
+    let tested = if tests.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n                     WHERE {}",
+            tests.join("\n                       AND ")
+        )
+    };
+    let (_, _, order) = spelled(direction);
+    let limit = binder.bind(Value::Integer(
+        i64::try_from(section.rows).expect("a page's row count fits i64"),
+    ));
+    let sql = format!(
+        "SELECT d.id, d.path, NULL, d.content_hash FROM ({source}) AS dv
+                     CROSS JOIN documents AS d ON d.id = dv.id{tested}
+                     ORDER BY dv.folded{order}, dv.path{order}
                      LIMIT {limit}"
     );
     (sql, binder.into_values())

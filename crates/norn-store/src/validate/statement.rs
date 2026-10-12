@@ -14,7 +14,7 @@ use norn_wire::Severity;
 
 use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, Filter, PathPart, Term,
+    AnswerSeek, Binder, FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, Filter, PathPart, Reach, Term,
     answer_ordering, answer_place, answer_range,
 };
 
@@ -52,8 +52,11 @@ pub enum ValidateStatement {
     /// at `(fingerprint, kind, severity)` where the request admits one
     /// severity. A path part bounds the seek by its glob's folded range, and
     /// nothing sorts. A document part that keeps what it seeks drives the
-    /// statement instead: the documents it matched each reach their findings
-    /// by one seek at their path, and those are sorted.
+    /// statement instead, each of its documents reaching its findings by one
+    /// seek at its path: one keeping its documents in the answer's path order
+    /// from the page's place, so only one document's findings are ordered
+    /// among themselves, and any other from the documents it matched, which
+    /// are sorted.
     KindPage,
     /// How many findings stand, one tally per kind and severity: an aggregate
     /// over `findings_fingerprint_kind_severity_nocase`, which covers every
@@ -100,9 +103,12 @@ pub enum ValidateStatement {
     /// arms are joined by `UNION ALL` and ordered together in `(path COLLATE
     /// NOCASE, path, position, id)`, which SQLite runs as a merge of the arms'
     /// own orders, so nothing sorts and a bounded read costs the rows it hands
-    /// back. A path part bounds every arm as it bounds a section; a document
-    /// part that keeps what it seeks drives each arm instead, and those are
-    /// sorted. Each arm also reaches the link its finding is about, where it
+    /// back. A path part bounds every arm as it bounds a section. A document
+    /// part that keeps its documents in the answer's path order makes the read
+    /// one arm instead, driven from its source at the batch's place, each
+    /// document seeking every kind read at its path; any other document part
+    /// that keeps what it seeks drives each arm, and those are sorted. Each
+    /// arm, or the one, also reaches the link its finding is about, where it
     /// is about one, by two seeks behind its own (`documents_path`, then
     /// `links_document_ordinal`), which neither sort nor reorder the merge.
     MergedPage,
@@ -113,9 +119,9 @@ pub enum ValidateStatement {
     /// equality, so it still seeks the index that holds the answer's path order,
     /// and seeks past the finding's position and id; the arms are ordered by
     /// position and id, which the index hands back within the one path, and
-    /// nothing sorts. A document part that keeps what it seeks drives each arm
-    /// as it does a merged page's, and each arm reaches its finding's link as
-    /// a merged page's does.
+    /// nothing sorts. No document part drives it: each tests the document at
+    /// the one path by its key, and each arm reaches its finding's link as a
+    /// merged page's does.
     DocumentTail,
 }
 
@@ -264,6 +270,11 @@ struct Narrowed<'a> {
     /// Whether some document part keeps what it seeks, so the matched
     /// documents drive the statement.
     driven: bool,
+    /// The first document part that keeps the documents it matched in the
+    /// answer's path order, which drives a page from its place
+    /// ([`Filter::source`]), by its position among `documents`; `None` where
+    /// none does.
+    ordered: Option<usize>,
 }
 
 impl<'a> Narrowed<'a> {
@@ -277,9 +288,45 @@ impl<'a> Narrowed<'a> {
                 .filter_map(|filter| filter.path_part())
                 .collect(),
             driven: documents.iter().any(|filter| !filter.shape().excludes()),
+            ordered: documents
+                .iter()
+                .position(|filter| filter.shape().is_path_ordered(false)),
             documents,
         }
     }
+
+    /// How `statement` reaches the findings it reads.
+    fn drive(&self, statement: ValidateStatement) -> Drive {
+        let paged = matches!(
+            statement,
+            ValidateStatement::KindPage
+                | ValidateStatement::RulePage
+                | ValidateStatement::MergedPage
+        );
+        match (statement, self.driven, self.ordered) {
+            // A tail reads one document's findings, whose row each part
+            // tests where it stands.
+            (ValidateStatement::DocumentTail, _, _) | (_, false, _) => Drive::Tested,
+            (_, true, Some(at)) if paged => Drive::Ordered(at),
+            (_, true, _) => Drive::Matched,
+        }
+    }
+}
+
+/// How a statement reaches the findings it reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drive {
+    /// Seeks the findings in the answer's path order and tests the document
+    /// row at each one's path against every document part.
+    Tested,
+    /// The document part at this position among the parts drives it from its
+    /// source, in the answer's path order from the statement's place on; each
+    /// document reaches its findings by one seek at its path, and the row is
+    /// tested against every other document part.
+    Ordered(usize),
+    /// The documents a part that keeps what it seeks matched drive it, each
+    /// reaching its findings by one seek at its path, and those are sorted.
+    Matched,
 }
 
 /// One validate statement and its parameters, in the numbering the text
@@ -305,13 +352,28 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
             let arm = compose_arm(findings, &narrowed, findings.kinds, &mut binder);
             let ordered = format!(
                 "{}, {}, {}",
-                answer_ordering(&seeked.column("path"), ""),
+                ordering(&narrowed, findings.statement, &seeked.column("path")),
                 seeked.column("position"),
                 seeked.id
             );
             let limit = limit(&mut binder);
             format!(
                 "{arm}\n                     ORDER BY {ordered}\n                     LIMIT {limit}"
+            )
+        }
+        ValidateStatement::MergedPage
+            if matches!(narrowed.drive(findings.statement), Drive::Ordered(_)) =>
+        {
+            // The part's documents are read once, in path order, and each
+            // seeks every kind read at its path, so the one arm is already in
+            // the merge's order, and only the findings of one document are
+            // ordered among themselves.
+            assert!(!findings.kinds.is_empty(), "a merged read reads a kind");
+            let arm = compose_arm(findings, &narrowed, findings.kinds, &mut binder);
+            let ordered = ordering(&narrowed, findings.statement, MERGE_PATH);
+            let limit = limit(&mut binder);
+            format!(
+                "{arm}\n                     ORDER BY {ordered}, {MERGE_POSITION}, {MERGE_ID}\n                     LIMIT {limit}"
             )
         }
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail => {
@@ -353,6 +415,16 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     (text, binder.into_values())
 }
 
+/// The terms ordering a page's findings by their path in the answer order:
+/// the driving source's own columns where an ordered part drives it, which
+/// hand the documents back in that order, and `column`'s otherwise.
+fn ordering(narrowed: &Narrowed<'_>, statement: ValidateStatement, column: &str) -> String {
+    match narrowed.drive(statement) {
+        Drive::Ordered(_) => "dv.folded, dv.path".to_string(),
+        Drive::Tested | Drive::Matched => answer_ordering(column, ""),
+    }
+}
+
 /// One arm of a statement: a `SELECT` of `kinds` — the one kind of a page's
 /// section and of each arm of a merge, and every kind a summary tallies —
 /// under the fingerprint, the rule, the severities and the place the
@@ -379,24 +451,33 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
 /// **Every other part judges the document row at the finding's path**, which
 /// a finding standing where no document row does never satisfies. Where some
 /// such part keeps what it seeks, the matched documents drive the statement:
-/// `CROSS JOIN` keeps them the outer loop, reached by the part's seek, and
-/// each one's findings are one seek at its path, so the statement costs what
-/// the part matched and sorts that. Where every such part excludes, the
-/// statement seeks its kind as an unnarrowed one does and tests each
-/// finding's document row, one seek of `documents_path` at its path.
+/// `CROSS JOIN` keeps them the outer loop, and each one's findings are one
+/// seek at its path. **On a page, a part that keeps its documents in the
+/// answer's path order drives it from the page's place** ([`Filter::source`]):
+/// its documents are read from the lower bound on, inclusive, since the
+/// document a page resumes inside may hold findings past its position, and
+/// below the upper bound, so a continuation reads the documents from where it
+/// resumes until its page is full and sorts only one document's findings
+/// among themselves; a merged page reads every kind at each document in one
+/// arm. Every other document part tests the driving document's row, one seek
+/// at its key. Where no such part does, or on a summary, the documents the
+/// parts matched drive the statement, reached by the parts' seeks, so it
+/// costs what they matched and sorts that. Where every such part excludes,
+/// and on a document's tail, the statement seeks its kind as an unnarrowed one
+/// does and tests each finding's document row, one seek of `documents_path`
+/// at its path and one per part at the document's key.
 fn compose_arm(
     findings: &Findings<'_>,
     narrowed: &Narrowed<'_>,
     kinds: &[&str],
     binder: &mut Binder,
 ) -> String {
+    let statement = findings.statement;
+    let drive = narrowed.drive(statement);
     let Narrowed {
-        parts,
-        documents,
-        driven,
+        parts, documents, ..
     } = narrowed;
     let on_a_document = !documents.is_empty();
-    let statement = findings.statement;
     let rows = matches!(
         statement,
         ValidateStatement::KindPage
@@ -427,6 +508,11 @@ fn compose_arm(
             column("kind"),
             binder.bind(Value::Text((*kind).to_string()))
         )),
+        (true, kinds)
+            if statement == ValidateStatement::MergedPage && matches!(drive, Drive::Ordered(_)) =>
+        {
+            conditions.push(format!("{} IN ({})", column("kind"), listed(binder, kinds)))
+        }
         (true, _) => unreachable!("a page section reads one kind"),
         (false, kinds) => {
             conditions.push(format!("{} IN ({})", column("kind"), listed(binder, kinds)))
@@ -485,6 +571,14 @@ fn compose_arm(
     // position and the range no column to seek, so they test what that seek
     // reaches.
     let (folded, path, position, after_id) = lower;
+    // An ordered part's source reads its documents from the lower bound's
+    // path, inclusive, to the upper bound.
+    let reach = Reach {
+        descending: false,
+        from: (Value::Text(folded.clone()), Value::Text(path.clone())),
+        inclusive: true,
+        before: upper.clone(),
+    };
     if statement == ValidateStatement::DocumentTail {
         // The tail is the one path's findings after a position and an id, so
         // the path parts' lower bounds hold already: the path was admitted
@@ -513,9 +607,16 @@ fn compose_arm(
             binder.bind(Value::Integer(position)),
             binder.bind(Value::Integer(after_id)),
         );
+        // Where a source drives the statement, each document's findings are
+        // sought at its path, so the place only tests what that seek reaches.
+        let seek_reach = if matches!(drive, Drive::Ordered(_)) {
+            "+"
+        } else {
+            ""
+        };
         conditions.push(
             AnswerSeek {
-                reach: "",
+                reach: seek_reach,
                 comparison: ">",
                 lead: None,
                 path: &path_column,
@@ -548,10 +649,6 @@ fn compose_arm(
         conditions.push(part.glob_test(&path_column, binder));
     }
 
-    let tests: Vec<String> = documents
-        .iter()
-        .map(|filter| filter.spell("dv.id", binder))
-        .collect();
     // A rule's page reaches each finding it pages from the rule's row, by the
     // finding's row id; its tally reads the rule's rows alone.
     let reached = if ruled && rows {
@@ -559,8 +656,30 @@ fn compose_arm(
     } else {
         ""
     };
-    let from = if *driven {
-        conditions.extend(tests);
+    let from = if let Drive::Ordered(at) = drive {
+        let source = documents[at]
+            .source(&reach, binder)
+            .expect("a part that keeps its documents in path order has a source");
+        for (other, filter) in documents.iter().enumerate() {
+            if other != at {
+                conditions.push(filter.test("dv.id", binder));
+            }
+        }
+        // The path compared folded as well as bytewise, as a matched
+        // document's is: the folded equality is what a seek at the document's
+        // path runs down an index holding the answer's path order by.
+        format!(
+            "FROM ({source}) AS dv
+                     CROSS JOIN {table} AS {seek}
+                         ON {path_column} = dv.path COLLATE NOCASE AND {path_column} = dv.path{reached}"
+        )
+    } else if drive == Drive::Matched {
+        conditions.extend(
+            documents
+                .iter()
+                .map(|filter| filter.spell("dv.id", binder))
+                .collect::<Vec<String>>(),
+        );
         // The path compared folded as well as bytewise: the folded equality
         // is implied by the bytewise one, and it is what lets a seek at a
         // matched document's path run down an index holding the answer's
@@ -575,7 +694,7 @@ fn compose_arm(
     } else {
         if on_a_document {
             let tested: Vec<String> = std::iter::once(format!("dv.path = {path_column}"))
-                .chain(tests)
+                .chain(documents.iter().map(|filter| filter.test("dv.id", binder)))
                 .collect();
             conditions.push(format!(
                 "EXISTS (SELECT 1 FROM documents AS dv

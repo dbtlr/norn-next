@@ -11,10 +11,10 @@ use std::collections::BTreeSet;
 use super::{
     KIND_INDEX, KIND_RANGE_SEEK, KIND_SEEK, ROOTS, RULE_KIND_INDEX, RULE_KIND_SEEK,
     RULE_SEVERITY_INDEX, RULE_SEVERITY_SEEK, SEVERITY_INDEX, SEVERITY_SEEK, VALIDATE_SCHEMA,
-    Validating, citing, declared, finding, names, plans_of, requests, rewritten, rows_of,
-    rule_requests, ruling, undeclared, validating, vault,
+    Validating, citing, declared, finding, judge_ordered, names, plans_of, requests, rewritten,
+    rows_of, rule_requests, ruling, undeclared, validating, vault,
 };
-use crate::common::violation;
+use crate::common::{drained_parts, violation};
 use crate::find::failure_of;
 use norn_store::{
     MAX_PAGE, PageRefusal, RepairBatch, RepairSelection, StoredPathOrder, ValidatePlan,
@@ -1291,22 +1291,42 @@ fn a_documents_tail_merges_one_seek_per_kind_at_one_path() {
     }
 }
 
-/// **A statement a document part drives is driven from the documents it
-/// matched**, each reaching its findings by one seek at its path, as a kind
-/// page is; the merge sorts only what the part matched.
+/// **A merged page a document part drives reads the part's documents once,
+/// from the batch's place, in path order (NORN-390)**: one arm seeks every
+/// kind read at each document's path, so the merge is already in its order
+/// and only one document's findings are ordered among themselves. A
+/// document's tail is never driven: it seeks its one path's findings and tests
+/// the document's row at its key.
 #[test]
 fn a_merged_page_a_document_part_drives_seeks_the_matched_documents_findings() {
     let store = Validating::with_rules_under("batch-driven", 0, StoredPathOrder::Sensitive);
-    for params in [
-        repairing().with_predicates([Predicate::tag("draft")]),
-        repairing()
-            .with_rule("tasks")
-            .with_predicates([Predicate::equal_to("status", "open")]),
+    for (params, seeked) in [
+        (repairing().with_predicates([Predicate::tag("draft")]), "f"),
+        (
+            repairing()
+                .with_rule("tasks")
+                .with_predicates([Predicate::equal_to("status", "open")]),
+            "fr",
+        ),
     ] {
-        let plans = store.batch_plans(&params.with_limit(1));
-        for page in plans_of(&plans, ValidateStatement::MergedPage) {
-            page.assert_no_full_scan();
-            rows_of(&page, "dv").assert_searches_through("documents", Access::RowId);
+        let plans = store.batch_plans(&params.clone().with_limit(1));
+        let merged = plans_of(&plans, ValidateStatement::MergedPage);
+        assert!(!merged.is_empty(), "{params:?} read no merged page");
+        for page in merged {
+            judge_ordered(&page, seeked);
+            assert!(
+                !page.sql().contains("UNION ALL"),
+                "a merged page a part drives read the part's documents per kind: {}",
+                page.sql()
+            );
+        }
+        for tail in plans_of(&plans, ValidateStatement::DocumentTail) {
+            tail.assert_no_full_scan();
+            assert!(
+                tail.rows().iter().all(|row| row.detail != "CO-ROUTINE dv"),
+                "a document's tail was driven: {:?}",
+                tail.rows()
+            );
         }
     }
 }
@@ -1480,9 +1500,9 @@ fn continued_from(
 /// upper case admits the bulk where the root folds ASCII case and nothing
 /// where it tells spellings apart, and costs the same at both sizes either
 /// way. A document part's continuation is held over the documents it matches,
-/// `a.md` before its cursor and `notes/c.md` after, the same at both sizes: a
-/// statement a document part drives reads every document it matched
-/// (NORN-390), so the pair that grows the matched set is that defect's.
+/// `a.md` before its cursor and `notes/c.md` after, the same at both sizes;
+/// [`a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set`]
+/// grows the documents a part matches.
 ///
 /// Control: the rule's kind index dropped on the larger vault, a
 /// continuation by the kind reaches what stands before its cursor, and the
@@ -1556,6 +1576,58 @@ fn a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor() {
                 judge(&large, &by_kind, [&deep(fewer), &deep(more)]);
             },
         );
+    }
+}
+
+/// **A continuation a document part drives costs its batch, not the documents
+/// the part matched, on either root (NORN-390).** Over the fixture and 50,
+/// then 500, bulk documents every part of [`drained_parts`] matches, each with
+/// an undeclared-tag warning and a breach citing `tasks`, a batch of three
+/// narrowed by each part — merging every kind, selecting one kind, and
+/// selecting the rule — costs the same at both sizes and steps through no full
+/// scan, continuing from a cursor at the second bulk document, where almost
+/// every matched document stands after it, and at the bulk document
+/// [`LEFT_IN_THE_BULK`] before the last, where almost every one stands before.
+#[test]
+fn a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set() {
+    let (fewer, more) = (50, 500);
+    for order in ROOTS {
+        let small = Validating::with_matched_bulk_under("batch-matched-small", fewer, order);
+        let large = Validating::with_matched_bulk_under("batch-matched-large", more, order);
+        for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
+            for selected in [
+                repairing(),
+                repairing().with_kinds([FindingKind::UndeclaredTag]),
+                repairing().with_rule("tasks"),
+            ] {
+                let params = selected.with_limit(3).with_predicates(part.clone());
+                for after in [
+                    ["bulk/0001.md", "bulk/0001.md"],
+                    [
+                        &format!("bulk/{:04}.md", fewer - LEFT_IN_THE_BULK - 1),
+                        &format!("bulk/{:04}.md", more - LEFT_IN_THE_BULK - 1),
+                    ],
+                ] {
+                    let (at_small, small_paths, _) = continued_from(&small, &params, after[0]);
+                    let (at_large, large_paths, _) = continued_from(&large, &params, after[1]);
+                    assert_eq!(
+                        at_small, at_large,
+                        "a continuation after {after:?} a {shape:?} part drives grew with the \
+                         documents it matched under {order:?}: {params:?}"
+                    );
+                    assert_eq!(small_paths.len(), large_paths.len());
+                    assert!(
+                        !large_paths.is_empty()
+                            && large_paths.iter().all(|path| path.starts_with("bulk/")),
+                        "a continuation of {params:?} covers bulk documents: {large_paths:?}"
+                    );
+                    assert_eq!(
+                        at_large.full_scan_steps, 0,
+                        "a continuation of {params:?} stepped through a full scan under {order:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

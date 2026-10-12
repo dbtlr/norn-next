@@ -12,9 +12,13 @@
 //! **A page with no filter reads its order index in page order**, so nothing
 //! sorts: the path page and a field sort's valued section seek it and stop at
 //! the page's bound, and a field sort's missing section walks it, as stated
-//! below. **A page with a filter
-//! drives from the filter's seek and sorts the matched set**, so its cost is
-//! bounded by the match count, which is what a narrowing part narrows.
+//! below. **A path page a filter keeping its documents in the answer's path
+//! order narrows drives from that filter's source** ([`crate::ReadFilter::is_path_ordered`]),
+//! seeking its documents from where the page resumes, so it sorts nothing and
+//! costs the documents it reads; every other filter tests each of them at its
+//! key. **A page any other filter that keeps what it seeks narrows drives
+//! from the filter's seek and sorts the matched set**, so its cost is bounded
+//! by the match count, which is what a narrowing part narrows.
 //!
 //! **Paths stand in the answer's path order on every root**: the path folded
 //! by ASCII case with the bytewise path as the tie-break, so the order is

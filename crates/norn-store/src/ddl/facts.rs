@@ -178,7 +178,13 @@
 //! SQLite's `NOCASE` folds ASCII alone, so the fold is computed in Rust rather
 //! than left to a collation. `document_tags_folded_name` is the index a find's
 //! tag part seeks, read off the index without touching the rows, and the one
-//! a count's tag grouping walks in group order. A count's tag label reads
+//! a count's tag grouping walks in group order. It holds each tag's documents
+//! in the answer's path order, `(folded_name, path COLLATE NOCASE, path,
+//! document)`, so a page a tag part drives seeks them from where it resumes;
+//! `path` is the document's own path, copied beside its id as the field
+//! pillar's is, and for the same reason it cannot go stale: a document that
+//! moves is a death at one path and a birth at another, whose tags the
+//! cascade takes and the birth writes again. A count's tag label reads
 //! past the index: each row's `ordinal` and `name`, and the holding
 //! document's path, which is where the label's first occurrence is judged.
 //! `ordinal` is the tag's position in the order the writer hands the tags,
@@ -298,6 +304,7 @@ fn nullable_span_tables() -> Vec<String> {
     id          INTEGER PRIMARY KEY,
     document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal     INTEGER NOT NULL,
+    path        TEXT    NOT NULL,
     name        TEXT    NOT NULL,
     folded_name TEXT    NOT NULL,
     source      TEXT    NOT NULL,
@@ -309,7 +316,9 @@ fn nullable_span_tables() -> Vec<String> {
         ),
         "CREATE UNIQUE INDEX document_tags_document_ordinal ON document_tags(document, ordinal)"
             .to_string(),
-        "CREATE INDEX document_tags_folded_name ON document_tags(folded_name, document)"
-            .to_string(),
+        "CREATE INDEX document_tags_folded_name ON document_tags(
+    folded_name, path COLLATE NOCASE, path, document
+)"
+        .to_string(),
     ]
 }

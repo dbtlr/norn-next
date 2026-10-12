@@ -193,9 +193,9 @@ impl WriteStatement {
             }
             Self::InsertTag => {
                 "INSERT INTO document_tags (
-                     document, ordinal, name, folded_name, source, span_line, span_column,
+                     document, ordinal, path, name, folded_name, source, span_line, span_column,
                      span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             }
             Self::InsertField => {
                 "INSERT INTO document_fields (
