@@ -1654,6 +1654,103 @@ fn every_route_and_default_a_repair_plan_fills_comes_from_one_clock_reading() {
     assert_eq!(host.read_evidence().since(account).clock_reads, 1);
 }
 
+/// [`STAMPED_AND_ROUTED`] beside a rule filling a `review`'s `status` from a
+/// plain default, a fix that reads no clock.
+const STAMPED_ROUTED_AND_PLAIN: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n    allowed_paths: {paths: ['zz-repair/log/**'], route: 'zz-repair/log/{{date}}/'}\n  reviews:\n    match: {frontmatter: {type: review}}\n    required:\n      status: {default: todo}\n";
+
+/// `plan` with every position a clock reading fills set to one marker: the
+/// value of a `created` or `day` default, the destination of a route's move
+/// and the transition that lands there. Also the clock-filled values, in plan
+/// order, and how many moves were masked.
+fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, Vec<String>, usize) {
+    let mut masked = plan.clone();
+    let mut filled = Vec::new();
+    let mut moves = 0;
+    for operation in &mut masked.operations {
+        match &mut operation.kind {
+            OperationKind::MoveDocument { to, .. } => {
+                *to = at("masked.md");
+                moves += 1;
+            }
+            OperationKind::SetFrontmatter { field, value, .. }
+                if field == "created" || field == "day" =>
+            {
+                filled.push(format!("{field}={value:?}"));
+                *value = AuthoredValue::string("masked");
+            }
+            _ => {}
+        }
+    }
+    for transition in &mut masked.transitions {
+        if transition.before == norn_wire::FileState::absent() {
+            transition.path = at("masked.md");
+            transition.after = norn_wire::FileState::absent();
+        }
+    }
+    (masked, filled, moves)
+}
+
+/// **An apply plans what its preview did, apart from what the clock fills.**
+/// Three routes and five clock defaults across three tasks, beside a review
+/// whose default reads no clock: a second apart, the preview and the apply
+/// read the clock at different instants, so the `created` instants differ.
+/// With the clock-filled values masked (each default's value, each route's
+/// destination and the transition landing there) the two plans are equal in
+/// operations, transitions, conditions and provenance (citations, skipped
+/// findings, remaining count and cursor), and the review's fix stands alike
+/// in both.
+#[test]
+fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-clock-masked",
+        STAMPED_ROUTED_AND_PLAIN,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\ncreated: then\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+            ("r.md", b"---\ntype: review\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let preview = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    // The host's clock is the system's, which a test cannot drive; `{{now}}`
+    // reads to the second, so a wait past one makes the two readings differ.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let ApplyReport::Applied {
+        plan: apply,
+        changeset,
+        ..
+    } = planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+
+    let (preview_masked, preview_filled, preview_moves) = with_the_clock_masked(&preview);
+    let (apply_masked, apply_filled, apply_moves) = with_the_clock_masked(&apply);
+    assert_eq!((preview_moves, preview_filled.len()), (3, 5), "{preview:?}");
+    assert_eq!((apply_moves, apply_filled.len()), (3, 5), "{apply:?}");
+    assert_ne!(
+        preview_filled, apply_filled,
+        "the two readings of the clock are one instant"
+    );
+    assert!(
+        preview
+            .operations
+            .iter()
+            .any(|operation| matches!(&operation.kind,
+                OperationKind::SetFrontmatter { field, .. } if field == "status")),
+        "the review's plain default is in the plan: {:?}",
+        preview.operations
+    );
+    assert_eq!(apply_masked.operations, preview_masked.operations);
+    assert_eq!(apply_masked.transitions, preview_masked.transitions);
+    assert_eq!(apply_masked.conditions, preview_masked.conditions);
+    assert_eq!(provenance(&apply_masked), provenance(&preview_masked));
+    assert_eq!(apply_masked, preview_masked);
+}
+
 /// **A repair plan filling no default that reads the clock reads it not at
 /// all.**
 #[test]
