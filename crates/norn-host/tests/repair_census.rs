@@ -219,8 +219,9 @@ const REACHED: &[&[&str]] = &[
     // A held document's row by its path.
     &["documents_path"],
     // The resolution of a route's moved links and a link fix's address: the
-    // links held under a key, and a class's heads on either root.
-    &["link_keys_key"],
+    // links held under a key and a class's heads, each under the key the root
+    // decides (raw where it tells spellings apart, folded where it folds).
+    &["link_keys_key", "link_keys_folded_key"],
     &[
         "documents_admitted_suffix_key",
         "documents_admitted_folded_suffix_key",

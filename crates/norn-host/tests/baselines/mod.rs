@@ -515,10 +515,12 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 /// rewrites. This allowance holds two subjects of the child, each in its own
 /// pair: the three previews above, and `Host::repair` previewed over the
 /// repair workload under its own mark, before any apply. One run of the lane
-/// read the previews at 166,908 to 166,950 bytes and the repair previews at
-/// 265,129 to 265,213, a difference between the profiles of **0 bytes** for
-/// each pair. The readings above predate the repair subjects and the schema,
-/// so they are the earlier workload's; the 4 KiB allowance was not changed.
+/// read the previews between 166,908 and 166,950 bytes and the repair
+/// previews between 265,129 and 265,213, the larger profile holding no more
+/// than the smaller in either pair: a growth of **0 bytes**, the pair's
+/// saturating difference. The readings above predate the repair subjects and
+/// the schema, so they are the earlier workload's; the 4 KiB allowance was
+/// not changed.
 ///
 /// The allowance is **4 KiB**, the figure
 /// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at, by the same rule:
@@ -601,9 +603,10 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// two subjects of the child, each in its own pair: the plan mix above, and
 /// the repair workload applied through `Host::repair` after every other write
 /// has landed and the heap has settled, the watcher's echo of its
-/// publications inside the window. One run of the lane read the mix at
-/// 187,027 to 187,111 bytes and the repair apply at 249,577 to 249,661, a
-/// difference between the profiles of **0 bytes** for each pair, with one
+/// publications inside the window. One run of the lane read the mix between
+/// 187,027 and 187,111 bytes and the repair apply between 249,577 and
+/// 249,661, the larger profile holding no more than the smaller in either
+/// pair: a growth of **0 bytes**, the pair's saturating difference, with one
 /// child reading its mix at 201,791, an excursion of 14,692 bytes over the
 /// others in that run and inside the 31,550 the allowance is derived from.
 /// The readings above predate the repair subjects and the schema, so they are
