@@ -4017,6 +4017,15 @@ impl Gated {
         )
     }
 
+    /// Whether the vault's root folds ASCII case: the gate folder is found
+    /// under its upper-case spelling.
+    fn folds_case(&self) -> bool {
+        self.vault
+            .path()
+            .join(GATE_FOLDER.to_ascii_uppercase())
+            .exists()
+    }
+
     fn repair(&self, params: norn_wire::RepairParams) -> (CounterSnapshot, norn_wire::Provenance) {
         repair_reading(&self.host, params)
     }
@@ -4491,8 +4500,9 @@ fn read_the_continuations(
                 .sum();
             let planned = continued.skipped.len() + fixed;
             assert_eq!(continued.remaining, None, "a continuation counts none");
-            if narrowing.by_the_roots_fold && planned == 0 {
+            if narrowing.by_the_roots_fold && !gated.folds_case() {
                 // A root that tells spellings apart: the part admits nothing.
+                assert_eq!(planned, 0, "`{name}` admits nothing where spellings differ");
                 assert!(continued.cursor.is_none(), "`{name}` admits nothing");
             } else {
                 assert_eq!(

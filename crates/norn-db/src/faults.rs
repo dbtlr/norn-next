@@ -95,8 +95,8 @@ pub(crate) fn cap_the_pages(connection: &Connection) -> Result<(), DbError> {
 
 /// Whether the statements SQLite begins are recorded: on every connection
 /// opened while this stands, and on every connection that counts its statements
-/// (`Database::count_statements_begun`), whenever it was opened. Raised by [`record_statements_begun`] and lowered by
-/// [`stop_recording_statements`].
+/// (`Database::count_statements_begun`), whenever it was opened. Raised by
+/// [`record_statements_begun`] and lowered by [`stop_recording_statements`].
 static RECORDING_STATEMENTS: AtomicBool = AtomicBool::new(false);
 
 /// The text of each statement the recording connections began, in the order
