@@ -400,10 +400,14 @@ thread_local! {
 }
 
 /// The statement trace [`Database::count_statements_begun`] installs: one
-/// statement begun, counted on the thread SQLite began it on.
+/// statement begun, counted on the thread SQLite began it on. Where
+/// `induced-failure` keeps a statement record, its text is recorded too.
+#[cfg_attr(not(feature = "induced-failure"), allow(unused_variables))]
 fn count_one_statement_begun(event: TraceEvent<'_>) {
-    if let TraceEvent::Stmt(..) = event {
+    if let TraceEvent::Stmt(_, sql) = event {
         STATEMENTS_BEGUN.with(|begun| begun.set(begun.get().saturating_add(1)));
+        #[cfg(feature = "induced-failure")]
+        crate::faults::record_the_statement_begun(sql);
     }
 }
 
@@ -488,6 +492,8 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
         .map_err(|error| error::sql("turning foreign keys on", error))?;
     #[cfg(feature = "induced-failure")]
     crate::faults::cap_the_pages(&connection)?;
+    #[cfg(feature = "induced-failure")]
+    crate::faults::trace_if_recording(&connection);
     Ok(Attempt::Connected(connection))
 }
 
@@ -572,6 +578,8 @@ fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Conne
     connection
         .authorizer(Some(refuse_everything_but_reading))
         .map_err(|error| error::sql("sealing the read-only connection", error))?;
+    #[cfg(feature = "induced-failure")]
+    crate::faults::trace_if_recording(&connection);
     Ok(connection)
 }
 

@@ -82,6 +82,8 @@ use crate::store::Store;
 pub mod induced_failure {
     use std::sync::atomic::Ordering;
 
+    use norn_db::EmittedPlan;
+
     use super::{
         CHANGESETS_COMMITTED, DISARMED, Store, StoreError, TEAR_AFTER_COMMIT,
         TEAR_AT_CHUNK_BOUNDARY, error, rusqlite,
@@ -382,6 +384,59 @@ pub mod induced_failure {
         super::UNWIND_AFTER_SNAPSHOT_OPENS.set(true);
     }
 
+    /// Record the text of every statement SQLite begins on every store this
+    /// process opens from here on, writer and readers alike, until
+    /// [`stop_recording_statements`].
+    ///
+    /// **This is the census a plan bar is held to.** A bar states how one
+    /// statement reaches its rows; whether every statement an operation runs
+    /// is one a bar states is a fact only SQLite's statement trace holds,
+    /// because it sees each statement whoever composed it. The record is met at
+    /// the driver seam and forwarded from here, as the page cap is, and it is
+    /// process-wide for the reason the cap is: a host runs its statements on
+    /// threads the suite does not own. The trace names no connection, so the
+    /// record holds whatever this process ran: a suite asserting over it runs
+    /// alone in its process.
+    pub fn record_statements_begun() {
+        norn_db::faults::record_statements_begun();
+    }
+
+    /// Stop recording, and forget what was recorded.
+    pub fn stop_recording_statements() {
+        norn_db::faults::stop_recording_statements();
+    }
+
+    /// The text of every statement recorded since the record was last taken,
+    /// in the order SQLite began them, as it was prepared, its parameters
+    /// unbound. A statement run inside another — a trigger's, or one the
+    /// full-text index runs for itself — is reported behind `-- `, and the
+    /// start of a trigger's program as `-- TRIGGER <name>`.
+    pub fn statements_begun() -> Vec<String> {
+        norn_db::faults::take_recorded_statements()
+    }
+
+    /// The plan SQLite reports for `sql` on the store's own connection, and
+    /// the columns it reads, with every parameter bound to `NULL`.
+    ///
+    /// The statement is any the record holds, so it is prepared on a
+    /// connection that can prepare all of them: the writer, with the
+    /// functions a reader registers registered on it as well. SQLite chooses
+    /// a plan by a bound value only from gathered statistics or a `LIKE` or
+    /// `GLOB` pattern, so where a statement has neither, the plan of its
+    /// unbound text is the plan it ran with.
+    pub fn explain_out_of_band(store: &Store, sql: &str) -> Result<EmittedPlan, StoreError> {
+        let connection = store.connection();
+        crate::read::register_functions(connection)?;
+        let parameters = connection
+            .prepare(sql)
+            .map_err(|error| error::sql("preparing a recorded statement", error))?
+            .parameter_count();
+        let unbound = std::iter::repeat_n(rusqlite::types::Null, parameters);
+        Ok(store
+            .database
+            .emitted_plan(sql, rusqlite::params_from_iter(unbound))?)
+    }
+
     fn arm_the_store_schema(database: &std::path::Path, code: i32) {
         *super::ARMED_STORE_SCHEMA
             .lock()
@@ -389,8 +444,9 @@ pub mod induced_failure {
             Some((database.to_path_buf(), code));
     }
 
-    /// Disarm every process-wide arrangement above — the page cap, the store
-    /// schema's armed condition, and the two tears — plus the calling
+    /// Disarm every process-wide arrangement above — the page cap, the
+    /// statement record, the store schema's armed condition, and the two
+    /// tears — plus the calling
     /// thread's busy one-shot, its armed feed-page write and its armed
     /// establishment unwind.
     ///
@@ -406,6 +462,7 @@ pub mod induced_failure {
     /// to watch the same request converge without it.
     pub fn disarm() {
         norn_db::faults::set_page_cap(0);
+        norn_db::faults::stop_recording_statements();
         norn_db::faults::clear_the_meta_read_arm();
         super::WRITE_AFTER_FEED_PAGES.set(None);
         super::UNWIND_AFTER_SNAPSHOT_OPENS.set(false);
