@@ -52,10 +52,12 @@ rusqlite = { workspace = true }
 
 # `induced-failure` gates the driver-seam arrangements a suite reaches a rung
 # through: the page cap an open applies, which is a full disk met by the engine
-# rather than described to it, and the busy a pinned-scalar read reports. Off
-# by default, so a shipped build carries neither the arms nor the reads into
-# them. A client forwards its own feature of the same name to this one, because
-# the arrangement is armed in the client's suite and met inside this crate.
+# rather than described to it, the busy a pinned-scalar read reports, and the
+# record of every statement SQLite begins on a connection, which a suite plans
+# out of band to hold what an operation ran to a plan bar. Off by default, so a
+# shipped build carries none of the arms or the reads into them. A client
+# forwards its own feature of the same name to this one, because the
+# arrangement is armed in the client's suite and met inside this crate.
 [features]
 induced-failure = []
 

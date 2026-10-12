@@ -10,10 +10,13 @@
 //! So the seam lives here. [`induced_failure`] is the arming surface a suite
 //! calls, and the rest of this file is what the store's own paths read: the
 //! thread-local and process-wide arms, the abort points the increment
-//! checks, and the condition a store schema's statement list meets. **Two
+//! checks, and the condition a store schema's statement list meets. **Three
 //! arrangements are met at the driver seam rather than here** — the page cap an
-//! open applies, and the busy a pinned-scalar read reports — so the arms behind
-//! them are `norn-db`'s and the surface below forwards to them.
+//! open applies, the busy a pinned-scalar read reports, and the record of every
+//! statement SQLite begins — so the arms behind them are `norn-db`'s and the
+//! surface below forwards to them. The plan of a recorded statement is taken
+//! out of band, on the store's own connection, so a suite plans what ran
+//! without a statement of its own entering the record.
 //!
 //! **The seam is deliberately small.** It names *where* a store operation can be
 //! made to fail, and *how* — a busy database, a full disk, a corrupt or refusing
@@ -57,7 +60,7 @@ use crate::store::Store;
 /// store operation produces, and each of them exists because a rung, a refusal or
 /// a verification cannot be reached from outside otherwise — nothing above this
 /// crate reaches a store's database, so a suite arranges through this surface
-/// rather than by writing into the file itself. Two of them are armed at the
+/// rather than by writing into the file itself. Three of them are armed at the
 /// driver seam below and forwarded from here, which keeps every arrangement a
 /// suite makes in one vocabulary. **Nothing in a product path calls any of
 /// this.** The module is hidden from the documentation and every name in it says

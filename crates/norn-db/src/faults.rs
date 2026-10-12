@@ -93,8 +93,9 @@ pub(crate) fn cap_the_pages(connection: &Connection) -> Result<(), DbError> {
         .map_err(|error| error::sql("capping the page count", error))
 }
 
-/// Whether every connection opened from here on records the statements SQLite
-/// begins on it. Raised by [`record_statements_begun`] and lowered by
+/// Whether the statements SQLite begins are recorded: on every connection
+/// opened while this stands, and on every connection that counts its statements
+/// (`Database::count_statements_begun`), whenever it was opened. Raised by [`record_statements_begun`] and lowered by
 /// [`stop_recording_statements`].
 static RECORDING_STATEMENTS: AtomicBool = AtomicBool::new(false);
 
@@ -106,7 +107,10 @@ static RECORDING_STATEMENTS: AtomicBool = AtomicBool::new(false);
 static STATEMENTS_RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Record the text of every statement SQLite begins on every connection this
-/// process opens from here on, until [`stop_recording_statements`].
+/// process opens from here on, until [`stop_recording_statements`]. A
+/// connection opened earlier is recorded as well where it counts its
+/// statements, because the counting trace records through the same arm; any
+/// other connection opened earlier is not.
 ///
 /// **This is a census of what ran, taken by the engine.** A plan bar states
 /// how one statement reaches its rows; whether every statement an operation
@@ -124,9 +128,17 @@ pub fn record_statements_begun() {
 
 /// Stop recording and forget what was recorded. A connection opened while
 /// the record stood keeps its trace, which records nothing once this returns.
+///
+/// The arm is lowered and the record emptied under the lock a recording
+/// statement takes to check the arm and push, so a statement racing the stop
+/// is either in the record this empties or dropped; none is left standing for
+/// the next recording.
 pub fn stop_recording_statements() {
+    let mut record = STATEMENTS_RECORDED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     RECORDING_STATEMENTS.store(false, Ordering::SeqCst);
-    take_recorded_statements();
+    record.clear();
 }
 
 /// The text of every statement recorded since the record was last taken, in
@@ -160,10 +172,10 @@ fn record_one(event: TraceEvent<'_>) {
 /// place of [`trace_if_recording`]'s, and that trace records through here, so
 /// a counting connection is recorded as every other one is.
 pub(crate) fn record_the_statement_begun(sql: &str) {
+    let mut record = STATEMENTS_RECORDED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if RECORDING_STATEMENTS.load(Ordering::SeqCst) {
-        STATEMENTS_RECORDED
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(sql.to_string());
+        record.push(sql.to_string());
     }
 }
