@@ -40,7 +40,7 @@ use norn_wire::{
 use super::Ran;
 use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::error::{self, StoreError};
-use crate::facts::Span;
+use crate::facts::{LinkFamily, Span};
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
 use crate::path::ClassKey;
 use crate::request::{Reading, optional_span, optional_value_head, unreadable};
@@ -78,6 +78,25 @@ pub(crate) struct FindingBase {
     /// The rule set the finding cites, and `None` for one citing none.
     pub(crate) rule_set: Option<i64>,
     value: Option<norn_wire::ValueHead>,
+    /// The link the finding is about, where the statement joined it: only a
+    /// repair batch's merged reads do, so it is `None` on every other read.
+    pub(crate) link: Option<FindingLink>,
+}
+
+/// The link a link finding is about, as a repair batch hands it back: its
+/// syntax and its address.
+///
+/// The link is the one the finding's ordinal names in the finding's holder.
+/// Its address is spelled as a link's address is everywhere a plan names one:
+/// the protocol prefix, then the target as written, and no anchor — empty for
+/// an anchor-only link. A finding about its document, and a link finding
+/// whose holder no longer holds a link at its ordinal, have none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindingLink {
+    /// The syntax the link is written in.
+    pub family: LinkFamily,
+    /// The link's address as written, protocol prefix included.
+    pub address: String,
 }
 
 impl FindingBase {
@@ -161,7 +180,35 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         position: row.get(12)?,
         rule_set: row.get(13)?,
         value,
+        link: None,
     }))
+}
+
+/// A merged read's row: the finding as [`finding_base`] reads it, with the
+/// link it joined — the family, protocol and target read from `first` on,
+/// all three `NULL` for a finding about no link.
+///
+/// A family this crate did not write is [`StoreError::Damaged`], as one read
+/// anywhere else is.
+pub(crate) fn linked_finding_base(row: &Row<'_>, first: usize) -> Reading<FindingBase> {
+    let mut base = match finding_base(row)? {
+        Ok(base) => base,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
+    let Some(family) = row.get::<_, Option<String>>(first)? else {
+        return Ok(Ok(base));
+    };
+    let Some(family) = LinkFamily::from_str(&family) else {
+        return Ok(Err(unreadable("links.family", &family)));
+    };
+    let protocol: Option<String> = row.get(first + 1)?;
+    let target: String = row.get(first + 2)?;
+    let address = match protocol {
+        Some(protocol) => format!("{protocol}://{target}"),
+        None => target,
+    };
+    base.link = Some(FindingLink { family, address });
+    Ok(Ok(base))
 }
 
 /// The finding rows the findings column of `documents` carries, in their
