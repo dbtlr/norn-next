@@ -453,6 +453,11 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// [`PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`], which
 /// count what the code holds and not what the allocator keeps.
 ///
+/// **Re-read under the current workload, on 2026-10-12**, with the repair
+/// subjects planted, one run of the lane read the plan gate child's peak resident set at 36.26
+/// MiB and every other planning child's at 33.82 to 36.32, under the ceiling,
+/// which was not changed.
+///
 /// **This ceiling bounds the process.** It is 53 MiB, by the rule
 /// [`READ_PEAK_RSS_CEILING_BYTES`] is authored under: the proportion
 /// [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its highest reading, 1.61x,
@@ -501,6 +506,19 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 /// read 164,752 bytes at both profiles, and job 111384985926, after them and
 /// before the settle, read 171,287 at both, a difference of **0 bytes** in
 /// each: the rise of about 6.5 KB is those changes', on both platforms.
+///
+/// **Re-read under the current workload, on 2026-10-12.** The planning child
+/// now attaches under a schema that reads the repair workload's documents
+/// alone and plants that workload beside the three subjects above: five
+/// documents each breaching a synonym rule and a default rule, and one
+/// misplaced document a route moves with twenty in-links its cascade
+/// rewrites. This allowance holds two subjects of the child, each in its own
+/// pair: the three previews above, and `Host::repair` previewed over the
+/// repair workload under its own mark, before any apply. One run of the lane
+/// read the previews at 166,908 to 166,950 bytes and the repair previews at
+/// 265,129 to 265,213, a difference between the profiles of **0 bytes** for
+/// each pair. The readings above predate the repair subjects and the schema,
+/// so they are the earlier workload's; the 4 KiB allowance was not changed.
 ///
 /// The allowance is **4 KiB**, the figure
 /// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at, by the same rule:
@@ -575,6 +593,25 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// of the re-reading read twenty-six children at 172,147 to 172,207 bytes and
 /// four at 193,045 to 198,775, an excursion of at most 26,628 bytes over the
 /// same child's lower reading, inside the one the allowance is derived from.
+///
+/// **Re-read under the current workload, on 2026-10-12.** The planning child
+/// now attaches under a schema that reads the repair workload's documents
+/// alone and plants that workload beside the three subjects above (see
+/// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`]). This allowance holds
+/// two subjects of the child, each in its own pair: the plan mix above, and
+/// the repair workload applied through `Host::repair` after every other write
+/// has landed and the heap has settled, the watcher's echo of its
+/// publications inside the window. One run of the lane read the mix at
+/// 187,027 to 187,111 bytes and the repair apply at 249,577 to 249,661, a
+/// difference between the profiles of **0 bytes** for each pair, with one
+/// child reading its mix at 201,791, an excursion of 14,692 bytes over the
+/// others in that run and inside the 31,550 the allowance is derived from.
+/// The readings above predate the repair subjects and the schema, so they are
+/// the earlier workload's. No negative control has been read on the repair
+/// subjects: the two above were read on the three-subject workload, and the
+/// retentions they plant are proportional to the vault's documents, which the
+/// repair subjects do not change, so the differences they plant stand; the
+/// allowance was not changed.
 ///
 /// The allowance is **40 KiB**: the excursion with a quarter of headroom,
 /// 39,438 bytes, rounded up to the next 8 KiB. A retention held for each of
