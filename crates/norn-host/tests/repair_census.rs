@@ -11,8 +11,11 @@
 //!
 //! - the unnarrowed first batch, cut inside a document, its tail and the probe
 //!   for more past it; and its continuation from the cursor it answered;
-//! - a batch narrowed by rule, by rule and severity, by kind, by severity, by
-//!   a path part, by a path part and a rule, and by a document part;
+//! - a batch of one narrowed by rule, by rule and severity, by kind, by
+//!   severity, by a path part, by a path part and a rule, and by a document
+//!   part, each cut inside a document (the suite asserts the cut) and each
+//!   continued from the cursor it minted, so a narrowing's seek past a cursor
+//!   is in the record as well as its first page;
 //! - fixes whose planning reads what the snapshot holds: a route whose
 //!   documents other documents link to, so the plan resolves the links it
 //!   moves; a route whose cascade may respell a frontmatter link a rule reads
@@ -68,6 +71,17 @@ const SCHEMA: &str = "version: 1\nfields:\n  ref: {type: link}\nrules:\n  tasks:
 /// Where every document the census arranges stands.
 const FOLDER: &str = "zz-repair/";
 
+/// The document that sorts before every other the census selects: a task
+/// missing its `status`, outside its route's folder, holding two links nothing
+/// resolves, so it carries four findings of four sorts (a required field
+/// missing, a misplacement, and two broken links). A batch of one over any
+/// narrowing that reaches it is cut inside it, which is what runs the
+/// document's tail and the probe for more past it.
+const CUT_DOCUMENT: (&str, &[u8]) = (
+    "0-cut.md",
+    b"---\ntype: task\n---\nSee [[nowhere-a]] and [[nowhere-b]].\n",
+);
+
 /// The documents the census arranges, beneath [`FOLDER`]:
 ///
 /// - `loose/a.md` is a task missing its `status`, outside its route's folder,
@@ -122,6 +136,8 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         std::fs::create_dir_all(at.parent().expect("a parent folder")).expect("make the folder");
         std::fs::write(at, bytes).expect("write a document");
     }
+    std::fs::write(vault.path().join(CUT_DOCUMENT.0), CUT_DOCUMENT.1)
+        .expect("write the cut document");
     let host = vault.host();
     let lease = attach::attach_and_wait(&host, vault.name());
     let attached = induced_failure::statements_begun();
@@ -177,6 +193,18 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         );
     }
 
+    let past_a_cursor: BTreeSet<&str> = plans
+        .iter()
+        .filter(|plan| plan.sql().contains(") > (?"))
+        .flat_map(|plan| plan.rows().iter().filter_map(PlanRow::index))
+        .collect();
+    for arms in REACHED_PAST_A_CURSOR {
+        assert!(
+            arms.iter().any(|index| past_a_cursor.contains(index)),
+            "the census reached no seek past a cursor of {arms:?}: {past_a_cursor:?}"
+        );
+    }
+
     induced_failure::execute_out_of_band(&mut store, "DROP INDEX links_document_ordinal")
         .expect("drop the index");
     let replanned = plans_of(&store, &statements);
@@ -193,7 +221,8 @@ const REACHED: &[&[&str]] = &[
     // A merged page and a document's tail by kind, and by kind and severity.
     &["findings_fingerprint_kind_nocase"],
     &["findings_fingerprint_kind_severity_nocase"],
-    // The same, narrowed by rule.
+    // The same, narrowed by rule: the first page, and the page past a cursor
+    // and the tail of a cut document, which seek the same indexes.
     &["finding_rules_fingerprint_rule_kind_nocase"],
     &["finding_rules_fingerprint_rule_kind_severity_nocase"],
     // A document part driving the batch.
@@ -215,6 +244,18 @@ const REACHED: &[&[&str]] = &[
     &["rule_sets_fingerprint_rules"],
 ];
 
+/// The indexes a seek past a position — a continuation's page, a cut
+/// document's tail, the probe for more past it — is reached through, by
+/// narrowing: the arms a first batch never runs. A statement is one of these
+/// where it compares the `(path, position, id)` of the last finding it read.
+const REACHED_PAST_A_CURSOR: &[&[&str]] = &[
+    &["findings_fingerprint_kind_nocase"],
+    &["findings_fingerprint_kind_severity_nocase"],
+    &["finding_rules_fingerprint_rule_kind_nocase"],
+    &["finding_rules_fingerprint_rule_kind_severity_nocase"],
+    &["document_fields_raw"],
+];
+
 /// Preview a repair over every arm of the batch read through `host`, then
 /// apply one, and hand back the text of every statement each ran.
 fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) -> Vec<String> {
@@ -232,17 +273,10 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
         report
     };
 
-    let first = repair(repairing(ApplyMode::Preview).with_limit(1));
-    let next = provenance(planned(&first))
-        .cursor
-        .clone()
-        .expect("a batch of one leaves more to repair");
-    repair(
-        repairing(ApplyMode::Preview)
-            .with_limit(1)
-            .with_after(*next),
-    );
-    for params in [
+    // Each narrowing is run as a batch of one that cuts a document, then
+    // continued from the cursor it minted: a continuation's statements are
+    // the narrowing's own seeks past a cursor, which a first batch never runs.
+    let narrowings = [
         repairing(ApplyMode::Preview),
         repairing(ApplyMode::Preview).with_rule("tasks"),
         repairing(ApplyMode::Preview)
@@ -254,9 +288,28 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
         repairing(ApplyMode::Preview).with_severity(Severity::Error),
         repairing(ApplyMode::Preview).with_predicates([beneath()]),
         repairing(ApplyMode::Preview)
-            .with_rule("hubs")
+            .with_rule("tasks")
             .with_predicates([beneath()]),
         repairing(ApplyMode::Preview).with_predicates([Predicate::equal_to("type", "task")]),
+    ];
+    for narrowing in narrowings {
+        let first = repair(narrowing.clone().with_limit(1));
+        assert!(
+            findings_in(planned(&first)) > 1,
+            "a batch of one cut no document under {narrowing:?}: {:?}",
+            provenance(planned(&first))
+        );
+        let next = provenance(planned(&first))
+            .cursor
+            .clone()
+            .expect("a batch of one leaves more to repair");
+        repair(narrowing.with_limit(1).with_after(*next));
+    }
+    for params in [
+        repairing(ApplyMode::Preview),
+        repairing(ApplyMode::Preview)
+            .with_rule("hubs")
+            .with_predicates([beneath()]),
     ] {
         repair(params);
     }
@@ -270,6 +323,18 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
         "the census's apply wrote something"
     );
     ran
+}
+
+/// How many findings a repair plan's batch covers: those its operations fix
+/// and those it left alone.
+fn findings_in(plan: &ResolvedPlan) -> usize {
+    let provenance = provenance(plan);
+    provenance
+        .citations
+        .iter()
+        .map(|citation| citation.findings.len())
+        .sum::<usize>()
+        + provenance.skipped.len()
 }
 
 /// The statement the census plans for one the trace recorded, or none for
