@@ -1,4 +1,4 @@
-//! Settling: which skipped link findings the plan's final state no longer
+//! Held links: which skipped link findings the plan's final state still
 //! holds.
 //!
 //! **A repair skips every link finding it selects, and then the plan may mend
@@ -135,7 +135,7 @@ fn keyed(link: &LinkKey) -> (DocumentPath, LinkFamily, String) {
 /// holder, and `links` the link each link finding is about, by the finding's
 /// id. A skipped finding that is no link finding, or whose link the batch did
 /// not hand back, is kept.
-pub(crate) fn settle(
+pub(crate) fn skipped_still_held(
     skipped: Vec<SkippedFinding>,
     rows: &[FindingRow],
     links: &BTreeMap<u64, FindingLink>,
@@ -228,7 +228,7 @@ mod tests {
         PlanCondition::link_resolution(LinkKey::new(path(holder), syntax, address), before, after)
     }
 
-    /// The ids of the findings `settle` keeps among the link findings `of`,
+    /// The ids of the findings `skipped_still_held` keeps among the link findings `of`,
     /// each `(id, kind, holder, link)`, under the plan `operations` and
     /// `conditions` describe.
     fn kept(
@@ -248,7 +248,7 @@ mod tests {
             .iter()
             .map(|(id, ..)| SkippedFinding::new(*id, SkipReason::NoDeclaredFix))
             .collect();
-        settle(skipped, &rows, &links, &Landing::of(operations, conditions))
+        skipped_still_held(skipped, &rows, &links, &Landing::of(operations, conditions))
             .into_iter()
             .map(|skip| skip.finding)
             .collect()
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(kept(&findings, &[], &conditions), vec![2]);
     }
 
-    /// **Only link findings settle**: a skipped finding of any other kind, and
+    /// **Only link findings are judged**: a skipped finding of any other kind, and
     /// a link finding whose link the batch did not hand back, stand, as does
     /// the batch's order.
     #[test]
@@ -505,10 +505,11 @@ mod tests {
             ),
         ];
 
-        let kept: Vec<u64> = settle(skipped, &rows, &links, &Landing::of(&[], &conditions))
-            .into_iter()
-            .map(|skip| skip.finding)
-            .collect();
+        let kept: Vec<u64> =
+            skipped_still_held(skipped, &rows, &links, &Landing::of(&[], &conditions))
+                .into_iter()
+                .map(|skip| skip.finding)
+                .collect();
 
         // 5 is dropped; 3 is no link finding; 9 has no link; 7 still stands.
         assert_eq!(kept, vec![7, 3, 9]);

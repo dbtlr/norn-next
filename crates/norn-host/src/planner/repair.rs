@@ -59,10 +59,10 @@
 //! one about the document whole — that the composed document no longer holds
 //! is dropped: it is neither fixed nor skipped — a route out of a rule's area
 //! drops that rule's findings. **A link finding is settled by the resolved
-//! plan instead** ([`settle`]): link health is no conclusion of that judgment,
-//! so planning skips every link finding from its row, and the step that
-//! follows the whole resolution drops those the plan's resolution change set
-//! shows no longer hold. A broken link a route's move makes resolve, an
+//! plan instead** ([`skipped_still_held`]): link health is no conclusion of
+//! that judgment, so planning skips every link finding from its row, and the
+//! step that follows the whole resolution drops those the plan's resolution
+//! change set shows no longer hold. A broken link a route's move makes resolve, an
 //! ambiguous link it makes name one document or none, and a link naming a
 //! heading that is not there which the plan makes resolve to no document or
 //! to several, are dropped, each judged by the link at the finding's ordinal
@@ -101,11 +101,11 @@
 //! resolution, the provenance around it and the backstop.
 
 mod declared;
-mod settle;
+mod held_links;
 
 #[cfg(test)]
 pub(crate) use declared::blinded as blinding_the_respell_check;
-pub(crate) use settle::{Landing, settle};
+pub(crate) use held_links::{Landing, skipped_still_held};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -132,7 +132,7 @@ pub(crate) struct Planned {
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
     /// The findings left alone, in batch order: every link finding among
-    /// them, which the host settles against the resolved plan ([`settle`]).
+    /// them, which the host settles against the resolved plan ([`skipped_still_held`]).
     pub(crate) skipped: Vec<SkippedFinding>,
     /// The operations a fix would have been that cannot be resolved because
     /// the clock gives no reading, numbered in the operations' sequence. The

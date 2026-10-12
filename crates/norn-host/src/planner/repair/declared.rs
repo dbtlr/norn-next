@@ -118,7 +118,7 @@
 //! document as the last fix leaves it. A link finding is no conclusion of it,
 //! and is skipped here as its row reads; the resolved plan settles it
 //! afterwards, dropping the finding where a route's move changes what its link
-//! resolves to ([`super::settle`]).
+//! resolves to ([`super::held_links`]).
 //!
 //! **A list's elements are fixed one by one into one change to the field**
 //! ([`elements`]). Every selected `field/not-one-of` finding of one field, and
