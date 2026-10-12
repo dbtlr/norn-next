@@ -34,11 +34,12 @@ const PLAN: &str = "NORN_REPAIR_CRASH_PLAN";
 const PROFILE: &str = "tiny";
 
 /// One rule: a task holds a `status` (defaulting to `todo`) and belongs in
-/// `tasks/`, where it is routed.
-const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+/// `tasks/` or `filed/`; a misplaced one is routed to `filed/`, a folder the
+/// vault does not yet hold, so the route makes it.
+const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**', 'zz-repair/filed/**'], route: 'zz-repair/filed/'}\n";
 
 /// The documents the repair works on: two tasks missing their `status`, a task
-/// outside `tasks/`, and a holder linking to it that is no task.
+/// outside both folders, and a holder linking to it that is no task.
 const DOCUMENTS: [(&str, &str); 4] = [
     ("tasks/a.md", "---\ntype: task\n---\n# A\n"),
     ("tasks/b.md", "---\ntype: task\n---\n# B\n"),
@@ -181,13 +182,26 @@ fn assert_store_is_a_build_from_zero(sandbox: &Sandbox, vault: &attach::Vault, l
         );
 }
 
+/// Every stage `norn-fs` counts by publication ordinal, in the order a
+/// publication passes through them.
+const COUNTED_STAGES: [&str; 6] = [
+    "mkdir",
+    "swap",
+    "unlink",
+    "respell",
+    "parent-sync",
+    "cleanup",
+];
+
 /// **A crash at any publication of a repair plan, then a re-send.** The repair
 /// plans five publications: two field fixes, and a routed move that creates the
-/// document in `tasks/`, respells the holder's link and removes the original.
-/// For each, the process ends before the publication lands and again after it
-/// lands; sending the same resolved plan then answers it applied, leaves the
-/// vault bytes an uninterrupted apply leaves, and leaves a store that equals a
-/// build from zero.
+/// document in `filed/` (making the folder), respells the holder's link and
+/// removes the original. For each, every counted stage the publication passes
+/// ends the process there, before the publication lands and after it lands;
+/// sending the same resolved plan then answers it applied, leaves the vault
+/// bytes an uninterrupted apply leaves, and leaves a store that equals a build
+/// from zero. A stage this plan never reaches ends nothing, and the test says
+/// which those are.
 #[test]
 fn a_repair_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again() {
     let (baseline_box, baseline) = a_vault("repair-crash-baseline");
@@ -202,27 +216,26 @@ fn a_repair_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_
     );
     let wanted = tree_bytes(baseline.path());
     assert_eq!(
-        wanted["zz-repair/h.md"], b"Up: [m](tasks/m.md)\n",
+        wanted["zz-repair/h.md"], b"Up: [m](filed/m.md)\n",
         "the cascade respelled the holder"
     );
     assert_store_is_a_build_from_zero(&baseline_box, &baseline, "the uninterrupted apply");
 
+    let mut reached = Vec::new();
     for ordinal in 1..=publications {
-        // Before the publication lands (a swap or an unlink, whichever it is),
-        // and after it lands and its folder is synced.
-        for armed in [
-            format!("swap@{ordinal}=ends,unlink@{ordinal}=ends"),
-            format!("parent-sync@{ordinal}=ends"),
-        ] {
+        for stage in COUNTED_STAGES {
+            let armed = format!("{stage}@{ordinal}=ends");
             let (sandbox, vault) = a_vault("repair-crash");
             // Each vault is its own tree, so its plan names its own root.
             let sent_plan = planned(&vault);
             assert_eq!(sent_plan.operations, plan.operations, "{armed}");
             assert_eq!(sent_plan.transitions, plan.transitions, "{armed}");
-            assert!(
-                crashed_by(&sandbox, &sent_plan, &armed),
-                "{armed}: the arm fired"
-            );
+            if !crashed_by(&sandbox, &sent_plan, &armed) {
+                // The publication never passes this stage: the child applied
+                // the whole plan, which `crashed_by` has checked it did.
+                continue;
+            }
+            reached.push(armed.clone());
 
             let ApplyReport::Applied { changeset, .. } = sent(&vault, &sent_plan) else {
                 panic!("{armed}: the re-send answers applied");
@@ -238,4 +251,18 @@ fn a_repair_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_
             assert_store_is_a_build_from_zero(&sandbox, &vault, &armed);
         }
     }
+    // Every publication is crashed before it lands and after: the stages a
+    // publication of any kind passes are armed at each ordinal, and the ones
+    // this plan reaches are the swaps and the unlink, the folder made for the
+    // routed document, and the folder sync after each.
+    let fired = |stage: &str| reached.iter().filter(|a| a.starts_with(stage)).count();
+    assert_eq!(fired("swap@"), 4, "{reached:?}");
+    assert_eq!(fired("unlink@"), 1, "{reached:?}");
+    assert_eq!(fired("mkdir@"), 1, "{reached:?}");
+    assert_eq!(fired("parent-sync@"), publications, "{reached:?}");
+    // `respell` is a case-only rename of a document, which no repair plans, and
+    // `cleanup` runs only after a publication has failed, which an uninterrupted
+    // apply of this plan never does: neither is reached, and each says so by
+    // the child ending cleanly with the arm unfired.
+    assert_eq!(fired("respell@") + fired("cleanup@"), 0, "{reached:?}");
 }
