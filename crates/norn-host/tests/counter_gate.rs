@@ -3936,7 +3936,10 @@ impl Gate {
 /// tag, planting the tag on every gate document, took 35,338 VM steps over
 /// `ambiguous`'s 30 and 221,828 over `realistic`'s 200, with 57 sorts at
 /// both. The bar holds the other half of the claim, that the vault around the
-/// matched documents costs nothing.
+/// matched documents costs nothing. That a continuation pays for every matched
+/// document, those before its cursor included, is a defect rather than a
+/// declared cost (NORN-390): draining such a selection is quadratic in the
+/// matched set, and its fix owns the pair that varies that set.
 const MARKED_GATES: usize = 12;
 
 /// How many gate documents stand beside `profile`'s tree: a tenth of its
