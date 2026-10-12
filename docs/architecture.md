@@ -2872,7 +2872,11 @@ an ambiguous link that now names one document or none, a missing-anchor link tha
 none or several. A link with no entry in that set, one whose resolution the plan does not change or one it
 removes, keeps its finding. A
 missing-anchor link that now names another single document stands, as a declared limit:
-judging it would need the store's anchor predicate asked of the new document. The change
+judging it would need the store's anchor predicate asked of the new document. A holder whose cascade respells some links of an address and leaves others as written
+is a declared limit too: the plan names a link by holder, syntax and address and never by ordinal, so where the
+forecast advises on a link of the old address the finding is read both ways, respelled and as
+written, and dropped only where neither holds it; one may stay listed though it no longer
+holds, and none is dropped that holds. The change
 set has no entry for a link the after-state no longer holds, so a link finding on a
 wikilink that a declared `field/forbidden` fix with `remove` deleted along with its field
 stays skipped though the link is gone, as a declared limit (NORN-389); it is the only fix

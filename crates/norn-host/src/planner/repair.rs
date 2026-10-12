@@ -74,6 +74,11 @@
 //! **A declared limit**: a missing-anchor link that now resolves to
 //! another single document stands, since whether that document holds the
 //! anchor is the store's anchor predicate and not asked here.
+//! **A declared limit**: in a holder whose cascade respells some links of an
+//! address and leaves others as written, the plan does not say which of them a
+//! finding is about, so it is read both ways and dropped only where it holds
+//! under neither; one may stay listed though it no longer holds, and none is
+//! dropped that holds.
 //! The skipped findings keep the batch's order.
 //!
 //! **A route's link cascade is judged by construction, not by generation.**

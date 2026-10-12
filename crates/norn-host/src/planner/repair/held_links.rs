@@ -18,9 +18,13 @@
 //! at the plan's after-state is its holder where the batch's routes leave it,
 //! its syntax as stored, and its address as the cascade that respells it
 //! leaves it ([`Landing`]). The plan's resolution change set is keyed at the
-//! after-state and exact, with an entry for every link whose resolution the
-//! plan changes and no other, so a link with no entry is one whose resolution
-//! the plan does not change, or one it removes, and its finding stands.
+//! after-state and exact: it holds an entry for every link whose resolution
+//! the plan changes, every link whose text the plan writes and every link a
+//! cascade leaves behind, and no other. A link with no entry is one the plan
+//! leaves resolving as it did, or one it removes, and its finding stands.
+//! Which of the three put a link in the set does not matter here: an entry
+//! records what the link resolves to at the plan's after-state, and the verdict
+//! below reads only that.
 //!
 //! **An entry says whether the finding still holds.** A `link/broken` finding
 //! stands only where the link still resolves to nothing; a `link/ambiguous`
@@ -39,13 +43,23 @@
 //! stands as skipped, so it may be reported for an anchor the new document
 //! holds.
 //!
-//! **Declared limit: a cascade rewrite is mapped for every link of its holder
-//! with that syntax and address, though the batch may rewrite only some.** A
-//! holder's rewrite batch can leave some links of that address as written;
-//! they keep their own entry under the old address. A missing-anchor finding on
-//! such a link is read under the new address, so it stands where its own entry
-//! may say it resolves to none or to several. The error keeps a finding listed
-//! and never drops one that holds.
+//! **A cascade's respelling is read by the plan's own account of it.** A
+//! cascade rewrite and a forecast advisory both name a link by its holder,
+//! syntax and address, never by its ordinal, so the plan does not say which of
+//! the links of one key a holder's rewrite batch respelled. Where the forecast
+//! advises on no link of the old key, the batch respelled every one of them,
+//! and the finding is read under the key of the new address. Where it does
+//! advise on one, the batch left some of them as written, so which one the
+//! finding is about is not known, and it is read both ways: respelled, under
+//! the new address, and as written, under the old one, where no entry means the
+//! link resolves as it did. The finding is dropped only where both readings
+//! drop it.
+//!
+//! **Declared limit: in a holder whose cascade respells some links of an
+//! address and leaves others as written, a finding on that address may stay
+//! listed though it no longer holds.** It is dropped only where it holds under
+//! neither reading, so one that holds under the reading that does not match its
+//! link stays. None is dropped that holds.
 //!
 //! **Declared limit: a link finding about a link the plan removes stands.** The
 //! change set has no entry for a link the after-state no longer holds, so a

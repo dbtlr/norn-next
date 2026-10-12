@@ -333,7 +333,9 @@ impl Resolves {
 /// transition, which that file's hashes guard.
 ///
 /// **The change set is exact.** It holds one entry for every link whose
-/// resolution the plan changes, and no other, so the applier computes it
+/// resolution the plan changes, every link whose text the plan writes, every
+/// link a cascade leaves behind and every link that named a document the plan
+/// removes, and no other, so the applier computes it
 /// again and refuses on any difference: an entry the plan records that the
 /// set computed again does not hold, and an entry the set computed again
 /// holds that the plan does not record. An address resolution is not an
