@@ -17,8 +17,8 @@ use super::{
 use crate::common::violation;
 use crate::find::failure_of;
 use norn_store::{
-    PageRefusal, RepairBatch, RepairSelection, StoredPathOrder, ValidatePlan, ValidateStatement,
-    ValidateWork,
+    MAX_PAGE, PageRefusal, RepairBatch, RepairSelection, StoredPathOrder, ValidatePlan,
+    ValidateStatement, ValidateWork,
 };
 use norn_testkit::explain::{Access, QueryPlan};
 use norn_wire::{
@@ -174,6 +174,45 @@ fn a_limit_inside_a_document_extends_the_batch_through_its_last_finding() {
         Some(&CursorKey::repair_document("b.md")),
         "a batch's cursor names the last document it covered"
     );
+}
+
+/// **A batch runs past [`MAX_PAGE`] where one document holds more selected
+/// findings than that**, the declared limit of a batch's size: the boundary
+/// document's tail is joined whole. With 1,100 more undeclared tags standing
+/// over `a.md`, so 1,103 findings, a batch at the maximum limit holds all
+/// 1,103 and covers `a.md` alone, its cursor names `a.md`, and the next batch
+/// starts at `b.md`. A limit past the maximum is still refused.
+#[test]
+fn a_document_holding_more_findings_than_the_maximum_page_is_batched_whole_past_it() {
+    let mut store = Validating::new("batch-past-max-page");
+    let crowd = 1100;
+    {
+        let mut request = store.store.begin_request();
+        for at in 0..crowd {
+            request
+                .record_finding(&undeclared("a.md", &format!("crowd-{at:04}")))
+                .expect("recording a finding");
+        }
+    }
+    let held = crowd + 3;
+    assert!(held > MAX_PAGE, "the document holds more than a page");
+    let maximum = u32::try_from(MAX_PAGE).expect("a page bound fits a wire limit");
+
+    let batch = store.batch(&repairing().with_limit(maximum));
+    assert_eq!(documents(&batch.rows), ["a.md"]);
+    assert_eq!(
+        batch.rows.len(),
+        held,
+        "the boundary document is read whole"
+    );
+    let next = batch.next.expect("more documents remain");
+    assert_eq!(next.key(), &CursorKey::repair_document("a.md"));
+    let continued = store.batch(&repairing().with_limit(maximum).with_after(next));
+    assert_eq!(documents(&continued.rows)[0], "b.md");
+    assert!(matches!(
+        store.refused(&repairing().with_limit(maximum + 1)),
+        PageRefusal::OutOfBound { .. }
+    ));
 }
 
 /// **A batch is cut only between documents**, and only as far past the limit
