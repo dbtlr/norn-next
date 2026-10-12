@@ -4217,33 +4217,101 @@ const CONTINUATIONS: [Continuation; 3] = [
 /// batch.
 const CONTINUATION_FINDINGS: usize = 6;
 
+/// Which gate documents a rule narrowing admits: every one, so they grow
+/// with the vault, or the [`MARKED_GATES`] a document part names, the same at
+/// every scale.
+#[derive(Clone, Copy, Debug)]
+enum Admitted {
+    EveryGate,
+    Marked,
+}
+
+impl Admitted {
+    /// How many gate documents beside `profile`'s tree this narrowing admits.
+    fn documents(self, profile: &norn_fixtures::Profile) -> usize {
+        match self {
+            Admitted::EveryGate => gates(profile),
+            Admitted::Marked => MARKED_GATES,
+        }
+    }
+}
+
 /// The gate rule's findings selected with each other part of a selection in
 /// turn: a kind, a severity, a path part, and a document part that is a field
-/// equality and one that is a tag. Every one admits the same gate documents.
-fn rule_narrowings(gated: &Gated) -> Vec<(&'static str, norn_wire::RepairParams)> {
+/// equality and one that is a tag.
+fn rule_narrowings(gated: &Gated) -> Vec<(&'static str, norn_wire::RepairParams, Admitted)> {
     let by_rule = || gated.params().with_rule(GATE_RULE);
     vec![
         (
             "kind",
             by_rule().with_kinds([norn_wire::FindingKind::NotOneOf]),
+            Admitted::EveryGate,
         ),
         (
             "severity",
             by_rule().with_severity(norn_wire::Severity::Error),
+            Admitted::EveryGate,
         ),
         (
             "path part",
             by_rule().with_predicates([Predicate::path(format!("{GATE_FOLDER}/**"))]),
+            Admitted::EveryGate,
         ),
         (
             "field equality",
             by_rule().with_predicates([Predicate::equal_to("zz_region", "east")]),
+            Admitted::Marked,
         ),
         (
             "tag",
             by_rule().with_predicates([Predicate::tag("zz-gate-tag")]),
+            Admitted::Marked,
         ),
     ]
+}
+
+/// How many admitted gate documents stand after the cursor a continuation is
+/// measured from: the batch's three or one, and the rest the batch's probe
+/// reads past it, the same at every scale.
+const LEFT_AFTER_THE_CURSOR: usize = 5;
+
+/// The cursor that leaves [`LEFT_AFTER_THE_CURSOR`] of the `admitted` gate
+/// documents `params` selects, each holding `per_document` findings: reached
+/// by first batches and continuations sized to end exactly at a document,
+/// each at most [`MAX_PAGE`] findings. So every admitted document but the
+/// last few stands before it, and that prefix grows with the vault wherever
+/// the admitted documents do.
+fn cursor_leaving_the_last(
+    gated: &Gated,
+    params: &norn_wire::RepairParams,
+    admitted: usize,
+    per_document: usize,
+) -> norn_wire::Cursor {
+    let mut to_pass = admitted - LEFT_AFTER_THE_CURSOR;
+    let mut after: Option<norn_wire::Cursor> = None;
+    while to_pass > 0 {
+        let documents = to_pass.min(MAX_PAGE / per_document);
+        let mut hop = params
+            .clone()
+            .with_limit(u32::try_from(documents * per_document).expect("a hop fits a limit"));
+        if let Some(cursor) = after.take() {
+            hop = hop.with_after(cursor);
+        }
+        let (_, passed) = gated.repair(hop);
+        assert_eq!(
+            passed.skipped.len()
+                + passed
+                    .citations
+                    .iter()
+                    .map(|citation| citation.findings.len())
+                    .sum::<usize>(),
+            documents * per_document,
+            "a hop toward the cursor plans whole documents"
+        );
+        after = Some(*passed.cursor.expect("a hop leaves the documents after it"));
+        to_pass -= documents;
+    }
+    after.expect("the cursor passes at least one document")
 }
 
 /// What a continuation of one narrowing cost, and the bytes of the skipped
@@ -4255,7 +4323,8 @@ struct ContinuationReading {
 }
 
 /// Attach `profile` under `configuration` and read the continuation of every
-/// rule narrowing, each after a real cursor its own first batch answered.
+/// rule narrowing, each after a real cursor that leaves only the last
+/// [`LEFT_AFTER_THE_CURSOR`] documents it admits.
 fn read_the_continuations(
     label: &str,
     profile: &norn_fixtures::Profile,
@@ -4264,19 +4333,25 @@ fn read_the_continuations(
     let gated = Gated::attach(label, profile, configuration.gate);
     rule_narrowings(&gated)
         .into_iter()
-        .map(|(narrowing, params)| {
+        .map(|(narrowing, params, admitted)| {
+            let cursor = cursor_leaving_the_last(
+                &gated,
+                &params,
+                admitted.documents(profile),
+                configuration.gate.fields,
+            );
             let params = params.with_limit(configuration.limit);
-            let (_, first) = gated.repair(params.clone());
-            let cursor = first
-                .cursor
-                .expect("the first batch of a rule's narrowing leaves more");
-            let (counters, continued) = gated.repair(params.with_after(*cursor));
+            let (counters, continued) = gated.repair(params.with_after(cursor));
             assert_eq!(
                 continued.skipped.len(),
                 CONTINUATION_FINDINGS,
                 "the continuation of `{narrowing}` plans the findings of its batch's documents"
             );
             assert_eq!(continued.remaining, None, "a continuation counts none");
+            assert!(
+                continued.cursor.is_some(),
+                "the continuation of `{narrowing}` leaves documents after it"
+            );
             ContinuationReading {
                 narrowing,
                 counters,
@@ -4289,13 +4364,20 @@ fn read_the_continuations(
 }
 
 /// **A repair's continuation costs the batch, not the vault (NORN-376).**
-/// `Host::repair` in a preview with `after` set to the cursor a first batch
-/// answered, over `ambiguous` (300 documents) and `realistic` (2000), each
-/// with a tenth of its documents planted as gate documents, runs the same
-/// statements, rows, VM steps, document opens and holds at both sizes: the
-/// batch is six skipped findings of the same three or one documents either
-/// way, no link is in its neighbourhood (no judgment is run), and only the
-/// gate documents after it differ. The pair is held for the gate rule
+/// `Host::repair` in a preview with `after` set to a real cursor, over
+/// `ambiguous` (300 documents) and `realistic` (2000), each with a tenth of
+/// its documents planted as gate documents, runs the same statements, rows,
+/// VM steps, document opens and holds at both sizes: the batch is six skipped
+/// findings of the same three or one documents either way, no link is in its
+/// neighbourhood (no judgment is run), and the same
+/// [`LEFT_AFTER_THE_CURSOR`] admitted documents stand after the cursor.
+///
+/// **The cursor is deep**: every admitted gate document but the last five
+/// stands before it, 25 over `ambiguous` and 195 over `realistic`, so a
+/// continuation that re-read the selection from its first document, or
+/// stepped through what precedes its cursor, costs the larger vault more. A
+/// document part's prefix is its seven marked documents at both sizes
+/// ([`MARKED_GATES`]). The pair is held for the gate rule
 /// combined with each of a kind, a severity, a path part, a field equality
 /// and a tag, at the three [`CONTINUATIONS`]: the base, F_d raised with the
 /// annotation bytes held, and the annotation bytes raised with F_d held. The
