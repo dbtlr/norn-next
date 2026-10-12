@@ -390,6 +390,47 @@ fn the_first_batch_counts_what_remains_and_the_last_names_no_cursor() {
     assert_eq!(provenance(&whole).cursor, None);
 }
 
+/// The write generation a validate of the repair's documents reads: the
+/// independent account of the generation the findings stand at.
+fn validated_generation(host: &attach::ServingHost, vault: &attach::Vault) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    host.validate(&request)
+        .expect("a validate answers")
+        .answer
+        .reading
+        .generation
+}
+
+/// **A first batch records the generation the store's findings stand at.**
+/// It equals the write generation a validate reads, before a write and again
+/// after one has moved it.
+#[test]
+fn the_first_batch_records_the_generation_the_findings_stand_at() {
+    let (_sandbox, vault, host) = a_vault("host-repair-generation");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let standing_at = validated_generation(&host, &vault);
+    let first = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(3)));
+    assert_eq!(provenance(&first).finding_generation, standing_at);
+
+    host.set(SetParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        WriteTarget::path(at("a.md")),
+        vec![FieldChange::set("status", AuthoredValue::string("done"))],
+    ))
+    .expect("the write is admitted")
+    .wait()
+    .expect("a.md is written");
+
+    let moved_to = validated_generation(&host, &vault);
+    assert!(moved_to > standing_at, "the write moved no generation");
+    let after = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(3)));
+    assert_eq!(provenance(&after).finding_generation, moved_to);
+}
+
 /// **A cursor survives the findings it covered being derived again.** After
 /// a batch minted its cursor at a.md, a write to a.md files its findings anew
 /// under new identities at a later generation; the continuation reads only the
