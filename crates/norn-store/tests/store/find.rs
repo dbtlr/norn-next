@@ -1649,6 +1649,7 @@ fn judge_from_the_place(page: &QueryPlan, shape: ReadFilter, seek: &Seek) {
         }
     };
     page.assert_no_full_scan();
+    page.assert_no_temp_btree();
     let rows = rows_of(page, alias);
     rows.assert_searches_through(table, access);
     rows.assert_search_constraint(table, &constraint);
@@ -1823,6 +1824,25 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
             failure_of(&format!("{index} dropped under {part:?}"), || {
                 judge_filter(&page, seek)
             });
+            // The index a path-ordered part's source seeks, gone: the path
+            // page reads its documents some other way. A path part's source
+            // seeks the folded order's index, whichever root's index its set
+            // reads.
+            let sourced_from = match shape {
+                ReadFilter::PathGlob(_) => "documents_path_nocase",
+                _ => index,
+            };
+            if shape.is_path_ordered(false) && *index == sourced_from {
+                let plans = roots[on(*shape)].plans_under(
+                    &request().with_predicates([part.clone()]),
+                    &declared_readings(),
+                );
+                let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
+                failure_of(
+                    &format!("{index} dropped under {part:?}, a path page"),
+                    || judge_from_the_place(&page, *shape, seek),
+                );
+            }
         }
     }
 }
@@ -2540,6 +2560,9 @@ impl Seeded {
 /// document the page meets, where almost every matched document stands after
 /// the cursor, and from the fifth from the bulk's other end, where almost
 /// every one stands before it.
+///
+/// Control: the index an equality's source seeks dropped on the larger vault,
+/// a page near the bulk's end reads what the part matched, and the bar fails.
 #[test]
 fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
     let (fewer, more) = (50, 500);
@@ -2548,7 +2571,7 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
         StoredPathOrder::AsciiCaseInsensitive,
     ] {
         let small = Seeded::with_matched_bulk_under("find-matched-small", fewer, order);
-        let large = Seeded::with_matched_bulk_under("find-matched-large", more, order);
+        let mut large = Seeded::with_matched_bulk_under("find-matched-large", more, order);
         for (shape, part) in drained_parts(FindingKind::BodyBytesNotUtf8) {
             for direction in [Direction::Ascending, Direction::Descending] {
                 // A part ordered only ascending is not yet held descending.
@@ -2586,6 +2609,99 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
                     assert_eq!(
                         at_large.work.page_full_scan_steps, 0,
                         "a page of {params:?} stepped through a full scan under {order:?}"
+                    );
+                }
+            }
+        }
+
+        // Control: the index an equality's source seeks, dropped on the larger
+        // vault, a page near the bulk's end reads what the part matched.
+        large.drop_index("document_fields_raw");
+        let equality = request()
+            .with_predicates([Predicate::equal_to("status", "open")])
+            .with_limit(3);
+        failure_of(
+            &format!("document_fields_raw dropped under {order:?}"),
+            || {
+                let (at_small, at_large) = (
+                    small.page(&small.resumed(
+                        &equality,
+                        None,
+                        &format!("bulk/{:04}.md", fewer - 5),
+                    )),
+                    large.page(&large.resumed(
+                        &equality,
+                        None,
+                        &format!("bulk/{:04}.md", more - 5),
+                    )),
+                );
+                assert_eq!(at_small.work, at_large.work);
+            },
+        );
+    }
+}
+
+/// **A page a document part drives answers what one page holding every
+/// match answers, drained a row and two rows at a time, either way, on either
+/// root (NORN-390).** Over the fixture and twelve bulk documents every part of
+/// [`drained_parts`] matches — each reached by its part twice, a value or a
+/// tag written twice — and, where the root tells spellings apart, `BULK/0003.md`
+/// and `Bulk/0003.md` beside `bulk/0003.md`, every page of each part's drain
+/// continues exactly where the one before it stopped: the drain holds each
+/// matched document once, in the answer's path order, and every bulk document
+/// among them.
+#[test]
+fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let mut seeded = Seeded::with_matched_bulk_under("find-matched-drain", 12, order);
+        let mut bulk: Vec<String> = (0..12).map(|at| format!("bulk/{at:04}.md")).collect();
+        if order == StoredPathOrder::Sensitive {
+            let declared = declared();
+            let variants = ["BULK/0003.md", "Bulk/0003.md"];
+            let documents: Vec<_> = variants
+                .iter()
+                .map(|at| matched_by_every_part(at, &declared))
+                .collect();
+            let mut request = seeded.store.begin_request();
+            write_documents(&mut request, &documents);
+            for at in variants {
+                request
+                    .record_finding(&violation(at))
+                    .expect("recording a variant's finding");
+            }
+            bulk.extend(variants.iter().map(|at| at.to_string()));
+        }
+        let answer_order = |path: &String| (path.to_ascii_lowercase(), path.clone());
+        for (shape, part) in drained_parts(FindingKind::BodyBytesNotUtf8) {
+            for direction in [Direction::Ascending, Direction::Descending] {
+                if !shape.is_path_ordered(direction == Direction::Descending) {
+                    continue;
+                }
+                let params = sorted(SortKey::path(), direction).with_predicates(part.clone());
+                let whole = seeded.paths(&params.clone().with_limit(MAX_PAGE as u32));
+                let mut ordered = whole.clone();
+                ordered.sort_by_key(answer_order);
+                if direction == Direction::Descending {
+                    ordered.reverse();
+                }
+                ordered.dedup();
+                assert_eq!(
+                    whole, ordered,
+                    "{part:?} {direction:?} answered other than each match once in path order \
+                     under {order:?}"
+                );
+                assert!(
+                    bulk.iter().all(|path| whole.contains(path)),
+                    "{part:?} {direction:?} missed a bulk document under {order:?}: {whole:?}"
+                );
+                for limit in [1, 2] {
+                    assert_eq!(
+                        drained(&seeded, &params, limit),
+                        whole,
+                        "{part:?} {direction:?} drained {limit} at a time under {order:?}"
                     );
                 }
             }

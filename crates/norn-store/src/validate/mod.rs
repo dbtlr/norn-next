@@ -59,7 +59,7 @@
 //! continuation costs its batch however many documents the part matched; any
 //! other document part that keeps what it seeks drives each arm, which then
 //! sorts what that part matched, as a page's section does. No index is added
-//! for it: the indexes a page seeks are the ones behind the merge. A batch holds about `limit` findings and **never splits a
+//! for the merge: the indexes a page seeks are the ones behind it. A batch holds about `limit` findings and **never splits a
 //! document's selected findings**: a limit falling inside a document reads the
 //! document's remaining findings on ([`ValidateStatement::DocumentTail`]), so a
 //! batch runs past its limit only by its last document. The `batch` module

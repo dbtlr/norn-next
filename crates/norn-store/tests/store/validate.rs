@@ -24,9 +24,9 @@ use crate::common::{
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
-    StoreError, StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan,
-    ValidateStatement, ValidateWork, Validated, Validation, induced_failure,
+    ContentModel, FindingFacts, IN_VALUES_CEILING, PageRefusal, ReadStatement, Snapshot,
+    SnapshotReader, Store, StoreError, StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS,
+    ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -2072,11 +2072,14 @@ fn work_leaving(
 /// same at both sizes and steps through no full scan: the second page, where
 /// almost every matched document stands after the cursor, and the page that
 /// leaves six findings after it, where almost every one stands before.
+///
+/// Control: the index an equality's source seeks dropped on the larger vault,
+/// a deep page reads what the part matched, and the bar fails.
 #[test]
 fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
     for order in ROOTS {
         let small = Validating::with_matched_bulk_under("validate-matched-small", 50, order);
-        let large = Validating::with_matched_bulk_under("validate-matched-large", 500, order);
+        let mut large = Validating::with_matched_bulk_under("validate-matched-large", 500, order);
         for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
             for selected in [
                 validating().with_kinds([FindingKind::UndeclaredTag]),
@@ -2111,6 +2114,58 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
                     );
                 }
             }
+        }
+
+        // Control: the index an equality's source seeks, dropped on the larger
+        // vault, a deep page reads what the part matched before its place.
+        large.drop_index("document_fields_raw");
+        let equality = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::equal_to("status", "open")]);
+        failure_of(
+            &format!("document_fields_raw dropped under {order:?}"),
+            || {
+                assert_eq!(
+                    work_leaving(&small, &equality, 5, 6),
+                    work_leaving(&large, &equality, 5, 6)
+                )
+            },
+        );
+    }
+}
+
+/// **A membership naming as many values as a part may drives a page and a
+/// batch from its source (NORN-390).** Over the fixture and twelve bulk
+/// documents every part of [`drained_parts`] matches, a membership naming
+/// `open` among [`IN_VALUES_CEILING`] values — one seek per value, merged —
+/// answers the page and the batch an equality on `open` answers.
+#[test]
+fn a_membership_at_its_ceiling_drives_a_page_and_a_batch_from_its_source() {
+    let validating_store = Validating::with_matched_bulk_under(
+        "validate-membership-ceiling",
+        12,
+        StoredPathOrder::Sensitive,
+    );
+    let values: Vec<String> = std::iter::once("open".to_string())
+        .chain((1..IN_VALUES_CEILING).map(|at| format!("value-{at:03}")))
+        .collect();
+    let member = Predicate::in_any("status", values);
+    let equality = Predicate::equal_to("status", "open");
+    let narrowed = |part: &Predicate| validating().with_predicates([part.clone()]).with_limit(7);
+    let paged = |part: &Predicate| {
+        let (rows, _) = validating_store.page(&narrowed(part));
+        rows.iter().map(named).collect::<Vec<_>>()
+    };
+    assert_eq!(paged(&member), paged(&equality));
+    let batched = |part: &Predicate| {
+        let batch = validating_store.batch(&batch::selecting(&narrowed(part)));
+        batch.rows.iter().map(named).collect::<Vec<_>>()
+    };
+    assert_eq!(batched(&member), batched(&equality));
+    assert!(!batched(&member).is_empty());
+    for plan in validating_store.plans(&narrowed(&member)) {
+        if plan.statement == ReadStatement::Validate(ValidateStatement::KindPage) {
+            judge_ordered(&emitted_plan(&plan.plan), "f");
         }
     }
 }

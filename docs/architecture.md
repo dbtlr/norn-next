@@ -873,7 +873,10 @@ with no filter does and tests each row against them at its key. Two bars hold th
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
-handed it and sorts at most once per page statement. Each filter is one index seek, judged
+handed it and sorts at most once per page statement; a path page a filter's source drives
+seeks that filter's index from its place and sorts nothing, and its continuation, near the
+start of what the filter matched and near the end, costs the same while the documents the
+filter matches grow with the vault. Each filter is one index seek, judged
 on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, on
 `(key, typed)` where the key carries a typed order, or on `(key, folded)` where it is a tag
 key — the `tags` carrier, declared or not, or a key declared `tags` — whose value rows hold
@@ -985,8 +988,9 @@ path part or a document part costs the same at both and steps through no full sc
 either root, and so does one selecting a rule together with any of those; a page of a range
 that matches every finding costs the same at both, by kind and by rule alike, and a page
 deep among many findings at one path costs what the page one page in costs; a continuation
-a document part drives, near the start of what it matched and near the end, costs the same
-while the documents it matches grow with the vault. On a
+a document part keeping its documents in the answer's path order drives, near the start of
+what it matched and near the end, costs the same while the documents it matches grow with
+the vault. On a
 root that tells spellings apart a path part's folded range also reads the findings at paths
 spelling its prefix in another case, which its glob rejects. A
 payload bar holds that no statement a page or a summary runs, under every narrowing the drain
@@ -1000,7 +1004,7 @@ validate's — one compilation, the same refusals, a rule composing with every o
 and the batch is one merged read: a compound statement with one arm per kind, each arm the
 seek a kind's page is (over the rule's own rows where a rule is selected), joined by `UNION
 ALL` and ordered together, which SQLite runs as a merge of the arms' own orders with no sort
-and no index added. Where a document part keeping its documents in the answer's path order
+and no index added for it. Where a document part keeping its documents in the answer's path order
 narrows the batch, the read is one arm instead: the part's documents from the batch's place,
 read once, each seeking every kind read at its path, so only one document's findings are
 ordered among themselves; any other document part keeping what it seeks drives each arm
@@ -1015,8 +1019,8 @@ covered, under no fingerprint, only where more remain, and is its own row type, 
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
 plan bar with a negative control, and a work bar over two vault sizes holds that a batch no
 document part drives costs the findings it reads and steps through no full scan or sort, and
-that a continuation a document part drives costs the same while the documents the part
-matches grow. A
+that a continuation a document part keeping its documents in the answer's path order drives
+costs the same while the documents the part matches grow. A
 first batch also counts the selection (see Mutation, `repair`), so its cost follows the findings the selection
 admits; the counter lane holds a repair narrowed to a path flat across vault sizes. The
 host's `repair` verb pages through it, one batch per request.

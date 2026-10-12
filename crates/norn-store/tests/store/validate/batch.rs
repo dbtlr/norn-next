@@ -50,7 +50,7 @@ pub(super) fn selecting(selection: &ValidateParams) -> RepairParams {
 
 impl Validating {
     /// The batch `params` selects.
-    fn batch(&self, params: &RepairParams) -> RepairBatch {
+    pub(super) fn batch(&self, params: &RepairParams) -> RepairBatch {
         self.snapshot()
             .repair_batch(&RepairSelection::from(params), &declared())
             .unwrap_or_else(|refusal| panic!("a batch of {params:?}: {refusal}"))
@@ -1588,12 +1588,15 @@ fn a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor() {
 /// scan, continuing from a cursor at the second bulk document, where almost
 /// every matched document stands after it, and at the bulk document
 /// [`LEFT_IN_THE_BULK`] before the last, where almost every one stands before.
+///
+/// Control: the index an equality's source seeks dropped on the larger vault,
+/// a deep continuation reads what the part matched, and the bar fails.
 #[test]
 fn a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set() {
     let (fewer, more) = (50, 500);
     for order in ROOTS {
         let small = Validating::with_matched_bulk_under("batch-matched-small", fewer, order);
-        let large = Validating::with_matched_bulk_under("batch-matched-large", more, order);
+        let mut large = Validating::with_matched_bulk_under("batch-matched-large", more, order);
         for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
             for selected in [
                 repairing(),
@@ -1628,6 +1631,26 @@ fn a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set() {
                 }
             }
         }
+
+        // Control: the index an equality's source seeks, dropped on the larger
+        // vault, a deep continuation reads what the part matched before it.
+        large.drop_index("document_fields_raw");
+        let equality = repairing()
+            .with_limit(3)
+            .with_predicates([Predicate::equal_to("status", "open")]);
+        let deep = [
+            format!("bulk/{:04}.md", fewer - LEFT_IN_THE_BULK - 1),
+            format!("bulk/{:04}.md", more - LEFT_IN_THE_BULK - 1),
+        ];
+        failure_of(
+            &format!("document_fields_raw dropped under {order:?}"),
+            || {
+                assert_eq!(
+                    continued_from(&small, &equality, &deep[0]).0,
+                    continued_from(&large, &equality, &deep[1]).0
+                )
+            },
+        );
     }
 }
 

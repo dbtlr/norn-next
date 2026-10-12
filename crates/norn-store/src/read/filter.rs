@@ -12,8 +12,12 @@ use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
 ///
-/// Each is a membership test of the page's document against rows one index
-/// seek reaches, so a filter costs the rows it matches rather than the vault.
+/// Each reads rows one index seek reaches, so a filter costs the rows it
+/// matches rather than the vault, three ways: as the set of documents it keeps,
+/// as a test of one document at its key, and — where it keeps its documents in
+/// the answer's path order ([`ReadFilter::is_path_ordered`]) — as those
+/// documents from a place in that order, a seek of the same index past its
+/// key and value, or one such seek per value or container, merged.
 /// [`ReadFilter::all`] and [`ReadFilter::slot`] keep the same discipline as
 /// [`crate::FindStatement`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +26,8 @@ pub enum ReadFilter {
     /// raw)` on `document_fields_raw`, `(key, typed)` on
     /// `document_fields_typed` against the value's typed sort key, or `(key,
     /// folded)` on `document_fields_folded` against the tag or link the value
-    /// names.
+    /// names. Each index holds the path after them, so the documents at one
+    /// value stand in the answer's path order.
     /// A shaped reading counts a row only where its key's presence row, one
     /// primary-key seek, names the container the declared shape holds.
     Equal(FieldMatch),
@@ -283,20 +288,21 @@ impl Filter {
         }
         match self {
             Filter::Path(part) => {
+                // The answer order's folded range, on either root, rather than
+                // the root's range a set reads: the source hands documents
+                // back in the answer's order, and the glob decides each.
                 let (lower, upper) = super::answer_order::answer_range(&part.pattern);
                 let (lower, upper) = (binder.bind(Value::Text(lower)), binder.bind(upper));
                 let glob = part.glob_test("dg.path", binder);
-                Some(reach.arm(
+                let rows = Rows::new(
                     "documents AS dg",
-                    "dg.path",
                     "dg.id",
-                    &format!(
+                    format!(
                         "dg.path >= {lower} COLLATE NOCASE AND dg.path < {upper} COLLATE NOCASE \
                          AND {glob}"
                     ),
-                    false,
-                    binder,
-                ))
+                );
+                Some(reach.arm(&rows, false, binder))
             }
             Filter::Bound {
                 shape,
@@ -326,35 +332,26 @@ pub(crate) struct Reach {
 }
 
 impl Reach {
-    /// One arm of a source: the rows of `table` under `condition`, its
-    /// document's path at `path` and id at `id`, bounded by this reach,
-    /// ordered its way, and grouped by the path where `grouped`, which is
-    /// where a document holds several rows the condition admits.
-    fn arm(
-        &self,
-        table: &str,
-        path: &str,
-        id: &str,
-        condition: &str,
-        grouped: bool,
-        binder: &mut Binder,
-    ) -> String {
-        let body = self.rows(table, path, id, condition, binder);
+    /// One arm of a source: `rows`, bounded by this reach, ordered its way,
+    /// and grouped by the path where `grouped`, which is where a document
+    /// holds several of the rows.
+    fn arm(&self, rows: &Rows, grouped: bool, binder: &mut Binder) -> String {
+        let body = self.rows(rows, binder);
         let grouping = if grouped { " GROUP BY 1, 2" } else { "" };
         format!("{body}{grouping} ORDER BY {}", self.ordering())
     }
 
-    /// The rows of one arm, bounded and unordered: what a merge of several
-    /// arms joins before ordering them together.
-    fn rows(
-        &self,
-        table: &str,
-        path: &str,
-        id: &str,
-        condition: &str,
-        binder: &mut Binder,
-    ) -> String {
-        let mut conditions = vec![condition.to_string()];
+    /// `rows` bounded by this reach and unordered, each as its document's
+    /// folded path, path and id: what a merge of several arms joins before
+    /// ordering them together.
+    fn rows(&self, rows: &Rows, binder: &mut Binder) -> String {
+        let Rows {
+            table,
+            document,
+            path,
+            condition,
+        } = rows;
+        let mut conditions = vec![condition.clone()];
         let comparison = match (self.descending, self.inclusive) {
             (false, false) => ">",
             (false, true) => ">=",
@@ -373,7 +370,7 @@ impl Reach {
             conditions.push(format!("{path} < {before} COLLATE NOCASE"));
         }
         format!(
-            "SELECT {path} COLLATE NOCASE AS folded, {path} AS path, {id} AS id FROM {table}
+            "SELECT {path} COLLATE NOCASE AS folded, {path} AS path, {document} AS id FROM {table}
                      WHERE {}",
             conditions.join(" AND ")
         )
@@ -410,6 +407,7 @@ fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binde
         table,
         document,
         condition,
+        ..
     } = rows_of(shape, values, Reached::Set, binder);
     let membership = if shape.excludes() { "NOT IN" } else { "IN" };
     format!(
@@ -426,6 +424,7 @@ fn test_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder
         table,
         document,
         condition,
+        ..
     } = rows_of(shape, values, Reached::OneDocument, binder);
     let existence = if shape.excludes() {
         "NOT EXISTS"
@@ -447,19 +446,25 @@ enum Reached {
 }
 
 /// The rows a filter reads: the table they stand in, the column naming the
-/// document each one stands for, and the condition a row meets. An excluding
+/// document each one stands for, the column holding that document's path
+/// where the table carries one, and the condition a row meets. An excluding
 /// filter's rows are the documents it does not keep.
 struct Rows {
     table: String,
     document: String,
+    path: String,
     condition: String,
 }
 
 impl Rows {
+    /// The rows of `table`, read under its alias, whose `path` column is the
+    /// alias's: every table a source reads carries its document's path.
     fn new(table: &str, document: &str, condition: String) -> Self {
+        let alias = table.rsplit(" AS ").next().unwrap_or(table);
         Rows {
             table: table.to_string(),
             document: document.to_string(),
+            path: format!("{alias}.path"),
             condition,
         }
     }
@@ -653,9 +658,11 @@ fn reading_conditions(reading: FieldMatch, next: &mut dyn FnMut() -> String) -> 
 }
 
 /// The source of a filter of `shape` binding `values`, whose documents stand
-/// in the answer's path order `reach`'s way ([`Filter::source`]). A
-/// membership binds its key and reading once and each of `members` once, and
-/// every arm names them.
+/// in the answer's path order `reach`'s way ([`Filter::source`]): the rows the
+/// filter's set reads ([`rows_of`]), bounded by the reach. A membership is
+/// one arm per member, each the equality its member is — a membership's values
+/// are an equality's with its list where the equality's value stands — and a
+/// presence one arm per container, merged.
 fn source_bound(
     shape: ReadFilter,
     values: &[Value],
@@ -663,94 +670,53 @@ fn source_bound(
     reach: &Reach,
     binder: &mut Binder,
 ) -> String {
-    // The list a membership's `values` binds is its members, which `members`
-    // binds one by one, so a source passes over it.
-    let listed = matches!(shape, ReadFilter::Member(_)).then_some(1);
-    let mut bound = values
-        .iter()
-        .enumerate()
-        .filter(|(at, _)| Some(*at) != listed)
-        .map(|(_, value)| value.clone());
-    let mut next = |binder: &mut Binder| {
-        binder.bind(
-            bound
-                .next()
-                .expect("a filter binds every value its source names"),
-        )
-    };
     match shape {
-        ReadFilter::Equal(matched) => {
-            let column = matched.column();
-            let (key, value) = (next(binder), next(binder));
-            let conditions = reading_conditions(matched, &mut || next(binder));
-            reach.arm(
-                "document_fields AS fv",
-                "fv.path",
-                "fv.document",
-                &format!("fv.key = {key} AND fv.{column} = {value}{conditions}"),
-                true,
-                binder,
-            )
+        ReadFilter::Equal(_) | ReadFilter::Tag => {
+            let rows = rows_of(shape, values, Reached::Set, binder);
+            reach.arm(&rows, true, binder)
         }
         ReadFilter::Member(matched) => {
-            let column = matched.column();
-            let key = next(binder);
-            let conditions = reading_conditions(matched, &mut || next(binder));
             let arms = members
                 .iter()
                 .map(|member| {
-                    let member = binder.bind(member.clone());
-                    reach.rows(
-                        "document_fields AS fv",
-                        "fv.path",
-                        "fv.document",
-                        &format!("fv.key = {key} AND fv.{column} = {member}{conditions}"),
-                        binder,
-                    )
+                    let mut equal = values.to_vec();
+                    equal[1] = member.clone();
+                    let rows = rows_of(ReadFilter::Equal(matched), &equal, Reached::Set, binder);
+                    reach.rows(&rows, binder)
                 })
                 .collect();
             reach.merged(arms)
         }
         ReadFilter::Present => {
-            let key = next(binder);
             let arms = FieldContainer::ALL
                 .iter()
                 .map(|container| {
+                    let mut rows = rows_of(shape, values, Reached::Set, binder);
                     let container = binder.bind(Value::Text(container.as_str().to_string()));
-                    reach.rows(
-                        "document_fields AS fp",
-                        "fp.path",
-                        "fp.document",
-                        &format!(
-                            "fp.key = {key} AND fp.ordinal = 0 AND fp.container = {container}"
-                        ),
-                        binder,
-                    )
+                    rows.condition
+                        .push_str(&format!(" AND fp.container = {container}"));
+                    reach.rows(&rows, binder)
                 })
                 .collect();
             reach.merged(arms)
         }
-        ReadFilter::Tag => {
-            let name = next(binder);
-            reach.arm(
-                "document_tags AS tg",
-                "tg.path",
-                "tg.document",
-                &format!("tg.folded_name = {name}"),
-                true,
-                binder,
-            )
-        }
         ReadFilter::Finding => {
-            let (fingerprint, kind) = (next(binder), next(binder));
-            reach.arm(
-                "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path",
-                "fg.path",
-                "df.id",
-                &format!("fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"),
-                true,
-                binder,
-            )
+            // The set reads each document's path among the kind's findings';
+            // a source reads the findings themselves, off the kind's index in
+            // path order, each joined to the document at its path.
+            let (fingerprint, kind) = (
+                binder.bind(values[0].clone()),
+                binder.bind(values[1].clone()),
+            );
+            let rows = Rows {
+                table: "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path".to_string(),
+                document: "df.id".to_string(),
+                path: "fg.path".to_string(),
+                condition: format!(
+                    "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
+                ),
+            };
+            reach.arm(&rows, true, binder)
         }
         ReadFilter::NotEqual(_)
         | ReadFilter::Absent
@@ -760,7 +726,7 @@ fn source_bound(
         | ReadFilter::PathGlob(_)
         | ReadFilter::Resolves(_)
         | ReadFilter::LinksTo(_) => {
-            unreachable!("{shape:?} keeps no documents in the answer's path order")
+            unreachable!("{shape:?} is no part a bound source spells")
         }
     }
 }
