@@ -3839,6 +3839,12 @@ fn repair_reading(
     let norn_wire::ApplyReport::Previewed { plan, .. } = previewed.report else {
         panic!("a preview answered {:?}", previewed.report);
     };
+    let operations = plan.operations.len() as u64;
+    let rewrites = plan
+        .operations
+        .iter()
+        .map(|operation| operation.cascade.len() as u64)
+        .sum();
     let provenance = plan
         .provenance
         .expect("a repair plan carries its provenance");
@@ -3859,6 +3865,12 @@ fn repair_reading(
         ("judgments", judged.judgments),
         ("judgment_statements", judged.statements_executed),
         ("judgment_vm_steps", judged.vm_steps),
+        ("judgment_full_scan_steps", judged.full_scan_steps),
+        ("links_evaluated", judged.links_evaluated),
+        ("keys_resolved", judged.keys_resolved),
+        ("head_rows", judged.head_rows),
+        ("operations", operations),
+        ("rewrites_planned", rewrites),
         ("reads_served", spent.reads_served),
         ("document_opens", read.document_opens),
         ("target_reads", read.target_reads),
@@ -4365,6 +4377,184 @@ fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing(
     assert!(
         failures.is_empty(),
         "the repair continuation failed the lane:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// One rule routing the route bar's subject into `aaa-route/placed/`.
+const ROUTE_SCHEMA: &str = "version: 1\nrules:\n  routed:\n    match: {frontmatter: {type: aaa-routed}}\n    allowed_paths: {paths: ['aaa-route/placed/**'], route: 'aaa-route/placed/'}\n";
+
+/// Where the route bar's misplaced document stands, and how its in-links
+/// spell it.
+const ROUTED_AT: &str = "aaa-route/loose/aaa-route-subject";
+
+/// Attach `profile` with one misplaced document and `links` holders each
+/// linking it by path, and preview the repair of the document's misplacement
+/// through the host.
+fn one_route(label: &str, profile: &norn_fixtures::Profile, links: usize) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), ROUTE_SCHEMA).expect("the schema");
+    let write = |path: String, text: String| {
+        let at = vault.path().join(path);
+        std::fs::create_dir_all(at.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(at, text).expect("writing a planted document");
+    };
+    write(
+        format!("{ROUTED_AT}.md"),
+        "---\ntype: aaa-routed\n---\n# Subject\n".to_string(),
+    );
+    for at in 0..links {
+        write(
+            format!("aaa-route/holders/h{at:04}.md"),
+            format!("See [[{ROUTED_AT}]].\n"),
+        );
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let params = norn_wire::RepairParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Preview,
+    )
+    .with_kinds([norn_wire::FindingKind::Misplaced])
+    .with_predicates([Predicate::path("aaa-route/**")]);
+    let (counters, provenance) = repair_reading(&host, params);
+    assert_eq!(
+        provenance.citations.len(),
+        1,
+        "the subject's misplacement is the one finding the repair fixes: {provenance:?}"
+    );
+    counters
+}
+
+/// How many holders link the routed document in the route bar: `ROUTE_LINKS`
+/// is L, and the bar also reads half and twice that.
+const ROUTE_LINKS: usize = 10;
+
+/// **A route's cascade is priced by the links it touches, through
+/// `Host::repair` (NORN-376).** A repair whose batch routes one misplaced
+/// document with L in-links previews a move and a rewrite for each of them.
+///
+/// **Held across the vault:** with L = 10, every counter the repair's read
+/// account and read window count is the same over `ambiguous` (300
+/// documents) and `realistic` (2000): the batch read's statements, rows and
+/// steps; the five link judgments' `judgments`, `links_evaluated`,
+/// `keys_resolved`, `head_rows`, statements, VM steps and full scans; the
+/// planning hold's statements and steps; the documents opened and the
+/// targets read. Planted paths sort ahead of the generated tree: a path
+/// that sorts among it costs the larger vault 5 more judgment VM steps for
+/// any L above zero.
+///
+/// **Linear in L, not the vault:** over `realistic`, at L / 2, L and 2L, every
+/// counter's growth from L to 2L is twice its growth from L / 2 to L. The
+/// links add `links_evaluated` (7 each), `rewrites_planned` (1), `document_opens`
+/// (2: once to plan the holder and once to judge the plan), `target_reads` (1),
+/// `stats`, the judgment and hold VM steps (245 each in the judgments), and
+/// leave `judgments`, `keys_resolved`, `head_rows`, the statements run and
+/// every batch counter where they were.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_routes_cascade_costs_the_links_it_touches_and_not_the_vault_through_a_repair() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let links = ROUTE_LINKS as u64;
+
+    let at_small = one_route("counter-gate-route-ambiguous", &small, ROUTE_LINKS);
+    let halved = one_route("counter-gate-route-half", &large, ROUTE_LINKS / 2);
+    let at_large = one_route("counter-gate-route-realistic", &large, ROUTE_LINKS);
+    let doubled = one_route("counter-gate-route-double", &large, ROUTE_LINKS * 2);
+
+    let mut failures = Vec::new();
+    for (profile, counters, links) in [
+        (&small, &at_small, links),
+        (&large, &at_large, links),
+        (&large, &doubled, 2 * links),
+    ] {
+        record_the_counters(
+            &format!(
+                "a repair routing a document of {links} in-links over `{}`",
+                profile.name
+            ),
+            counters,
+        );
+        for (name, expected) in [
+            ("operations", 1),
+            ("rewrites_planned", links),
+            ("document_opens", 2 * links + 2),
+            ("target_reads", links + 1),
+            ("links_evaluated", 7 * links),
+            ("judgments", 5),
+            ("judgment_full_scan_steps", 0),
+            ("full_scan_steps", 0),
+        ] {
+            if counters.get(name) != expected {
+                failures.push(format!(
+                    "routing a document of {links} in-links over `{}` read {} on `{name}`, and \
+                     its links name {expected}: {counters:?}",
+                    profile.name,
+                    counters.get(name)
+                ));
+            }
+        }
+    }
+    failures.extend(
+        SizeIndependencePair::new(
+            "a repair routing a document of ten in-links",
+            ScaleObservation::new(&small, at_small),
+            ScaleObservation::new(&large, at_large.clone()),
+        )
+        .violations(),
+    );
+    let mut grown = Vec::new();
+    for name in at_large.names() {
+        let (up, before) = (
+            doubled.get(name).abs_diff(at_large.get(name)),
+            at_large.get(name).abs_diff(halved.get(name)),
+        );
+        if up != 2 * before {
+            failures.push(format!(
+                "`{name}` read {} at {} links, {} at {} and {} at {}, and is not linear in the links",
+                halved.get(name),
+                ROUTE_LINKS / 2,
+                at_large.get(name),
+                ROUTE_LINKS,
+                doubled.get(name),
+                ROUTE_LINKS * 2
+            ));
+        }
+        if up > 0 {
+            grown.push(name);
+        }
+    }
+    for name in [
+        "links_evaluated",
+        "rewrites_planned",
+        "document_opens",
+        "target_reads",
+        "judgment_vm_steps",
+    ] {
+        if !grown.contains(&name) {
+            failures.push(format!("`{name}` did not grow with the links"));
+        }
+    }
+    for name in [
+        "judgments",
+        "keys_resolved",
+        "head_rows",
+        "judgment_statements",
+        "validate_vm_steps",
+        "validate_statements",
+    ] {
+        if grown.contains(&name) {
+            failures.push(format!(
+                "`{name}` grew with the links, and is to stay where it was"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the route's cascade failed the lane:\n{}",
         failures.join("\n")
     );
 }
