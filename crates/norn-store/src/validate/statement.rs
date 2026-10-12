@@ -14,8 +14,8 @@ use norn_wire::Severity;
 
 use crate::ddl::findings::DOCUMENT_POSITION;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_ROW_COLUMNS, Filter, PathPart, Term, answer_ordering, answer_place,
-    answer_range,
+    AnswerSeek, Binder, FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, Filter, PathPart, Term,
+    answer_ordering, answer_place, answer_range,
 };
 
 /// Every statement shape the validate builder runs, named.
@@ -217,21 +217,13 @@ const MERGE_PATH: &str = "order_path";
 const MERGE_POSITION: &str = "order_position";
 const MERGE_ID: &str = "order_id";
 
-/// The columns a merged read's arms add last: the family, protocol and target
-/// of the link the finding is about, `NULL` for a finding about none. The
+/// The link a merged read's arms add last ([`FINDING_LINK_COLUMNS`]). The
 /// finding reaches its link as every read of a finding's link does — its
 /// holder by path, then the holder's link by the finding's ordinal — through
 /// the unique `documents_path` and `links_document_ordinal` indexes, so each
 /// finding costs two seeks and the arm's order, which the joins sit behind,
 /// is untouched.
-const MERGE_LINK_COLUMNS: &str = "lk.family, lk.protocol, lk.target";
 const MERGE_LINK_JOINS: &str = "\n                     LEFT JOIN documents AS dl ON dl.path = f.path\n                     LEFT JOIN links AS lk ON lk.document = dl.id AND lk.ordinal = f.ordinal";
-
-/// Where the link columns [`MERGE_LINK_COLUMNS`] begin in a merged read's
-/// row: after a finding's own columns and the three ordering columns.
-pub(crate) fn merged_link_column() -> usize {
-    FINDING_ROW_COLUMNS.matches(',').count() + 1 + 3
-}
 
 /// The table one arm seeks, the alias it takes, and the column that holds the
 /// finding's id there.
@@ -607,7 +599,7 @@ fn compose_arm(
         }
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail => format!(
             "{FINDING_ROW_COLUMNS}, {path_column} AS {MERGE_PATH}, \
-             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {MERGE_LINK_COLUMNS}"
+             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {FINDING_LINK_COLUMNS}"
         ),
         ValidateStatement::Summary | ValidateStatement::RuleSummary => {
             format!("{}, {}, COUNT(*)", column("kind"), column("severity"))

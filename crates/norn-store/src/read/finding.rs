@@ -53,6 +53,13 @@ pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, 
      f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation, \
      f.ordinal, f.position, f.rule_set, f.value_head, f.value_bytes, f.value_hash";
 
+/// The link a merged read joins to a finding, under the lookup alias `lk`,
+/// named for the reader that takes them by name ([`linked_finding_base`]): the
+/// family, protocol and target of the link the finding is about, `NULL` for a
+/// finding about none.
+pub(crate) const FINDING_LINK_COLUMNS: &str =
+    "lk.family AS link_family, lk.protocol AS link_protocol, lk.target AS link_target";
+
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
 #[derive(Clone, Debug)]
@@ -185,24 +192,25 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
 }
 
 /// A merged read's row: the finding as [`finding_base`] reads it, with the
-/// link it joined — the family, protocol and target read from `first` on,
-/// all three `NULL` for a finding about no link.
+/// link it joined — the family, protocol and target [`FINDING_LINK_COLUMNS`]
+/// names, all three `NULL` for a finding about no link. They are read by
+/// name, so the reader stays right however many columns precede them.
 ///
 /// A family this crate did not write is [`StoreError::Damaged`], as one read
 /// anywhere else is.
-pub(crate) fn linked_finding_base(row: &Row<'_>, first: usize) -> Reading<FindingBase> {
+pub(crate) fn linked_finding_base(row: &Row<'_>) -> Reading<FindingBase> {
     let mut base = match finding_base(row)? {
         Ok(base) => base,
         Err(damaged) => return Ok(Err(damaged)),
     };
-    let Some(family) = row.get::<_, Option<String>>(first)? else {
+    let Some(family) = row.get::<_, Option<String>>("link_family")? else {
         return Ok(Ok(base));
     };
     let Some(family) = LinkFamily::from_str(&family) else {
         return Ok(Err(unreadable("links.family", &family)));
     };
-    let protocol: Option<String> = row.get(first + 1)?;
-    let target: String = row.get(first + 2)?;
+    let protocol: Option<String> = row.get("link_protocol")?;
+    let target: String = row.get("link_target")?;
     let address = match protocol {
         Some(protocol) => format!("{protocol}://{target}"),
         None => target,

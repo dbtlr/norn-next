@@ -51,7 +51,7 @@ use norn_wire::{
     RepairParams, RuleSet, Severity, Unsatisfied,
 };
 
-use super::statement::{Findings, compose_findings, merged_link_column};
+use super::statement::{Findings, compose_findings};
 use super::{Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
@@ -353,9 +353,7 @@ impl Snapshot {
         });
         let merged = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let found: Vec<FindingBase> = self
-            .run_statement(&mut lookups.ran, merged, |row| {
-                linked_finding_base(row, merged_link_column())
-            })
+            .run_statement(&mut lookups.ran, merged, linked_finding_base)
             .map_err(|problem| error::sql("reading a batch of findings", problem))?
             .into_iter()
             .collect::<Result<_, _>>()?;
