@@ -7,7 +7,8 @@
 //! order. `limit` is a soft target in selected findings, read as validate's
 //! page limit is: `null` leaves it to the host's default page and the host's
 //! ceiling caps the request. A batch is never cut inside a document, so it
-//! extends through the last findings of its last document. The cursor
+//! extends through the last findings of its last document, past the host's
+//! ceiling where that one document holds more selected findings. The cursor
 //! `after` continues from the last document path a batch covered.
 //!
 //! **A repair states its mode, as every write does.** There is no default: a

@@ -36,9 +36,10 @@ sha2 = { workspace = true }
 # `induced-failure` gates `induced_failure`, the module of out-of-band
 # arrangements the store's own suite reaches through to reach a rung or a
 # refusal from outside — a store schema this build did not write, a dropped
-# index, a busy database, a process killed mid-changeset. It forwards to
-# `norn-db`'s feature of the same name, because two of the arrangements are met
-# at the driver seam rather than here. Off by default, so a shipped build
+# index, a busy database, a process killed mid-changeset — and the record of
+# every statement SQLite begins, with the out-of-band `EXPLAIN` that plans each
+# one. It forwards to `norn-db`'s feature of the same name, because three of the
+# arrangements are met at the driver seam rather than here. Off by default, so a shipped build
 # carries none of the hooks: the out-of-band SQL executor, the busy-injection
 # thread-local read on every pinned scalar, the tear the increment checks
 # between two entries, and the write a feed page read checks for.

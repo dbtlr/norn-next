@@ -28,7 +28,9 @@ mod attach;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use norn_host::ReloadRefusal;
 use norn_testkit::process::Sandbox;
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Citation, CitedFinding,
     Confidence, Cursor, DocumentPath, ErrorDetail, ErrorEnvelope, FieldChange, FindingKind,
@@ -386,6 +388,96 @@ fn the_first_batch_counts_what_remains_and_the_last_names_no_cursor() {
     assert_eq!(provenance(&whole).skipped.len(), FINDINGS);
     assert_eq!(provenance(&whole).remaining, Some(0));
     assert_eq!(provenance(&whole).cursor, None);
+}
+
+/// The write generation a validate of the repair's documents reads: the
+/// independent account of the generation the findings stand at.
+fn validated_generation(host: &attach::ServingHost, vault: &attach::Vault) -> u64 {
+    let request = ValidateParams::new(address(vault))
+        .with_predicates([Predicate::path(format!("{FOLDER}*"))])
+        .with_limit(1000);
+    host.validate(&request)
+        .expect("a validate answers")
+        .answer
+        .reading
+        .generation
+}
+
+/// **A first batch records the generation the store's findings stand at.**
+/// It equals the write generation a validate reads, before a write and again
+/// after one has moved it.
+#[test]
+fn the_first_batch_records_the_generation_the_findings_stand_at() {
+    let (_sandbox, vault, host) = a_vault("host-repair-generation");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let standing_at = validated_generation(&host, &vault);
+    let first = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(3)));
+    assert_eq!(provenance(&first).finding_generation, standing_at);
+
+    host.set(SetParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        WriteTarget::path(at("a.md")),
+        vec![FieldChange::set("status", AuthoredValue::string("done"))],
+    ))
+    .expect("the write is admitted")
+    .wait()
+    .expect("a.md is written");
+
+    let moved_to = validated_generation(&host, &vault);
+    assert!(moved_to > standing_at, "the write moved no generation");
+    let after = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(3)));
+    assert_eq!(provenance(&after).finding_generation, moved_to);
+}
+
+/// **An apply's first batch counts what remains as its preview did, before
+/// its own writes change the findings.** a.md's missing `status` fills from
+/// its default and its broken link stays, so the first batch (a.md, at a limit
+/// of two) fixes one selected finding and skips one; the three tasks after it
+/// each stand under one. The count is the selection's total before the batch
+/// less the batch's findings, though the apply leaves the selection one
+/// smaller.
+#[test]
+fn an_applys_first_batch_counts_what_remains_before_its_own_writes() {
+    let defaulting = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-remaining-before-writes",
+        defaulting,
+        &[
+            ("a.md", b"---\ntype: task\n---\nSee [[nowhere-a]].\n"),
+            ("b.md", b"---\ntype: task\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+            ("d.md", b"---\ntype: task\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let selected = standing(&host, &vault, |request| request).len() as u64;
+    assert_eq!(selected, 5);
+
+    let preview = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(2)));
+    let ApplyReport::Applied { plan: apply, .. } =
+        planned(host.repair(repairing(&vault, ApplyMode::Apply).with_limit(2)))
+    else {
+        panic!("the repair applies");
+    };
+
+    let in_batch = |plan: &ResolvedPlan| {
+        let cited: usize = provenance(plan)
+            .citations
+            .iter()
+            .map(|citation| citation.findings.len())
+            .sum();
+        (cited + provenance(plan).skipped.len()) as u64
+    };
+    assert_eq!(in_batch(&apply), 2, "{:?}", provenance(&apply));
+    assert_eq!(provenance(&apply).remaining, provenance(&preview).remaining);
+    assert_eq!(
+        provenance(&apply).remaining,
+        Some(selected - in_batch(&apply))
+    );
+    let after = standing(&host, &vault, |request| request).len() as u64;
+    assert_eq!(after, selected - 1, "the apply changed no finding");
 }
 
 /// **A cursor survives the findings it covered being derived again.** After
@@ -1652,6 +1744,241 @@ fn every_route_and_default_a_repair_plan_fills_comes_from_one_clock_reading() {
     let account = host.read_evidence();
     planned(host.repair(repairing(&vault, ApplyMode::Apply)));
     assert_eq!(host.read_evidence().since(account).clock_reads, 1);
+}
+
+/// [`STAMPED_AND_ROUTED`] beside a rule filling a `review`'s `status` from a
+/// plain default, a fix that reads no clock.
+const STAMPED_ROUTED_AND_PLAIN: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      created: {default: '{{now}}'}\n      day: {default: '{{date}}'}\n    allowed_paths: {paths: ['zz-repair/log/**'], route: 'zz-repair/log/{{date}}/'}\n  reviews:\n    match: {frontmatter: {type: review}}\n    required:\n      status: {default: todo}\n";
+
+/// The folder a route files a stamped document under, before its date.
+const ROUTE_ROOT: &str = "zz-repair/log/";
+
+/// Whether `text` reads as a `YYYY-MM-DD` date.
+fn is_a_date(text: &str) -> bool {
+    let b = text.as_bytes();
+    let number = |from: usize, to: usize| text.get(from..to)?.parse::<u32>().ok();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+        && matches!(number(5, 7), Some(1..=12))
+        && matches!(number(8, 10), Some(1..=31))
+}
+
+/// Whether `text` reads as an RFC 3339 instant to the second, `Z` or with an
+/// offset: `YYYY-MM-DDTHH:MM:SS+HH:MM`.
+fn is_an_instant(text: &str) -> bool {
+    let Some((date, time)) = text.split_once('T') else {
+        return false;
+    };
+    let (clock, offset) = match time.strip_suffix('Z') {
+        Some(clock) => (clock, None),
+        None => match time.rfind(['+', '-']) {
+            Some(at) => (&time[..at], Some(&time[at + 1..])),
+            None => return false,
+        },
+    };
+    let pair =
+        |text: &str, bound: u32| text.len() == 2 && text.parse::<u32>().is_ok_and(|n| n < bound);
+    let parts: Vec<&str> = clock.split(':').collect();
+    let offset_parts: Vec<&str> = offset.map_or_else(Vec::new, |o| o.split(':').collect());
+    is_a_date(date)
+        && matches!(parts.as_slice(), [h, m, s] if pair(h, 24) && pair(m, 60) && pair(s, 61))
+        && (offset.is_none()
+            || matches!(offset_parts.as_slice(), [h, m] if pair(h, 24) && pair(m, 60)))
+}
+
+/// What the clock filled in a plan, read off it while masking, and how much
+/// of the plan was masked for it.
+struct ClockFilled {
+    /// Each `created` value, in plan order.
+    instants: Vec<String>,
+    /// Each `day` value, in plan order.
+    days: Vec<String>,
+    /// The date folder of each route's destination, in plan order.
+    folders: Vec<String>,
+    /// The after-state of each stamped document's transition, as planned.
+    stamped_after: Vec<norn_wire::FileState>,
+}
+
+/// `path` with the date folder a route reads the clock for set to `DATE`, the
+/// rest of the path as planned; the date it replaced is pushed to `folders`.
+/// Panics where a path under the route's root holds no date there.
+fn without_the_route_date(path: &DocumentPath, folders: &mut Vec<String>) -> DocumentPath {
+    let Some(under) = path.as_str().strip_prefix(ROUTE_ROOT) else {
+        return path.clone();
+    };
+    let (date, rest) = under.split_once('/').expect("a document under a date");
+    assert!(is_a_date(date), "a route's folder is a date: {path:?}");
+    folders.push(date.to_string());
+    DocumentPath::new(format!("{ROUTE_ROOT}DATE/{rest}")).expect("a document path")
+}
+
+/// `plan` with only what the clock fills set apart: the date folder in a
+/// route's paths (a move's destination, a write's target, the transitions
+/// landing there), the value of a `created` or `day` default, and the
+/// after-state of a document stamped with an instant, whose bytes hold it.
+/// Each masked value is checked to be a well-formed clock reading. Everything
+/// else, the rest of each destination path included, stays as planned.
+fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
+    let mut masked = plan.clone();
+    let mut filled = ClockFilled {
+        instants: Vec::new(),
+        days: Vec::new(),
+        folders: Vec::new(),
+        stamped_after: Vec::new(),
+    };
+    let mut stamped = BTreeSet::new();
+    for operation in &mut masked.operations {
+        match &mut operation.kind {
+            OperationKind::MoveDocument { to, .. } => {
+                assert!(
+                    to.as_str().starts_with(ROUTE_ROOT),
+                    "a route's destination is under its dated root: {to:?}"
+                );
+                *to = without_the_route_date(to, &mut filled.folders);
+            }
+            OperationKind::SetFrontmatter {
+                target: WriteTarget::Path(path),
+                field,
+                value,
+            } => {
+                if field == "created" || field == "day" {
+                    let reading = value.scalar_text().expect("a clock reading");
+                    if field == "created" {
+                        assert!(is_an_instant(&reading), "an instant: {reading}");
+                        stamped.insert(path.as_str().to_string());
+                        filled.instants.push(reading);
+                    } else {
+                        assert!(is_a_date(&reading), "a date: {reading}");
+                        filled.days.push(reading);
+                    }
+                    *value = AuthoredValue::string("masked");
+                }
+                *path = without_the_route_date(path, &mut Vec::new());
+            }
+            _ => {}
+        }
+    }
+    for transition in &mut masked.transitions {
+        let was = transition.path.as_str().to_string();
+        transition.path = without_the_route_date(&transition.path, &mut Vec::new());
+        if stamped.contains(&was) {
+            filled.stamped_after.push(transition.after.clone());
+            transition.after =
+                norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+        }
+    }
+    (masked, filled)
+}
+
+/// **An apply plans what its preview did, apart from what the clock fills.**
+/// Three routes and five clock defaults across three tasks, beside a review
+/// whose default reads no clock: a second apart, the preview and the apply
+/// read the clock at different instants, so the `created` instants differ.
+/// With only what the clock fills masked (each default's value, the date
+/// folder of each route's paths, and the after-state of the two documents
+/// stamped with an instant), each checked to be a well-formed reading, and the
+/// rest of every destination path left as planned, the two plans are equal in
+/// operations, transitions, conditions and provenance (citations, skipped
+/// findings, remaining count and cursor), and the review's fix stands alike
+/// in both.
+#[test]
+fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-clock-masked",
+        STAMPED_ROUTED_AND_PLAIN,
+        &[
+            ("a.md", b"---\ntype: task\n---\n"),
+            ("b.md", b"---\ntype: task\ncreated: then\n---\n"),
+            ("c.md", b"---\ntype: task\n---\n"),
+            ("r.md", b"---\ntype: review\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let preview = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    // The host's clock is the system's, which a test cannot drive; `{{now}}`
+    // reads to the second, so a wait past one makes the two readings differ.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let ApplyReport::Applied {
+        plan: apply,
+        changeset,
+        ..
+    } = planned(host.repair(repairing(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+
+    let (preview_masked, preview_filled) = with_the_clock_masked(&preview);
+    let (apply_masked, apply_filled) = with_the_clock_masked(&apply);
+    for (plan, filled) in [(&preview, &preview_filled), (&apply, &apply_filled)] {
+        assert_eq!(
+            (
+                filled.folders.len(),
+                filled.instants.len(),
+                filled.days.len()
+            ),
+            (3, 2, 3),
+            "{plan:?}"
+        );
+        // One reading of the clock fills a plan: every route's folder is the
+        // day every `day` default holds.
+        let day = &filled.days[0];
+        assert!(filled.days.iter().chain(&filled.folders).all(|d| d == day));
+        assert!(
+            filled
+                .instants
+                .iter()
+                .all(|at| at.starts_with(day.as_str()))
+        );
+    }
+    assert_ne!(
+        preview_filled.instants, apply_filled.instants,
+        "the two readings of the clock are one instant"
+    );
+    // The stamped documents' bytes hold the instant, so their hashes differ
+    // between the plans; the unstamped `b.md` is not masked.
+    assert_eq!(preview_filled.stamped_after.len(), 2);
+    assert!(
+        preview_filled
+            .stamped_after
+            .iter()
+            .zip(&apply_filled.stamped_after)
+            .all(|(then, now)| then != now),
+        "a stamped document's hash is its instant's"
+    );
+    // A difference that is not the clock's is not masked: the apply landing
+    // a document under another name, or in a subfolder, is a difference.
+    for altered in ["zz-repair/log/DATE/other.md", "zz-repair/log/DATE/sub/a.md"] {
+        let mut other = apply.clone();
+        let OperationKind::MoveDocument { to, .. } = &mut other.operations[0].kind else {
+            panic!("the first operation is a move");
+        };
+        *to = DocumentPath::new(altered.replace("DATE", "2026-01-01")).expect("a path");
+        assert_ne!(
+            with_the_clock_masked(&other).0,
+            preview_masked,
+            "{altered} passed the mask"
+        );
+    }
+    assert!(
+        preview
+            .operations
+            .iter()
+            .any(|operation| matches!(&operation.kind,
+                OperationKind::SetFrontmatter { field, .. } if field == "status")),
+        "the review's plain default is in the plan: {:?}",
+        preview.operations
+    );
+    assert_eq!(apply_masked.operations, preview_masked.operations);
+    assert_eq!(apply_masked.transitions, preview_masked.transitions);
+    assert_eq!(apply_masked.conditions, preview_masked.conditions);
+    assert_eq!(provenance(&apply_masked), provenance(&preview_masked));
+    assert_eq!(apply_masked, preview_masked);
 }
 
 /// **A repair plan filling no default that reads the clock reads it not at
@@ -4349,4 +4676,140 @@ fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_findin
         !link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty(),
         "the validator still reports the escaped link"
     );
+}
+
+/// The schema the reload cases preview under: a task's `status` is required,
+/// defaulting to `todo`, and one of `todo` and `done`.
+const FILLING_STATUS: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done]}\n";
+
+/// Rewrite the vault's schema to `schema` and wait for the host to reload it.
+fn reloaded_under(host: &attach::ServingHost, vault: &attach::Vault, schema: &str) {
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("rewrite the schema");
+    wait_until(
+        "the reload to activate the rewritten schema",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.reload(vault.name()) {
+            Ok(_) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(standing)) => {
+                Observed::pending(format!("the entry stands at {standing:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// The plan [`FILLING_STATUS`] previews for `vault`'s task missing its
+/// `status` (one operation, setting `status: todo`), the vault reloaded under
+/// `schema` before the plan is returned to be sent back to apply.
+fn previewed_across_a_reload_to(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    schema: &str,
+) -> ResolvedPlan {
+    let plan = previewed(host.repair(repairing(vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations, vec![setting(1, "a.md", "status", "todo")]);
+    reloaded_under(host, vault, schema);
+    plan
+}
+
+/// A vault holding one task missing its `status`, under [`FILLING_STATUS`].
+fn a_vault_missing_a_status(label: &str) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(
+        label,
+        FILLING_STATUS,
+        &[("a.md", b"---\ntype: task\n---\n# A\n")],
+    )
+}
+
+/// **A repair plan previewed before a schema reload applies where the new
+/// declaration still admits the value it writes.** The reload widens the
+/// closed set; the plan, sent back unchanged, lands its `status`.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_applies_where_the_new_declaration_admits_its_value() {
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-admits");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS.replace("[todo, done]", "[todo, done, blocked]"),
+    );
+
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+}
+
+/// **A repair plan previewed before a schema reload applies where the new
+/// declaration adds a violation on a field the plan leaves alone.** The
+/// reload requires `priority`, which the task lacks and the plan does not
+/// write: that violation stood in the document before the plan, so the plan
+/// introduces none.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_applies_where_the_new_declaration_flags_another_field() {
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-other-field");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS.replace(
+            "      status: {default: todo}\n",
+            "      status: {default: todo}\n      priority:\n",
+        ),
+    );
+
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "a.md"),
+        "---\ntype: task\nstatus: todo\n---\n# A\n"
+    );
+    // The unwritten field's finding stands: `finding_of` finds exactly one.
+    finding_of(
+        &host,
+        &vault,
+        "a.md",
+        FindingKind::RequiredMissing,
+        "priority",
+    );
+}
+
+/// **A repair plan previewed before a schema reload is refused where the new
+/// declaration makes the value it writes a violation.** The reload drops
+/// `todo` from the closed set, and the default that wrote it; the apply refuses
+/// with the schema violation the plan would introduce, and the document is left
+/// as it was.
+#[test]
+fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_rejects_its_value()
+{
+    let (_sandbox, vault, host) = a_vault_missing_a_status("host-repair-reload-rejects");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed_across_a_reload_to(
+        &host,
+        &vault,
+        &FILLING_STATUS
+            .replace("[todo, done]", "[done]")
+            .replace(": {default: todo}", ":"),
+    );
+
+    let (_refusal, _plan, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("one introduced schema violation: {checks:?}");
+    };
+    assert_eq!(violation.path, at("a.md"));
+    assert_eq!(violation.kind, FindingKind::NotOneOf);
+    assert_eq!(violation.target.as_deref(), Some("status"));
+    assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
 }

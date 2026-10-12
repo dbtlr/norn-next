@@ -17,8 +17,8 @@ use super::{
 use crate::common::violation;
 use crate::find::failure_of;
 use norn_store::{
-    PageRefusal, RepairBatch, RepairSelection, StoredPathOrder, ValidatePlan, ValidateStatement,
-    ValidateWork,
+    MAX_PAGE, PageRefusal, RepairBatch, RepairSelection, StoredPathOrder, ValidatePlan,
+    ValidateStatement, ValidateWork,
 };
 use norn_testkit::explain::{Access, QueryPlan};
 use norn_wire::{
@@ -174,6 +174,45 @@ fn a_limit_inside_a_document_extends_the_batch_through_its_last_finding() {
         Some(&CursorKey::repair_document("b.md")),
         "a batch's cursor names the last document it covered"
     );
+}
+
+/// **A batch runs past [`MAX_PAGE`] where one document holds more selected
+/// findings than that**, the declared limit of a batch's size: the boundary
+/// document's tail is joined whole. With 1,100 more undeclared tags standing
+/// over `a.md`, so 1,103 findings, a batch at the maximum limit holds all
+/// 1,103 and covers `a.md` alone, its cursor names `a.md`, and the next batch
+/// starts at `b.md`. A limit past the maximum is still refused.
+#[test]
+fn a_document_holding_more_findings_than_the_maximum_page_is_batched_whole_past_it() {
+    let mut store = Validating::new("batch-past-max-page");
+    let crowd = 1100;
+    {
+        let mut request = store.store.begin_request();
+        for at in 0..crowd {
+            request
+                .record_finding(&undeclared("a.md", &format!("crowd-{at:04}")))
+                .expect("recording a finding");
+        }
+    }
+    let held = crowd + 3;
+    assert!(held > MAX_PAGE, "the document holds more than a page");
+    let maximum = u32::try_from(MAX_PAGE).expect("a page bound fits a wire limit");
+
+    let batch = store.batch(&repairing().with_limit(maximum));
+    assert_eq!(documents(&batch.rows), ["a.md"]);
+    assert_eq!(
+        batch.rows.len(),
+        held,
+        "the boundary document is read whole"
+    );
+    let next = batch.next.expect("more documents remain");
+    assert_eq!(next.key(), &CursorKey::repair_document("a.md"));
+    let continued = store.batch(&repairing().with_limit(maximum).with_after(next));
+    assert_eq!(documents(&continued.rows)[0], "b.md");
+    assert!(matches!(
+        store.refused(&repairing().with_limit(maximum + 1)),
+        PageRefusal::OutOfBound { .. }
+    ));
 }
 
 /// **A batch is cut only between documents**, and only as far past the limit
@@ -1380,6 +1419,143 @@ fn a_batch_costs_the_batch_not_the_vault() {
         failure_of(&format!("{KIND_INDEX} dropped under {order:?}"), || {
             judge(&large, &broad[1])
         });
+    }
+}
+
+impl Validating {
+    /// [`Validating::with_rules_under`] with one more finding over each bulk
+    /// document: a closed-set breach at error citing `tasks`. So the findings
+    /// of `tasks` at one kind, at one severity and under `bulk/` each grow
+    /// with the vault, and a cursor among them can stand behind as many
+    /// selected documents as the vault holds.
+    fn with_tasks_in_the_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
+        let mut validating_store = Self::with_rules_under(label, bulk, order);
+        let mut request = validating_store.store.begin_request();
+        for at in 0..bulk {
+            request
+                .record_finding(&super::judged(
+                    FindingKind::NotOneOf,
+                    Severity::Error,
+                    &format!("bulk/{at:04}.md"),
+                    Some("status"),
+                    &["tasks"],
+                    Some("filed"),
+                ))
+                .expect("recording a bulk breach citing `tasks`");
+        }
+        validating_store
+    }
+}
+
+/// How many bulk documents stand after a deep cursor: the batch's and the
+/// one its probe reads past it.
+const LEFT_IN_THE_BULK: usize = 4;
+
+/// What a batch of `params` costs continuing from a cursor at `after`, minted
+/// on the snapshot a first batch was answered from: its work, and the paths
+/// it covers.
+fn continued_from(
+    store: &Validating,
+    params: &RepairParams,
+    after: &str,
+) -> (ValidateWork, Vec<String>, bool) {
+    let first = store.batch(params);
+    let cursor = Cursor::new(first.snapshot, CursorKey::repair_document(after));
+    let batch = store.batch(&params.clone().with_after(cursor));
+    let paths = documents(&batch.rows)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    (batch.work, paths, batch.next.is_some())
+}
+
+/// **A continuation costs the batch, not what stands before its cursor, on
+/// either root.** Beside 50 and then 500 bulk documents, each holding a
+/// breach at error citing `tasks` and a missing field citing `tasks` and
+/// `bulk`, a batch of three selecting `tasks` with a kind, with a severity,
+/// with a path part spelled as the bulk is and in upper case, continues from
+/// a cursor at the bulk document four before the last: 46 then 496 selected
+/// documents stand before it, and the same four after. It costs the same at
+/// both sizes, sorts nothing and steps through no full scan. A path part in
+/// upper case admits the bulk where the root folds ASCII case and nothing
+/// where it tells spellings apart, and costs the same at both sizes either
+/// way. A document part's continuation is held over the documents it matches,
+/// `a.md` before its cursor and `notes/c.md` after, the same at both sizes: a
+/// statement a document part drives reads every document it matched
+/// (NORN-390), so the pair that grows the matched set is that defect's.
+///
+/// Control: the rule's kind index dropped on the larger vault, a
+/// continuation by the kind reaches what stands before its cursor, and the
+/// bar fails.
+#[test]
+fn a_continuation_costs_the_batch_not_the_vault_at_a_deep_cursor() {
+    let (fewer, more) = (50, 500);
+    let deep = |bulk: usize| format!("bulk/{:04}.md", bulk - LEFT_IN_THE_BULK - 1);
+    for order in ROOTS {
+        let small = Validating::with_tasks_in_the_bulk_under("batch-deep-small", fewer, order);
+        let mut large = Validating::with_tasks_in_the_bulk_under("batch-deep-large", more, order);
+        let tasks = || repairing().with_rule("tasks").with_limit(3);
+        let by_kind = tasks().with_kinds([FindingKind::NotOneOf]);
+        let in_the_bulk = [
+            by_kind.clone(),
+            tasks().with_severity(Severity::Error),
+            tasks().with_predicates([Predicate::path("bulk/**")]),
+            tasks().with_predicates([Predicate::path("BULK/**")]),
+        ];
+        let judge = |large: &Validating, params: &RepairParams, after: [&str; 2]| {
+            let (at_small, small_paths, _) = continued_from(&small, params, after[0]);
+            let (at_large, large_paths, more_remain) = continued_from(large, params, after[1]);
+            assert_eq!(
+                at_small, at_large,
+                "a continuation of {params:?} grew with what stands before its cursor under \
+                 {order:?}"
+            );
+            assert_eq!(
+                small_paths.len(),
+                large_paths.len(),
+                "a continuation of {params:?} covered other documents at the two sizes"
+            );
+            (at_large, large_paths, more_remain)
+        };
+        for params in &in_the_bulk {
+            let (at_large, paths, more_remain) = judge(&large, params, [&deep(fewer), &deep(more)]);
+            assert_eq!(
+                (at_large.sorts, at_large.full_scan_steps),
+                (0, 0),
+                "a continuation of {params:?} sorted or scanned under {order:?}: {at_large:?}"
+            );
+            let folds = order == StoredPathOrder::AsciiCaseInsensitive;
+            if params.predicates == [Predicate::path("BULK/**")] && !folds {
+                assert!(
+                    paths.is_empty(),
+                    "{params:?} admits nothing under {order:?}"
+                );
+            } else {
+                assert!(
+                    !paths.is_empty()
+                        && paths.len() < LEFT_IN_THE_BULK
+                        && paths.iter().all(|path| path.starts_with("bulk/"))
+                        && more_remain,
+                    "a continuation of {params:?} covers bulk documents and leaves more under \
+                     {order:?}: {paths:?}"
+                );
+            }
+        }
+        let driven = tasks().with_predicates([Predicate::equal_to("status", "open")]);
+        let (_, paths, _) = judge(&large, &driven, ["a.md", "a.md"]);
+        assert_eq!(
+            paths,
+            ["notes/c.md"],
+            "the part's matched documents after `a.md`"
+        );
+
+        large.drop_index(RULE_KIND_INDEX);
+        failure_of(
+            &format!("{RULE_KIND_INDEX} dropped under {order:?}"),
+            || {
+                judge(&large, &by_kind, [&deep(fewer), &deep(more)]);
+            },
+        );
     }
 }
 

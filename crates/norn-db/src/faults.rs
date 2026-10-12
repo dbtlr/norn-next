@@ -6,6 +6,9 @@
 //! why the code that meets them has the shape it has, and neither is reachable
 //! by writing rows into a temporary database.
 //!
+//! One record is kept here for the same reason: the text of every statement
+//! SQLite begins, which only the connection's statement trace sees whole.
+//!
 //! The arming surface belongs to the client, because a suite arms an
 //! arrangement in the vocabulary of what it is testing. What lives here is
 //! narrower: the arms themselves, and the two reads the substrate's own paths
@@ -21,9 +24,11 @@
 //! this crate's, so the arm and the code that meets it are in the build
 //! together or in neither.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use rusqlite::Connection;
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 
 use crate::error::{self, DbError};
 
@@ -86,4 +91,91 @@ pub(crate) fn cap_the_pages(connection: &Connection) -> Result<(), DbError> {
     connection
         .pragma_update(None, "max_page_count", pages)
         .map_err(|error| error::sql("capping the page count", error))
+}
+
+/// Whether the statements SQLite begins are recorded: on every connection
+/// opened while this stands, and on every connection that counts its statements
+/// (`Database::count_statements_begun`), whenever it was opened. Raised by
+/// [`record_statements_begun`] and lowered by [`stop_recording_statements`].
+static RECORDING_STATEMENTS: AtomicBool = AtomicBool::new(false);
+
+/// The text of each statement the recording connections began, in the order
+/// SQLite began them, as it was prepared, its parameters unbound. A statement
+/// run inside another — a trigger's, or one a virtual table runs for itself —
+/// is reported behind `-- `, and the start of a trigger's program as
+/// `-- TRIGGER <name>`.
+static STATEMENTS_RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record the text of every statement SQLite begins on every connection this
+/// process opens from here on, until [`stop_recording_statements`]. A
+/// connection opened earlier is recorded as well where it counts its
+/// statements, because the counting trace records through the same arm; any
+/// other connection opened earlier is not.
+///
+/// **This is a census of what ran, taken by the engine.** A plan bar states
+/// how one statement reaches its rows; whether every statement an operation
+/// runs is one some bar states is a fact only the statement trace holds,
+/// because it sees each statement whoever composed it — a virtual table's own
+/// statements and transaction control included. The arm is read when a
+/// connection is opened, as the page cap is, and it is process-wide, because
+/// the statements a host runs are begun on threads the suite does not own.
+///
+/// The trace names no connection, so the record holds whatever this process
+/// ran: a suite asserting over it runs alone in its process.
+pub fn record_statements_begun() {
+    RECORDING_STATEMENTS.store(true, Ordering::SeqCst);
+}
+
+/// Stop recording and forget what was recorded. A connection opened while
+/// the record stood keeps its trace, which records nothing once this returns.
+///
+/// The arm is lowered and the record emptied under the lock a recording
+/// statement takes to check the arm and push, so a statement racing the stop
+/// is either in the record this empties or dropped; none is left standing for
+/// the next recording.
+pub fn stop_recording_statements() {
+    let mut record = STATEMENTS_RECORDED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    RECORDING_STATEMENTS.store(false, Ordering::SeqCst);
+    record.clear();
+}
+
+/// The text of every statement recorded since the record was last taken, in
+/// the order SQLite began them.
+pub fn take_recorded_statements() -> Vec<String> {
+    std::mem::take(
+        &mut *STATEMENTS_RECORDED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    )
+}
+
+/// Trace this connection's statements into the record, where one is being
+/// kept. A build without the feature never reads the arm.
+pub(crate) fn trace_if_recording(connection: &Connection) {
+    if RECORDING_STATEMENTS.load(Ordering::SeqCst) {
+        connection.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record_one));
+    }
+}
+
+/// The statement trace [`trace_if_recording`] installs.
+fn record_one(event: TraceEvent<'_>) {
+    if let TraceEvent::Stmt(_, sql) = event {
+        record_the_statement_begun(sql);
+    }
+}
+
+/// Add the statement SQLite just began to the record, where one is being kept.
+///
+/// A connection that counts its statements installs a trace of its own in
+/// place of [`trace_if_recording`]'s, and that trace records through here, so
+/// a counting connection is recorded as every other one is.
+pub(crate) fn record_the_statement_begun(sql: &str) {
+    let mut record = STATEMENTS_RECORDED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if RECORDING_STATEMENTS.load(Ordering::SeqCst) {
+        record.push(sql.to_string());
+    }
 }

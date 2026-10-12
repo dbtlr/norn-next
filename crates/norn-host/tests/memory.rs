@@ -146,9 +146,9 @@ use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Column, CountParams,
     CountReport, DeleteParams, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
     ErrorEnvelope, FieldChange, FindParams, FindReport, GetParams, GetReport, GroupKey, LinkFamily,
-    LinkHealth, MoveParams, MoveSubject, PlanDocument, Predicate, ResolutionTarget, ResolvedPlan,
-    SearchParams, SearchReport, SetParams, TargetResult, ValidateParams, ValidateReport,
-    VaultAddress, WriteTarget,
+    LinkHealth, MoveParams, MoveSubject, PlanDocument, Predicate, RepairParams, ResolutionTarget,
+    ResolvedPlan, SearchParams, SearchReport, SetParams, TargetResult, ValidateParams,
+    ValidateReport, VaultAddress, WriteTarget,
 };
 
 /// Every allocation this binary makes goes through the counting allocator, so
@@ -682,6 +682,41 @@ const PLAN_MOVED_HUB_STEM: &str = "memory-plan-moved-hub";
 /// plans a cascade of as many rewrites, fixed at both per-PR scales.
 const PLAN_HUB_IN_LINKS: usize = 20;
 
+/// The vault schema the planning child is attached under. Its two rules read
+/// the repair workload's documents alone, by the `memory_plan_kind` they
+/// carry, which no generated document does: one repairs a document's
+/// `memory_plan_state` by a synonym and its missing `memory_plan_owner` by a
+/// default, the other routes a misplaced document into `memory-plan-repair/routed/`.
+/// No rule reads the set, hub or delete subjects, so the schema leaves those
+/// plans as they were.
+const PLAN_SCHEMA: &str = "version: 1
+rules:
+  memory-plan-fields:
+    match: { frontmatter: { memory_plan_kind: fixable } }
+    one_of:
+      memory_plan_state: { values: [open, closed], synonyms: { complete: closed } }
+    required:
+      memory_plan_owner: { default: me }
+  memory-plan-route:
+    match: { frontmatter: { memory_plan_kind: routed } }
+    allowed_paths: { paths: ['memory-plan-repair/routed/**'], route: 'memory-plan-repair/routed/' }
+";
+
+/// The repair workload, fixed at both per-PR scales so only the vault's size
+/// varies: [`REPAIR_FIELD_DOCS`] documents, each breaching the synonym rule
+/// and the default rule (two findings each), one misplaced document the route
+/// moves, linked by its path from [`REPAIR_ROUTE_IN_LINKS`] documents (a move
+/// keeps a bare stem valid, so only a path link is rewritten), and a batch
+/// limit that takes all of it.
+const REPAIR_FIELD_DOCS: usize = 5;
+const REPAIR_ROUTE_IN_LINKS: usize = 20;
+const REPAIR_LIMIT: u32 = 2 * REPAIR_FIELD_DOCS as u32 + 1;
+
+/// The stem of the document the repair's route moves, and the folder its
+/// in-links stand under.
+const REPAIR_ROUTED_STEM: &str = "memory-plan-repair-routed";
+const REPAIR_LINKS_DIR: &str = "memory-plan-repair-links";
+
 /// The document the plan mix deletes, which no link names.
 const PLAN_DELETED: &str = "memory-plan-delete/memory-plan-lonely.md";
 
@@ -754,11 +789,21 @@ const PLAN_WRITES: [(&str, usize); 3] = [
     ("delete", 1),
 ];
 
+/// What the repair write of the planning child writes, as its apply answers
+/// its targets: each field document, the routed document's two places, and
+/// each in-link's rewrite.
+const REPAIR_WRITE: (&str, usize) = ("repair", REPAIR_FIELD_DOCS + 2 + REPAIR_ROUTE_IN_LINKS);
+
+/// Every write the planning child lands: the plan mix's and the repair's.
+const PLAN_AND_REPAIR_WRITES: [(&str, usize); 4] =
+    [PLAN_WRITES[0], PLAN_WRITES[1], PLAN_WRITES[2], REPAIR_WRITE];
+
 /// The heap stretches the planning child measures.
-const PLAN_STRETCHES: [&str; 2] = ["previews", "mix"];
+const PLAN_STRETCHES: [&str; 4] = ["previews", "mix", "repair-previews", "repair-apply"];
 
 /// How many documents [`plant_plan_subjects`] plants.
-const PLAN_PLANTED: usize = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1;
+const PLAN_PLANTED: usize =
+    PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1 + REPAIR_FIELD_DOCS + 1 + REPAIR_ROUTE_IN_LINKS;
 
 /// What each planned write of the size child writes, as the apply answers its
 /// targets: each moved or relinked document's two places.
@@ -804,7 +849,7 @@ struct PlanChild {
 const PLANNING: PlanChild = PlanChild {
     case: PLAN_HARNESS_CASE,
     plant: plant_plan_subjects,
-    writes: &PLAN_WRITES,
+    writes: &PLAN_AND_REPAIR_WRITES,
     stretches: &PLAN_STRETCHES,
     added: PLAN_PLANTED - 1,
 };
@@ -831,7 +876,8 @@ fn plant(vault: &attach::Vault, at: &str, content: &[u8]) {
 /// Plant the planning child's subjects into `vault`'s tree, before anything
 /// attaches it: [`PLAN_SET_MATCHES`] documents carrying [`PLAN_SET_FIELD`],
 /// the hub with [`PLAN_HUB_IN_LINKS`] documents linking it by its bare stem,
-/// and the document the mix deletes.
+/// the document the mix deletes, [`PLAN_SCHEMA`], and the repair workload's
+/// documents.
 fn plant_plan_subjects(vault: &attach::Vault) {
     let plant = |at: &str, content: &[u8]| plant(vault, at, content);
     for at in 0..PLAN_SET_MATCHES {
@@ -848,6 +894,24 @@ fn plant_plan_subjects(vault: &attach::Vault) {
         );
     }
     plant(PLAN_DELETED, b"no link names me\n");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), PLAN_SCHEMA)
+        .expect("writing the planning child's schema");
+    for at in 0..REPAIR_FIELD_DOCS {
+        plant(
+            &format!("memory-plan-repair/fields/{at:04}.md"),
+            b"---\nmemory_plan_kind: fixable\nmemory_plan_state: complete\n---\na repairable document\n",
+        );
+    }
+    plant(
+        &format!("memory-plan-repair/loose/{REPAIR_ROUTED_STEM}.md"),
+        b"---\nmemory_plan_kind: routed\n---\na misplaced document\n",
+    );
+    for at in 0..REPAIR_ROUTE_IN_LINKS {
+        plant(
+            &format!("{REPAIR_LINKS_DIR}/{at:04}.md"),
+            format!("See [[memory-plan-repair/loose/{REPAIR_ROUTED_STEM}]].\n").as_bytes(),
+        );
+    }
 }
 
 /// Plant the size child's subjects into `vault`'s tree, before anything
@@ -1041,6 +1105,59 @@ fn the_plan_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_th
     let large = plan_child("plan-heap-realistic", "realistic", &PLANNING).heap("mix");
     hold_plan_pair(
         "the plan mix",
+        small,
+        large,
+        baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **A repair's plan holds its operations and a fixed record per fix, never
+/// the vault**, as a difference in heap bytes across the two per-PR scales,
+/// read before anything is applied.
+///
+/// The planning child plants one repair workload at both profiles: five
+/// documents each breaching a synonym rule and a default rule, one misplaced
+/// document a route moves with [`REPAIR_ROUTE_IN_LINKS`] in-links its cascade
+/// rewrites, a batch limit that takes all of it, and nothing else in the
+/// selection. It previews `Host::repair` over that under its own mark on a
+/// settled heap, before any apply, so only the vault's size varies and the
+/// preview is held at the plan previews' resolution.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_repair_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile()
+ {
+    let small = plan_child("plan-repair-previews-ambiguous", "ambiguous", &PLANNING)
+        .heap("repair-previews");
+    let large = plan_child("plan-repair-previews-realistic", "realistic", &PLANNING)
+        .heap("repair-previews");
+    hold_plan_pair(
+        "the repair previews",
+        small,
+        large,
+        baselines::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **A repair applied through a live host holds its operations and a fixed
+/// record per fix, never the vault**, as a difference in heap bytes across the
+/// two per-PR scales, read as the apply answers.
+///
+/// The same workload as
+/// [`the_repair_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`],
+/// applied through `Host::repair` in apply mode after every other write has
+/// landed and the heap has settled. The watcher's echo of its publications is
+/// inside the window, so it is held at the plan mix's allowance, which is
+/// authored over that echo's excursion.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_repair_apply_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile()
+{
+    let small =
+        plan_child("plan-repair-apply-ambiguous", "ambiguous", &PLANNING).heap("repair-apply");
+    let large =
+        plan_child("plan-repair-apply-realistic", "realistic", &PLANNING).heap("repair-apply");
+    hold_plan_pair(
+        "the repair apply",
         small,
         large,
         baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
@@ -1404,6 +1521,29 @@ fn plan_and_report(root: &Path) {
         lines.push(format!("plan {write} wrote {targets}"));
     };
 
+    let repair_request = |mode| {
+        RepairParams::new(address(), mode)
+            .with_predicates([Predicate::path("memory-plan-repair/**")])
+            .with_limit(REPAIR_LIMIT)
+    };
+    settle_heap();
+    let repair_mark = heap::Mark::set();
+    let repaired = previewed_plan("repair", host.repair(repair_request(ApplyMode::Preview)));
+    let repair_previews = repair_mark.peak_above();
+    let repair_fixes = repaired.operations.len();
+    let rewrites: usize = repaired
+        .operations
+        .iter()
+        .map(|operation| operation.cascade.len())
+        .sum();
+    assert_eq!(
+        (repair_fixes, rewrites),
+        (2 * REPAIR_FIELD_DOCS + 1, REPAIR_ROUTE_IN_LINKS),
+        "the repair planned other than two fixes per field document and the route's move with a \
+         rewrite per in-link"
+    );
+    drop(repaired);
+
     settle_heap();
     let mark = heap::Mark::set();
     let set = previewed_plan(
@@ -1448,6 +1588,14 @@ fn plan_and_report(root: &Path) {
     landed("delete", deleted);
     let mix = mark.peak_above();
 
+    // The repair applies last, on a settled heap, so no echo of an earlier
+    // write is handled beside it.
+    settle_heap();
+    let repair_mark = heap::Mark::set();
+    let targets = applied_pending("repair", host.repair(repair_request(ApplyMode::Apply)));
+    let repair_apply = repair_mark.peak_above();
+    lines.push(format!("plan repair wrote {targets}"));
+
     let mut store = vault.store();
     println!("{}", report_line(attach::derived_documents(&mut store)));
     for line in lines {
@@ -1455,6 +1603,8 @@ fn plan_and_report(root: &Path) {
     }
     println!("plan heap previews {previews}");
     println!("plan heap mix {mix}");
+    println!("plan heap repair-previews {repair_previews}");
+    println!("plan heap repair-apply {repair_apply}");
 }
 
 /// The size harness: adopt the tree at `root`, attach it, keep it attached,
@@ -1687,11 +1837,18 @@ fn previewed_plan(
 /// such a target cost the apply no write; counting it would let a plan that
 /// landed nothing pass as one that landed its targets.
 fn applied_plan(write: &str, host: &attach::ServingHost, plan: ResolvedPlan) -> usize {
-    let answered = host
-        .apply(ApplyParams::new(
+    applied_pending(
+        write,
+        host.apply(ApplyParams::new(
             ApplyMode::Apply,
             PlanDocument::resolved(plan),
-        ))
+        )),
+    )
+}
+
+/// What an apply answered, as [`applied_plan`] holds it.
+fn applied_pending(write: &str, pending: Result<norn_host::PendingApply, ErrorEnvelope>) -> usize {
+    let answered = pending
         .unwrap_or_else(|refusal| panic!("the {write} apply was refused: {refusal:?}"))
         .wait()
         .unwrap_or_else(|refusal| panic!("the {write} apply was refused: {refusal:?}"));

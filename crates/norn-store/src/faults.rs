@@ -10,10 +10,13 @@
 //! So the seam lives here. [`induced_failure`] is the arming surface a suite
 //! calls, and the rest of this file is what the store's own paths read: the
 //! thread-local and process-wide arms, the abort points the increment
-//! checks, and the condition a store schema's statement list meets. **Two
+//! checks, and the condition a store schema's statement list meets. **Three
 //! arrangements are met at the driver seam rather than here** — the page cap an
-//! open applies, and the busy a pinned-scalar read reports — so the arms behind
-//! them are `norn-db`'s and the surface below forwards to them.
+//! open applies, the busy a pinned-scalar read reports, and the record of every
+//! statement SQLite begins — so the arms behind them are `norn-db`'s and the
+//! surface below forwards to them. The plan of a recorded statement is taken
+//! out of band, on the store's own connection, so a suite plans what ran
+//! without a statement of its own entering the record.
 //!
 //! **The seam is deliberately small.** It names *where* a store operation can be
 //! made to fail, and *how* — a busy database, a full disk, a corrupt or refusing
@@ -57,7 +60,7 @@ use crate::store::Store;
 /// store operation produces, and each of them exists because a rung, a refusal or
 /// a verification cannot be reached from outside otherwise — nothing above this
 /// crate reaches a store's database, so a suite arranges through this surface
-/// rather than by writing into the file itself. Two of them are armed at the
+/// rather than by writing into the file itself. Three of them are armed at the
 /// driver seam below and forwarded from here, which keeps every arrangement a
 /// suite makes in one vocabulary. **Nothing in a product path calls any of
 /// this.** The module is hidden from the documentation and every name in it says
@@ -81,6 +84,8 @@ use crate::store::Store;
 #[doc(hidden)]
 pub mod induced_failure {
     use std::sync::atomic::Ordering;
+
+    use norn_db::EmittedPlan;
 
     use super::{
         CHANGESETS_COMMITTED, DISARMED, Store, StoreError, TEAR_AFTER_COMMIT,
@@ -382,6 +387,59 @@ pub mod induced_failure {
         super::UNWIND_AFTER_SNAPSHOT_OPENS.set(true);
     }
 
+    /// Record the text of every statement SQLite begins on every store this
+    /// process opens from here on, writer and readers alike, until
+    /// [`stop_recording_statements`].
+    ///
+    /// **This is the census a plan bar is held to.** A bar states how one
+    /// statement reaches its rows; whether every statement an operation runs
+    /// is one a bar states is a fact only SQLite's statement trace holds,
+    /// because it sees each statement whoever composed it. The record is met at
+    /// the driver seam and forwarded from here, as the page cap is, and it is
+    /// process-wide for the reason the cap is: a host runs its statements on
+    /// threads the suite does not own. The trace names no connection, so the
+    /// record holds whatever this process ran: a suite asserting over it runs
+    /// alone in its process.
+    pub fn record_statements_begun() {
+        norn_db::faults::record_statements_begun();
+    }
+
+    /// Stop recording, and forget what was recorded.
+    pub fn stop_recording_statements() {
+        norn_db::faults::stop_recording_statements();
+    }
+
+    /// The text of every statement recorded since the record was last taken,
+    /// in the order SQLite began them, as it was prepared, its parameters
+    /// unbound. A statement run inside another — a trigger's, or one the
+    /// full-text index runs for itself — is reported behind `-- `, and the
+    /// start of a trigger's program as `-- TRIGGER <name>`.
+    pub fn statements_begun() -> Vec<String> {
+        norn_db::faults::take_recorded_statements()
+    }
+
+    /// The plan SQLite reports for `sql` on the store's own connection, and
+    /// the columns it reads, with every parameter bound to `NULL`.
+    ///
+    /// The statement is any the record holds, so it is prepared on a
+    /// connection that can prepare all of them: the writer, with the
+    /// functions a reader registers registered on it as well. SQLite chooses
+    /// a plan by a bound value only from gathered statistics or a `LIKE` or
+    /// `GLOB` pattern, so where a statement has neither, the plan of its
+    /// unbound text is the plan it ran with.
+    pub fn explain_out_of_band(store: &Store, sql: &str) -> Result<EmittedPlan, StoreError> {
+        let connection = store.connection();
+        crate::read::register_functions(connection)?;
+        let parameters = connection
+            .prepare(sql)
+            .map_err(|error| error::sql("preparing a recorded statement", error))?
+            .parameter_count();
+        let unbound = std::iter::repeat_n(rusqlite::types::Null, parameters);
+        Ok(store
+            .database
+            .emitted_plan(sql, rusqlite::params_from_iter(unbound))?)
+    }
+
     fn arm_the_store_schema(database: &std::path::Path, code: i32) {
         *super::ARMED_STORE_SCHEMA
             .lock()
@@ -389,8 +447,9 @@ pub mod induced_failure {
             Some((database.to_path_buf(), code));
     }
 
-    /// Disarm every process-wide arrangement above — the page cap, the store
-    /// schema's armed condition, and the two tears — plus the calling
+    /// Disarm every process-wide arrangement above — the page cap, the
+    /// statement record, the store schema's armed condition, and the two
+    /// tears — plus the calling
     /// thread's busy one-shot, its armed feed-page write and its armed
     /// establishment unwind.
     ///
@@ -406,6 +465,7 @@ pub mod induced_failure {
     /// to watch the same request converge without it.
     pub fn disarm() {
         norn_db::faults::set_page_cap(0);
+        norn_db::faults::stop_recording_statements();
         norn_db::faults::clear_the_meta_read_arm();
         super::WRITE_AFTER_FEED_PAGES.set(None);
         super::UNWIND_AFTER_SNAPSHOT_OPENS.set(false);
