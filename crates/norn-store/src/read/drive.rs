@@ -99,10 +99,13 @@
 //! page selects: a validate's findings of one kind, severity or rule, or a
 //! field sort's section of documents carrying its key, where the count is of
 //! documents and not of those rows, so the page walks on past the ceiling.
-//! Each such row is walked once over a drain past the ceiling's rounds, so
-//! the drain stays linear: no index holds a range's, a full-text match's, a
-//! resolution's or a links-to part's documents in a page's order, and a
-//! count that judged each row would read without bound.
+//! Such a page pays its rounds to the ceiling first — windows counted in
+//! documents that hold few of its rows, and counts — which, as each round
+//! but the last walks its whole window, come to a few times the documents
+//! the page passes; then each row past the ceiling's rounds is walked once
+//! over a drain, so the drain stays linear: no index holds a range's, a
+//! full-text match's, a resolution's or a links-to part's documents in a
+//! page's order, and a count that judged each row would read without bound.
 //!
 //! **A later read of the same request walks on from where an earlier one
 //! stopped** ([`Settled`]): a repair batch cut inside a document reads one

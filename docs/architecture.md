@@ -923,8 +923,10 @@ literal prefix the glob rejects — which its count takes for kept, so the page 
 part keeping many documents of which few hold the rows the page selects — a validate's
 findings of one kind, severity or rule, or a field sort's section of documents carrying
 its key — whose count is of documents and not of those rows, so the page walks on past the
-ceiling though the drain stays linear, each row walked once; no index holds such a part's
-documents in a page's order. Inequality and absence seek the
+ceiling though the drain stays linear: its rounds to the ceiling, windows counted in
+documents that hold few of its rows and counts, come to a few times the documents the page
+passes, and each row past them is walked once; no index holds such a part's documents in a
+page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
