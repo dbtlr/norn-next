@@ -131,7 +131,6 @@ impl Spread {
                 .record_finding(&warning(&bulk(at)))
                 .expect("recording a warning");
         }
-        drop(request);
         let reader = Arc::new(
             store
                 .open_reader()
