@@ -977,7 +977,7 @@ a path part's folded range bounds on every root, and that a document part keepin
 documents in the answer's path order drives instead from its source — the part's documents
 sought from the page's place and each one's findings at its path, so a continuation costs
 the documents it reads from its place to its last finding however many the part matched,
-those holding no finding the page selects included, each read once over a drain — while any other document part keeping
+those holding no finding the page selects included, each read once per kind a drain pages — while any other document part keeping
 what it seeks drives from the documents it matched; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks

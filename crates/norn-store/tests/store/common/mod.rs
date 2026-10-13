@@ -488,7 +488,8 @@ pub fn mixed_documents(declared: &ContentModel) -> (Vec<DocumentFacts>, &'static
 }
 
 /// Every part a conjunction is judged under (NORN-390): each part of
-/// [`drained_parts`] alone, a path part, an inequality and an absence.
+/// [`drained_parts`] alone, a path part over a folder and one naming a single
+/// bulk document, an inequality and an absence.
 pub fn conjoined_parts(kind: FindingKind) -> Vec<Predicate> {
     let mut parts: Vec<Predicate> = drained_parts(kind)
         .into_iter()
@@ -497,6 +498,7 @@ pub fn conjoined_parts(kind: FindingKind) -> Vec<Predicate> {
         .collect();
     parts.extend([
         Predicate::path("mixed/**"),
+        Predicate::path("bulk/0003.md"),
         Predicate::not_equal_to("status", "closed"),
         Predicate::missing("noted"),
     ]);

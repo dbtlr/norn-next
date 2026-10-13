@@ -2721,10 +2721,11 @@ fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
 
 /// **A path page a part drives reads no document past a path part's range,
 /// either way (NORN-390).** Over the fixture and 50, then 500, bulk documents
-/// every part matches, all under `bulk/`, a path page narrowed by an equality
-/// and by a path part whose range stands before `bulk/` ascending, `a*`, or
-/// after it descending, `z*`, costs the same at both sizes: the equality's
-/// source starts and stops within the path part's range.
+/// every part matches, all under `bulk/`, a path page of three rows narrowed by
+/// an equality and by path parts whose ranges stand before `bulk/`, after it,
+/// or end inside it — alone and two together, either way — costs the same at
+/// both sizes: the equality's source starts at the ranges' near end and stops
+/// at their far end, the tightest of them.
 #[test]
 fn a_driven_path_page_reads_within_a_path_parts_range() {
     for order in [
@@ -2733,13 +2734,59 @@ fn a_driven_path_page_reads_within_a_path_parts_range() {
     ] {
         let small = Seeded::with_matched_bulk_under("find-ranged-small", 50, order);
         let large = Seeded::with_matched_bulk_under("find-ranged-large", 500, order);
-        for (direction, glob) in [(Direction::Ascending, "a*"), (Direction::Descending, "z*")] {
+        // Each range standing before the bulk, after it, or ending inside it,
+        // alone and beside another, so the source must start at a range's
+        // near end and stop at its far end, the tightest of several.
+        for (direction, globs) in [
+            (Direction::Ascending, &["a*"][..]),
+            (Direction::Ascending, &["z*"][..]),
+            (Direction::Ascending, &["z*", "**"][..]),
+            (Direction::Ascending, &["b*/**", "bulk/00*"][..]),
+            (Direction::Descending, &["z*"][..]),
+            (Direction::Descending, &["a*"][..]),
+            (Direction::Descending, &["z*", "**"][..]),
+            (Direction::Descending, &["b*/**", "bulk/00*"][..]),
+        ] {
             let params = sorted(SortKey::path(), direction)
-                .with_predicates([Predicate::equal_to("status", "open"), Predicate::path(glob)]);
+                .with_predicates(
+                    std::iter::once(Predicate::equal_to("status", "open"))
+                        .chain(globs.iter().map(|glob| Predicate::path(*glob))),
+                )
+                .with_limit(3);
             assert_eq!(
                 small.page(&params).work,
                 large.page(&params).work,
-                "a {direction:?} page beside `{glob}` read past its range under {order:?}"
+                "a {direction:?} page beside {globs:?} read past its ranges under {order:?}"
+            );
+        }
+        // Continuations from a place outside the ranges, and from one just
+        // short of where the tightest ends, so the source must start at the
+        // near end past the place and stop at the far end.
+        for (direction, globs, after) in [
+            (Direction::Ascending, &["z*"][..], "a.md"),
+            (Direction::Descending, &["a*"][..], "zzz.md"),
+            (
+                Direction::Ascending,
+                &["b*/**", "bulk/000*"][..],
+                "bulk/0008.md",
+            ),
+            (
+                Direction::Descending,
+                &["bulk/0*", "b*/**"][..],
+                "bulk/0001.md",
+            ),
+        ] {
+            let params = sorted(SortKey::path(), direction)
+                .with_predicates(
+                    std::iter::once(Predicate::equal_to("status", "open"))
+                        .chain(globs.iter().map(|glob| Predicate::path(*glob))),
+                )
+                .with_limit(3);
+            assert_eq!(
+                small.page(&small.resumed(&params, None, after)).work,
+                large.page(&large.resumed(&params, None, after)).work,
+                "a {direction:?} page beside {globs:?} after `{after}` read past its ranges \
+                 under {order:?}"
             );
         }
     }
@@ -2771,14 +2818,26 @@ fn a_conjunction_answers_what_both_its_parts_admit_whichever_drives() {
         again.message = "a second finding of the kind".to_string();
         request.record_finding(&again).expect("recording it twice");
         let parts = conjoined_parts(FindingKind::BodyBytesNotUtf8);
+        let whole_by = |direction: Direction, parts: &[Predicate]| {
+            seeded.paths(
+                &sorted(SortKey::path(), direction)
+                    .with_predicates(parts.to_vec())
+                    .with_limit(MAX_PAGE as u32),
+            )
+        };
+        // What each part admits, read ascending: a descending page is held to
+        // it, so a source that reads otherwise one way is found.
+        for part in &parts {
+            let mut descending = whole_by(Direction::Descending, std::slice::from_ref(part));
+            descending.reverse();
+            assert_eq!(
+                descending,
+                whole_by(Direction::Ascending, std::slice::from_ref(part)),
+                "{part:?} admitted other documents descending under {order:?}"
+            );
+        }
         for direction in [Direction::Ascending, Direction::Descending] {
-            let whole = |parts: &[Predicate]| {
-                seeded.paths(
-                    &sorted(SortKey::path(), direction)
-                        .with_predicates(parts.to_vec())
-                        .with_limit(MAX_PAGE as u32),
-                )
-            };
+            let whole = |parts: &[Predicate]| whole_by(direction, parts);
             for part in &parts {
                 let alone = whole(std::slice::from_ref(part));
                 let mut ordered = alone.clone();
@@ -2794,7 +2853,7 @@ fn a_conjunction_answers_what_both_its_parts_admit_whichever_drives() {
                     if first == second {
                         continue;
                     }
-                    let admitted = whole(std::slice::from_ref(second));
+                    let admitted = whole_by(Direction::Ascending, std::slice::from_ref(second));
                     let both: Vec<String> = whole(std::slice::from_ref(first))
                         .into_iter()
                         .filter(|path| admitted.contains(path))

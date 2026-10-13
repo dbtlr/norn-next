@@ -33,8 +33,9 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
     ContentHash, Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows,
-    Pattern, Predicate, ResolutionTarget, RuleSet, SchemaRule, Severity, Sort, SortKey,
-    Unsatisfied, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, VaultAddress, VaultName,
+    Pattern, Predicate, RepairParams, ResolutionTarget, RuleSet, SchemaRule, Severity, Sort,
+    SortKey, Unsatisfied, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, VaultAddress,
+    VaultName,
 };
 use sha2::{Digest, Sha256};
 
@@ -2153,6 +2154,55 @@ fn a_driven_page_stops_where_a_path_parts_range_does() {
             small.validate(&params).work,
             large.validate(&params).work,
             "a page beside a path part read past its range under {order:?}"
+        );
+    }
+}
+
+/// **A page and a batch a document part drives order a document's findings by
+/// their position, then their id (NORN-390).** Over the fixture, two more
+/// undeclared-tag warnings stand at `a.md`, the only document the tag `draft`
+/// stands on, recorded about its fortieth link and then about its
+/// thirty-ninth, so their ids run against their positions. A page of the kind
+/// and a repair batch narrowed by the tag answer `a.md`'s findings in the
+/// order the unnarrowed ones hold them, where every finding is sought off its
+/// kind's index in that order.
+#[test]
+fn a_driven_page_orders_a_documents_findings_by_position_then_id() {
+    for order in ROOTS {
+        let mut validating_store = Validating::under("validate-driven-position", order);
+        for (ordinal, tag) in [(40, "fortieth"), (39, "thirty-ninth")] {
+            let mut finding = undeclared("a.md", tag);
+            finding.ordinal = Some(ordinal);
+            validating_store.stand(&finding);
+        }
+        let at_a = |rows: Vec<FindingRow>| {
+            rows.into_iter()
+                .filter(|row| row.path.as_str() == "a.md")
+                .map(|row| (row.kind, row.target, row.id))
+                .collect::<Vec<_>>()
+        };
+        let tags = || validating().with_kinds([FindingKind::UndeclaredTag]);
+        let unnarrowed = at_a(validating_store.rows(&tags()));
+        assert_eq!(
+            unnarrowed
+                .iter()
+                .filter(|(_, target, _)| target.is_some())
+                .count(),
+            4,
+            "{unnarrowed:?}"
+        );
+        assert_eq!(
+            at_a(validating_store.rows(&tags().with_predicates([Predicate::tag("draft")]))),
+            unnarrowed,
+            "a page the tag drives under {order:?}"
+        );
+        let batched = |params: RepairParams| at_a(validating_store.batch(&params).rows);
+        assert_eq!(
+            batched(batch::selecting(
+                &validating().with_predicates([Predicate::tag("draft")])
+            )),
+            batched(batch::selecting(&validating())),
+            "a batch the tag drives under {order:?}"
         );
     }
 }
