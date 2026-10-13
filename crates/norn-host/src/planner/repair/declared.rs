@@ -480,6 +480,7 @@ enum Made {
     Fixed {
         operations: Vec<OperationKind>,
         cited: Vec<CitedFinding>,
+        removed_field: Option<(DocumentPath, String)>,
     },
     /// The operation a fix would have been, which reads a clock that gives
     /// no reading, and why it does not resolve.
@@ -727,14 +728,12 @@ impl<'d> Reckoned<'d> {
             }
             let id = self.rows[at].id;
             let written = lowered.made.iter().find_map(|made| match made {
-                Made::Fixed { operations, cited }
-                    if cited.iter().any(|cited| cited.finding == id) =>
-                {
-                    match operations.as_slice() {
-                        [operation] => Some(operation),
-                        _ => None,
-                    }
-                }
+                Made::Fixed {
+                    operations, cited, ..
+                } if cited.iter().any(|cited| cited.finding == id) => match operations.as_slice() {
+                    [operation] => Some(operation),
+                    _ => None,
+                },
                 Made::Fixed { .. } | Made::Unresolved { .. } => None,
             });
             match (written, lowered.decided[at].take()) {
@@ -806,7 +805,11 @@ fn decided_skips(decided: &mut [Option<SkippedFinding>], skipped: Vec<(usize, Sk
 /// answers it; or the operation left unresolved, numbered in its place.
 fn push(planned: &mut Planned, made: Made, namings: &Namings) {
     match made {
-        Made::Fixed { operations, cited } => {
+        Made::Fixed {
+            operations,
+            cited,
+            removed_field,
+        } => {
             let mut earlier: Option<OperationId> = None;
             for kind in operations {
                 planned
@@ -830,6 +833,7 @@ fn push(planned: &mut Planned, made: Made, namings: &Namings) {
                     .push(Citation::new(id.clone(), cited.clone()));
                 earlier = Some(id);
             }
+            planned.removed_fields.extend(removed_field);
         }
         Made::Unresolved { operation, reason } => {
             let id = next_id(planned);
@@ -1169,6 +1173,7 @@ struct Fix {
     operations: Vec<OperationKind>,
     cited: Vec<CitedFinding>,
     state: State,
+    removed_field: Option<(DocumentPath, String)>,
 }
 
 impl Fix {
@@ -1177,6 +1182,7 @@ impl Fix {
         made.push(Made::Fixed {
             operations: self.operations,
             cited: self.cited,
+            removed_field: self.removed_field,
         });
         self.state
     }
@@ -1369,6 +1375,7 @@ impl Composing<'_> {
             Vec::new()
         };
         Ok(Fix {
+            removed_field: None,
             operations: vec![set],
             cited: vec![cited(self.row, Confidence::Declared, notes)],
             state,

@@ -62,6 +62,7 @@ fn holder(
     );
     facts.links = (0..links)
         .map(|at| LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: protocol.map(str::to_string),

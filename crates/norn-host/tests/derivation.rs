@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(12),
-    "1ab7023b9b70dcc1ef1aaa7b0cb4fd4d7525453f24d55344adca7677054f3925",
+    DerivationVersion::new(13),
+    "3fba0383a453cb93ae19a9239485aeebf9992e2c1dd2aa14f6dbf31cdee67893",
 );
 
 /// The vault schema the main corpus is derived under: a field of every

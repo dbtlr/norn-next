@@ -180,6 +180,7 @@ pub(super) fn fix_field(
     );
     Mapped {
         fix: Some(Fix {
+            removed_field: None,
             operations: vec![set],
             cited: cites,
             state: current,

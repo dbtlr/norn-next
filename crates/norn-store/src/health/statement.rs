@@ -119,7 +119,7 @@ impl After {
 /// [`crate::ExplainedStatement::LinkHealthPathLinks`] over the links held
 /// under the path key `?1`.
 ///
-/// The row's first thirteen columns are a link row's, in the order
+/// The row's first fourteen columns are a link row's, in the order
 /// [`crate::request::stored_link_row`] reads them; then the holding
 /// document's path, the link's row id and ordinal, the key and its segment
 /// count, the holding document's generation, and the driver row a page
@@ -136,7 +136,7 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
     let columns = format!(
         "l.family, l.embed, l.protocol, l.target, l.title, l.anchor, l.block_ref,
                 l.span_line, l.span_column, l.span_offset, l.anchor_text, l.anchor_marked,
-                l.address, d.path, l.id, l.ordinal, k.{link_key}, k.segments, d.generation"
+                l.field, l.address, d.path, l.id, l.ordinal, k.{link_key}, k.segments, d.generation"
     );
     let driver = match selected {
         Selected::Documents => {

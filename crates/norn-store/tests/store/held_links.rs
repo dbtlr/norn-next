@@ -30,6 +30,7 @@ impl Held {
         let mut store = scratch.open_under(StoredPathOrder::Sensitive);
         let mut linked = document_with_every_fact("notes/linked.md", "hash-linked");
         linked.links.push(LinkFact {
+            field: None,
             family: LinkFamily::Markdown,
             embed: false,
             protocol: None,
@@ -39,6 +40,7 @@ impl Held {
             span: Some(span(5, 1, 70)),
         });
         linked.links.push(LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: None,
@@ -50,6 +52,7 @@ impl Held {
             span: Some(span(6, 1, 90)),
         });
         linked.links.push(LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: None,

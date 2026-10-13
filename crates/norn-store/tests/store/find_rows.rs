@@ -1217,6 +1217,7 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
     // without resolving any: what this case measures is the cut.
     long.links = (0..NESTED_ROW_CEILING + 2)
         .map(|index| LinkFact {
+            field: None,
             family: LinkFamily::Markdown,
             embed: false,
             protocol: Some("https".to_string()),

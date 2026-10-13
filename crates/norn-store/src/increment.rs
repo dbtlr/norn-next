@@ -678,6 +678,7 @@ fn upsert(
                     link.span.map(|span| span.line),
                     link.span.map(|span| span.column),
                     link.span.map(|span| span.byte_offset),
+                    link.field,
                 ],
                 |row| row.get(0),
             )

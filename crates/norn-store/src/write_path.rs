@@ -175,8 +175,8 @@ impl WriteStatement {
                 "INSERT INTO links (
                      document, ordinal, family, embed, protocol, target, title, anchor,
                      anchor_text, anchor_marked, block_ref, address, span_line, span_column,
-                     span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                     span_offset, field
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  RETURNING id"
             }
             Self::InsertLinkKey => {
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn a_statements_parameter_count_is_its_highest_placeholder() {
         assert_eq!(WriteStatement::UpsertDocument.parameter_count(), 14);
-        assert_eq!(WriteStatement::InsertLink.parameter_count(), 15);
+        assert_eq!(WriteStatement::InsertLink.parameter_count(), 16);
         assert_eq!(WriteStatement::DiscardStaleFindings.parameter_count(), 1);
         assert_eq!(WriteStatement::PutMeta.parameter_count(), 2);
     }

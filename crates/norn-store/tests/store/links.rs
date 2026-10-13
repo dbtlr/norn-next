@@ -64,6 +64,7 @@ fn link(
     anchor: Option<&str>,
 ) -> LinkFact {
     LinkFact {
+        field: None,
         family,
         embed: false,
         protocol: protocol.map(str::to_string),

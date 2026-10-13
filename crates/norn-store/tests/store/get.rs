@@ -939,6 +939,7 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
     let mut paged = parsed("paged.md", &body);
     paged.links = (0..HELD)
         .map(|at| LinkFact {
+            field: None,
             family: if at % 2 == 0 {
                 LinkFamily::Wikilink
             } else {

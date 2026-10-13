@@ -1239,6 +1239,7 @@ impl StoredColumns for StoredLink {
             None => (None, None, None),
         };
         let mut columns = vec![
+            ("field", optional_text(link.field.as_deref())),
             ("family", quoted(link.family.as_str())),
             ("embed", flag(link.embed)),
             ("protocol", optional_text(link.protocol.as_deref())),
@@ -1553,6 +1554,7 @@ mod tests {
         let mut linked = projection();
         linked.documents[0].links.push(StoredLink {
             fact: LinkFact {
+                field: None,
                 family: norn_store::LinkFamily::Wikilink,
                 embed: true,
                 protocol: None,

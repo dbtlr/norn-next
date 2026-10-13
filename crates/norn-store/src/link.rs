@@ -438,6 +438,7 @@ mod tests {
     /// A link of `family`, written with `protocol` and `target`.
     fn written(family: crate::facts::LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
         LinkFact {
+            field: None,
             family,
             embed: false,
             protocol: protocol.map(str::to_string),

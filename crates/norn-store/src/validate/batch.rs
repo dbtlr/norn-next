@@ -113,8 +113,8 @@ pub struct RepairBatch {
     /// COLLATE NOCASE, path, position, id)` order.
     pub rows: Vec<FindingRow>,
     /// The link each link finding among `rows` is about, by the finding's row
-    /// id: the family and address of the link at the finding's ordinal in its
-    /// holder. A finding about its document, and one whose holder holds no
+    /// id: the family, address and frontmatter field of the link at the
+    /// finding's ordinal in its holder. A finding about its document, and one whose holder holds no
     /// link at its ordinal, has none. It is read in the statements that read
     /// the rows, so it costs no statement of its own.
     pub links: BTreeMap<u64, FindingLink>,

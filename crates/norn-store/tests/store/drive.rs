@@ -82,6 +82,7 @@ fn spread_document(at: &str, matched: bool, declared: &ContentModel) -> norn_sto
         declared,
     );
     facts.links.push(LinkFact {
+        field: None,
         family: LinkFamily::Wikilink,
         embed: false,
         protocol: None,

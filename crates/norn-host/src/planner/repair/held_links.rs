@@ -12,9 +12,9 @@
 //! set says which links the plan changed and what they resolve to afterwards.
 //!
 //! **A finding is judged by the link it is about.** The batch hands back, for
-//! each link finding, the family and address of the link at the finding's
-//! ordinal in its holder ([`FindingLink`]), so two links of one address and
-//! two syntaxes in one holder are two links with two verdicts. The link's key
+//! each link finding, the family, address and frontmatter field of the link at
+//! the finding's ordinal in its holder ([`FindingLink`]), so two links of one
+//! address and two syntaxes in one holder are two links with two verdicts. The link's key
 //! at the plan's after-state is its holder where the batch's routes leave it,
 //! its syntax as stored, and its address as the cascade that respells it
 //! leaves it ([`Landing`]). The plan's resolution change set is keyed at the
@@ -22,10 +22,10 @@
 //! the plan changes, every link whose text the plan writes, every link a
 //! cascade leaves behind and every link that named a document the plan
 //! removes, and no other. A link with no entry is one the plan leaves
-//! resolving as it did, or one it removes, and its finding stands. Which of
-//! the four put a link in the set does not matter here: an entry
-//! records what the link resolves to at the plan's after-state, and the verdict
-//! below reads only that.
+//! resolving as it did, and its finding stands unless a declared forbidden
+//! removal deletes its field. Which of the four put a link in the set does
+//! not matter here: an entry records what the link resolves to at the plan's
+//! after-state, and the verdict below reads only that.
 //!
 //! **An entry says whether the finding still holds.** A `link/broken` finding
 //! stands only where the link still resolves to nothing; a `link/ambiguous`
@@ -62,14 +62,16 @@
 //! neither reading, so one that holds under the reading that does not match its
 //! link stays. None is dropped that holds.
 //!
-//! **Declared limit: a link finding about a link the plan removes stands.** The
-//! change set has no entry for a link the after-state no longer holds, so a
-//! declared `field/forbidden` fix with `remove` deletes a frontmatter field,
-//! and a link finding on a wikilink that field held stays skipped though the
-//! link is gone (NORN-389). It is the only fix that removes a link: a rename
-//! keeps the link in its new field, and a closed set never holds a wikilink.
+//! **A declared forbidden removal drops the link findings its field holds.**
+//! Derivation records the top-level frontmatter field on each frontmatter
+//! link, and the batch reads it at the finding's ordinal. Planning records
+//! each admitted forbidden removal by the finding row's holder and field,
+//! and settling drops the link findings that pair names, even though the
+//! resolution change set has no entry for the removed links. A rename keeps
+//! the link in its new field and records no removal; body links have no field
+//! and stay subject to the resolution change set alone.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use norn_store::FindingLink;
 use norn_wire::{
@@ -81,8 +83,11 @@ use crate::planner::links::wire_family;
 
 /// What the plan changes about where links stand: the batch's routes, the
 /// cascade's respellings, the resolution change set and the links the
-/// forecast advises on, each read off the resolved plan once.
+/// forecast advises on, read off the resolved plan once, and the declared
+/// forbidden removals recorded by planning.
 pub(crate) struct Landing {
+    /// The finding holders and fields deleted by declared forbidden removals.
+    removed_fields: BTreeSet<(DocumentPath, String)>,
     /// Where each routed document goes, by where it stood.
     routes: HashMap<DocumentPath, DocumentPath>,
     /// What a cascade respells a link's address to, by the holder where the
@@ -99,11 +104,13 @@ pub(crate) struct Landing {
 impl Landing {
     /// What `operations`, a resolved plan's, route and respell, what its
     /// `conditions` record the plan changes the resolution of, and what its
-    /// forecast `advisories` say of the links.
+    /// forecast `advisories` say of the links, beside the declared forbidden
+    /// `removed_fields` recorded by planning.
     pub(crate) fn of(
         operations: &[Operation],
         conditions: &[PlanCondition],
         advisories: &[LinkAdvisory],
+        removed_fields: BTreeSet<(DocumentPath, String)>,
     ) -> Self {
         let mut routes = HashMap::new();
         let mut respelled = HashMap::new();
@@ -134,6 +141,7 @@ impl Landing {
             .map(|advisory| keyed(advisory.link()))
             .collect();
         Landing {
+            removed_fields,
             routes,
             respelled,
             resolutions,
@@ -211,6 +219,13 @@ pub(crate) fn skipped_still_held(
 /// `landing` describes has landed: where any reading of the link says it does,
 /// since a finding is dropped only where every reading drops it.
 fn standing(row: &FindingRow, link: &FindingLink, landing: &Landing) -> bool {
+    if link.field.as_ref().is_some_and(|field| {
+        landing
+            .removed_fields
+            .contains(&(row.path.clone(), field.clone()))
+    }) {
+        return false;
+    }
     landing
         .readings(&row.path, link)
         .any(|change| change.is_none_or(|(_, after)| holds_after(row.kind, after)))
@@ -261,6 +276,7 @@ mod tests {
 
     fn wikilink(address: &str) -> FindingLink {
         FindingLink {
+            field: None,
             family: norn_store::LinkFamily::Wikilink,
             address: address.to_string(),
         }
@@ -268,6 +284,7 @@ mod tests {
 
     fn markdown(address: &str) -> FindingLink {
         FindingLink {
+            field: None,
             family: norn_store::LinkFamily::Markdown,
             address: address.to_string(),
         }
@@ -318,7 +335,7 @@ mod tests {
             .iter()
             .map(|(id, ..)| SkippedFinding::new(*id, SkipReason::NoDeclaredFix))
             .collect();
-        let landing = Landing::of(operations, conditions, advisories);
+        let landing = Landing::of(operations, conditions, advisories, BTreeSet::new());
         skipped_still_held(skipped, &rows, &links, &landing)
             .into_iter()
             .map(|skip| skip.finding)
@@ -576,11 +593,15 @@ mod tests {
             ),
         ];
 
-        let kept: Vec<u64> =
-            skipped_still_held(skipped, &rows, &links, &Landing::of(&[], &conditions, &[]))
-                .into_iter()
-                .map(|skip| skip.finding)
-                .collect();
+        let kept: Vec<u64> = skipped_still_held(
+            skipped,
+            &rows,
+            &links,
+            &Landing::of(&[], &conditions, &[], BTreeSet::new()),
+        )
+        .into_iter()
+        .map(|skip| skip.finding)
+        .collect();
 
         // 5 is dropped; 3 is no link finding; 9 has no link; 7 still stands.
         assert_eq!(kept, vec![7, 3, 9]);

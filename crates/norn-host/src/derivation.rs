@@ -75,7 +75,7 @@ use norn_wire::{
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(12);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(13);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -1468,7 +1468,7 @@ pub(crate) fn frontmatter_field_links(bytes: &[u8]) -> Vec<(String, LinkFact)> {
     parsed(source)
         .frontmatter_field_wikilinks()
         .into_iter()
-        .map(|held| (held.field.to_string(), map_link(held.link)))
+        .map(|held| (held.field.to_string(), map_frontmatter_link(held)))
         .collect()
 }
 
@@ -1501,11 +1501,19 @@ thread_local! {
 /// wikilinks, then its body's.
 fn links_of(document: &Document<'_>, scan: &norn_text::BodyScan<'_>) -> Vec<LinkFact> {
     document
-        .frontmatter_wikilinks()
+        .frontmatter_field_wikilinks()
         .into_iter()
-        .chain(scan.links())
-        .map(map_link)
+        .map(map_frontmatter_link)
+        .chain(scan.links().into_iter().map(map_link))
         .collect()
+}
+
+/// The store's fact for a frontmatter link, with the field the text layer names.
+fn map_frontmatter_link(held: norn_text::FieldLink<'_>) -> LinkFact {
+    LinkFact {
+        field: Some(held.field.to_string()),
+        ..map_link(held.link)
+    }
 }
 
 /// The store's fact for one link the text layer parsed. An empty anchor —
@@ -1527,6 +1535,7 @@ fn map_link(link: norn_text::Link) -> LinkFact {
         (None, None) => None,
     };
     LinkFact {
+        field: None,
         family: match link.family {
             norn_text::LinkFamily::Wikilink => LinkFamily::Wikilink,
             norn_text::LinkFamily::Markdown => LinkFamily::Markdown,

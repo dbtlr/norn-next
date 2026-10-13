@@ -4530,6 +4530,184 @@ fn a_bare_value_naming_a_document_whose_route_the_batch_refuses_resolves_where_i
 
 // ---- link findings a plan settles ----
 
+/// A forbidden removal drops each kind of link finding in its field, while
+/// identical links in another field and in the body stay skipped.
+#[test]
+fn a_forbidden_removal_drops_its_link_findings_and_keeps_identical_links_elsewhere() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-forbidden-remove",
+        BANNED,
+        &[
+            ("one/zz-twin.md", b"# One\n"),
+            ("two/zz-twin.md", b"# Two\n"),
+            ("zz-peer.md", b"# Peer\n"),
+            (
+                "h.md",
+                b"---\ntype: task\nscratch: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    assert_eq!(linked.len(), 9);
+    for kind in [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ] {
+        assert_eq!(linked.iter().filter(|row| row.kind == kind).count(), 3);
+    }
+    let kept: BTreeSet<u64> = linked
+        .iter()
+        .filter(|row| row.span.expect("a literal link has a span").line != 3)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(kept.len(), 6);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&preview)
+            .skipped
+            .iter()
+            .map(|skip| skip.finding)
+            .collect::<BTreeSet<_>>(),
+        kept,
+    );
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(preview.operations, plan.operations);
+    assert_eq!(provenance(&preview).skipped, provenance(&plan).skipped);
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: task\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]\n"
+    );
+    let after = link_findings_of(&host, &vault, "h.md");
+    assert_eq!(after.len(), 6);
+    for kind in [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ] {
+        assert_eq!(after.iter().filter(|row| row.kind == kind).count(), 2);
+    }
+}
+
+/// A forbidden rename keeps each link finding skipped with the link in its
+/// new field.
+#[test]
+fn a_forbidden_rename_keeps_its_link_findings_skipped() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-forbidden-rename",
+        BANNED,
+        &[
+            ("one/zz-twin.md", b"# One\n"),
+            ("two/zz-twin.md", b"# Two\n"),
+            ("zz-peer.md", b"# Peer\n"),
+            (
+                "h.md",
+                b"---\ntype: task\ndue_date: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "h.md");
+    assert_eq!(linked.len(), 3);
+    for kind in [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ] {
+        assert_eq!(linked.iter().filter(|row| row.kind == kind).count(), 1);
+    }
+    let kept: BTreeSet<u64> = linked.iter().map(|row| row.id).collect();
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&preview)
+            .skipped
+            .iter()
+            .map(|skip| skip.finding)
+            .collect::<BTreeSet<_>>(),
+        kept
+    );
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(preview.operations, plan.operations);
+    assert_eq!(provenance(&preview).skipped, provenance(&plan).skipped);
+    assert_eq!(
+        written(&vault, "h.md"),
+        "---\ntype: task\ndue: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n"
+    );
+    let after = link_findings_of(&host, &vault, "h.md");
+    assert_eq!(after.len(), 3);
+    for kind in [
+        FindingKind::Broken,
+        FindingKind::Ambiguous,
+        FindingKind::MissingAnchor,
+    ] {
+        assert_eq!(after.iter().filter(|row| row.kind == kind).count(), 1);
+    }
+}
+
+/// A forbidden removal on a document its route moves drops the link findings
+/// its field held: the removal names the field at the document's path before
+/// the move, so the route does not hide it.
+#[test]
+fn a_forbidden_removal_on_a_routed_document_drops_its_link_findings() {
+    let schema = format!(
+        "{BANNED}    allowed_paths: {{paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}}\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-forbidden-remove-routed",
+        &schema,
+        &[
+            ("one/zz-twin.md", b"# One\n"),
+            ("two/zz-twin.md", b"# Two\n"),
+            ("zz-peer.md", b"# Peer\n"),
+            (
+                "inbox/h.md",
+                b"---\ntype: task\nscratch: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]]\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "inbox/h.md");
+    assert_eq!(linked.len(), 7);
+    let kept: BTreeSet<u64> = linked
+        .iter()
+        .filter(|row| row.span.expect("a literal link has a span").line != 3)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(kept.len(), 4);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&preview)
+            .skipped
+            .iter()
+            .map(|skip| skip.finding)
+            .collect::<BTreeSet<_>>(),
+        kept,
+    );
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(provenance(&preview).skipped, provenance(&plan).skipped);
+    assert_eq!(
+        written(&vault, "tasks/h.md"),
+        "---\ntype: task\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]]\n"
+    );
+    assert_eq!(link_findings_of(&host, &vault, "tasks/h.md").len(), 4);
+}
+
 /// The `link/*` findings standing over the document at `name`, in id order.
 fn link_findings_of(
     host: &attach::ServingHost,

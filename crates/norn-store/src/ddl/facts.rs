@@ -32,7 +32,9 @@
 //!
 //! A link row is the token as it was written: its family, the `protocol://`
 //! prefix if it carried one, the raw target text, the title, and the fragment
-//! split into an anchor or a block reference. Resolution is **not** here —
+//! split into an anchor or a block reference. Its nullable `field` is the
+//! top-level frontmatter field whose value holds it, and `NULL` for a body
+//! link. Resolution is **not** here —
 //! not as a resolved edge, and not as an addressing mode either.
 //!
 //! **There is no addressing-mode column.** How a target resolves derives from
@@ -275,6 +277,7 @@ fn nullable_span_tables() -> Vec<String> {
     span_line     INTEGER,
     span_column   INTEGER,
     span_offset   INTEGER,
+    field         TEXT,
     CHECK (anchor IS NULL OR block_ref IS NULL),
     CHECK (anchor <> ''),
     CHECK (block_ref <> ''),

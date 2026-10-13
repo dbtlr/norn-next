@@ -879,17 +879,17 @@ fn read_links(
         values,
         |row| {
             let link = stored_link_row(row)?;
-            let holder: String = row.get(13)?;
-            let id: i64 = row.get(14)?;
-            let ordinal: i64 = row.get(15)?;
-            let key: Option<String> = row.get(16)?;
-            let segments: Option<i64> = row.get(17)?;
-            let generation: i64 = row.get(18)?;
-            let after = match row.get::<_, Option<String>>(19)? {
+            let holder: String = row.get(14)?;
+            let id: i64 = row.get(15)?;
+            let ordinal: i64 = row.get(16)?;
+            let key: Option<String> = row.get(17)?;
+            let segments: Option<i64> = row.get(18)?;
+            let generation: i64 = row.get(19)?;
+            let after = match row.get::<_, Option<String>>(20)? {
                 Some(text) => Some(After {
                     text,
-                    first: row.get(20)?,
-                    second: row.get(21)?,
+                    first: row.get(21)?,
+                    second: row.get(22)?,
                 }),
                 None => None,
             };
