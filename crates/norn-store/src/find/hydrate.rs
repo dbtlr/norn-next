@@ -76,7 +76,9 @@ pub const BODY_ROW_CEILING: usize = 65_536;
 ///
 /// **The page counters are the page's cost as SQLite ran it**, read off each
 /// page statement's own status once its rows are read, and summed over the
-/// page statements the find ran. They are counters rather than a plan's
+/// page statements the find ran and every statement the page's drive ran
+/// beside them: the walk's windows, the parts' counts and the vault's span.
+/// The keys read are the page statements' alone. They are counters rather than a plan's
 /// words, so a pair of finds over two vault sizes reads whether a page's work
 /// grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

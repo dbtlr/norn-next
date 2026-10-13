@@ -20,6 +20,26 @@ pub(crate) struct KeysetPage<T> {
     pub(crate) stepped: Stepped,
 }
 
+impl<T: Clone> KeysetPage<T> {
+    /// The page `rows` make, read one past a bound of `limit` where a next
+    /// page exists, and what SQLite counted reading them.
+    pub(crate) fn cut(mut rows: Vec<T>, limit: usize, stepped: Stepped) -> Self {
+        let read = rows.len() as u64;
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last().cloned()
+        } else {
+            None
+        };
+        KeysetPage {
+            rows,
+            next,
+            read,
+            stepped,
+        }
+    }
+}
+
 impl Snapshot {
     /// One page of at most `limit` rows, read from `sections` in order.
     ///
@@ -37,33 +57,38 @@ impl Snapshot {
         sections: impl IntoIterator<Item = S>,
         limit: usize,
         record: &mut Vec<Ran>,
-        mut read: impl FnMut(&mut Vec<Ran>, S, usize) -> Result<Vec<T>, StoreError>,
+        read: impl FnMut(&mut Vec<Ran>, S, usize) -> Result<Vec<T>, StoreError>,
     ) -> Result<KeysetPage<T>, StoreError> {
         let mut rows: Vec<T> = Vec::new();
-        let mut stepped = Stepped::default();
-        for section in sections {
-            let room = limit + 1 - rows.len();
-            if room == 0 {
-                break;
-            }
-            let ran_before = record.len();
-            rows.extend(read(record, section, room)?);
-            for ran in &record[ran_before..] {
-                stepped.add(ran.stepped);
-            }
-        }
-        let read = rows.len() as u64;
-        let next = if rows.len() > limit {
-            rows.truncate(limit);
-            rows.last().cloned()
-        } else {
-            None
-        };
-        Ok(KeysetPage {
-            rows,
-            next,
-            read,
-            stepped,
-        })
+        let stepped = fill_from(sections, limit + 1, &mut rows, record, read)?;
+        Ok(KeysetPage::cut(rows, limit, stepped))
     }
+}
+
+/// `rows` filled from `sections` in order until it holds `bound`: each
+/// section is asked for the room `rows` has left, and a section after `rows`
+/// is full is never read. `read` answers a section with at most the rows it
+/// is handed, running each statement through at the end of `record`; what
+/// SQLite counted stepping the statements the sections ran is summed and
+/// handed back.
+pub(crate) fn fill_from<S, T>(
+    sections: impl IntoIterator<Item = S>,
+    bound: usize,
+    rows: &mut Vec<T>,
+    record: &mut Vec<Ran>,
+    mut read: impl FnMut(&mut Vec<Ran>, S, usize) -> Result<Vec<T>, StoreError>,
+) -> Result<Stepped, StoreError> {
+    let mut stepped = Stepped::default();
+    for section in sections {
+        let room = bound - rows.len();
+        if room == 0 {
+            break;
+        }
+        let ran_before = record.len();
+        rows.extend(read(record, section, room)?);
+        for ran in &record[ran_before..] {
+            stepped.add(ran.stepped);
+        }
+    }
+    Ok(stepped)
 }
