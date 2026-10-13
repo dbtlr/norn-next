@@ -1780,6 +1780,21 @@ mod tests {
         );
     }
 
+    /// **Co-selecting rules agreeing on a default fill the field once, cited
+    /// once.** A third co-selecting rule requiring the field with no default
+    /// proposes nothing, so it neither disagrees nor skips the field.
+    #[test]
+    fn agreeing_defaults_of_co_selecting_rules_fill_the_field_once() {
+        let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n  c-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\n---\n")]);
+
+        let planned = vault.plan(&[missing(2, "a.md", "status")]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "status", "todo")]);
+        assert_eq!(planned.citations, vec![citing(1, &[2])]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
     /// **A default reading a capture its rule's `match.path` binds several
     /// ways skips as an ambiguous capture**, noting two of the bindings.
     #[test]
