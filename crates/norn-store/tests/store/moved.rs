@@ -117,6 +117,76 @@ fn tombstone_suffix_reads_use_the_roots_raw_or_folded_key() {
     }
 }
 
+/// Where three deaths share the probed key, the two named are the first in
+/// path order, whichever order one increment recorded them in.
+#[test]
+fn deaths_sharing_a_key_are_named_in_path_order() {
+    for (order, spellings, named) in [
+        (
+            StoredPathOrder::Sensitive,
+            ["x/target.md", "x/target.MD", "x/target.Md"],
+            ["x/target.MD", "x/target.Md"],
+        ),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            ["x/target.md", "x/TARGET.md", "x/Target.md"],
+            ["x/TARGET.md", "x/Target.md"],
+        ),
+    ] {
+        for reversed in [false, true] {
+            let scratch = Scratch::new("moved-suffix-ties");
+            let mut store = scratch.open_under(order);
+            let mut entries: Vec<(&str, Provenance)> = spellings
+                .iter()
+                .map(|at| (*at, Provenance::PlanDelete))
+                .collect();
+            if reversed {
+                entries.reverse();
+            }
+            deaths(&mut store, &entries);
+            let found: Vec<_> = snapshot(&store)
+                .tombstones_by_suffix("target")
+                .expect("suffix deaths")
+                .into_iter()
+                .map(|death| death.path)
+                .collect();
+            assert_eq!(
+                found,
+                named.map(path).to_vec(),
+                "{order:?}, reversed {reversed}"
+            );
+        }
+    }
+}
+
+/// The suffix read's cost does not grow with quarantine deaths sharing its
+/// key: the partial index holds none of them for the read to step over.
+#[test]
+fn quarantine_deaths_sharing_the_key_do_not_grow_the_suffix_read() {
+    let steps = |quarantined: usize| {
+        let scratch = Scratch::new("moved-quarantine-cost");
+        let mut store = scratch.open();
+        let spellings: Vec<String> = (0..quarantined)
+            .map(|at| format!("q/{at:04}/target.md"))
+            .collect();
+        let mut entries: Vec<(&str, Provenance)> = spellings
+            .iter()
+            .map(|at| (at.as_str(), Provenance::Quarantine))
+            .collect();
+        entries.push(("zzz/target.md", Provenance::PlanDelete));
+        deaths(&mut store, &entries);
+        let read = snapshot(&store);
+        let found = read.tombstones_by_suffix("target").expect("suffix deaths");
+        assert_eq!(found.len(), 1);
+        read.counters()
+            .readings()
+            .find(|(name, _)| *name == "vm_steps")
+            .map(|(_, value)| value)
+            .expect("a vm_steps reading")
+    };
+    assert_eq!(steps(3), steps(600));
+}
+
 /// The exact path names one recorded death or none, by stored spelling.
 #[test]
 fn tombstone_at_path_returns_one_or_none() {

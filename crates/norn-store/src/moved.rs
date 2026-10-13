@@ -17,8 +17,8 @@
 //!   never moved, and following its last good hash would point a link at a
 //!   copy. The suffix indexes hold no quarantine row, so the limit counts only
 //!   deaths whose file is gone.
-//! - The holders read returns paths in bytewise order from its index, so which
-//!   two holders a caller names does not depend on row ids.
+//! - Both bounded reads walk an index that runs on to `path`, so which two
+//!   deaths or holders a caller names does not depend on row ids.
 //!
 //! Each shape is named by [`MovedStatement`] and runs through
 //! [`Snapshot::run_statement`], so it is counted on the snapshot and explained
@@ -103,7 +103,8 @@ impl Snapshot {
     /// At most two deaths named by a wikilink suffix with its anchor split off.
     /// Quarantine is excluded because the file remains on disk.
     /// The target takes [`suffix_probe`]'s refusals; ambiguity-ignore does not
-    /// exclude deaths from this read.
+    /// exclude deaths from this read. Deaths sharing a key come in path order,
+    /// so the two named do not depend on row ids.
     pub fn tombstones_by_suffix(&self, target: &str) -> Result<Vec<MovedTombstone>, StoreError> {
         self.read_tombstones_by_suffix(target, &mut Vec::new())
     }

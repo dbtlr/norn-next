@@ -75,7 +75,9 @@
 //! keys. `tombstones_suffix_key` and `tombstones_folded_suffix_key` are partial,
 //! holding no `quarantine` death: a quarantined file is still on disk, so it
 //! never moved, and a read that repeats the predicate stops at its two-row
-//! limit counting only deaths that mean the file is gone.
+//! limit counting only deaths that mean the file is gone. Each index runs on
+//! to `path`, so where three or more deaths share one key the two a read
+//! returns are the first in path order, never an accident of row ids.
 //!
 //! `last_content_hash` is nullable, because a death can be learned from a path
 //! that is already absent and there is nothing left to hash. A re-death of a
@@ -123,8 +125,8 @@ const STATEMENTS: &[&str] = &[
     recorded_at       INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX tombstones_path ON tombstones(path)",
-    "CREATE INDEX tombstones_suffix_key ON tombstones(suffix_key) WHERE provenance <> 'quarantine'",
-    "CREATE INDEX tombstones_folded_suffix_key ON tombstones(folded_suffix_key) WHERE provenance <> 'quarantine'",
+    "CREATE INDEX tombstones_suffix_key ON tombstones(suffix_key, path) WHERE provenance <> 'quarantine'",
+    "CREATE INDEX tombstones_folded_suffix_key ON tombstones(folded_suffix_key, path) WHERE provenance <> 'quarantine'",
     "CREATE INDEX tombstones_change_feed ON tombstones(
     generation, path, last_content_hash
 )",

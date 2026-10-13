@@ -792,7 +792,9 @@ names, the tombstone at an exact path, and the live documents holding a content 
 tombstone stores the raw and folded suffix keys of its path, computed with the path by
 `DocumentPath` as a document row's are, and each key has a partial index,
 `tombstones_suffix_key` and `tombstones_folded_suffix_key`, holding no quarantine death: a
-quarantined file is still on disk, so it never moved and is never followed. The suffix read
+quarantined file is still on disk, so it never moved and is never followed. Each index runs
+on to `path`, so where three or more deaths share one key the two the read names are the
+first in path order, not in row-id order. The suffix read
 seeks the one key the root's path order decides, repeating the partial predicate in each
 range arm so the seek stays on the index; the exact-path read seeks `tombstones_path` with
 the same exclusion; the holders read seeks `documents_content_hash` over `(content_hash,
