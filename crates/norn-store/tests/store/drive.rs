@@ -98,7 +98,7 @@ fn spread_document(at: &str, matched: bool, declared: &ContentModel) -> norn_sto
 /// established on.
 struct Spread {
     _scratch: Scratch,
-    _store: Store,
+    store: Store,
     reader: Arc<SnapshotReader>,
     /// The documents under `bulk/`.
     size: usize,
@@ -190,11 +190,24 @@ impl Spread {
         );
         Spread {
             _scratch: scratch,
-            _store: store,
+            store,
             reader,
             size,
             matched: paths,
         }
+    }
+
+    /// This vault with an unreadable-frontmatter error standing over each
+    /// bulk document `at` names besides its warnings: a second kind, which a
+    /// repair of both reads as an arm of its own.
+    fn with_unreadable(mut self, at: impl Fn(usize) -> bool) -> Self {
+        let mut request = self.store.begin_request();
+        for path in (0..self.size).filter(|&document| at(document)).map(bulk) {
+            request
+                .record_finding(&unread_block(&path))
+                .expect("recording an unreadable frontmatter");
+        }
+        self
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -810,6 +823,75 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
                 spread.size
             );
         }
+    }
+}
+
+/// **A repair's window ends at the earliest of its kinds' own, and a kind
+/// holding fewer than the budget bounds nothing (NORN-393).** Over 400
+/// documents each with a warning, of which a range matches the fifty-first to
+/// the fifty-fifth — more than the three findings a batch of two reads, and
+/// fewer than its first budget of twenty-four — a batch of the warnings and
+/// unreadable frontmatter, two arms, reads one count at three, then its first
+/// window, one statement per arm, walks it and finds nothing, reads the
+/// vault's span, asks at twenty-four and is driven from what the range
+/// matched: two counts, a span, two windows and two reads of the merged arms.
+///
+/// Where every fourth document also holds an unreadable frontmatter, the
+/// warnings' window ends at the twenty-fourth document and the unreadable
+/// frontmatters' at the ninety-third: a window ending at the later would walk
+/// past the matched documents and fill the batch with no count. Where only
+/// the first ten do, the unreadable frontmatters hold fewer than the budget
+/// and bound nothing, and the window ends where the warnings' does: a short
+/// arm that ended the window at the section's end would do the same.
+#[test]
+fn a_repairs_window_ends_at_the_earliest_of_its_kinds() {
+    let matched = |at: usize| (50..55).contains(&at);
+    let vaults = [
+        Spread::matching("drive-arms-dense", 400, matched).with_unreadable(|at| at % 4 == 0),
+        Spread::matching("drive-arms-short", 400, matched).with_unreadable(|at| at < 10),
+    ];
+    for spread in &vaults {
+        let batch = RepairParams::new(vault(), ApplyMode::Preview)
+            .with_kinds([
+                FindingKind::UndeclaredTag,
+                FindingKind::FrontmatterUnreadable,
+            ])
+            .with_predicates([Predicate::before("status", "p")])
+            .with_limit(2);
+        let selection = RepairSelection::from(&batch);
+        let read = spread
+            .snapshot()
+            .repair_batch(&selection, &declared())
+            .expect("a batch");
+        assert_eq!(
+            read.rows
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            [bulk(50), bulk(51)],
+            "the batch over {:?}",
+            spread.matched
+        );
+        let plans = spread
+            .snapshot()
+            .repair_batch_plans(&selection, &declared())
+            .expect("the plans of a batch");
+        let ran = |statement: ReadStatement, narrowed: bool| {
+            plans
+                .iter()
+                .filter(|plan| plan.statement == statement && plan.filters.is_empty() != narrowed)
+                .count()
+        };
+        assert_eq!(
+            (
+                ran(ReadStatement::Find(FindStatement::PartCeiling), true),
+                ran(ReadStatement::Find(FindStatement::DocumentSpan), false),
+                ran(ReadStatement::Validate(ValidateStatement::KindPage), false),
+                ran(ReadStatement::Validate(ValidateStatement::MergedPage), true),
+            ),
+            (2, 1, 2, 2),
+            "the batch's counts, spans, windows and reads of the merged arms"
+        );
     }
 }
 

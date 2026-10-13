@@ -52,12 +52,13 @@
 //! read in two units: a window counts it in the page's rows on each arm, and
 //! a part's count in documents. Each row stands at one document, so the
 //! budget's rows on an arm stand at no more than the budget's documents, and
-//! a part keeping at most the budget drives the rest of the page for about
-//! what a round already paid. A round costs its budget on each arm: its
-//! window reads at most that many index rows per arm, each part's count
-//! reads its index seek until one document past the budget, and the walk
-//! reads fewer than the budget's rows on every arm but the one its window
-//! ends on, and on that one the budget's rows and the rest at the end path.
+//! a part keeping at most the budget drives the rest of the page from that
+//! many documents and the rows they hold. A round costs its budget on each
+//! arm: its window reads at most that many index rows per arm, each part's
+//! count reads its index seek until one document past the budget, and the
+//! walk reads fewer than the budget's rows on every arm but the one its
+//! window ends on, and on that one the budget's rows and the rest at the end
+//! path.
 //! The budgets double, so a page costs about the last budget it reached,
 //! which is never past the ceiling, times the arms it reads. A part asked
 //! its documents among the rows its seek reaches alone over-counts where the

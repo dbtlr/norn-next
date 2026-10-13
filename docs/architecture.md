@@ -901,8 +901,8 @@ document row id once, the first time a round leaves the page short; a page no pa
 the ceiling drives walks on unbounded. The budget is one number read in two units: a
 window counts it in the page's rows, on each arm, and a count in documents. A row stands at
 one document, so the budget's rows on an arm stand at no more than the budget's documents,
-and a part keeping at most the budget drives the rest of the page for about what a round
-already paid. A round costs its budget per arm — its window at most that many index rows on
+and a part keeping at most the budget drives the rest of the page from that many documents
+and the rows they hold. A round costs its budget per arm — its window at most that many index rows on
 each, each count at most one document past it, its walk fewer than that many rows on every
 arm but the one its window ends on, and that one's up to the end path's findings — and the
 budgets double, so a page costs about the last budget it reached, at most the ceiling, times
