@@ -5844,3 +5844,91 @@ fn planted_stem_read(profile: &norn_fixtures::Profile) -> (CounterSnapshot, u64)
     );
     (reading, control.work.rarity_rows_read)
 }
+
+/// The move-following reads cost the same with more matching deaths and hash holders.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn moved_lookups_cost_the_same_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let small_counters = one_moved_lookup("counter-gate-moved-ambiguous", &small);
+    let large_counters = one_moved_lookup("counter-gate-moved-realistic", &large);
+    SizeIndependencePair::new(
+        "reading move-following deaths and live hash holders",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Grow both matching sets with the attached profile, then measure one snapshot's reads.
+fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    {
+        let host = vault.host();
+        attach::attach_and_wait(&host, vault.name());
+    }
+    let mut store = vault.store();
+    let declared = the_pinned_declaration(&mut store);
+    assert!(profile.docs > 2);
+    let deaths = (0..profile.docs).map(|at| Change::Death {
+        path: DocumentPath::new(&format!("moved-deaths/{at:04}/moved-target.md"))
+            .expect("a dead path"),
+        provenance: norn_store::Provenance::PlanDelete,
+    });
+    let holders = (0..profile.docs).map(|at| {
+        Change::Upsert(DocumentFacts::new(
+            DocumentPath::new(&format!("moved-holders/{at:04}.md")).expect("a holder path"),
+            "moved-shared-hash",
+            "body\n",
+            5,
+        ))
+    });
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            deaths.chain(holders),
+            &[],
+            &declared,
+        )
+        .expect("recording deaths and hash holders");
+    let snapshot = std::sync::Arc::new(store.open_reader().reader.expect("a reader"))
+        .try_take()
+        .expect("an idle reader")
+        .establish()
+        .expect("a snapshot");
+    assert_eq!(
+        snapshot
+            .tombstones_by_suffix("moved-target.md")
+            .expect("suffix deaths")
+            .len(),
+        2
+    );
+    assert!(
+        snapshot
+            .tombstone_at_path(
+                &DocumentPath::new("moved-deaths/0000/moved-target.md").expect("an exact path")
+            )
+            .expect("exact death")
+            .is_some()
+    );
+    assert_eq!(
+        snapshot
+            .live_holders("moved-shared-hash")
+            .expect("hash holders")
+            .len(),
+        2
+    );
+    let counters = snapshot
+        .counters()
+        .readings()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    record_the_counters(
+        &format!("move-following lookups over `{}`", profile.name),
+        &counters,
+    );
+    counters
+}
