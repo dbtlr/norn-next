@@ -1821,8 +1821,9 @@ struct ClockFilled {
     days: Vec<String>,
     /// The date folder of each route's destination, in plan order.
     folders: Vec<String>,
-    /// The after-state of each stamped document's transition, as planned.
-    stamped_after: Vec<norn_wire::FileState>,
+    /// The after-state of each document's transition a clock default fills,
+    /// as planned, with whether the document is stamped with an instant.
+    filled_after: Vec<(bool, norn_wire::FileState)>,
 }
 
 /// `path` with the date folder a route reads the clock for set to `DATE`, the
@@ -1840,8 +1841,10 @@ fn without_the_route_date(path: &DocumentPath, folders: &mut Vec<String>) -> Doc
 
 /// `plan` with only what the clock fills set apart: the date folder in a
 /// route's paths (a move's destination, a write's target, the transitions
-/// landing there), the value of a `created` or `day` default, and the
-/// after-state of a document stamped with an instant, whose bytes hold it.
+/// landing there, the citation notes naming a destination), the value of a `created` or `day` default, and the
+/// after-state of every document a clock default fills, whose bytes hold the
+/// instant or the day (a day sits in the bytes too, and differs between two
+/// readings that straddle local midnight).
 /// Each masked value is checked to be a well-formed clock reading. Everything
 /// else, the rest of each destination path included, stays as planned.
 fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
@@ -1850,9 +1853,10 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
         instants: Vec::new(),
         days: Vec::new(),
         folders: Vec::new(),
-        stamped_after: Vec::new(),
+        filled_after: Vec::new(),
     };
     let mut stamped = BTreeSet::new();
+    let mut clock_filled = BTreeSet::new();
     for operation in &mut masked.operations {
         match &mut operation.kind {
             OperationKind::MoveDocument { to, .. } => {
@@ -1869,6 +1873,7 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
             } => {
                 if field == "created" || field == "day" {
                     let reading = value.scalar_text().expect("a clock reading");
+                    clock_filled.insert(path.as_str().to_string());
                     if field == "created" {
                         assert!(is_an_instant(&reading), "an instant: {reading}");
                         stamped.insert(path.as_str().to_string());
@@ -1887,10 +1892,25 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
     for transition in &mut masked.transitions {
         let was = transition.path.as_str().to_string();
         transition.path = without_the_route_date(&transition.path, &mut Vec::new());
-        if stamped.contains(&was) {
-            filled.stamped_after.push(transition.after.clone());
+        if clock_filled.contains(&was) {
+            filled
+                .filled_after
+                .push((stamped.contains(&was), transition.after.clone()));
             transition.after =
                 norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+        }
+    }
+    // A citation's note names a route's destination, date folder included.
+    if let Some(block) = &mut masked.provenance {
+        for note in block
+            .citations
+            .iter_mut()
+            .flat_map(|citation| &mut citation.findings)
+            .flat_map(|finding| &mut finding.notes)
+        {
+            for date in &filled.folders {
+                *note = note.replace(date.as_str(), "DATE");
+            }
         }
     }
     (masked, filled)
@@ -1901,8 +1921,10 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
 /// whose default reads no clock: a second apart, the preview and the apply
 /// read the clock at different instants, so the `created` instants differ.
 /// With only what the clock fills masked (each default's value, the date
-/// folder of each route's paths, and the after-state of the two documents
-/// stamped with an instant), each checked to be a well-formed reading, and the
+/// folder of each route's paths, and the after-state of the three documents a
+/// clock default fills, two with an instant and one with a day alone, whose
+/// hash then holds a date that differs if the two readings straddle local
+/// midnight), each checked to be a well-formed reading, and the
 /// rest of every destination path left as planned, the two plans are equal in
 /// operations, transitions, conditions and provenance (citations, skipped
 /// findings, remaining count and cursor), and the review's fix stands alike
@@ -1962,16 +1984,54 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         preview_filled.instants, apply_filled.instants,
         "the two readings of the clock are one instant"
     );
-    // The stamped documents' bytes hold the instant, so their hashes differ
-    // between the plans; the unstamped `b.md` is not masked.
-    assert_eq!(preview_filled.stamped_after.len(), 2);
-    assert!(
-        preview_filled
-            .stamped_after
+    // Every document a clock default fills has its hash masked: `a.md` and
+    // `c.md` hold an instant, so their hashes differ between the plans, and
+    // `b.md` holds a day alone, which two readings share unless they straddle
+    // local midnight, so its hash is masked and not compared.
+    let instants_of = |filled: &ClockFilled| -> Vec<norn_wire::FileState> {
+        filled
+            .filled_after
             .iter()
-            .zip(&apply_filled.stamped_after)
-            .all(|(then, now)| then != now),
+            .filter(|(stamped, _)| *stamped)
+            .map(|(_, after)| after.clone())
+            .collect()
+    };
+    assert_eq!(preview_filled.filled_after.len(), 3);
+    assert_eq!(
+        preview_filled
+            .filled_after
+            .iter()
+            .map(|(stamped, _)| *stamped)
+            .collect::<Vec<_>>(),
+        apply_filled
+            .filled_after
+            .iter()
+            .map(|(stamped, _)| *stamped)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        instants_of(&preview_filled)
+            .iter()
+            .zip(instants_of(&apply_filled))
+            .all(|(then, now)| *then != now),
         "a stamped document's hash is its instant's"
+    );
+    // The day alone differing, as it does across local midnight, passes the
+    // mask: a day-only document's hash standing in for the other reading's.
+    let mut straddling = apply.clone();
+    let day_only = straddling
+        .transitions
+        .iter_mut()
+        .find(|transition| {
+            transition.path.as_str().starts_with(ROUTE_ROOT)
+                && transition.path.as_str().ends_with("/b.md")
+        })
+        .expect("the day-only document's transition");
+    day_only.after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32]));
+    assert_eq!(
+        with_the_clock_masked(&straddling).0,
+        preview_masked,
+        "a day-only document's hash passed the mask"
     );
     // A difference that is not the clock's is not masked: the apply landing
     // a document under another name, or in a subfolder, is a difference.
@@ -1987,6 +2047,20 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
             "{altered} passed the mask"
         );
     }
+    // Nor is a document no clock default fills: the review's after-state
+    // differing is a difference.
+    let mut other = apply.clone();
+    let review = other
+        .transitions
+        .iter_mut()
+        .find(|transition| transition.path.as_str().ends_with("/r.md"))
+        .expect("the review's transition");
+    review.after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32]));
+    assert_ne!(
+        with_the_clock_masked(&other).0,
+        preview_masked,
+        "an unfilled document's hash passed the mask"
+    );
     assert!(
         preview
             .operations
