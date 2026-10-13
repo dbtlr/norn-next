@@ -331,8 +331,9 @@ impl Snapshot {
         // the driver the first read settled on, or, where that read filled
         // within a round of its walk, walked on from that round: where its
         // window ends, and the counts it answered. The first read's last
-        // finding stands at the cut document, so the window ends past the
-        // document, where the read resumes, unless it ends inside it.
+        // finding stands at the cut document's path, so the window ends at
+        // that path or past it; the read resumes past the path, so a window
+        // ending there is spent and one ending past it is the walk's.
         let settled = first.settled.resumed_where(|end| *end != path);
         let beyond = self.drive_page(
             &merged,

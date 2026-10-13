@@ -16,27 +16,46 @@
 //! that doubles** ([`Snapshot::drive_page`]). It first asks the parts in the
 //! request's order whether one keeps no more documents than the page reads
 //! ([`FindStatement::PartCeiling`]); the first that does drives the page from
-//! what it matched, walking nothing. Otherwise, a round walks at most a budget of rows of the
-//! page's order past where the last round stopped — the row its window ends
-//! at is read first, narrowed by no part ([`Paged::window`]), and the walk
-//! tests every part at each row up to it — and where that leaves the page
+//! what it matched, walking nothing. Otherwise, a round walks at most a
+//! budget of documents of the page's order past where the last round stopped
+//! — the document its window ends at is read first, narrowed by no document
+//! part ([`Paged::window`]), and the walk tests every part at each row up to
+//! it, every row at that document included — and where that leaves the page
 //! short, asks the parts again whether one keeps at most the budget; the
-//! first that does drives the
-//! rest of the page from what it matched, and otherwise the budget doubles.
+//! first that does drives the rest of the page from what it matched, and
+//! otherwise the budget doubles.
 //! The budget starts at [`MATCHED_DRIVE_FACTOR`] documents per row the page
 //! reads and stops at the ceiling: the greater of that and the square root of
 //! the rows the page reads times the documents the vault holds
 //! ([`FindStatement::DocumentSpan`], read once, the first time a round of the
 //! walk leaves the page short). A page
-//! asked at the ceiling that no part drives walks on unbounded. A field
-//! sort's missing section walks every document in path order, passing the
-//! ones that carry the key, so its window is counted in documents too.
+//! asked at the ceiling that no part drives walks on unbounded.
+//!
+//! **A window is counted in documents**, the unit the budget and the counts
+//! are in, whatever rows each document holds. A walk in the answer's path
+//! order — a find's path page, a field sort's missing section, which walks
+//! every document in path order passing the ones that carry the key, and a
+//! validate's or a repair's walk of findings — reads its window's end off the
+//! documents in that order ([`Snapshot::window_end`]): `documents_path_nocase`
+//! read one past an offset, narrowed by a validate's path parts alone, which
+//! bound its walk; the walk reads every row up to that document's path, every
+//! row at it included, so a finding at a path no document stands at, between
+//! two documents or past the last, falls inside the window that path does,
+//! and the next round resumes past the path. A field sort's valued section
+//! holds one row per document, and reads its window off its own statement.
 //!
 //! **What a page costs.** The first count costs at most the rows the page
-//! reads, one document past them per part asked. A round costs its budget, in rows walked, in the
-//! window's rows and in each part's count, which reads its index seek until
-//! one document past the budget; the budgets double, so a page costs about
-//! the last budget it reached, which is never past the ceiling. A part asked
+//! reads, one document past them per part asked. A round costs its budget in
+//! documents: its window reads that many index rows of the documents' path
+//! order, or of the valued section's, each part's count reads its index seek
+//! until one document past the budget, and the walk reads the rows those
+//! documents hold. A validate's or a repair's walk reads every finding of the
+//! kinds it selects that its documents hold, so where documents hold many
+//! findings a round walks that many more rows than documents — each walked
+//! once over a drain, since the walk stops where the page fills and the next
+//! page resumes past its last row. The budgets double, so a page costs about
+//! the last budget it reached, which is never past the ceiling — that many
+//! documents, and the rows they hold. A part asked
 //! its documents among the rows its seek reaches alone over-counts where the
 //! seek reaches documents the part then rejects, and is only ever taken to
 //! keep more than it does.
@@ -46,11 +65,12 @@
 //!   first budget past that walk, so the page costs about the walk it needs —
 //!   at least eight documents per row — and its counts no more than that, the
 //!   first one a document per row it reads.
-//!   The rows a round's window passes past the page's last row, which the
-//!   next page walks again, are at most that budget: eight per row on the
-//!   first round, and otherwise twice what the page walked before it. So a
-//!   drain walks each document a bounded number of times, and is linear in
-//!   the vault.
+//!   The documents a round's window counts past the page's last row, which
+//!   the next page counts again, are at most that budget: eight per row on
+//!   the first round, and otherwise twice what the page walked before it; the
+//!   walk itself reads no row past the page's last. So a drain counts each
+//!   document a bounded number of times and walks each row once, and is
+//!   linear in the vault.
 //! - **A part keeping few documents** — no more than the ceiling — drives a
 //!   page from what it matched once the budget reaches them, or at once where
 //!   it keeps no more than the page reads, so the page
@@ -184,8 +204,8 @@ pub(crate) enum Settled<R> {
 
 impl<R> Settled<R> {
     /// This, for a later read that resumes where `ahead` says whether it
-    /// resumes before a row: a round's window stays the walk's where the
-    /// later read resumes before the row the window ends at, and is read
+    /// resumes before a bound: a round's window stays the walk's where the
+    /// later read resumes before the document the window ends at, and is read
     /// again from where the later read resumes otherwise.
     pub(crate) fn resumed_where(self, ahead: impl FnOnce(&R) -> bool) -> Self {
         match self {
@@ -250,10 +270,11 @@ impl<R> Round<R> {
 /// Where a round's window ends.
 #[derive(Clone, Debug)]
 pub(crate) enum Window<R> {
-    /// Not read: the round reads it first, its budget past where the round
-    /// starts ([`Paged::window`]).
+    /// Not read: the round reads it first, its budget in documents past
+    /// where the round starts ([`Paged::window`]).
     Unread,
-    /// At this row, which the walk reads up to.
+    /// At this document's place, which the walk reads up to, every row at it
+    /// included.
     EndsAt(R),
     /// Past the section's end, which the walk reads to.
     SectionEnds,
@@ -290,7 +311,7 @@ impl Snapshot {
     /// documents than `scale`, the rows the page reads, and the first that
     /// does drives it from what it matched; otherwise the page walks its own
     /// order in rounds: each walks at
-    /// most a budget of rows past where the last stopped
+    /// most a budget of documents past where the last stopped
     /// ([`Paged::window`]), and where that leaves the page short, asks the
     /// parts in the request's order whether one keeps at most the budget
     /// ([`FindStatement::PartCeiling`]); the first that does drives the rest
@@ -384,8 +405,9 @@ impl Snapshot {
 
     /// `found` filled to `rows` from the sections `queue` holds by a walk in
     /// rounds from `round`, for a page of `scale` rows no part drove before
-    /// it walked: each round walks at most its budget past where the last
-    /// stopped — up to its window's end, read first where it is not known —
+    /// it walked: each round walks at most its budget of documents past where
+    /// the last stopped — up to its window's end, read first where it is not
+    /// known —
     /// and where that leaves the page short, asks `parts` whether one keeps
     /// at most the budget; the first that does drives the rest of the page,
     /// and otherwise the budget doubles, to the ceiling, where the page walks

@@ -58,10 +58,11 @@ pub enum ValidateStatement {
     /// among themselves, and otherwise one keeping few enough documents from
     /// the documents it matched, which are sorted. Where none does, the
     /// statement seeks its kind and tests each finding's document; where a
-    /// window of the page's walk bounds it, the window's last finding bounds
-    /// the seek above on the same row value, and the window itself is this
-    /// statement narrowed by its path parts alone, read one finding past an
-    /// offset.
+    /// window of the page's walk bounds it, the path of the document the
+    /// window ends at bounds the seek above on the same row value, every
+    /// finding at it included. The window is counted in documents, the
+    /// documents the path parts admit in the answer's path order read one
+    /// past an offset ([`crate::FindStatement::PathPage`]).
     KindPage,
     /// How many findings stand, one tally per kind and severity: an aggregate
     /// over `findings_fingerprint_kind_severity_nocase`, which covers every
@@ -113,10 +114,9 @@ pub enum ValidateStatement {
     /// one arm instead, driven from its source at the batch's place, each
     /// document seeking every kind read at its path; otherwise a document part
     /// keeping few enough documents drives each arm, and those are sorted, and
-    /// where none does each arm seeks its kind, bounded above at a window's
-    /// last finding where one bounds the walk; the window is this read
-    /// narrowed by its path parts alone, one finding past an offset, and
-    /// reaches no link. Each
+    /// where none does each arm seeks its kind, bounded above at the path of
+    /// the document a window of the walk ends at, as a kind page's section
+    /// is. Each
     /// arm, or the one, also reaches the link its finding is about, where it
     /// is about one, by two seeks behind its own (`documents_path`, then
     /// `links_document_ordinal`), which neither sort nor reorder the merge.
@@ -483,13 +483,13 @@ fn ordering(narrowed: &Narrowed<'_>, statement: ValidateStatement, column: &str)
 /// drives the statement from the documents it matched, and on a summary the
 /// documents every keeping part matched do, so it costs what they matched and
 /// sorts that. Where none drives — every part excludes, the page walks a
-/// window of its findings before it asks a part what it keeps, every part
+/// window of documents before it asks a part what it keeps, every part
 /// keeps more than the ceiling, or the statement is a document's tail — the
 /// statement seeks its kind as an unnarrowed one does and tests each
 /// finding's document row, one seek of `documents_path` at its path and one
-/// per part at the document's key; a window's last finding, where one bounds
-/// the walk, bounds the seek above on the same row value as its place does
-/// below.
+/// per part at the document's key; the path of the document a window ends at,
+/// where one bounds the walk, bounds the seek above on the same row value as
+/// its place does below, every finding at that path included.
 fn compose_arm(
     findings: &Findings<'_>,
     narrowed: &Narrowed<'_>,
