@@ -3890,12 +3890,14 @@ const LINKED_PAIR: [(&str, &[u8]); 2] = [
 /// The address resolution a repair of [`LINKED_PAIR`] records: `zz-target`,
 /// written in the holder, names the target at `lands`.
 fn linking_to(lands: &str) -> norn_wire::PlanCondition {
+    linking_from("zz-holder.md", lands)
+}
+
+/// The address resolution a repair records for `zz-target`, written in the
+/// holder at `holder`, naming the target at `lands`.
+fn linking_from(holder: &str, lands: &str) -> norn_wire::PlanCondition {
     norn_wire::PlanCondition::address_resolution(
-        norn_wire::LinkKey::new(
-            at("zz-holder.md"),
-            norn_wire::LinkFamily::Wikilink,
-            "zz-target",
-        ),
+        norn_wire::LinkKey::new(at(holder), norn_wire::LinkFamily::Wikilink, "zz-target"),
         norn_wire::Resolves::one(at(lands)),
     )
 }
@@ -4067,6 +4069,68 @@ fn a_refused_plans_fresh_plan_carries_the_resolution_and_refuses_where_the_evide
             );
         }
     }
+}
+
+/// **Declared limit (NORN-371): a refused plan's fresh plan also carries the
+/// address resolution of an operation it leaves unresolved.** A condition
+/// names no operation, so where another writer removes one holder of a
+/// two-link repair plan the fresh plan lists that holder's operation as
+/// unresolved and still carries the condition recorded for its link, and may
+/// refuse on evidence for an operation it no longer holds.
+#[test]
+fn declared_limit_a_refused_repair_plans_fresh_plan_carries_the_condition_of_an_operation_it_left_unresolved()
+ {
+    const HOLDER_B: &str = "zz-holder-b.md";
+    let documents: [(&str, &[u8]); 3] = [
+        ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+        (HOLDER_B, b"---\nup: zz-target\n---\n# Holder B\n"),
+        ("zz-target.md", b"# Target\n"),
+    ];
+    let (_sandbox, vault, host) = a_vault_under("host-repair-fresh-limit", LINKING, &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+    assert_eq!(
+        plan.conditions,
+        vec![
+            linking_from(HOLDER_B, "zz-target.md"),
+            linking_to("zz-target.md")
+        ]
+    );
+    // Another writer changes one holder, which refuses the plan, and removes
+    // the other, which leaves its operation nothing to write to.
+    std::fs::write(
+        vault.path().join(FOLDER).join("zz-holder.md"),
+        "---\nup: zz-target\nnote: x\n---\n# Holder\n",
+    )
+    .expect("another writer changes a holder");
+    std::fs::remove_file(vault.path().join(FOLDER).join(HOLDER_B))
+        .expect("another writer removes the other holder");
+
+    let (refusal, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("refused with {:?}", refusal.detail());
+    };
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "the removed holder's operation is left to the caller: {unresolved:?}"
+    );
+    assert_eq!(
+        kinds(&fresh),
+        vec![setting(1, "zz-holder.md", "up", "[[zz-target]]").kind],
+        "the fresh plan holds the changed holder's operation alone"
+    );
+    // The limit: the condition for the operation the fresh plan no longer
+    // holds is carried all the same.
+    assert_eq!(
+        fresh.conditions,
+        vec![
+            linking_from(HOLDER_B, "zz-target.md"),
+            linking_to("zz-target.md")
+        ]
+    );
 }
 
 /// **A route in the same batch moving the target leaves a plan that applies
