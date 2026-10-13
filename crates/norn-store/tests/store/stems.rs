@@ -157,6 +157,30 @@ fn selected_postings_over_the_cap_answer_too_common() {
     assert_eq!(answer.work.postings_rows_read, 0);
 }
 
+/// The cap applies to every selected list, not only the rarest: for "abcdef"
+/// (T = 7, k = 4) the three rarest trigrams fit, the fourth selected one does
+/// not, and the read answers TooCommon without reading postings.
+#[test]
+fn a_selected_list_past_the_cap_behind_rarer_ones_answers_too_common() {
+    let scratch = Scratch::new("stem-mixed-prefix");
+    let mut store = scratch.open();
+    let mut documents: Vec<_> = (0..=norn_store::similarity::POSTINGS_CAP)
+        .map(|at| document(&format!("{at}/abcd.md"), "hash", "body"))
+        .collect();
+    documents.push(document("abcdef.md", "hash", "body"));
+    write_documents(&mut store.begin_request(), &documents);
+    let reader = std::sync::Arc::new(store.open_reader().reader.unwrap());
+    let snapshot = reader.try_take().unwrap().establish().unwrap();
+    let answer = snapshot.similar_stems("abcdef").unwrap();
+    assert_eq!(
+        answer.matches,
+        norn_store::StemMatches::TooCommon {
+            trigram: "  a".to_string()
+        }
+    );
+    assert_eq!(answer.work.postings_rows_read, 0);
+}
+
 /// Common query trigrams may exceed the cap when every selected list fits.
 /// Selected lists of exactly the cap remain admitted, and both row readings
 /// stay within their declared bounds.
