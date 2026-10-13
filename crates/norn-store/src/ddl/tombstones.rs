@@ -69,9 +69,7 @@
 //! `suffix_key` and `folded_suffix_key` are stored anyway, because a statement
 //! seeks them: move-following reads the deaths a broken wikilink's suffix
 //! names ([`crate::Snapshot::tombstones_by_suffix`]), probing the one key the
-//! root decides as a document suffix probe does. The folded key is also sought
-//! by the exact-path read on a root that folds ASCII case, with folded path
-//! equality keeping the read at the exact place. Both are computed with `path`
+//! root decides as a document suffix probe does. Both are computed with `path`
 //! by [`crate::DocumentPath`] in the write that records the death, so they
 //! cannot disagree with it, and a re-death of the same path writes the same
 //! keys. `tombstones_suffix_key` and `tombstones_folded_suffix_key` are partial,
@@ -80,6 +78,18 @@
 //! limit counting only deaths that mean the file is gone. Each index runs on
 //! to `path`, so where three or more deaths share one key the two a read
 //! returns are the first in path order, never an accident of row ids.
+//!
+//! # The exact place on a folding root has its own index
+//!
+//! On a root that folds ASCII case, a Markdown or `vault://` link names a
+//! place, and the deaths at it are every stored spelling folding to it.
+//! `tombstones_path_nocase` declares `path COLLATE NOCASE, path`, as
+//! `documents_path_nocase` does for the live resolution of the same
+//! addresses, so the exact-path read is one equality seek under `NOCASE` that
+//! walks only deaths at that place, in bytewise path order, and stops at two
+//! however many deaths share the place's directories and stem. It is partial
+//! on the same predicate as the suffix indexes. A root that tells spellings
+//! apart reads the unique `tombstones_path` instead.
 //!
 //! `last_content_hash` is nullable, because a death can be learned from a path
 //! that is already absent and there is nothing left to hash. A re-death of a
@@ -129,6 +139,7 @@ const STATEMENTS: &[&str] = &[
     "CREATE UNIQUE INDEX tombstones_path ON tombstones(path)",
     "CREATE INDEX tombstones_suffix_key ON tombstones(suffix_key, path) WHERE provenance <> 'quarantine'",
     "CREATE INDEX tombstones_folded_suffix_key ON tombstones(folded_suffix_key, path) WHERE provenance <> 'quarantine'",
+    "CREATE INDEX tombstones_path_nocase ON tombstones(path COLLATE NOCASE, path) WHERE provenance <> 'quarantine'",
     "CREATE INDEX tombstones_change_feed ON tombstones(
     generation, path, last_content_hash
 )",

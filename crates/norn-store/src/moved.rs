@@ -14,13 +14,13 @@
 //!   narrows which live documents a link resolves to, not which deaths it can
 //!   follow.
 //! - The exact-path read uses the root's case behaviour: bytewise on a root
-//!   that tells spellings apart, or an equality seek of the folded suffix key
-//!   with a folded path equality on a root that folds ASCII case. Several
+//!   that tells spellings apart, or an equality seek under `NOCASE` of the
+//!   partial `tombstones_path_nocase` on a root that folds ASCII case. Several
 //!   deaths at one folded place remain several deaths, bounded to two.
 //! - **A quarantine death is never read.** Its file is still on disk, so it
 //!   never moved, and following its last good hash would point a link at a
-//!   copy. The suffix indexes hold no quarantine row, so the limit counts only
-//!   deaths whose file is gone.
+//!   copy. The suffix indexes and `tombstones_path_nocase` hold no quarantine
+//!   row, so the limit counts only deaths whose file is gone.
 //! - These reads walk an index that runs on to `path`, so which two
 //!   deaths or holders a caller names does not depend on row ids.
 //!
@@ -181,7 +181,8 @@ impl Snapshot {
     }
 
     /// Read the exact place under the root's case behaviour, recording the
-    /// statement that ran. The folded seek names at most two deaths in path order.
+    /// statement that ran. The folded seek walks only deaths at the folded
+    /// place and names at most two in path order.
     fn read_tombstone_at_path(
         &self,
         path: &DocumentPath,
@@ -196,13 +197,10 @@ impl Snapshot {
             ),
             SuffixKey::Folded => (
                 "SELECT path, last_content_hash, provenance FROM tombstones \
-                 WHERE folded_suffix_key = ?1 AND path = ?2 COLLATE NOCASE \
-                 AND provenance <> 'quarantine' ORDER BY path LIMIT 2"
+                 WHERE path = ?1 COLLATE NOCASE AND provenance <> 'quarantine' \
+                 ORDER BY path LIMIT 2"
                     .to_string(),
-                vec![
-                    Value::Text(path.folded_suffix_key().to_string()),
-                    Value::Text(path.as_str().to_string()),
-                ],
+                vec![Value::Text(path.as_str().to_string())],
             ),
         };
         let ran = Ran::new(MovedStatement::TombstoneAtPath, query);

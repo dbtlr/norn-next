@@ -300,6 +300,37 @@ fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
     }
 }
 
+/// On a folding root, deaths sharing the place's directories and stem under
+/// other extensions leave the exact-path read's cost unchanged: the seek walks
+/// only deaths at the folded place.
+#[test]
+fn deaths_sharing_the_stem_do_not_grow_the_folded_exact_read() {
+    let steps = |siblings: usize| {
+        let scratch = Scratch::new("moved-folded-exact-cost");
+        let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+        let spellings: Vec<String> = (0..siblings)
+            .map(|at| format!("x/target.e{at:04}"))
+            .collect();
+        let mut entries: Vec<(&str, Provenance)> = spellings
+            .iter()
+            .map(|at| (at.as_str(), Provenance::PlanDelete))
+            .collect();
+        entries.push(("x/Target.md", Provenance::PlanDelete));
+        deaths(&mut store, &entries);
+        let read = snapshot(&store);
+        let found = read
+            .tombstone_at_path(&path("X/TARGET.md"))
+            .expect("folded death");
+        assert_eq!(found.len(), 1);
+        read.counters()
+            .readings()
+            .find(|(name, _)| *name == "vm_steps")
+            .map(|(_, value)| value)
+            .expect("a vm_steps reading")
+    };
+    assert_eq!(steps(3), steps(600));
+}
+
 /// A case-variant Markdown link can follow the same moved bytes as a wikilink.
 #[test]
 fn a_case_variant_markdown_link_finds_its_death_on_a_folding_root() {
@@ -512,14 +543,15 @@ fn tombstone_suffix_plans_seek_only_the_roots_partial_index() {
     }
 }
 
-/// The exact-path statement seeks the root's index with no scan or sort.
+/// The exact-path statement seeks the root's path index with no scan or sort,
+/// and reads no suffix key.
 #[test]
 fn exact_tombstone_plans_seek_the_roots_path_index() {
     for (order, index) in [
         (StoredPathOrder::Sensitive, "tombstones_path"),
         (
             StoredPathOrder::AsciiCaseInsensitive,
-            "tombstones_folded_suffix_key",
+            "tombstones_path_nocase",
         ),
     ] {
         let scratch = Scratch::new("moved-exact-plans");
@@ -530,6 +562,9 @@ fn exact_tombstone_plans_seek_the_roots_path_index() {
             .expect("path plans");
         let plan = plan_of(&plans, norn_store::MovedStatement::TombstoneAtPath);
         judge_seek(&plan, "tombstones", index);
+        assert!(!plans[0].plan.reads.iter().any(|column| {
+            column.table == "tombstones" && column.column.ends_with("suffix_key")
+        }));
     }
 }
 
