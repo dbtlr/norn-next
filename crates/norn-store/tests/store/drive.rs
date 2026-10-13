@@ -325,32 +325,61 @@ fn repair_drain(spread: &Spread, params: &RepairParams, limit: u32) -> Drained {
 }
 
 fn validating(part: &Predicate) -> ValidateParams {
+    validating_all(std::slice::from_ref(part))
+}
+
+fn validating_all(parts: &[Predicate]) -> ValidateParams {
     ValidateParams::new(vault())
         .with_kinds([FindingKind::UndeclaredTag])
-        .with_predicates([part.clone()])
+        .with_predicates(parts.to_vec())
 }
 
 fn repairing(part: &Predicate) -> RepairParams {
+    repairing_all(std::slice::from_ref(part))
+}
+
+fn repairing_all(parts: &[Predicate]) -> RepairParams {
     RepairParams::new(vault(), ApplyMode::Preview)
         .with_kinds([FindingKind::UndeclaredTag])
-        .with_predicates([part.clone()])
+        .with_predicates(parts.to_vec())
+}
+
+/// A full-text match beside a path part over every bulk document: the path
+/// part bounds a validate's and a repair's walk and the windows that count
+/// it, and drives a find's path page from its source.
+fn beside_a_path_part() -> (&'static str, Vec<Predicate>) {
+    (
+        "a full-text match beside a path part",
+        vec![Predicate::path("bulk/**"), Predicate::matches("marked")],
+    )
 }
 
 /// Every drain judged over `spread`, each beside the name a failure gives it:
-/// a validate and a repair narrowed by each part of [`spread_parts`] and by
-/// the control, and each of [`find_drains`] and the control's path page.
+/// a validate and a repair narrowed by each part of [`spread_parts`], by the
+/// control and by [`beside_a_path_part`], each of [`find_drains`], and the
+/// control's and [`beside_a_path_part`]'s path pages.
 fn every_drain(spread: &Spread, limit: u32) -> Vec<(String, Drained)> {
     let mut drains = Vec::new();
-    for (name, part) in spread_parts().into_iter().chain([control()]) {
+    let (beside, parts) = beside_a_path_part();
+    for (name, parts) in spread_parts()
+        .into_iter()
+        .chain([control()])
+        .map(|(name, part)| (name, vec![part]))
+        .chain([(beside, parts.clone())])
+    {
         drains.push((
             format!("a validate by {name}"),
-            validate_drain(spread, &validating(&part), limit),
+            validate_drain(spread, &validating_all(&parts), limit),
         ));
         drains.push((
             format!("a repair by {name}"),
-            repair_drain(spread, &repairing(&part), limit),
+            repair_drain(spread, &repairing_all(&parts), limit),
         ));
     }
+    drains.push((
+        format!("a path page by {beside}"),
+        find_drain(spread, &request().with_predicates(parts), limit),
+    ));
     let (name, part) = control();
     for (name, params) in find_drains().into_iter().chain([(
         format!("a path page by {name}"),
@@ -384,7 +413,9 @@ const LINEAR_SLACK: f64 = 1.1;
 /// [`SPARSE_LARGE`], documents one in [`SPARSE`] of which it does, a
 /// validate, a repair and a find narrowed by each such part — a range, a
 /// full-text match, a links-to part and a membership of seventeen values, and
-/// for a find a presence on a page descending and on a field's page — drained
+/// for a find a presence on a page descending and on a field's page — and by
+/// a full-text match beside a path part, which bounds the walk and its windows
+/// and drives a find's path page from its source, each drained
 /// five at a time, costs the same per matched document at both sizes, within
 /// [`LINEAR_SLACK`], counted over every statement its snapshots ran: the
 /// drive's own counts and walks included. The sparse pair's pages walk past

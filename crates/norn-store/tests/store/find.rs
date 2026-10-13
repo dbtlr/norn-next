@@ -1677,9 +1677,12 @@ fn judge_from_the_place(page: &QueryPlan, shape: ReadFilter, seek: &Seek) {
             *access,
             "(key=? AND container=? AND (path,path)>(?,?))".to_string(),
         ),
+        // The page's place, folded into the glob's range, is the one lower
+        // bound: a bound of the range's own beside it was sought instead,
+        // from the range's opening on every page (NORN-393).
         ReadFilter::PathGlob(_) => (
             Access::Index("documents_path_nocase"),
-            "(path>? AND path<?)".to_string(),
+            "((path,path)>(?,?) AND path<?)".to_string(),
         ),
         _ => {
             let leading = constraint
@@ -1764,7 +1767,8 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// in the answer's path order seeks them from the page's place** (NORN-390):
 /// the same index past its key and value, the folded and the bytewise path
 /// bounded below; a presence part one seek per container; and a path part the
-/// folded order's index over its glob's folded range on either root. **An
+/// folded order's index from the page's place, folded into its glob's folded
+/// range, on either root. **An
 /// excluding filter is tested at each document's key** on every page: a seek of
 /// its table's primary key, never of the rows it names across the vault.
 ///
