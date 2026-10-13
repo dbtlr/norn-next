@@ -8,6 +8,7 @@ use super::{FieldMatch, FieldOrder, MatchedColumn};
 use crate::facts::StoredPathOrder;
 use crate::fields::FieldContainer;
 use crate::path::SuffixKey;
+use crate::request::range_predicate_from;
 use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
@@ -226,14 +227,66 @@ impl Filter {
     }
 
     /// This filter's fragment: a membership test of `id`, the column holding
-    /// the page's document id, its placeholders numbered by `binder`. A path
-    /// part binds its glob's range under the root's order, then the glob and
-    /// the order.
+    /// the page's document id, against the set of documents the filter keeps,
+    /// its placeholders numbered by `binder`.
     pub(crate) fn spell(&self, id: &str, binder: &mut Binder) -> String {
+        let Rows {
+            table,
+            document,
+            condition,
+            ..
+        } = self.kept_rows(Reached::Set, binder);
+        let membership = if self.shape().excludes() {
+            "NOT IN"
+        } else {
+            "IN"
+        };
+        format!(
+            "{id} {membership} (SELECT {document} FROM {table}
+                     WHERE {condition})"
+        )
+    }
+
+    /// Whether the documents this filter keeps are at most `ceiling`, as one
+    /// statement answers it: the distinct documents among the rows its index
+    /// seek reaches, read until one past the ceiling and counted. Every
+    /// condition the index does not answer — a glob, a reading's shape or fold,
+    /// a links-to part's ambiguity, a resolution's ignore set, a finding's
+    /// document row — is dropped, so the count reads no row past the seek's
+    /// own and costs the ceiling's documents' rows whatever the filter keeps.
+    /// A dropped condition can only count a document the filter does not keep,
+    /// so a filter is never taken to keep fewer documents than it does.
+    pub(crate) fn kept_within(&self, ceiling: usize) -> (String, Vec<Value>) {
+        let mut binder = Binder::default();
+        let Rows {
+            table,
+            document,
+            condition,
+            ..
+        } = self.kept_rows(Reached::Seek, &mut binder);
+        let ceiling = i64::try_from(ceiling).expect("a ceiling fits i64");
+        let (within, past) = (
+            binder.bind(Value::Integer(ceiling)),
+            binder.bind(Value::Integer(ceiling + 1)),
+        );
+        (
+            format!(
+                "SELECT count(*) <= {within} FROM (SELECT DISTINCT {document} FROM {table}
+                     WHERE {condition}
+                     LIMIT {past})"
+            ),
+            binder.into_values(),
+        )
+    }
+
+    /// The rows this filter's seek reads, read for `reached`: a path part's
+    /// glob range under the root's order, then the glob and the order; every
+    /// other part its own rows.
+    fn kept_rows(&self, reached: Reached, binder: &mut Binder) -> Rows {
         match self {
             Filter::Path(part) => {
                 let (lower, upper) = super::glob::path_range(&part.pattern, part.order);
-                spell_bound(
+                rows_of(
                     self.shape(),
                     &[
                         Value::Text(lower),
@@ -241,11 +294,11 @@ impl Filter {
                         Value::Text(part.pattern.as_str().to_string()),
                         Value::Text(part.order.as_str().to_string()),
                     ],
-                    id,
+                    reached,
                     binder,
                 )
             }
-            Filter::Bound { shape, values, .. } => spell_bound(*shape, values, id, binder),
+            Filter::Bound { shape, values, .. } => rows_of(*shape, values, reached, binder),
         }
     }
 
@@ -415,23 +468,6 @@ impl Reach {
     }
 }
 
-/// The fragment of a filter of `shape` binding `values`: a membership test
-/// of `id` against the set of documents the filter keeps, its placeholders
-/// numbered by `binder`.
-fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder) -> String {
-    let Rows {
-        table,
-        document,
-        condition,
-        ..
-    } = rows_of(shape, values, Reached::Set, binder);
-    let membership = if shape.excludes() { "NOT IN" } else { "IN" };
-    format!(
-        "{id} {membership} (SELECT {document} FROM {table}
-                     WHERE {condition})"
-    )
-}
-
 /// The test of a filter of `shape` binding `values` on the one document `id`
 /// names: whether any of the rows the filter reads stands for it, reached by
 /// that document's key, its placeholders numbered by `binder`.
@@ -454,11 +490,14 @@ fn test_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder
 }
 
 /// What a filter's rows are read for: the set of every document they stand
-/// for, or whether they stand for one document.
+/// for, whether they stand for one document, or the rows its index seek
+/// reaches alone — every condition the index does not answer dropped, so a
+/// count of them stops where the seek does.
 #[derive(Clone, Copy, PartialEq)]
 enum Reached {
     Set,
     OneDocument,
+    Seek,
 }
 
 /// The rows a filter reads: the table they stand in, the column naming the
@@ -490,9 +529,9 @@ impl Rows {
 /// its values bound by `binder` in the order the condition names them.
 ///
 /// Every shape reads the same rows either way but a finding's: the set of
-/// documents a finding kind stands over is the documents at the paths it
-/// stands at, and one document's question is whether one stands at its path,
-/// which a seek at that path answers.
+/// documents a finding kind stands over is its findings, each joined to the
+/// document at its path, and one document's question is whether one stands
+/// at its path, which a seek at that path answers.
 fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut Binder) -> Rows {
     // The number this fragment's first value takes: a fragment's values
     // are bound in the order it names them, so they number from here.
@@ -502,9 +541,10 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
     // value and never as an index constraint: an index on the value would
     // otherwise reach every row holding it across the vault.
     let compared = match reached {
-        Reached::Set => "",
+        Reached::Set | Reached::Seek => "",
         Reached::OneDocument => "+",
     };
+    let seek_only = reached == Reached::Seek;
     let mut bound = values.iter().cloned();
     let mut next = || {
         binder.bind(
@@ -526,7 +566,11 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         ReadFilter::Equal(matched) | ReadFilter::NotEqual(matched) => {
             let column = matched.column();
             let (key, value) = (next(), next());
-            let conditions = reading_conditions(matched, &mut next);
+            let conditions = if seek_only {
+                String::new()
+            } else {
+                reading_conditions(matched, &mut next)
+            };
             Rows::new(
                 "document_fields AS fv",
                 "fv.document",
@@ -536,7 +580,11 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         ReadFilter::Member(matched) => {
             let column = matched.column();
             let (key, values) = (next(), next());
-            let conditions = reading_conditions(matched, &mut next);
+            let conditions = if seek_only {
+                String::new()
+            } else {
+                reading_conditions(matched, &mut next)
+            };
             Rows::new(
                 "document_fields AS fv",
                 "fv.document",
@@ -565,27 +613,41 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             )
         }
         ReadFilter::PathGlob(order) => {
-            let (lower, upper, pattern, recorded) = (next(), next(), next(), next());
+            let (lower, upper) = (next(), next());
             let collation = order.collation();
-            Rows::new(
-                "documents AS dg",
-                "dg.id",
+            let range = format!("dg.path >= {lower}{collation} AND dg.path < {upper}{collation}");
+            let condition = if seek_only {
+                range
+            } else {
+                let (pattern, recorded) = (next(), next());
                 format!(
-                    "dg.path >= {lower}{collation} AND dg.path < {upper}{collation}
+                    "{range}
                        AND {}",
                     glob_test(&pattern, "dg.path", &recorded)
-                ),
-            )
+                )
+            };
+            Rows::new("documents AS dg", "dg.id", condition)
         }
         ReadFilter::Resolves(key) => {
             // Each value takes its number in turn, and the resolution's
             // predicate spells its ranges and its exclusion over those
             // numbers from `first`: two bounds per range, then the ignore
             // set, the target's segment count and the path order.
+            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
+            if seek_only {
+                for _ in 0..ranges * 2 {
+                    next();
+                }
+                let column = format!("dr.{}", key.column());
+                return Rows::new(
+                    "documents AS dr",
+                    "dr.id",
+                    format!("({})", range_predicate_from(&column, ranges, first)),
+                );
+            }
             for _ in values {
                 next();
             }
-            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
             Rows::new(
                 "documents AS dr",
                 "dr.id",
@@ -604,8 +666,15 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             let listed: Vec<String> = (0..values.len() - LINKS_TO_PARAMETERS)
                 .map(|_| next())
                 .collect();
-            let (ignored, order, path, document) = (next(), next(), next(), next());
             let link_key = resolve::link_key_column(key);
+            if seek_only {
+                return Rows::new(
+                    "link_keys AS lk",
+                    "lk.document",
+                    format!("lk.{link_key} IN ({})", listed.join(", ")),
+                );
+            }
+            let (ignored, order, path, document) = (next(), next(), next(), next());
             Rows::new(
                 "link_keys AS lk",
                 "lk.document",
@@ -635,19 +704,40 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         }
         ReadFilter::Finding => {
             let (fingerprint, kind) = (next(), next());
-            let standing = match reached {
-                Reached::Set => format!(
-                    "df.path IN (SELECT fg.path FROM findings AS fg
-                         WHERE fg.vault_schema_fingerprint = {fingerprint}
-                           AND fg.kind = {kind})"
-                ),
-                Reached::OneDocument => format!(
-                    "EXISTS (SELECT 1 FROM findings AS fg
+            match reached {
+                // The kind's findings, off its index in the answer's path
+                // order, each joined to the document at its path: rows a
+                // reader can stop reading at any point, so a count of them
+                // bounded at a ceiling costs the ceiling.
+                Reached::Set => Rows {
+                    table: "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path"
+                        .to_string(),
+                    document: "df.id".to_string(),
+                    path: "fg.path".to_string(),
+                    condition: format!(
+                        "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
+                    ),
+                },
+                Reached::OneDocument => Rows::new(
+                    "documents AS df",
+                    "df.id",
+                    format!(
+                        "EXISTS (SELECT 1 FROM findings AS fg
                          WHERE fg.path = df.path AND fg.vault_schema_fingerprint = {fingerprint}
                            AND {compared}fg.kind = {kind})"
+                    ),
                 ),
-            };
-            Rows::new("documents AS df", "df.id", standing)
+                // The kind's findings alone, each named by its path, a
+                // finding at a path no document stands at among them.
+                Reached::Seek => Rows {
+                    table: "findings AS fg".to_string(),
+                    document: "fg.path".to_string(),
+                    path: "fg.path".to_string(),
+                    condition: format!(
+                        "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
+                    ),
+                },
+            }
         }
     }
 }
@@ -687,7 +777,7 @@ fn source_bound(
     binder: &mut Binder,
 ) -> String {
     match shape {
-        ReadFilter::Equal(_) | ReadFilter::Tag => {
+        ReadFilter::Equal(_) | ReadFilter::Tag | ReadFilter::Finding => {
             let rows = rows_of(shape, values, Reached::Set, binder);
             reach.arm(&rows, true, binder)
         }
@@ -716,24 +806,7 @@ fn source_bound(
                 .collect();
             reach.merged(arms)
         }
-        ReadFilter::Finding => {
-            // The set reads each document's path among the kind's findings';
-            // a source reads the findings themselves, off the kind's index in
-            // path order, each joined to the document at its path.
-            let (fingerprint, kind) = (
-                binder.bind(values[0].clone()),
-                binder.bind(values[1].clone()),
-            );
-            let rows = Rows {
-                table: "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path".to_string(),
-                document: "df.id".to_string(),
-                path: "fg.path".to_string(),
-                condition: format!(
-                    "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
-                ),
-            };
-            reach.arm(&rows, true, binder)
-        }
+
         ReadFilter::NotEqual(_)
         | ReadFilter::Absent
         | ReadFilter::Before(_)

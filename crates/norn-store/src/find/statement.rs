@@ -14,8 +14,8 @@ use crate::facts::StoredPathOrder;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::SuffixKey;
 use crate::read::{
-    AnswerSeek, Binder, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term, answer_ordering,
-    answer_place, answer_range, key_walk,
+    AnswerSeek, Binder, Driver, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term,
+    answer_ordering, answer_place, answer_range, key_walk,
 };
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 
@@ -26,10 +26,11 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 /// and [`FIND_STATEMENTS`] is the count a census is checked against. A page's
 /// filters are spelled inside the page statement they narrow, and are named by
 /// [`crate::ReadFilter`]. Each page statement below is named by the index it seeks
-/// with no filter; a filter that keeps what it seeks drives the statement
+/// with no filter; a filter that keeps what it seeks may drive the statement
 /// instead — a path page from the filter's source where the filter keeps its
-/// documents in the answer's path order, and otherwise from the filter's seek,
-/// the statement sorting what that seek handed it.
+/// documents in the answer's path order, and otherwise from the filter's seek
+/// where it keeps few enough documents ([`FindStatement::PartCeiling`]), the
+/// statement sorting what that seek handed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
@@ -128,10 +129,27 @@ pub enum FindStatement {
     /// the resolution ladder's order, beside how many there were. Run once by
     /// every read that carries links, however many it carries.
     LinkTargets,
+    /// Whether a part that keeps what it seeks keeps few enough documents to
+    /// drive a page from what it matched: the distinct documents among the
+    /// rows of its index seek alone, read until one past the ceiling and
+    /// counted, so it costs the rows of at most that many documents whatever
+    /// the part keeps. Every condition the index does not answer is dropped,
+    /// so a document the seek reaches and the part rejects counts too, and a
+    /// part is never taken to keep fewer documents than it does. Run once per
+    /// part, in the request's order until one keeps few enough, by a find,
+    /// validate or repair page no part drives from its documents in the page's
+    /// order ([`crate::ReadFilter::is_path_ordered`]); the ceiling is the read
+    /// module's driver choice's.
+    PartCeiling,
+    /// The greatest document row id: one seek of the row ids' last entry,
+    /// which bounds how many documents the vault holds — a deleted document's
+    /// id is never reused below it — and so scales the ceiling a part is
+    /// asked against. Run once by a page that asks any part's ceiling.
+    DocumentSpan,
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 20;
+pub const FIND_STATEMENTS: usize = 22;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -161,6 +179,8 @@ impl FindStatement {
             Self::CandidateSuffixes,
             Self::LinkTargets,
             Self::OffsetSpellings,
+            Self::PartCeiling,
+            Self::DocumentSpan,
         ]
     }
 
@@ -188,6 +208,8 @@ impl FindStatement {
             Self::CandidateSuffixes => 17,
             Self::LinkTargets => 18,
             Self::OffsetSpellings => 19,
+            Self::PartCeiling => 20,
+            Self::DocumentSpan => 21,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -295,6 +317,9 @@ pub(crate) struct Section<'a> {
     pub(crate) key: Option<&'a str>,
     pub(crate) start: SectionStart<'a>,
     pub(crate) filters: &'a [Filter],
+    /// How the section reaches the documents its filters keep, chosen once
+    /// per request ([`crate::store::Snapshot::choose_driver`]).
+    pub(crate) driver: Driver,
     pub(crate) rows: usize,
 }
 
@@ -314,33 +339,32 @@ pub(crate) struct Section<'a> {
 /// blob, which SQLite orders after every text. So the text does not branch on
 /// whether the section resumes, and the plan is the same either way.
 ///
-/// **A path page narrowed by a filter keeping its documents in the answer's
-/// path order is driven from that filter's source**
-/// ([`compose_ordered_path_page`]). **Any other section narrowed by a filter
-/// that keeps what it seeks is driven from that seek.** The section's own
-/// order index is spelled out of reach — the term that would seek it stands
-/// behind a unary `+`, which SQLite reads as the same value and never as an
-/// index constraint — so the section reaches each document the filter's seek
-/// handed it by that document's key and sorts them: its cost is the filter's
-/// matches, not the order index's rows. A section with no filter, or narrowed
-/// only by filters that exclude ([`crate::ReadFilter::excludes`]), seeks its
-/// order index and tests each row it reads at that document's key.
+/// **How a section reaches its documents is the request's driver**, chosen once
+/// for every section ([`Driver`]). A path page a filter keeping its documents
+/// in the answer's path order narrows is driven from that filter's source
+/// ([`compose_ordered_path_page`]). A section a filter keeping few enough
+/// documents drives is driven from that filter's seek: the section's own order
+/// index is spelled out of reach — the term that would seek it stands behind a
+/// unary `+`, which SQLite reads as the same value and never as an index
+/// constraint — so the section reaches each document the filter's seek handed
+/// it by that document's key and sorts them: its cost is the filter's matches,
+/// at most the ceiling, not the order index's rows. Every other section seeks
+/// its order index and tests each row it reads at that document's key against
+/// every filter, the driving one's aside.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let text = |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.into()));
-    let keeps = section
-        .filters
-        .iter()
-        .any(|filter| !filter.shape().excludes());
-    if let FindStatement::PathPage(direction) = section.statement
-        && let Some(at) = section
-            .filters
-            .iter()
-            .position(|filter| filter.is_path_ordered(direction == PageDirection::Descending))
+    if let (FindStatement::PathPage(direction), Driver::Ordered(at)) =
+        (section.statement, section.driver)
     {
         return compose_ordered_path_page(section, direction, at, binder);
     }
-    let order_seek = if keeps { "+" } else { "" };
+    let driving = match section.driver {
+        Driver::Matched(at) => Some(at),
+        Driver::Walked => None,
+        Driver::Ordered(_) => unreachable!("only a path page is driven from a source"),
+    };
+    let order_seek = if driving.is_some() { "+" } else { "" };
     let (head, ordering, id) = match section.statement {
         FindStatement::ActiveFingerprint
         | FindStatement::KnownKey
@@ -358,7 +382,9 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::ClassHead
         | FindStatement::ClassTotal
         | FindStatement::CandidateSuffixes
-        | FindStatement::LinkTargets => {
+        | FindStatement::LinkTargets
+        | FindStatement::PartCeiling
+        | FindStatement::DocumentSpan => {
             unreachable!("{:?} is not a page section", section.statement)
         }
         FindStatement::PathPage(direction) => {
@@ -434,14 +460,15 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             )
         }
     };
-    // Where a filter keeps what it seeks, the filters' sets drive the section;
-    // where every filter excludes, each row the order index hands back is
-    // tested at its key.
+    // The driving filter's set drives the section, and every other filter is
+    // tested at each document's key; where none drives, each row the order
+    // index hands back is tested.
     let filters: String = section
         .filters
         .iter()
-        .map(|filter| {
-            let spelled = if keeps {
+        .enumerate()
+        .map(|(at, filter)| {
+            let spelled = if driving == Some(at) {
                 filter.spell(id, &mut binder)
             } else {
                 filter.test(id, &mut binder)
@@ -606,6 +633,15 @@ fn spelled(direction: PageDirection) -> (&'static str, &'static str, &'static st
 fn id_list(ids: &[i64]) -> Value {
     let listed: Vec<String> = ids.iter().map(i64::to_string).collect();
     Value::Text(format!("[{}]", listed.join(",")))
+}
+
+/// [`FindStatement::DocumentSpan`]: the greatest document row id, zero where
+/// the vault holds none.
+pub(crate) fn compose_document_span() -> (String, Vec<Value>) {
+    (
+        "SELECT coalesce(max(id), 0) FROM documents".to_string(),
+        Vec::new(),
+    )
 }
 
 /// [`FindStatement::KnownKey`]: whether any document carries `key`.

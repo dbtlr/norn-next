@@ -390,16 +390,19 @@ fn the_hosts_account_moves(host: &attach::ServingHost, vault: &attach::Vault) {
 /// How many statements each page of the live-hold find runs, on the first
 /// page and on the page its cursor continues alike.
 ///
-/// Six, each once per page and none per row: the pinned schema's fingerprint
-/// the find is judged under; whether a document carries `type`, and whether
-/// one carries `created`, one existence seek each; the page of `created`
-/// marker rows in descending order that the `type` filter narrows; the
-/// document rows the page found, by row id; and the head of each found
-/// document's tags. The cursor the second page continues is judged against
+/// Eight, each once per page and none per row: the pinned schema's
+/// fingerprint the find is judged under; whether a document carries `type`,
+/// and whether one carries `created`, one existence seek each; the vault's
+/// greatest document row id, which scales the ceiling, and whether the `type`
+/// filter keeps few enough documents to drive the page from what it matched,
+/// a count of its seek that stops past the ceiling (NORN-390); the
+/// page of `created` marker rows in descending order that the `type` filter
+/// narrows; the document rows the page found, by row id; and the head of each
+/// found document's tags. The cursor the second page continues is judged against
 /// the order it was minted in and becomes the page statement's bound, with no
 /// statement of its own. A statement run per hydrated row would put this at
 /// more than a page's rows.
-const STATEMENTS_PER_PAGE: u64 = 6;
+const STATEMENTS_PER_PAGE: u64 = 8;
 
 /// What the host's account moved from just before `act` until every one of
 /// `counts` has moved, waiting for the job the host runs on its own in answer
@@ -4955,7 +4958,10 @@ const READ_SHAPES: &[ReadShape] = &[
             "find_documents_hydrated",
             "find_page_vm_steps",
         ],
-        statements: 5,
+        // A links-to part keeps its documents in no page's order, so the page
+        // reads the vault's span and asks whether the part keeps few enough to
+        // drive from (NORN-390).
+        statements: 7,
         control: |reader| backlinks(reader, "cg-hub", None),
         grows: &["find_page_vm_steps", "vm_steps"],
     },

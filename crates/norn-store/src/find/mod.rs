@@ -16,9 +16,12 @@
 //! order narrows drives from that filter's source** ([`crate::ReadFilter::is_path_ordered`]),
 //! seeking its documents from where the page resumes, so it sorts nothing and
 //! costs the documents it reads; every other filter tests each of them at its
-//! key. **A page any other filter that keeps what it seeks narrows drives
-//! from the filter's seek and sorts the matched set**, so its cost is bounded
-//! by the match count, which is what a narrowing part narrows.
+//! key. **Any other page a filter that keeps what it seeks narrows is driven
+//! by the first such filter keeping few enough documents, or walks its order**
+//! ([`crate::read`]'s driver choice): a filter keeping at most
+//! a ceiling scaled by the page's rows and the vault drives it from its seek
+//! and sorts the matched set, and where none does the page seeks its order
+//! index and tests every filter at each document's key.
 //!
 //! **Paths stand in the answer's path order on every root**: the path folded
 //! by ASCII case with the bytewise path as the tie-break, so the order is
@@ -210,8 +213,8 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Compared, DateComparison, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran, ReadFilter,
-    ReadStatement, Report, ResolvesPart, page_limit,
+    Compared, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran,
+    ReadFilter, ReadStatement, Report, ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -224,9 +227,9 @@ pub use statement::{FIND_STATEMENTS, FindStatement, Nested, PageDirection};
 use statement::{Section, SectionStart, compose_page};
 pub(crate) use statement::{
     SpellingRange, compose_bare_directory, compose_candidate_suffixes, compose_class_head,
-    compose_class_total, compose_finding_candidates, compose_finding_classes, compose_known_key,
-    compose_link_targets, compose_match_probe, compose_offset_spellings, compose_universe,
-    path_list,
+    compose_class_total, compose_document_span, compose_finding_candidates,
+    compose_finding_classes, compose_known_key, compose_link_targets, compose_match_probe,
+    compose_offset_spellings, compose_universe, path_list,
 };
 
 /// Where a page stopped, or where a continuation resumes: the value the row
@@ -818,6 +821,18 @@ impl Snapshot {
         } else {
             sections(compiled.order, at)
         };
+        // A path page can be driven from a part's source the way it runs; a
+        // field order's page cannot, whatever its parts.
+        let descending = match compiled.order {
+            PageOrder::Path(direction) => Some(direction == PageDirection::Descending),
+            PageOrder::Field { .. } => None,
+        };
+        let parts: Vec<&Filter> = compiled.filters.iter().collect();
+        let driver = if sections.is_empty() {
+            Driver::Walked
+        } else {
+            self.choose_driver(&parts, descending, limit + 1, lookups)?
+        };
         let page = self.read_page(
             sections,
             limit,
@@ -828,6 +843,7 @@ impl Snapshot {
                     key: field_key(compiled.order),
                     start,
                     filters: &compiled.filters,
+                    driver,
                     rows,
                 });
                 let section = Ran::new(statement, composed).narrowed_by(compiled.filter_shapes());

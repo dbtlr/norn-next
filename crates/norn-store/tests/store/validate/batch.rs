@@ -72,7 +72,11 @@ impl Validating {
 
 /// Every batch `params` selects, drained `limit` findings at a time, each
 /// batch's findings in the order it answered them.
-fn drained(store: &Validating, params: &RepairParams, limit: u32) -> Vec<Vec<FindingRow>> {
+pub(super) fn drained(
+    store: &Validating,
+    params: &RepairParams,
+    limit: u32,
+) -> Vec<Vec<FindingRow>> {
     let mut batches = Vec::new();
     let mut after: Option<Cursor> = None;
     loop {

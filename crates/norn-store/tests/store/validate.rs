@@ -2209,6 +2209,175 @@ fn a_driven_page_orders_a_documents_findings_by_position_then_id() {
     }
 }
 
+/// **A drain a document part narrows answers what one page holding every
+/// finding answers, whichever drive (NORN-390).** Over the fixture and forty
+/// bulk documents every part of [`drained_parts`] matches, each with an
+/// undeclared-tag warning and a breach citing `tasks`, a validate of every
+/// kind drained two findings at a time, and a repair drained two at a time,
+/// each narrowed by each selection, answer the findings one page holding
+/// every finding answers, in its order, on either root. Two rows walk past
+/// the ceiling a part with no path order may keep, and the one page is driven
+/// from what the part matched, so the drives answer alike.
+#[test]
+fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
+    for order in ROOTS {
+        let validating_store = Validating::with_matched_bulk_under("validate-walked", 40, order);
+        for (shape, parts) in drained_parts(FindingKind::UndeclaredTag) {
+            let params = validating().with_predicates(parts.clone());
+            let (whole, _) = validating_store.page(&params.clone().with_limit(MAX_PAGE as u32));
+            let mut paged = Vec::new();
+            let mut after: Option<Cursor> = None;
+            loop {
+                let mut page = params.clone().with_limit(2);
+                if let Some(cursor) = after.take() {
+                    page = page.with_after(cursor);
+                }
+                let (rows, next) = validating_store.page(&page);
+                paged.extend(rows);
+                match next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+                assert!(
+                    paged.len() <= whole.len(),
+                    "the pages of {params:?} do not end"
+                );
+            }
+            assert_eq!(
+                paged.iter().map(named).collect::<Vec<_>>(),
+                whole.iter().map(named).collect::<Vec<_>>(),
+                "a validate a {shape:?} part narrows, drained two at a time, under {order:?}"
+            );
+            let repair = batch::selecting(&params);
+            let batched: Vec<_> = batch::drained(&validating_store, &repair, 2)
+                .into_iter()
+                .flatten()
+                .map(|row| named(&row))
+                .collect();
+            let whole: Vec<_> = validating_store
+                .batch(&repair.with_limit(MAX_PAGE as u32))
+                .rows
+                .iter()
+                .map(named)
+                .collect();
+            assert_eq!(
+                batched, whole,
+                "a repair a {shape:?} part narrows, drained two at a time, under {order:?}"
+            );
+        }
+    }
+}
+
+/// **A validate page and a repair batch drive from what a part matched exactly
+/// while it keeps no more documents than the ceiling (NORN-390).** In a vault
+/// too small to raise it, a page and a batch of one finding read two, so the
+/// ceiling is sixteen: narrowed by the word `rare`, which sixteen documents
+/// holding a finding carry, each is driven from what the match matched, and by
+/// seventeen each walks its kind's findings.
+#[test]
+fn a_page_and_a_batch_drive_from_what_a_part_matched_exactly_within_the_ceiling() {
+    let ceiling = 2 * norn_store::MATCHED_DRIVE_FACTOR;
+    for (count, driven) in [(ceiling, true), (ceiling + 1, false)] {
+        let mut validating_store = Validating::new(&format!("validate-ceiling-{count}"));
+        let documents: Vec<_> = (0..count)
+            .map(|at| {
+                document(
+                    &format!("rare/{at:02}.md"),
+                    &format!("hash-rare-{at}"),
+                    "a rare body\n",
+                )
+            })
+            .collect();
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &documents);
+        for at in 0..count {
+            request
+                .record_finding(&undeclared(&format!("rare/{at:02}.md"), "rare"))
+                .expect("recording a rare finding");
+        }
+        let params = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::matches("rare")])
+            .with_limit(1);
+        let drives = |plans: Vec<ValidatePlan>, statement: ValidateStatement| {
+            plans
+                .iter()
+                .filter(|plan| plan.statement == ReadStatement::Validate(statement))
+                .all(|plan| {
+                    plan.plan
+                        .sql
+                        .contains("IN (SELECT rowid FROM documents_fts")
+                })
+        };
+        assert_eq!(
+            drives(validating_store.plans(&params), ValidateStatement::KindPage),
+            driven,
+            "a page `rare` narrows, {count} documents against {ceiling}"
+        );
+        assert_eq!(
+            drives(
+                validating_store.batch_plans(&batch::selecting(&params).with_limit(1)),
+                ValidateStatement::MergedPage
+            ),
+            driven,
+            "a batch `rare` narrows, {count} documents against {ceiling}"
+        );
+    }
+}
+
+/// **A page a part drives from what it matched tests every other document
+/// part at each document's key (NORN-390).** Over the fixture, four documents
+/// the word `rare` stands in, each with an undeclared-tag warning, and 50,
+/// then 500, bulk documents every part of [`drained_parts`] matches, a page
+/// narrowed by `rare` and by a range the bulk all falls in is driven from what
+/// `rare` matched and costs the same at both sizes: the range is tested at
+/// each of the four, never read as the set it keeps.
+#[test]
+fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
+    for order in ROOTS {
+        let rare = |label: &str, bulk: usize| {
+            let mut validating_store = Validating::with_matched_bulk_under(label, bulk, order);
+            let documents: Vec<_> = (0..4)
+                .map(|at| {
+                    document(
+                        &format!("rare/{at}.md"),
+                        &format!("hash-rare-{at}"),
+                        "a rare body\n",
+                    )
+                })
+                .collect();
+            let mut request = validating_store.store.begin_request();
+            write_documents(&mut request, &documents);
+            for at in 0..4 {
+                request
+                    .record_finding(&undeclared(&format!("rare/{at}.md"), "rare"))
+                    .expect("recording a rare finding");
+            }
+            validating_store
+        };
+        let (small, large) = (
+            rare("validate-rare-small", 50),
+            rare("validate-rare-large", 500),
+        );
+        // `rare` drives whichever the request names first: named second, the
+        // range before it keeps more than the ceiling and is passed over.
+        for parts in [
+            [Predicate::matches("rare"), Predicate::before("status", "p")],
+            [Predicate::before("status", "p"), Predicate::matches("rare")],
+        ] {
+            let params = validating()
+                .with_kinds([FindingKind::UndeclaredTag])
+                .with_predicates(parts.clone())
+                .with_limit(2);
+            assert_eq!(
+                small.validate(&params).work,
+                large.validate(&params).work,
+                "a page `rare` drives grew with what the range keeps under {order:?}: {parts:?}"
+            );
+        }
+    }
+}
+
 /// **Two document parts together admit exactly the findings whose document
 /// both admit, whichever drives, on either root (NORN-390).** Over the
 /// fixture, six bulk documents every part matches and the [`mixed_documents`]

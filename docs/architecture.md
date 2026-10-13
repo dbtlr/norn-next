@@ -868,19 +868,38 @@ ones the part matched before its place or past its last row; every other part te
 document at its key. Those it reads include the ones another part then rejects, each read
 once over a drain; which part drives is the first in the request's order, not the rarest.
 A wider membership merges too many seeks to prepare for every page and drives no page from
-its source. A page any other filter that keeps what it seeks narrows — a range, a
-full-text match, a resolution or a links-to part, a membership or a presence descending,
-and any such part on a field sort's page — drives from the filter's seek and sorts the
-matched set: its cost is bounded by the match count. Inequality and absence seek the
+its source. A page no part can drive that way — narrowed by a range, a full-text match, a
+resolution or a links-to part, a wider membership, a membership or a presence descending,
+or any part on a field sort's page — asks its parts in the request's order whether one
+keeps at most a ceiling, by one count of the distinct documents among the rows of the
+part's index seek alone that stops one past it — every condition the index does not answer
+dropped, so a document the seek reaches and the part rejects counts too. The ceiling is the
+greater of eight per row the page reads and the square root of those rows times the
+documents the vault may hold, read once as its greatest document row id. The first part
+within it drives the page from its seek and sorts what it matched, so the page costs at most
+the ceiling, and a drain its pages times that — at most the vault where the vault's term
+sets the ceiling, eight documents per row it reads where the floor does; where none is, the
+page walks its own order index from where it resumes and tests every part at each
+document's key, so it costs the documents it walks to fill its rows — for a part spread
+through the vault, at most the ceiling — and a drain walks each document once. A page
+walking past many documents to the next of a few pays for the many, each once over a drain,
+a declared limit: a part's documents bunched together, or a part whose seek reaches many
+documents it rejects — findings at paths no document stands at, values of the wrong declared
+shape or failing a folded key's typed order, links whose key names another document,
+documents the ambiguity-ignore set leaves out, paths under a glob's literal prefix the glob
+rejects — which its count takes for kept, so the page walks; no index holds such a part's
+documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
 handed it and sorts at most once per page statement; a path page a filter's source drives
-seeks that filter's index from its place and sorts nothing, and its continuation, near the
-start of what the filter matched and near the end, costs the same while the documents the
-filter matches grow with the vault. Each filter is one index seek, judged
+seeks that filter's index from its place and sorts nothing; a part's ceiling count is the
+part's own seek, costing the same however many documents the part keeps past the ceiling; and a page's
+continuation narrowed by any part, in path order and in a field's, near the start of what
+the part matched and near the end, costs the same while the documents the part matches grow
+with the vault. Each filter is one index seek, judged
 on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, on
 `(key, typed)` where the key carries a typed order, or on `(key, folded)` where it is a tag
 key — the `tags` carrier, declared or not, or a key declared `tags` — whose value rows hold
@@ -977,8 +996,10 @@ a path part's folded range bounds on every root, and that a document part keepin
 documents in the answer's path order drives instead from its source — the part's documents
 sought from the page's place and each one's findings at its path, so a continuation costs
 the documents it reads from its place to its last finding however many the part matched,
-those holding no finding the page selects included, each read once per kind a drain pages — while any other document part keeping
-what it seeks drives from the documents it matched; and the summary, a covering seek of
+those holding no finding the page selects included, each read once per kind a drain pages — while
+where no such part narrows it, a part within the ceiling a find's page asks (counted per
+finding row the page reads) drives it from the documents it matched, and otherwise the section seeks its kind and
+tests each document; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
 drives it, one covering seek per matched document and cell, its groups sorted; a rule's
@@ -993,9 +1014,8 @@ path part or a document part costs the same at both and steps through no full sc
 either root, and so does one selecting a rule together with any of those; a page of a range
 that matches every finding costs the same at both, by kind and by rule alike, and a page
 deep among many findings at one path costs what the page one page in costs; a continuation
-a document part keeping its documents in the answer's path order drives, near the start of
-what it matched and near the end, costs the same while the documents it matches grow with
-the vault. On a
+narrowed by any document part, near the start of what it matched and near the end, costs
+the same while the documents it matches grow with the vault. On a
 root that tells spellings apart a path part's folded range also reads the findings at paths
 spelling its prefix in another case, which its glob rejects. A
 payload bar holds that no statement a page or a summary runs, under every narrowing the drain
@@ -1012,8 +1032,9 @@ ALL` and ordered together, which SQLite runs as a merge of the arms' own orders 
 and no index added for it. Where a document part keeping its documents in the answer's path order
 narrows the batch, the read is one arm instead: the part's documents from the batch's place,
 read once, each seeking every kind read at its path, so only one document's findings are
-ordered among themselves; any other document part keeping what it seeks drives each arm
-from the documents it matched, and the arm sorts those. A batch holds about
+ordered among themselves; where no such part narrows it, a part keeping at most the ceiling a
+find's page asks drives each arm from the documents it matched, and the arm sorts
+those, and otherwise each arm seeks its kind and tests each document. A batch holds about
 its limit in findings and never splits a document's selected findings: where the limit falls
 inside a document, a second statement reads that document's remaining findings, pinning its
 path by the folded and the bytewise equality together so that it still seeks and testing the
@@ -1024,8 +1045,8 @@ covered, under no fingerprint, only where more remain, and is its own row type, 
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
 plan bar with a negative control, and a work bar over two vault sizes holds that a batch no
 document part drives costs the findings it reads and steps through no full scan or sort, and
-that a continuation a document part keeping its documents in the answer's path order drives
-costs the same while the documents the part matches grow. A
+that a continuation narrowed by any document part costs the same while the documents the
+part matches grow. A
 first batch also counts the selection (see Mutation, `repair`), so its cost follows the findings the selection
 admits; the counter lane holds a repair narrowed to a path flat across vault sizes. The
 host's `repair` verb pages through it, one batch per request.

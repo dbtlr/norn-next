@@ -57,7 +57,7 @@ use super::{Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    FindingBase, FindingLink, Lookups, PageRefusal, Ran, linked_finding_base, page_limit,
+    Driver, FindingBase, FindingLink, Lookups, PageRefusal, Ran, linked_finding_base, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -292,8 +292,10 @@ impl Snapshot {
         if narrowing.conjunction.matches_nothing {
             return Ok((Vec::new(), false));
         }
+        let driver = self.page_driver(narrowing, limit + 1, lookups)?;
         let mut found = self.read_merged(
             narrowing,
+            driver,
             ValidateStatement::MergedPage,
             after.map(past_document),
             limit + 1,
@@ -312,6 +314,7 @@ impl Snapshot {
         }
         let tail = self.read_merged(
             narrowing,
+            driver,
             ValidateStatement::DocumentTail,
             Some((&path, position, id)),
             0,
@@ -321,6 +324,7 @@ impl Snapshot {
         found.extend(tail);
         let beyond = self.read_merged(
             narrowing,
+            driver,
             ValidateStatement::MergedPage,
             Some(past_document(&path)),
             1,
@@ -332,10 +336,12 @@ impl Snapshot {
 
     /// The findings one merged statement reads, counted into `work`: `rows`
     /// at most for a merged page, and every finding of the document for its
-    /// tail.
+    /// tail. `driver` is the batch's, chosen once for its first read.
+    #[allow(clippy::too_many_arguments)] // One merged read's every input, each named at its call.
     fn read_merged(
         &self,
         narrowing: &Narrowing,
+        driver: Driver,
         statement: ValidateStatement,
         after: Option<(&str, i64, i64)>,
         rows: usize,
@@ -350,6 +356,7 @@ impl Snapshot {
             severities: narrowing.severities.as_deref(),
             after,
             filters: &narrowing.conjunction.filters,
+            driver: Some(driver),
             rows,
         });
         let merged = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
