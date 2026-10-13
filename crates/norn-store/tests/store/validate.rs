@@ -2359,15 +2359,22 @@ fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
             rare("validate-rare-small", 50),
             rare("validate-rare-large", 500),
         );
-        let params = validating()
-            .with_kinds([FindingKind::UndeclaredTag])
-            .with_predicates([Predicate::matches("rare"), Predicate::before("status", "p")])
-            .with_limit(2);
-        assert_eq!(
-            small.validate(&params).work,
-            large.validate(&params).work,
-            "a page `rare` drives grew with what the range keeps under {order:?}"
-        );
+        // `rare` drives whichever the request names first: named second, the
+        // range before it keeps more than the ceiling and is passed over.
+        for parts in [
+            [Predicate::matches("rare"), Predicate::before("status", "p")],
+            [Predicate::before("status", "p"), Predicate::matches("rare")],
+        ] {
+            let params = validating()
+                .with_kinds([FindingKind::UndeclaredTag])
+                .with_predicates(parts.clone())
+                .with_limit(2);
+            assert_eq!(
+                small.validate(&params).work,
+                large.validate(&params).work,
+                "a page `rare` drives grew with what the range keeps under {order:?}: {parts:?}"
+            );
+        }
     }
 }
 

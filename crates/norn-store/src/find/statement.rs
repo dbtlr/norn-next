@@ -130,14 +130,16 @@ pub enum FindStatement {
     /// every read that carries links, however many it carries.
     LinkTargets,
     /// Whether a part that keeps what it seeks keeps few enough documents to
-    /// drive a page from what it matched: the rows of its own seek, read until
-    /// one row past the ceiling and counted, so it costs at most the ceiling
-    /// whatever the part keeps. A document reached by several rows counts
-    /// once per row, so a part is never taken to keep fewer documents than it
-    /// does. Run once per part, in the request's order until one keeps few
-    /// enough, by a find, validate or repair page no part drives from its
-    /// documents in the page's order ([`crate::ReadFilter::is_path_ordered`]);
-    /// the ceiling is the read module's driver choice's.
+    /// drive a page from what it matched: the distinct documents among the
+    /// rows of its index seek alone, read until one past the ceiling and
+    /// counted, so it costs the rows of at most that many documents whatever
+    /// the part keeps. Every condition the index does not answer is dropped,
+    /// so a document the seek reaches and the part rejects counts too, and a
+    /// part is never taken to keep fewer documents than it does. Run once per
+    /// part, in the request's order until one keeps few enough, by a find,
+    /// validate or repair page no part drives from its documents in the page's
+    /// order ([`crate::ReadFilter::is_path_ordered`]); the ceiling is the read
+    /// module's driver choice's.
     PartCeiling,
     /// The greatest document row id: one seek of the row ids' last entry,
     /// which bounds how many documents the vault holds — a deleted document's

@@ -16,18 +16,26 @@
 //! **The ceiling scales with the page and the vault**: the greater of
 //! [`MATCHED_DRIVE_FACTOR`] documents per row the page reads and the square
 //! root of the rows the page reads times the documents the vault holds
-//! ([`FindStatement::DocumentSpan`]). A page driven from what a part matched
-//! costs at most the ceiling's documents. A page that walks its order costs
-//! the documents it walks to fill its rows: a part keeping more than the
-//! ceiling spread through the vault leaves about the vault over the ceiling
-//! documents between two of its own, so a page walks about its rows times
-//! that, which is at most the ceiling, and a drain walks each document once.
-//! A drain driven from what a part matched costs its pages times the ceiling,
-//! at most the vault. **What stays a declared limit** is a part's documents
-//! bunched together: a page walking past many documents to the next of a
-//! bunch pays for the many, each once over a drain, since no index holds a
-//! range's, a full-text match's, a resolution's or a links-to part's
-//! documents in a page's order.
+//! ([`FindStatement::DocumentSpan`]). A part is asked its distinct documents
+//! among the rows its index seek reaches alone, which over-counts where the
+//! seek reaches documents the part then rejects. A page driven from what a
+//! part matched costs at most the ceiling's documents, and a drain of it its
+//! pages times that: at most the vault where the vault's term sets the
+//! ceiling, and eight documents per row it reads where the floor does. A page
+//! that walks its order costs the documents it walks to fill its rows: a part
+//! keeping more than the ceiling spread through the vault leaves about the
+//! vault over the ceiling documents between two of its own, so a page walks
+//! about its rows times that, which is at most the ceiling, and a drain walks
+//! each document once. **What stays a declared limit** is a page that walks
+//! past many documents to reach the next of a few: a part's documents bunched
+//! together, or a part whose seek reaches many documents it rejects — findings
+//! at paths no document stands at, values of the wrong declared shape, links
+//! whose key names another document, documents the ambiguity-ignore set
+//! leaves out, paths a glob with no literal prefix rejects — which its count
+//! takes for documents it keeps, so the page walks. Each such document is
+//! walked once over a drain: no index holds a range's, a full-text match's, a
+//! resolution's or a links-to part's documents in a page's order, and a count
+//! that judged each row would read without bound.
 
 use crate::error::{self, StoreError};
 use crate::find::{FindStatement, compose_document_span};
@@ -61,7 +69,7 @@ impl Snapshot {
     /// the first that keeps its documents in the page's order where the page
     /// reads in the answer's path order — `descending` names which way, and is
     /// `None` for a page in any other order — and otherwise the first that
-    /// keeps at most [`MATCHED_DRIVE_FACTOR`] documents per row, asked in the
+    /// keeps at most the ceiling ([`Snapshot::drive_ceiling`]), asked in the
     /// request's order and no further than the first that does. A part that
     /// excludes drives nothing.
     pub(crate) fn choose_driver(

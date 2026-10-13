@@ -19,7 +19,7 @@
 //! key. **Any other page a filter that keeps what it seeks narrows is driven
 //! by the first such filter keeping few enough documents, or walks its order**
 //! ([`crate::read`]'s driver choice): a filter keeping at most
-//! [`crate::MATCHED_DRIVE_FACTOR`] documents per row drives it from its seek
+//! a ceiling scaled by the page's rows and the vault drives it from its seek
 //! and sorts the matched set, and where none does the page seeks its order
 //! index and tests every filter at each document's key.
 //!

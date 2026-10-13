@@ -1987,6 +1987,120 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     );
 }
 
+/// **A part's ceiling count reads its index seek and no further, whatever the
+/// seek reaches that the part then rejects (NORN-390).** In a vault of one size,
+/// a field-sorted page of one row asks each part its ceiling at the same VM
+/// steps while 60, then 500, of the rows the part's seek reaches are ones the
+/// part rejects: findings of its kind at paths no document stands at, for a
+/// has-finding part; values of the wrong declared shape, for a shaped
+/// equality; links whose key also names another document, for a links-to
+/// part; and documents the declaration's ambiguity-ignore set leaves out of a
+/// target's class, for a resolution. A count that judged those rows would read
+/// every one of them.
+#[test]
+fn a_part_ceiling_probe_reads_only_its_seek() {
+    let probe_steps = |seeded: &Seeded, part: Predicate, declared: &ContentModel| {
+        seeded
+            .plans_under(
+                &sorted(SortKey::field("status"), Direction::Ascending)
+                    .with_predicates([part])
+                    .with_limit(1),
+                declared,
+            )
+            .into_iter()
+            .find(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
+            .expect("the part's ceiling count")
+            .vm_steps
+    };
+    let total = 600;
+    let readings = declared_readings();
+    // A vault of `total` documents, `rejected` of them reached by each part's
+    // seek and rejected by the part, beside three it keeps.
+    let vault = |label: &str, rejected: usize| {
+        let mut seeded = Seeded::new(label);
+        let link = |target: &str| LinkFact {
+            family: LinkFamily::Wikilink,
+            embed: false,
+            protocol: None,
+            target: target.to_string(),
+            title: None,
+            anchor: None,
+            span: Some(Span {
+                line: 1,
+                column: 1,
+                byte_offset: 0,
+            }),
+        };
+        let mut documents = vec![
+            document("lt/x.md", "hash-lt-x", "x\n"),
+            document("lu/x.md", "hash-lu-x", "x\n"),
+        ];
+        // The documents a resolution of `r` reaches: the rejected ones under
+        // `ign/`, which the declaration's ambiguity-ignore set leaves out,
+        // and the kept ones under `k/`.
+        let path = |at: usize| {
+            if at < rejected {
+                format!("ign/{at:04}/r.md")
+            } else if at < rejected + 3 {
+                format!("k/{at:04}/r.md")
+            } else {
+                format!("v/{at:04}.md")
+            }
+        };
+        for at in 0..total - 2 {
+            let path = path(at);
+            let shape = if at < rejected {
+                FrontmatterValue::Sequence(vec![string("x"), string("x")])
+            } else if at < rejected + 3 {
+                string("x")
+            } else {
+                string("other")
+            };
+            let mut facts = document(&path, &format!("hash-{path}"), "a body\n")
+                .with_frontmatter(Some(map(vec![("kind", shape)])), &readings);
+            if at < rejected {
+                facts.links.push(link("x"));
+            } else if at < rejected + 3 {
+                facts.links.push(link("lt/x"));
+            }
+            documents.push(facts);
+        }
+        let mut request = seeded.store.begin_request();
+        write_documents(&mut request, &documents);
+        for at in 0..rejected {
+            request
+                .record_finding(&violation(&format!("ghost/{at:04}.md")))
+                .expect("recording a ghost finding");
+        }
+        for at in 0..3 {
+            request
+                .record_finding(&violation(&path(rejected + at)))
+                .expect("recording a kept finding");
+        }
+        seeded
+    };
+    let (fewer, more) = (vault("find-seek-fewer", 60), vault("find-seek-more", 500));
+    let target = ResolutionTarget::new("lt/x").expect("a target");
+    for (part, declared) in [
+        (
+            Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
+            declared(),
+        ),
+        (Predicate::equal_to("kind", "x"), readings.clone()),
+        (Predicate::links_to(target), declared()),
+        (
+            Predicate::resolves(ResolutionTarget::new("r").expect("a target")),
+            declared().declare_ambiguity_ignore(Pattern::parse("ign/**").expect("a glob")),
+        ),
+    ] {
+        assert_eq!(
+            probe_steps(&fewer, part.clone(), &declared),
+            probe_steps(&more, part.clone(), &declared),
+            "{part:?}'s ceiling count read what it rejects"
+        );
+    }
+}
+
 /// `seeded` holding `count` more documents under `edge/`, each with the tag
 /// `edge`, `status: open` and the word `rare` in its body.
 fn with_edge_documents(seeded: &mut Seeded, count: usize) {
@@ -2128,9 +2242,10 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
 /// document's key (NORN-390).** Over the fixture, four documents the word
 /// `rare` stands in, and 50, then 500, bulk documents every part of
 /// [`drained_parts`] matches, a field-sorted page narrowed by `rare` and by a
-/// range the bulk all falls in is driven from what `rare` matched, and costs
-/// the same at both sizes: the range is tested at each of the four, never
-/// read as the set it keeps.
+/// range the bulk all falls in is driven from what `rare` matched, whether the
+/// request names it first or after the range, and costs the same at both
+/// sizes: the range is tested at each of the four, never read as the set it
+/// keeps, and never drives.
 #[test]
 fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
     for order in [
@@ -2141,14 +2256,21 @@ fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
         let mut large = Seeded::with_matched_bulk_under("find-rare-large", 500, order);
         with_edge_documents(&mut small, 4);
         with_edge_documents(&mut large, 4);
-        let params = sorted(SortKey::field("status"), Direction::Ascending)
-            .with_predicates([Predicate::matches("rare"), Predicate::before("status", "p")])
-            .with_limit(2);
-        assert_eq!(
-            small.page(&params).work,
-            large.page(&params).work,
-            "a page `rare` drives grew with what the range keeps under {order:?}"
-        );
+        // `rare` drives whichever the request names first: named second, the
+        // range before it keeps more than the ceiling and is passed over.
+        for parts in [
+            [Predicate::matches("rare"), Predicate::before("status", "p")],
+            [Predicate::before("status", "p"), Predicate::matches("rare")],
+        ] {
+            let params = sorted(SortKey::field("status"), Direction::Ascending)
+                .with_predicates(parts.clone())
+                .with_limit(2);
+            assert_eq!(
+                small.page(&params).work,
+                large.page(&params).work,
+                "a page `rare` drives grew with what the range keeps under {order:?}: {parts:?}"
+            );
+        }
     }
 }
 

@@ -871,17 +871,23 @@ A wider membership merges too many seeks to prepare for every page and drives no
 its source. A page no part can drive that way — narrowed by a range, a full-text match, a
 resolution or a links-to part, a wider membership, a membership or a presence descending,
 or any part on a field sort's page — asks its parts in the request's order whether one
-keeps at most a ceiling, by one count of the rows of the part's own seek that stops one row
-past it, a document reached by several rows counting once per row. The ceiling is the
+keeps at most a ceiling, by one count of the distinct documents among the rows of the
+part's index seek alone that stops one past it — every condition the index does not answer
+dropped, so a document the seek reaches and the part rejects counts too. The ceiling is the
 greater of eight per row the page reads and the square root of those rows times the
 documents the vault may hold, read once as its greatest document row id. The first part
 within it drives the page from its seek and sorts what it matched, so the page costs at most
-the ceiling and a drain at most the vault; where none is, the page walks its own order index
-from where it resumes and tests every part at each document's key, so it costs the
-documents it walks to fill its rows — for a part spread through the vault, at most the
-ceiling — and a drain walks each document once. A page walking past many documents to the
-next of a part's bunched documents pays for the many, each once over a drain, a declared
-limit: no index holds such a part's documents in a page's order. Inequality and absence seek the
+the ceiling, and a drain its pages times that — at most the vault where the vault's term
+sets the ceiling, eight documents per row it reads where the floor does; where none is, the
+page walks its own order index from where it resumes and tests every part at each
+document's key, so it costs the documents it walks to fill its rows — for a part spread
+through the vault, at most the ceiling — and a drain walks each document once. A page
+walking past many documents to the next of a few pays for the many, each once over a drain,
+a declared limit: a part's documents bunched together, or a part whose seek reaches many
+documents it rejects — findings at paths no document stands at, values of the wrong declared
+shape, links whose key names another document, documents the ambiguity-ignore set leaves
+out, paths a glob with no literal prefix rejects — which its count takes for kept, so the
+page walks; no index holds such a part's documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
