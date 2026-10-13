@@ -174,7 +174,7 @@ impl SpellingUse {
 /// On the wire a case is an object tagged `case`:
 /// `{"case":"rule_matches_nothing","rule":"stale"}`,
 /// `{"case":"unused_one_of_value","rule":"status","field":"status","value":"someday"}`,
-/// `{"case":"empty_combination","rules":["alpha","beta"],"conflict":"empty_one_of"}`.
+/// `{"case":"empty_combination","rules":["alpha","beta"],"conflict":{"of":"empty_one_of","field":"status"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "case", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
