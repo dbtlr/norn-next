@@ -29,17 +29,23 @@
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
 //!
-//! **Three kinds have derived fixes, four of them, made at
+//! **Three kinds have derived fixes, made at
 //! [`Confidence::Derived`]** ([`derived`]): a shape mismatch is wrapped or
 //! unwrapped; a type mismatch on a boolean field whose string spells a
 //! boolean but for its case is written as the boolean, and one on a link
 //! field whose bare value resolves to one document is written as that link
-//! ([`bare_link`]); and a value outside a closed set that differs from exactly
+//! ([`bare_link`]). An unquoted wikilink on a link field is written as the
+//! link it spells, as a string or element by element on a declared list.
+//! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
-//! ([`closed_set`]). A link fix is the exception to finding order: its answer
-//! rests on the batch's settled routes, so a document's link fixes compose
+//! ([`closed_set`]). A bare-value link fix is the exception to finding order:
+//! its answer rests on the batch's settled routes, so a document's link fixes compose
 //! last, after the routes of the batch are settled ([`Decided::emit`]). A
-//! type mismatch on a `date`, `number` or `boolean` field no derived fix
+//! refused wrap or unwrap composes with the element fixes it exposes, judged
+//! as one addition at the weakest level of the shape and element fixes,
+//! carrying the element notes. One needing a bare-value link answer waits
+//! for that phase; an admitted plain link reshape stays in finding order.
+//! A type mismatch on a `date`, `number` or `boolean` field no derived fix
 //! answers is an excluded class. Every link any fix writes is recorded with
 //! what it resolves to once the plan has landed ([`Decided::emit`]).
 //!
@@ -123,7 +129,7 @@
 //!
 //! **A list's elements are fixed one by one into one change to the field**
 //! ([`elements`]). Every selected `field/not-one-of` finding of one field, and
-//! every selected `field/type-mismatch` finding of a boolean field, composes
+//! every selected `field/type-mismatch` finding of a boolean or link field, composes
 //! into one `set_frontmatter` of the whole list, each element's replacement
 //! judged on the state the earlier ones left; an element whose fix is skipped
 //! stands, and never blocks its neighbours'. The one operation cites every
@@ -385,8 +391,8 @@ impl Decided<'_> {
     /// Add to `written` every wikilink the document's fixes may write, by
     /// where the document stands once the plan has landed and the address
     /// written: what its operations set ([`written_links`]), and what its
-    /// link fixes may write — each bare value made a link, and every link
-    /// the field it writes already holds.
+    /// link fixes may write — bare values, unquoted wikilinks, and every link
+    /// the field it writes already holds, including a deferred shape fix.
     pub(super) fn written(&self, written: &mut BTreeSet<Written>) {
         let Deciding::Composed(composed) = &self.decided else {
             return;
@@ -397,7 +403,7 @@ impl Decided<'_> {
                 written.extend(operations.iter().flat_map(written_links));
             }
         }
-        reckoned.link_writes(&composed.state, written);
+        reckoned.link_writes(composed, written);
     }
 
     /// Add the document to `planned`: its link fixes composed last onto the
@@ -467,6 +473,8 @@ struct Composed {
     made: Vec<Made>,
     decided: Vec<Option<SkippedFinding>>,
     unresolved: BTreeSet<usize>,
+    /// Shape fixes whose exposed bare link awaits the settled routes.
+    link_shapes: Vec<usize>,
     state: State,
     /// The state the composition started from and the additions made
     /// before it: what it is composed again from at a lowered threshold.
@@ -582,6 +590,7 @@ impl<'d> Reckoned<'d> {
         // The rows whose fix reads a clock that gives no reading: neither
         // fixed nor skipped, and still held.
         let mut unresolved = BTreeSet::new();
+        let mut link_shapes = Vec::new();
         let order = &self.order;
         let mut next = 0;
         while let Some(&at) = order.get(next) {
@@ -596,7 +605,17 @@ impl<'d> Reckoned<'d> {
             }
             // A link fix's answer rests on the batch's settled routes, so
             // it is composed last, once they are settled ([`bare_link`]).
-            if bare_link::is_link_mismatch(self.document.schema(), row) {
+            let link_mismatch = bare_link::is_link_mismatch(composing.schema(), row);
+            let unquoted = row
+                .target
+                .as_deref()
+                .filter(|_| link_mismatch)
+                .and_then(|field| {
+                    field_of(&state.bytes, field).flatten().and_then(|value| {
+                        derived::unquoted_field(composing.schema(), field, &value)
+                    })
+                });
+            if link_mismatch && unquoted.is_none() {
                 continue;
             }
             if let Some(field) = row.target.as_deref()
@@ -647,7 +666,7 @@ impl<'d> Reckoned<'d> {
                     FindingKind::RequiredMissing
                         | FindingKind::Forbidden
                         | FindingKind::ShapeMismatch
-                ),
+                ) || (row.kind == FindingKind::TypeMismatch && unquoted.is_some()),
                 row.target.as_deref(),
             ) else {
                 decided[at] = Some(unfixed(row, composing.repairing));
@@ -660,9 +679,26 @@ impl<'d> Reckoned<'d> {
                         .map_err(Unmade::Skipped)
                 }
                 FindingKind::ShapeMismatch => {
-                    derived::reshape(composing, &state, row, finding, field)
-                        .map_err(Unmade::Skipped)
+                    match derived::reshape(composing, &state, row, finding, field, None, &|_| None)
+                    {
+                        Ok(derived::Reshaping::Fixed(fix)) => Ok(fix),
+                        Ok(derived::Reshaping::NeedsLinks) => {
+                            link_shapes.push(at);
+                            continue;
+                        }
+                        Err(skip) => Err(Unmade::Skipped(skip)),
+                    }
                 }
+                FindingKind::TypeMismatch => derived::fix_value(
+                    composing,
+                    &state,
+                    row,
+                    finding,
+                    field,
+                    derived::replacement(unquoted.expect("the whole unquoted link was recognized")),
+                    &|_| None,
+                )
+                .map_err(Unmade::Skipped),
                 _ => Composing {
                     document: composing,
                     state: &state,
@@ -687,6 +723,7 @@ impl<'d> Reckoned<'d> {
             made,
             decided,
             unresolved,
+            link_shapes,
             state,
             began,
         }
@@ -1099,11 +1136,18 @@ impl Document<'_> {
         fixing: Fixing<'_>,
         still: &str,
     ) -> Result<State, Box<SkippedFinding>> {
-        let Fixing {
-            row,
-            finding,
-            candidates,
-        } = fixing;
+        let (state, introduced) = self.assessed(from, at, composed);
+        self.admitted(state, &introduced, fixing, still)
+    }
+
+    /// The result's state and the violations it introduces, from the one
+    /// applier judgment, retained where a refused reshape exposes element fixes.
+    fn assessed(
+        &self,
+        from: &State,
+        at: &DocumentPath,
+        composed: Arc<[u8]>,
+    ) -> (State, Vec<SchemaViolation>) {
         let verdict = verdict(
             &self.before,
             &from.standing,
@@ -1112,8 +1156,26 @@ impl Document<'_> {
             self.repairing.declared,
             self.repairing.case,
         );
-        let state = State::of(at.clone(), composed, verdict.standing);
-        let brought = brought_in(&verdict.introduced);
+        (
+            State::of(at.clone(), composed, verdict.standing),
+            verdict.introduced,
+        )
+    }
+
+    /// Admit an already judged state, or the refusal of the finding it fixes.
+    fn admitted(
+        &self,
+        state: State,
+        introduced: &[SchemaViolation],
+        fixing: Fixing<'_>,
+        still: &str,
+    ) -> Result<State, Box<SkippedFinding>> {
+        let Fixing {
+            row,
+            finding,
+            candidates,
+        } = fixing;
+        let brought = brought_in(introduced);
         if !brought.is_empty() {
             let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
             let skipped =
@@ -1131,7 +1193,7 @@ impl Document<'_> {
                 ))
             }));
         }
-        if !verdict.introduced.is_empty() {
+        if !introduced.is_empty() {
             return Err(Box::new(
                 skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
             ));
@@ -3392,6 +3454,82 @@ mod tests {
     }
 
     const SHAPE_MISMATCH: FindingKind = FindingKind::ShapeMismatch;
+
+    /// **An unwrap and the boolean case it exposes are one derived addition.**
+    #[test]
+    fn an_unwrap_composes_with_the_boolean_case_it_exposes() {
+        let vault = Vault::of(
+            "version: 1\nfields:\n  flag: {type: boolean, shape: single}\n",
+            &[("a.md", "---\nflag: ['True']\n---\n")],
+        );
+        let planned = vault.plan(&[judging(1, SHAPE_MISMATCH, "a.md", "flag", &list(&["True"]))]);
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "flag", AuthoredValue::Bool(true))]
+        );
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Derived
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// **A combined wrap below the threshold proposes the whole combined operation.**
+    #[test]
+    fn a_combined_wrap_below_the_threshold_proposes_the_combined_operation() {
+        let vault = Vault::of(
+            "version: 1\nfields:\n  flags: {type: boolean, shape: list}\n",
+            &[("a.md", "---\nflags: 'True'\n---\n")],
+        )
+        .at(Confidence::Declared);
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "flags",
+            &AuthoredValue::string("True"),
+        )]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::BelowThreshold)
+                    .with_value(head(&AuthoredValue::string("True")))
+                    .with_proposed(proposing(
+                        "a.md",
+                        "flags",
+                        AuthoredValue::List(vec![AuthoredValue::Bool(true)])
+                    ))
+            ]
+        );
+    }
+
+    /// **A combined value refused by the judge is carried as the candidate.**
+    #[test]
+    fn a_combined_wrap_the_judge_refuses_carries_the_combined_candidate() {
+        let vault = Vault::of(
+            "version: 1\nfields:\n  flags: {type: boolean, shape: list}\nrules:\n  flagged:\n    match: {frontmatter: {flags: true}}\n    forbidden:\n      draft:\n",
+            &[("a.md", "---\nflags: 'True'\ndraft: x\n---\n")],
+        );
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "flags",
+            &AuthoredValue::string("True"),
+        )]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
+                    .with_value(head(&AuthoredValue::string("True")))
+                    .with_candidates(derived::candidate_of(&AuthoredValue::List(vec![
+                        AuthoredValue::Bool(true)
+                    ])))
+            ]
+        );
+    }
 
     const PRIORITIES: &str = "version: 1\nfields:\n  priority: {type: number, shape: list}\n  owner: {type: text, shape: single}\n";
 

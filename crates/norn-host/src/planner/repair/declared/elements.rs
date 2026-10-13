@@ -12,15 +12,22 @@
 //!
 //! What each element is replaced by is a kind's own ([`closed_set`](super::closed_set)
 //! and [`derived`](super::derived)): they answer a [`Proposed`], and this
-//! module composes, judges and writes it as one.
+//! module composes, judges and writes it as one. A nested list element is
+//! matched by the finding's structured spelling, so an unquoted wikilink
+//! can be replaced by its link string. A refused shape fix uses the same
+//! proposals for the elements its reshape exposes, with no intermediate
+//! addition admitted: the combined value is judged once from the state the
+//! shape fix composes onto, at the weakest confidence and with every note.
 
 use norn_config::schema::VaultSchema;
 use norn_wire::{
-    AuthoredValue, Confidence, FindingRow, SkipReason, SkippedCandidates, SkippedFinding,
+    AuthoredValue, Confidence, FindingKind, FindingRow, SkipReason, SkippedCandidates,
+    SkippedFinding,
 };
 
-use super::{Document, Fix, Fixing, State, cited, field_of, skip};
+use super::{Document, Fix, Fixing, State, bare_link, cited, closed_set, derived, field_of, skip};
 use crate::applier::Held;
+use crate::derivation::stored_spelling;
 use crate::planner::edit::edited;
 
 /// What the elements of one field come to: the one fix that replaces the
@@ -40,12 +47,14 @@ pub(super) struct Element<'e> {
 }
 
 /// One offending element a kind's proposals are asked for: its row, the
-/// finding as the composed state holds it, the offending value whole, and
-/// whether every element the finding names is a string ([`strings_only`]).
+/// finding as the composed state holds it, the offending value whole and
+/// its first authored element, and whether every element the finding names
+/// is a string ([`strings_only`]).
 pub(super) struct Offending<'o> {
     pub(super) row: &'o FindingRow,
     pub(super) held: &'o Held,
     pub(super) text: &'o str,
+    pub(super) value: &'o AuthoredValue,
     pub(super) string: bool,
 }
 
@@ -110,10 +119,15 @@ pub(super) fn fix_field(
             skipped.push((at, crate::planner::repair::skipped(row)));
             continue;
         };
+        let Some(value) = named_element(&working, schema, field, &offending) else {
+            skipped.push((at, crate::planner::repair::skipped(row)));
+            continue;
+        };
         let replacement = match propose(&Offending {
             row,
             held,
             text: &offending,
+            value,
             string: strings_only(&working, schema, field, &offending),
         }) {
             Proposed::Skipped(skip) => {
@@ -122,8 +136,7 @@ pub(super) fn fix_field(
             }
             Proposed::Replace(replacement) => replacement,
         };
-        let Some(replaced) = replaced(&working, schema, field, &offending, &replacement.member)
-        else {
+        let Some(replaced) = replaced(&working, schema, field, value, &replacement.member) else {
             skipped.push((
                 at,
                 skip(row, SkipReason::JudgeWouldRefuse)
@@ -242,14 +255,10 @@ fn replaced(
     value: &AuthoredValue,
     schema: &VaultSchema,
     field: &str,
-    offending: &str,
+    offending: &AuthoredValue,
     member: &AuthoredValue,
 ) -> Option<AuthoredValue> {
-    let is_offending = |element: &AuthoredValue| {
-        element
-            .scalar_text()
-            .is_some_and(|text| same_value(schema, field, &text, offending))
-    };
+    let is_offending = |element: &AuthoredValue| same_member(schema, field, element, offending);
     match value {
         AuthoredValue::List(elements) => {
             let mut any = false;
@@ -267,5 +276,131 @@ fn replaced(
             any.then_some(AuthoredValue::List(elements))
         }
         scalar => is_offending(scalar).then(|| member.clone()),
+    }
+}
+
+/// Whether a field element has the spelling the finding names, with typed
+/// equality for scalars and the store's structured spelling for lists and maps.
+fn matches_element(
+    element: &AuthoredValue,
+    schema: &VaultSchema,
+    field: &str,
+    offending: &str,
+) -> bool {
+    match element.scalar_text() {
+        Some(text) => same_value(schema, field, &text, offending),
+        None => stored_spelling(element).as_deref() == Some(offending),
+    }
+}
+
+/// The first element of `value` the finding's spelling names.
+fn named_element<'v>(
+    value: &'v AuthoredValue,
+    schema: &VaultSchema,
+    field: &str,
+    offending: &str,
+) -> Option<&'v AuthoredValue> {
+    let elements = match value {
+        AuthoredValue::List(elements) => elements.as_slice(),
+        scalar => std::slice::from_ref(scalar),
+    };
+    elements
+        .iter()
+        .find(|element| matches_element(element, schema, field, offending))
+}
+
+/// What the element fixes exposed by a reshape can answer together.
+pub(super) enum Reshaped {
+    Unanswered,
+    NeedsLinks,
+    Replaced(Replacement),
+}
+
+/// Propose the element fixes a reshape exposes, without admitting an
+/// intermediate addition. `state` is the plain reshape's already judged
+/// state; the final combined value is judged from the state it reshaped.
+pub(super) fn after_reshape(
+    document: &Document<'_>,
+    state: &State,
+    row: &FindingRow,
+    field: &str,
+    value: &AuthoredValue,
+    mut links: Option<&mut dyn FnMut(&Offending<'_>) -> Proposed>,
+) -> Reshaped {
+    let mut working = value.clone();
+    let mut level = Confidence::Derived;
+    let mut notes = Vec::new();
+    let mut folds = derived::FoldCache::default();
+    let mut needs_links = false;
+    let mut any = false;
+    for held in state.holds.iter().filter(|held| {
+        held.field.as_deref() == Some(field)
+            && matches!(
+                held.kind,
+                FindingKind::TypeMismatch | FindingKind::NotOneOf | FindingKind::TooLong
+            )
+    }) {
+        let Some(text) = held.value.as_deref() else {
+            return Reshaped::Unanswered;
+        };
+        let Some(element) = named_element(&working, document.schema(), field, text) else {
+            return Reshaped::Unanswered;
+        };
+        let offending = Offending {
+            row,
+            held,
+            text,
+            value: element,
+            string: strings_only(&working, document.schema(), field, text),
+        };
+        let proposal = match held.kind {
+            FindingKind::NotOneOf => closed_set::propose(document, field, &mut folds, &offending),
+            FindingKind::TypeMismatch if derived::is_boolean(document.schema(), field) => {
+                derived::boolean_case(document, &offending)
+            }
+            FindingKind::TypeMismatch
+                if document.schema().declared_type(field)
+                    == norn_config::schema::FieldType::Link =>
+            {
+                match links.as_mut() {
+                    Some(propose) => propose(&offending),
+                    None if bare_link::qualifies(&offending) => {
+                        needs_links = true;
+                        continue;
+                    }
+                    None => return Reshaped::Unanswered,
+                }
+            }
+            _ => return Reshaped::Unanswered,
+        };
+        let Proposed::Replace(replacement) = proposal else {
+            return Reshaped::Unanswered;
+        };
+        let Some(replaced) = replaced(
+            &working,
+            document.schema(),
+            field,
+            element,
+            &replacement.member,
+        ) else {
+            return Reshaped::Unanswered;
+        };
+        working = replaced;
+        // Confidence orders strongest first, so the maximum is the weaker level.
+        level = level.max(replacement.level);
+        notes.extend(replacement.notes);
+        any = true;
+    }
+    if needs_links {
+        Reshaped::NeedsLinks
+    } else if any {
+        Reshaped::Replaced(Replacement {
+            candidates: derived::candidate_of(&working),
+            member: working,
+            level,
+            notes,
+        })
+    } else {
+        Reshaped::Unanswered
     }
 }

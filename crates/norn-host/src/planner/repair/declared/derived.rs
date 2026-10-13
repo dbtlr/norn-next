@@ -16,7 +16,16 @@
 //!   list holding a scalar is set to the one-item list of that scalar, its
 //!   YAML type kept; a field declared single holding a one-item list is set
 //!   to that item. A list of any other length under single has no derived
-//!   fix.
+//!   fix. Where the plain reshape is refused, the element fixes it exposes
+//!   compose with it as one addition, at their weakest confidence and with
+//!   their notes; a bare-value link answer waits for the settled routes.
+//! - **Unquoted wikilinks** on link fields are written as the link they
+//!   spell. A one-string list element spells `[[string]]` only where the
+//!   text layer reads exactly one wikilink spanning that text. A whole value
+//!   holding that one element becomes a link string unless the field is
+//!   declared a list, whose elements are replaced in one field write.
+//!   Resolution does not decide this answer; the written link's resolution
+//!   is recorded as every repair-written link's is.
 //! - **Boolean case** answers a `field/type-mismatch` on a `boolean` field: a
 //!   string whose trimmed text lower-cases to exactly `true` or `false` is
 //!   written as the YAML boolean, element by element for a list.
@@ -36,8 +45,8 @@
 //! field is declared `date`, `number` or `boolean`: a fix would reformat a
 //! date or coerce a number or a yes/no spelling, which a repair never makes
 //! ([`excluded`]). On a `link` field a bare value is made a link where it
-//! resolves to one document ([`super::bare_link`]); any other is left with no
-//! declared fix.
+//! resolves to one document ([`super::bare_link`]), and an unquoted wikilink
+//! is written as the link it spells; any other is left with no declared fix.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -47,14 +56,15 @@ use norn_wire::{
     SkippedFinding, ValueCandidate,
 };
 
-use super::elements::{Offending, Proposed, Replacement};
+use super::elements::{self, Offending, Proposed, Replacement};
 use super::{Document, Fix, Fixing, State, cited, field_of, head, skip, value_candidates};
 use crate::applier::Held;
+use crate::planner::edit::edited;
 
 /// The value a field declared `shape` holds once re-shaped, or `None` where
 /// no re-shape is proved unique: a scalar under a list is the one item of a
 /// list, and a list of one item under single is that item.
-fn reshaped(shape: Shape, value: &AuthoredValue) -> Option<AuthoredValue> {
+pub(super) fn reshaped(shape: Shape, value: &AuthoredValue) -> Option<AuthoredValue> {
     match (shape, value) {
         (Shape::List, scalar) if scalar.scalar_text().is_some() => {
             Some(AuthoredValue::List(vec![scalar.clone()]))
@@ -73,16 +83,104 @@ pub(super) fn candidate_of(value: &AuthoredValue) -> SkippedCandidates {
     value_candidates(std::iter::once(ValueCandidate::new(head(value))))
 }
 
-/// The fix of the `field/shape-mismatch` finding `row` — `finding`, as the
-/// before-state holds it — on `field`, made from `state`; or the skip it is
-/// left alone with.
+/// The link a one-string nested element spells, where the text layer reads
+/// exactly one wikilink spanning the whole spelling.
+pub(super) fn unquoted_element(value: &AuthoredValue) -> Option<AuthoredValue> {
+    let AuthoredValue::List(items) = value else {
+        return None;
+    };
+    let [AuthoredValue::String(text)] = items.as_slice() else {
+        return None;
+    };
+    let written = format!("[[{text}]]");
+    let links = norn_text::parse_wikilinks_in_text(&written);
+    matches!(links.as_slice(), [only] if only.raw == written)
+        .then_some(AuthoredValue::string(written))
+}
+
+/// The whole unquoted wikilink of a link field not declared a list.
+pub(super) fn unquoted_field(
+    schema: &VaultSchema,
+    field: &str,
+    value: &AuthoredValue,
+) -> Option<AuthoredValue> {
+    if schema.declared_type(field) != FieldType::Link
+        || schema.field(field).and_then(|f| f.shape()) == Some(Shape::List)
+    {
+        return None;
+    }
+    let AuthoredValue::List(items) = value else {
+        return None;
+    };
+    let [only] = items.as_slice() else {
+        return None;
+    };
+    unquoted_element(only)
+}
+
+/// A derived value written as one addition, judged before its threshold is read.
+pub(super) fn fix_value(
+    document: &Document<'_>,
+    state: &State,
+    row: &FindingRow,
+    finding: &Held,
+    field: &str,
+    replacement: Replacement,
+    vetoed: &dyn Fn(&State) -> Option<String>,
+) -> Result<Fix, Box<SkippedFinding>> {
+    let set = document.set(&state.at, field, replacement.member);
+    let composed = document.admit(
+        state,
+        std::slice::from_ref(&set),
+        Fixing {
+            row,
+            finding,
+            candidates: &replacement.candidates,
+        },
+    )?;
+    if let Some(note) = vetoed(&composed) {
+        return Err(Box::new(
+            skip(row, SkipReason::JudgeWouldRefuse)
+                .with_candidates(replacement.candidates)
+                .with_note(note),
+        ));
+    }
+    document.within_threshold(replacement.level, row, &set)?;
+    Ok(Fix {
+        removed_field: None,
+        operations: vec![set],
+        cited: vec![cited(row, replacement.level, replacement.notes)],
+        state: composed,
+    })
+}
+
+/// A derived replacement of `member`, proposed by no named rule.
+pub(super) fn replacement(member: AuthoredValue) -> Replacement {
+    Replacement {
+        candidates: candidate_of(&member),
+        member,
+        level: Confidence::Derived,
+        notes: Vec::new(),
+    }
+}
+
+/// What a shape fix reaches now, or leaves for the settled routes to answer.
+pub(super) enum Reshaping {
+    Fixed(Fix),
+    NeedsLinks,
+}
+
+/// The shape fix of `row`, composed with every exposed element fix where
+/// the plain reshape is refused. A bare link answer waits for `links`.
 pub(super) fn reshape(
     document: &Document<'_>,
     state: &State,
     row: &FindingRow,
     finding: &Held,
     field: &str,
-) -> Result<Fix, Box<SkippedFinding>> {
+    links: Option<&mut dyn FnMut(&Offending<'_>) -> Proposed>,
+    vetoed: &dyn Fn(&State) -> Option<String>,
+) -> Result<Reshaping, Box<SkippedFinding>> {
     let Some(shape) = document.schema().field(field).and_then(|f| f.shape()) else {
         return Err(Box::new(crate::planner::repair::skipped(row)));
     };
@@ -91,26 +189,67 @@ pub(super) fn reshape(
             format!("the document's `{field}` cannot be read to re-shape"),
         )));
     };
+    if let Some(link) = unquoted_field(document.schema(), field, &value) {
+        return fix_value(
+            document,
+            state,
+            row,
+            finding,
+            field,
+            replacement(link),
+            vetoed,
+        )
+        .map(Reshaping::Fixed);
+    }
     let Some(reshaped) = reshaped(shape, &value) else {
         return Err(Box::new(crate::planner::repair::skipped(row)));
     };
     let set = document.set(&state.at, field, reshaped.clone());
-    let composed = document.admit(
-        state,
-        std::slice::from_ref(&set),
+    let candidates = candidate_of(&reshaped);
+    let bytes = edited(&set, &state.bytes).map_err(|detail| {
+        Box::new(
+            skip(row, SkipReason::JudgeWouldRefuse)
+                .with_candidates(candidates.clone())
+                .with_note(format!("the fix cannot be set into the document: {detail}")),
+        )
+    })?;
+    let (exposed, introduced) = document.assessed(state, &state.at, bytes);
+    let refused = match document.admitted(
+        exposed.clone(),
+        &introduced,
         Fixing {
             row,
             finding,
-            candidates: &candidate_of(&reshaped),
+            candidates: &candidates,
         },
-    )?;
-    document.within_threshold(Confidence::Derived, row, &set)?;
-    Ok(Fix {
-        removed_field: None,
-        operations: vec![set],
-        cited: vec![cited(row, Confidence::Derived, Vec::new())],
-        state: composed,
-    })
+        "the fix leaves it still standing",
+    ) {
+        Ok(composed) => {
+            if let Some(note) = vetoed(&composed) {
+                return Err(Box::new(
+                    skip(row, SkipReason::JudgeWouldRefuse)
+                        .with_candidates(candidates)
+                        .with_note(note),
+                ));
+            }
+            document.within_threshold(Confidence::Derived, row, &set)?;
+            return Ok(Reshaping::Fixed(Fix {
+                removed_field: None,
+                operations: vec![set],
+                cited: vec![cited(row, Confidence::Derived, Vec::new())],
+                state: composed,
+            }));
+        }
+        Err(skip) => skip,
+    };
+    match elements::after_reshape(document, &exposed, row, field, &reshaped, links) {
+        elements::Reshaped::Unanswered => Err(refused),
+        elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
+        elements::Reshaped::Replaced(replacement) => {
+            fix_value(document, state, row, finding, field, replacement, vetoed)
+                .map(Reshaping::Fixed)
+        }
+    }
 }
 
 /// The boolean a string spells but for its case and padding: the string

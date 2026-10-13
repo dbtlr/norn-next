@@ -1,6 +1,8 @@
 //! A bare value made a link: the derived fix of a `field/type-mismatch` on a
 //! field declared `link` whose offending element is a bare value, such as
-//! `note` where `[[note]]` is meant.
+//! `note` where `[[note]]` is meant. The same phase writes a list field's
+//! unquoted wikilink elements as their spelled links ([`derived`]), without
+//! requiring resolution, and composes a shape fix needing a bare-link answer.
 //!
 //! **A value qualifies only where `[[value]]` reads back as exactly one plain
 //! wikilink.** The element is a non-empty string — and so is every element of
@@ -21,7 +23,10 @@
 //! after all its other fixes — at its route's destination where its route
 //! stands — once every route of the batch is settled
 //! ([`Reckoned::link_fixes`]): an exception to finding order. Each is
-//! resolved over the plan the settled routes make, by the one probe the
+//! resolved over the plan the settled routes make. A plain link wrap or
+//! unwrap admitted in finding order stays there; only a reshape needing a
+//! bare-value answer waits for this phase and its respell veto. Every address
+//! the combined write may hold joins the same one probe the
 //! applier makes again of an address resolution
 //! ([`crate::planner::links::resolved_addresses`]), every link the batch's
 //! fixes write in one judgment of the index
@@ -43,10 +48,10 @@
 use std::collections::BTreeSet;
 
 use norn_config::schema::typed::link_key;
-use norn_config::schema::{FieldType, VaultSchema};
+use norn_config::schema::{FieldType, Shape, VaultSchema};
 use norn_wire::{
-    AuthoredValue, Confidence, DocumentPath, FindingKind, FindingRow, OperationKind, Resolves,
-    SkipReason, SkippedCandidates, WriteTarget,
+    AuthoredValue, Confidence, DocumentPath, FindingKind, FindingRow, Resolves, SkipReason,
+    SkippedCandidates,
 };
 
 use super::elements::{self, Offending, Proposed, Replacement};
@@ -76,7 +81,7 @@ pub(super) fn is_link_mismatch(schema: &VaultSchema, row: &FindingRow) -> bool {
 /// beside it: a `#` fragment, which the key holds though it names a place in
 /// a document rather than a document, and an opening `[` or a line break,
 /// which the parser reads past.
-fn bare_address(value: &str) -> Option<&str> {
+pub(super) fn bare_address(value: &str) -> Option<&str> {
     if value.contains(['#', '[', '\n', '\r']) {
         return None;
     }
@@ -84,10 +89,25 @@ fn bare_address(value: &str) -> Option<&str> {
     (link_key(&written).as_deref() == Some(written.as_str())).then_some(value)
 }
 
+/// Whether the offending element qualifies for a bare-value link answer.
+pub(super) fn qualifies(offending: &Offending<'_>) -> bool {
+    offending.string && bare_address(offending.text).is_some()
+}
+
 /// What the document standing at `holder` makes of the offending element
 /// `offending` of a link field, its address resolved as `namings` answers.
-fn propose(holder: &DocumentPath, namings: &Namings, offending: &Offending<'_>) -> Proposed {
+fn propose(
+    holder: &DocumentPath,
+    namings: &Namings,
+    shape: Option<Shape>,
+    offending: &Offending<'_>,
+) -> Proposed {
     let row = offending.row;
+    if shape == Some(Shape::List)
+        && let Some(member) = derived::unquoted_element(offending.value)
+    {
+        return Proposed::Replace(derived::replacement(member));
+    }
     let Some(address) = offending
         .string
         .then(|| bare_address(offending.text))
@@ -145,10 +165,28 @@ impl Reckoned<'_> {
     }
 
     /// Add to `written` every wikilink the document's link fixes may write
-    /// once composed onto `state`: each bare value of a link field made a
-    /// link, and every link the field already holds, which the one write of
-    /// the field writes again.
-    pub(super) fn link_writes(&self, state: &State, written: &mut BTreeSet<Written>) {
+    /// once composed: bare values, unquoted wikilinks and existing links,
+    /// including every address a deferred shape fix's combined write may hold.
+    pub(super) fn link_writes(&self, composed: &Composed, written: &mut BTreeSet<Written>) {
+        let state = &composed.state;
+        for &at in &composed.link_shapes {
+            let row = &self.rows[at];
+            let field = row
+                .target
+                .as_deref()
+                .expect("a shape finding names a field");
+            let shape = self
+                .document
+                .schema()
+                .field(field)
+                .and_then(|f| f.shape())
+                .expect("a shape finding names a declared shape");
+            if let Some(Some(value)) = field_of(&state.bytes, field)
+                && let Some(value) = derived::reshaped(shape, &value)
+            {
+                self.element_writes(state, field, &value, written);
+            }
+        }
         for (field, elements) in self.link_runs() {
             for element in elements {
                 if let Some(address) = element.finding.value.as_deref().and_then(bare_address) {
@@ -156,11 +194,42 @@ impl Reckoned<'_> {
                 }
             }
             if let Some(Some(value)) = field_of(&state.bytes, field) {
-                written.extend(written_links(&OperationKind::set_frontmatter(
-                    WriteTarget::path(state.at.clone()),
-                    field,
-                    value,
-                )));
+                self.element_writes(state, field, &value, written);
+            }
+        }
+    }
+
+    /// Every address a link field's candidate write may hold, including
+    /// its existing links, unquoted wikilinks and qualifying bare values.
+    fn element_writes(
+        &self,
+        state: &State,
+        field: &str,
+        value: &AuthoredValue,
+        written: &mut BTreeSet<Written>,
+    ) {
+        written.extend(written_links(&self.document.set(
+            &state.at,
+            field,
+            value.clone(),
+        )));
+        let elements = match value {
+            AuthoredValue::List(items) => items.as_slice(),
+            scalar => std::slice::from_ref(scalar),
+        };
+        for element in elements {
+            let unquoted = (self.document.schema().field(field).and_then(|f| f.shape())
+                == Some(Shape::List))
+            .then(|| derived::unquoted_element(element))
+            .flatten();
+            let link = unquoted.or_else(|| {
+                let AuthoredValue::String(text) = element else {
+                    return None;
+                };
+                bare_address(text).map(|address| AuthoredValue::string(format!("[[{address}]]")))
+            });
+            if let Some(link) = link {
+                written.extend(written_links(&self.document.set(&state.at, field, link)));
             }
         }
     }
@@ -168,7 +237,8 @@ impl Reckoned<'_> {
     /// Compose the document's link fixes onto `composed`, last, as
     /// `composing` — the document at a threshold — makes them: its selected
     /// `field/type-mismatch` findings on link fields, in finding order, each
-    /// field's elements into one write of it, each address resolved as
+    /// field's elements into one write of it, and the deferred shape fixes
+    /// composed with their exposed link answers, each address resolved as
     /// `namings` answers, where the batch's settled routes leave it.
     ///
     /// **A link fix never brings its holder under a rule reading by value a
@@ -193,6 +263,45 @@ impl Reckoned<'_> {
                 state.at
             ))
         };
+        for &at in &composed.link_shapes.clone() {
+            let row = &self.rows[at];
+            let Some(finding) = self.found[at].as_ref() else {
+                continue;
+            };
+            if composed.state.holding(finding).is_none() {
+                continue;
+            }
+            let field = row
+                .target
+                .as_deref()
+                .expect("a shape finding names a field");
+            let holder = composed.state.at.clone();
+            let fixed = derived::reshape(
+                composing,
+                &composed.state,
+                row,
+                finding,
+                field,
+                Some(&mut |offending| {
+                    propose(
+                        &holder,
+                        namings,
+                        composing.schema().field(field).and_then(|f| f.shape()),
+                        offending,
+                    )
+                }),
+                &vetoed,
+            );
+            match fixed {
+                Ok(derived::Reshaping::Fixed(fix)) => {
+                    composed.state = fix.made(&mut composed.made);
+                }
+                Err(skip) => composed.decided[at] = Some(*skip),
+                Ok(derived::Reshaping::NeedsLinks) => {
+                    unreachable!("the link phase supplies its answers")
+                }
+            }
+        }
         for (field, elements) in self.link_runs() {
             let holder = composed.state.at.clone();
             let mapped = elements::fix_field(
@@ -200,7 +309,14 @@ impl Reckoned<'_> {
                 &composed.state,
                 field,
                 &elements,
-                &mut |offending| propose(&holder, namings, offending),
+                &mut |offending| {
+                    propose(
+                        &holder,
+                        namings,
+                        composing.schema().field(field).and_then(|f| f.shape()),
+                        offending,
+                    )
+                },
                 &vetoed,
             );
             decided_skips(&mut composed.decided, mapped.skipped);
@@ -375,6 +491,84 @@ mod tests {
     /// [`planned_at`] the default threshold.
     fn planned(schema: &str, documents: &[(&str, &str)], rows: &[FindingRow]) -> Planned {
         planned_at(schema, documents, rows, Confidence::DEFAULT_THRESHOLD)
+    }
+
+    /// **An unquoted wikilink in a single link field writes its spelled link and resolution.**
+    #[test]
+    fn an_unquoted_wikilink_in_a_single_link_field_is_written_with_its_condition() {
+        let row = mismatch(1, "a.md", "up", "[[\"zz-b\"]]");
+        let mut row = row;
+        row.kind = FindingKind::ShapeMismatch;
+        let planned = planned(
+            "version: 1\nfields:\n  up: {type: link, shape: single}\n",
+            &[("a.md", "---\nup: [[zz-b]]\n---\n"), ("zz-b.md", "# B\n")],
+            &[row],
+        );
+        assert_eq!(
+            kinds(&planned),
+            vec![setting("a.md", "up", AuthoredValue::string("[[zz-b]]"))]
+        );
+        assert_eq!(
+            planned.conditions,
+            vec![resolving("a.md", "zz-b", "zz-b.md")]
+        );
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Derived
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// **An unquoted wikilink is written even where its address resolves to none.**
+    #[test]
+    fn an_unquoted_wikilink_resolving_to_none_is_written_with_its_condition() {
+        let planned = planned(
+            LINKED,
+            &[("a.md", "---\nup: [[ghost]]\n---\n")],
+            &[mismatch(1, "a.md", "up", "[\"ghost\"]")],
+        );
+        assert_eq!(
+            kinds(&planned),
+            vec![setting("a.md", "up", AuthoredValue::string("[[ghost]]"))]
+        );
+        assert_eq!(
+            planned.conditions,
+            vec![PlanCondition::address_resolution(
+                LinkKey::new(
+                    DocumentPath::new("a.md").expect("a path"),
+                    LinkFamily::Wikilink,
+                    "ghost"
+                ),
+                Resolves::none(),
+            )]
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// **A nested list holding several strings spells no single wikilink.**
+    #[test]
+    fn a_nested_list_holding_several_strings_has_no_declared_link_fix() {
+        let planned = planned(
+            LINKED,
+            &[("a.md", "---\nup: [[a, b]]\n---\n")],
+            &[mismatch(1, "a.md", "up", "[\"a\",\"b\"]")],
+        );
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
+    /// **An unquoted wikilink on a text field has no derived link fix.**
+    #[test]
+    fn an_unquoted_wikilink_on_a_text_field_is_left_skipped() {
+        let planned = planned(
+            "version: 1\nfields:\n  up: {type: text}\n",
+            &[("a.md", "---\nup: [[x]]\n---\n")],
+            &[mismatch(1, "a.md", "up", "[\"x\"]")],
+        );
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
     }
 
     const LINKED: &str =
