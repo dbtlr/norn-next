@@ -39,10 +39,20 @@ pub fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
     left.intersection(right).count() as f64 / left.union(right).count() as f64
 }
 
-/// The least shared count a query of t distinct trigrams needs at the cutoff.
+/// The least shared count a query of t distinct trigrams needs at the cutoff:
+/// a candidate at the cutoff shares at least `CUTOFF * union`, and the union
+/// holds at least the query's t, so it shares at least `ceil(CUTOFF * t)`.
+/// The retrieval's prefix filter is complete only while this matches
+/// [`CUTOFF`]; computed in integers, it is `ceil(t / 2)`, and the assertion
+/// below ties the two so neither moves alone.
 pub fn required_shared(t: usize) -> usize {
     t.div_ceil(2)
 }
+
+const _: () = assert!(
+    CUTOFF == 0.5,
+    "required_shared computes ceil(CUTOFF * t) for a cutoff of one half"
+);
 
 #[cfg(test)]
 mod tests {
@@ -73,7 +83,6 @@ mod tests {
     fn required_shared_is_positive_for_nonempty_sets() {
         for t in 1..=100 {
             assert!(required_shared(t) >= 1);
-            assert_eq!(required_shared(t), t.div_ceil(2));
         }
     }
 }
