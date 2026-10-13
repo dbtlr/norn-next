@@ -302,7 +302,10 @@ impl Reckoned<'_> {
                 }
             }
         }
-        for (field, elements) in self.link_runs() {
+        for (field, mut elements) in self.link_runs() {
+            // A whole unquoted wikilink is decided in finding order; its
+            // skip stands rather than being decided again here.
+            elements.retain(|element| composed.decided[element.at].is_none());
             let holder = composed.state.at.clone();
             let mapped = elements::fix_field(
                 composing,
@@ -543,6 +546,51 @@ mod tests {
             )]
         );
         assert!(planned.skipped.is_empty());
+    }
+
+    /// **An unquoted wikilink on an unshaped field below the threshold keeps
+    /// its proposed operation.** The link phase leaves the earlier decision alone.
+    #[test]
+    fn an_unquoted_wikilink_on_an_unshaped_field_below_the_threshold_keeps_its_proposed_operation()
+    {
+        let planned = planned_at(
+            LINKED,
+            &[("a.md", "---\nup: [[zz-b]]\n---\n"), ("zz-b.md", "# B\n")],
+            &[mismatch(1, "a.md", "up", "[\"zz-b\"]")],
+            Confidence::Declared,
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::BelowThreshold)]);
+        let proposed = planned.skipped[0].proposed.as_ref().expect("a proposal");
+        assert_eq!(
+            proposed.kind,
+            setting("a.md", "up", AuthoredValue::string("[[zz-b]]"))
+        );
+    }
+
+    /// **An unquoted wikilink on an unshaped field the judge refuses keeps
+    /// its candidate.** The link phase leaves the earlier refusal alone.
+    #[test]
+    fn an_unquoted_wikilink_on_an_unshaped_field_the_judge_refuses_keeps_its_candidate() {
+        let schema = "version: 1\nfields:\n  up: {type: link}\nrules:\n  linked:\n    match: {frontmatter: {up: '[[zz-b]]'}}\n    forbidden:\n      draft:\n";
+        let planned = planned(
+            schema,
+            &[
+                ("a.md", "---\nup: [[zz-b]]\ndraft: x\n---\n"),
+                ("zz-b.md", "# B\n"),
+            ],
+            &[mismatch(1, "a.md", "up", "[\"zz-b\"]")],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
+        assert_eq!(
+            planned.skipped[0].candidates,
+            Some(derived::candidate_of(&AuthoredValue::string("[[zz-b]]")))
+        );
     }
 
     /// **A nested list holding several strings spells no single wikilink.**
