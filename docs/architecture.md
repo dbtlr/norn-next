@@ -3019,7 +3019,21 @@ so),
 and `judge_would_refuse` with its candidates where it introduces any other violation, or
 where a route fills to no folder a document can be moved into, `below_threshold` and
 `excluded_class` as above. A
-finding the rules conflict over is `rules_conflict`. Any other
+finding the rules conflict over is `rules_conflict`. The wire also names seven skip reasons
+for the link fixes of Layer 5C, which no repair emits yet. `too_common` and `too_short`
+skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
+`too_common` where the rarest trigrams the query needs exceed the postings cap (the note names
+the trigram past the cap) and `too_short` where the stem is below the shortest admitted query,
+three characters (the note gives it). `no_recorded_hash`, `no_holder`, `several_holders` and
+`several_tombstones` skip a move-following fix: the one tombstone found recorded no content
+hash, no live document holds the hash, at least two live documents hold it, or at least two
+tombstones match; the last two read to two and stop, so the note names the two paths and says
+"at least two" and the entry carries no candidate head. `link_not_rewritable` skips a link fix
+with one answer that cannot be written to it, because no spelling reads back to the
+destination uniquely from the holder or the text layer refuses the edit, its note carrying the
+reason. A suggestion's score is note text, never a field. The move-following fix (NORN-399),
+the similarity suggestion (NORN-400) and the closest-heading suggestion (NORN-401) produce
+these reasons. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a
@@ -3044,7 +3058,19 @@ after it. The store's batch read takes that count in the same call, as one more 
 a validate's summary reads — the selection's tally less the findings the batch holds — so
 it is counted into the batch's work and explained with its plans, costs the findings the
 selection admits, and describes the batch's own snapshot; a continuation carries none and
-runs no such statement. A cursor that is no repair's is refused as a
+runs no such statement. The block has a slot for
+repair advisories, which a repair notices about the vault's fields and schema and no single
+finding states, in one of three states: absent, `omitted` with the reason `narrowed`, and
+`computed` with its `items` and `total`, truncated exactly when it holds fewer items than
+its total. A repair advisory is a record that names fields, rules and a bounded sample of
+documents (at most five, with their exact total) and carries no operation; its kinds are
+`mixed_types`, `mixed_shapes`, `undeclared_uniform` and `near_duplicate_fields`, the last two
+with a `yaml` fragment, and `schema_hygiene` for a rule that matches nothing, a closed-set
+value no document holds, or two rules whose combination admits no document. The slot is wire
+vocabulary no repair fills yet: `Host::repair` never sets it, so it is absent on every
+batch. The advisory computation (NORN-402) fills it, `omitted` on the first batch of a
+repair a path or document predicate narrowed and `computed` on the first batch of an
+unnarrowed one, leaving continuation batches without it. A cursor that is no repair's is refused as a
 validate refuses a foreign cursor: `request/cursor-not-taken`. A selection holding parts
 the builder cannot apply as asked, such as a predicate on a key the vault does not hold, is
 refused in both modes as `request/unsatisfied`, naming every part as a read reports it
@@ -3057,7 +3083,7 @@ fresh plan a refusal answers carries none, since it is planned from the operatio
 vault still owes, not from findings. A caller refused a repair plan runs the repair again
 with the `after` it sent. The batch's `moved` reading is not carried: a repair cursor names
 a path and the batch reads the state that stands now, so nothing in it is the caller's to
-act on, and the apply seam carries no such field. Its advisories are dropped as a `where`
+act on, and the apply seam carries no such field. The batch read's in-band advisories are dropped as a `where`
 target's expansion drops the find's.
 `Host::vault_migrate` brings a registered vault's control files up to the versions this
 build reads, through the same seam. It reads the schema where the registration reads it —

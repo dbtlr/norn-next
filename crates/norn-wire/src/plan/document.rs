@@ -94,6 +94,7 @@ use crate::finding_row::{
     CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead, plan_candidate_head,
     plan_candidate_head_schema, plan_optional_value_head, plan_optional_value_head_schema,
 };
+use crate::plan::advisory::RepairAdvisories;
 use crate::plan::hash::ContentHash;
 use crate::plan::operation::{Operation, OperationId, OperationKind, written};
 use crate::plan::outcome::PlanFault;
@@ -498,6 +499,44 @@ pub enum SkipReason {
     /// finding — so the respelling could change what the holder is judged
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
+    // The next seven are Layer 5C's link-fix reasons: the move-following fix
+    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders` and
+    // `several_tombstones`, the similarity suggestion (NORN-400) emits
+    // `too_common` and `too_short`, and each link fix — those two and the
+    // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
+    // No repair runs those fixes yet, so nothing in the
+    // current call graph reaches them and each is a dormant carrier until its
+    // producer lands; NORN-396 lands the vocabulary first. The notes live
+    // here rather than in the doc comments schemars lifts.
+    /// A similarity suggestion needs more of a broken link's rarest trigrams
+    /// than the postings cap admits, so the stem is too common to suggest
+    /// from. The entry's value is the query stem, and its note names the
+    /// trigram past the cap.
+    TooCommon,
+    /// The broken link's stem is below the shortest admitted similarity
+    /// query, three characters. The entry's value is the query stem, and its
+    /// note gives the shortest admitted query.
+    TooShort,
+    /// Move-following found exactly one tombstone for the broken link, and
+    /// it recorded no content hash to follow. The note names the tombstone's
+    /// path.
+    NoRecordedHash,
+    /// No live document holds the content hash the tombstone recorded. The
+    /// note names the tombstone's path.
+    NoHolder,
+    /// At least two live documents hold the tombstone's content hash. The
+    /// read stops at two, so no exact total exists: the note names the two
+    /// paths and says "at least two", and the entry carries no candidate
+    /// head.
+    SeveralHolders,
+    /// At least two tombstones match the broken link. The read stops at two,
+    /// so the note names the two paths and says "at least two", and the entry
+    /// carries no candidate head.
+    SeveralTombstones,
+    /// A link fix has one answer, but the link cannot be written to it: no
+    /// spelling reads back to the destination uniquely from the holder, or
+    /// the text layer refuses the edit. The note carries that reason.
+    LinkNotRewritable,
 }
 
 /// The candidates a skipped finding had to choose between: documents, or
@@ -556,7 +595,10 @@ pub struct SkippedFinding {
     /// Why the plan left it alone.
     pub reason: SkipReason,
     /// The finding's actual value, as its bounded head, and absent where the
-    /// finding is about none: a missing required field.
+    /// finding is about none: a missing required field. Where the reason is
+    /// `too_common` or `too_short`, it is the query stem the similarity
+    /// suggestion would have searched for, derived from the broken link and
+    /// not the finding's actual value.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -709,11 +751,12 @@ impl Citation {
     }
 }
 
-// `Host::repair` (Layer 5B, NORN-373) emits this: a repair plan cites the
-// finding generation it read, the findings each operation fixes and the
+// `Host::repair` (Layer 5B, NORN-373) emits this block: a repair plan cites
+// the finding generation it read, the findings each operation fixes and the
 // findings it skipped, and carries the cursor that continues a batch that
-// leaves more. Its published description stays wire-facing, so the note
-// lives here rather than in the doc comment schemars lifts.
+// leaves more. It does not yet set `advisories`; see that field. Its
+// published description stays wire-facing, so the note lives here rather
+// than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
 ///
@@ -744,6 +787,19 @@ pub struct Provenance {
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Box<Cursor>>,
+    // Dormant carrier: Layer 5C's advisory computation (NORN-402) fills this
+    // slot, on the first batch of a repair. `Host::repair` never sets it
+    // today, so it is absent on every batch; NORN-396 lands the vocabulary
+    // first. The note lives here rather than in the doc comment schemars
+    // lifts.
+    /// The repair advisories: what the repair noticed about the vault's
+    /// fields and schema. The slot is in one of three states: absent, where
+    /// the batch carries none, as every continuation batch does; `omitted`,
+    /// where a path or document predicate narrowed the repair; and
+    /// `computed`, with its items and total, where the repair was
+    /// unnarrowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisories: Option<RepairAdvisories>,
 }
 
 impl Provenance {
@@ -756,6 +812,7 @@ impl Provenance {
             skipped,
             remaining: None,
             cursor: None,
+            advisories: None,
         }
     }
 
@@ -771,6 +828,13 @@ impl Provenance {
     #[must_use]
     pub const fn with_remaining(mut self, remaining: u64) -> Self {
         self.remaining = Some(remaining);
+        self
+    }
+
+    /// The provenance of a first batch, carrying `advisories`.
+    #[must_use]
+    pub fn with_advisories(mut self, advisories: RepairAdvisories) -> Self {
+        self.advisories = Some(advisories);
         self
     }
 

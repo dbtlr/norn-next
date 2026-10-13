@@ -480,6 +480,20 @@ bounded_head!(
     total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
 );
 
+// Layer 5C's repair advisories carry it: each names a bounded sample of the
+// documents it concerns beside the exact count. The advisory computation
+// (NORN-402) fills it, and nothing in the current call graph runs that, so
+// the type is a dormant carrier until then; NORN-396 lands the wire
+// vocabulary first. The note lives here rather than in the doc comment
+// schemars lifts into the published schema.
+bounded_head!(
+    DocumentPathHead of DocumentPath, paths,
+    what: "document path",
+    head_doc: "The bounded head of the documents a repair advisory concerns, with how many there were. The paths stop at the ceiling this schema advertises, and the total beside them is never below the paths carried: a smaller total heads nothing, and the read refuses it.",
+    list_doc: "The documents the advisory concerns, in path order.",
+    total_doc: "How many documents the advisory concerns, which is what makes the paths a head.",
+);
+
 // The plan-side read of the answer types a repair plan's provenance embeds.
 //
 // An answer drops a field it does not know and a plan refuses one, at every
