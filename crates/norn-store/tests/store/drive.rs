@@ -382,8 +382,9 @@ fn a_drain_no_part_drives_in_its_order_is_linear_in_the_vault() {
 /// the vault (NORN-393).** Over 500, then 2000, documents of which only the
 /// last three are matched, a first page of five narrowed by each part of
 /// [`spread_parts`] — a validate's, a repair's and a find's — costs the same
-/// VM steps at both sizes: it walks a few documents per row it reads, counts
-/// the part within that, and drives from the three it matched.
+/// VM steps at both sizes: it asks the part whether it keeps at most the rows
+/// the page reads, and drives from the three it matched, walking nothing and
+/// reading no span of the vault.
 #[test]
 fn a_selective_first_page_costs_its_rows_not_the_vault() {
     let last_three = |size: usize| move |at: usize| at + 3 >= size;
@@ -421,6 +422,30 @@ fn a_selective_first_page_costs_its_rows_not_the_vault() {
         [validate, repair, find]
     };
     for (name, part) in spread_parts() {
+        let plans = large
+            .snapshot()
+            .find_plans(
+                &request().with_predicates([part.clone()]).with_limit(5),
+                &declared(),
+            )
+            .expect("the plans of a find");
+        let ran = |statement: FindStatement| {
+            plans
+                .iter()
+                .filter(|plan| plan.statement == ReadStatement::Find(statement))
+                .count()
+        };
+        assert_eq!(
+            (
+                ran(FindStatement::PartCeiling),
+                ran(FindStatement::DocumentSpan),
+                ran(FindStatement::PathPage(
+                    norn_store::PageDirection::Ascending
+                )),
+            ),
+            (1, 0, 1),
+            "a first page by {name} walked or asked past its rows"
+        );
         assert_eq!(
             first_page(&small, &part),
             first_page(&large, &part),

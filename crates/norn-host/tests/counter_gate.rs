@@ -199,8 +199,8 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// and what they upserted, deleted and tombstoned. A raw `std::fs` read is
 /// outside both readings: this is a claim about the reader the host has.
 ///
-/// **The find's cost is pinned as well as its zero.** Each page runs
-/// [`STATEMENTS_PER_PAGE`] statements and hydrates a whole page, so a find
+/// **The find's cost is pinned as well as its zero.** Each page runs the
+/// statements [`STATEMENTS_PER_PAGE`] pins for it and hydrates a whole page, so a find
 /// that ran a statement per row it hydrated fails here at any scale.
 ///
 /// Each zero is measured rather than structural, and its control moves every
@@ -307,9 +307,10 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
         );
         assert_eq!(
             (page.work.statements, page.work.documents_hydrated),
-            (STATEMENTS_PER_PAGE, u64::from(FIND_LIMIT)),
-            "page {at} of the find was meant to run {STATEMENTS_PER_PAGE} statements and hydrate \
+            (STATEMENTS_PER_PAGE[at], u64::from(FIND_LIMIT)),
+            "page {at} of the find was meant to run {} statements and hydrate \
              a page of {FIND_LIMIT} rows, since `realistic` holds more tasks than two pages: {:?}",
+            STATEMENTS_PER_PAGE[at],
             page.work
         );
     }
@@ -387,22 +388,28 @@ fn the_hosts_account_moves(host: &attach::ServingHost, vault: &attach::Vault) {
     record_the_counters("a document removed under a live attachment", &deleted);
 }
 
-/// How many statements each page of the live-hold find runs, on the first
-/// page and on the page its cursor continues alike.
+/// How many statements each page of the live-hold find runs: the first page,
+/// then the page its cursor continues.
 ///
-/// Eight, each once per page and none per row: the pinned schema's
-/// fingerprint the find is judged under; whether a document carries `type`,
-/// and whether one carries `created`, one existence seek each; the vault's
-/// greatest document row id, which scales the ceiling, and whether the `type`
-/// filter keeps few enough documents to drive the page from what it matched,
-/// a count of its seek that stops past the ceiling (NORN-390); the
-/// page of `created` marker rows in descending order that the `type` filter
-/// narrows; the document rows the page found, by row id; and the head of each
-/// found document's tags. The cursor the second page continues is judged against
-/// the order it was minted in and becomes the page statement's bound, with no
-/// statement of its own. A statement run per hydrated row would put this at
-/// more than a page's rows.
-const STATEMENTS_PER_PAGE: u64 = 8;
+/// Each statement runs a fixed number of times per page and none per row: the
+/// pinned schema's fingerprint the find is judged under; whether a document
+/// carries `type`, and whether one carries `created`, one existence seek each;
+/// whether the `type` filter keeps no more documents than the page reads, a
+/// count of its seek that stops one past them; then, since it keeps more, a
+/// walk of the page in rounds (NORN-393) — each the row a window of the walk
+/// ends at among the `created` marker rows in descending order, and the page
+/// of those rows the `type` filter narrows, up to it — with, where a round
+/// leaves the page short, the vault's greatest document row id, read once,
+/// and the filter's count again at the walk's budget; the document rows the
+/// page found, by row id; and the head of each found document's tags. On
+/// `realistic` the first page's first window, 208 rows, holds fewer tasks
+/// than the page reads, so it takes a second round — the span, a count and a
+/// window and walk — and runs twelve; the continuation fills from its first
+/// window and runs eight. The cursor the second page continues is judged
+/// against the order it was minted in and becomes the page statement's bound,
+/// with no statement of its own. A statement run per hydrated row would put
+/// either at more than a page's rows.
+const STATEMENTS_PER_PAGE: [u64; 2] = [12, 8];
 
 /// What the host's account moved from just before `act` until every one of
 /// `counts` has moved, waiting for the job the host runs on its own in answer
@@ -4959,9 +4966,10 @@ const READ_SHAPES: &[ReadShape] = &[
             "find_page_vm_steps",
         ],
         // A links-to part keeps its documents in no page's order, so the page
-        // reads the vault's span and asks whether the part keeps few enough to
-        // drive from (NORN-390).
-        statements: 7,
+        // asks whether the part keeps few enough to drive from (NORN-390); its
+        // three backlinks are no more than the page reads, so that first count
+        // answers and the page reads no span of the vault (NORN-393).
+        statements: 6,
         control: |reader| backlinks(reader, "cg-hub", None),
         grows: &["find_page_vm_steps", "vm_steps"],
     },

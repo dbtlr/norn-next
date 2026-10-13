@@ -12,13 +12,16 @@
 //! not known before the page reads, and asking a part what it keeps costs
 //! what is asked.
 //!
-//! **So the page walks and asks in rounds, against a budget that doubles**
-//! ([`Snapshot::drive_page`]). A round walks at most a budget of rows of the
+//! **So the page asks once, then walks and asks in rounds, against a budget
+//! that doubles** ([`Snapshot::drive_page`]). It first asks the parts in the
+//! request's order whether one keeps no more documents than the page reads
+//! ([`FindStatement::PartCeiling`]); the first that does drives the page from
+//! what it matched, walking nothing. Otherwise, a round walks at most a budget of rows of the
 //! page's order past where the last round stopped — the row its window ends
 //! at is read first, narrowed by no part ([`Paged::window`]), and the walk
 //! tests every part at each row up to it — and where that leaves the page
-//! short, asks the parts in the request's order whether one keeps at most the
-//! budget ([`FindStatement::PartCeiling`]); the first that does drives the
+//! short, asks the parts again whether one keeps at most the budget; the
+//! first that does drives the
 //! rest of the page from what it matched, and otherwise the budget doubles.
 //! The budget starts at [`MATCHED_DRIVE_FACTOR`] documents per row the page
 //! reads and stops at the ceiling: the greater of that and the square root of
@@ -28,7 +31,8 @@
 //! sort's missing section walks every document in path order, passing the
 //! ones that carry the key, so its window is counted in documents too.
 //!
-//! **What a page costs.** A round costs its budget, in rows walked, in the
+//! **What a page costs.** The first count costs at most the rows the page
+//! reads, one document past them per part asked. A round costs its budget, in rows walked, in the
 //! window's rows and in each part's count, which reads its index seek until
 //! one document past the budget; the budgets double, so a page costs about
 //! the last budget it reached, which is never past the ceiling. A part asked
@@ -39,21 +43,24 @@
 //! - **A part spread through the vault**, keeping a share of its documents,
 //!   leaves a page to walk its rows over that share; the rounds stop at the
 //!   first budget past that walk, so the page costs about the walk it needs —
-//!   at least eight documents per row — and its counts no more than that.
+//!   at least eight documents per row — and its counts no more than that, the
+//!   first one a document per row it reads.
 //!   The rows a round's window passes past the page's last row, which the
 //!   next page walks again, are at most that budget: eight per row on the
 //!   first round, and otherwise twice what the page walked before it. So a
 //!   drain walks each document a bounded number of times, and is linear in
 //!   the vault.
 //! - **A part keeping few documents** — no more than the ceiling — drives a
-//!   page from what it matched once the budget reaches them, so the page
+//!   page from what it matched once the budget reaches them, or at once where
+//!   it keeps no more than the page reads, so the page
 //!   costs about what the part keeps, and a drain of it its pages times that:
 //!   the documents it keeps squared over the rows a page reads — at most the
 //!   vault where the vault's term sets the ceiling, and eight documents per
 //!   row it reads where the floor does.
-//! - **A selective first page** walks eight documents per row, asks at that,
-//!   and drives from what the part matched: it costs about its rows, whatever
-//!   the vault.
+//! - **A selective page**, whose part keeps no more documents than the page
+//!   reads, is driven from what the part matched by its first count, reading
+//!   no window and no span of the vault: it costs what the part keeps, as it
+//!   did before any walk.
 //!
 //! **What stays a declared limit** is a page that walks past many documents
 //! to reach the next of a few once the budget reaches the ceiling: a part
@@ -165,7 +172,10 @@ impl Snapshot {
     /// names which way the page reads the answer's path order, and is `None`
     /// for a page in any other order — drives it from its source, the first
     /// such part in the request's order. Where none does and some part keeps
-    /// what it seeks, the page walks its own order in rounds: each walks at
+    /// what it seeks, the page asks the parts whether one keeps no more
+    /// documents than `scale`, the rows the page reads, and the first that
+    /// does drives it from what it matched; otherwise the page walks its own
+    /// order in rounds: each walks at
     /// most a budget of rows past where the last stopped
     /// ([`Paged::window`]), and where that leaves the page short, asks the
     /// parts in the request's order whether one keeps at most the budget
@@ -208,6 +218,15 @@ impl Snapshot {
         };
         let settled = match settled.or_else(|| settled_driver(parts, descending)) {
             Some(driver) => {
+                read_rest(self, &mut lookups.ran, &mut found, &mut queue, driver)?;
+                Some(driver)
+            }
+            // A page with no section to read asks nothing.
+            None if queue.is_empty() => None,
+            // A part keeping no more documents than the page reads drives it
+            // from what it matched before anything is walked.
+            None if let Some(at) = self.first_within(parts, scale, lookups)? => {
+                let driver = Driver::Matched(at);
                 read_rest(self, &mut lookups.ran, &mut found, &mut queue, driver)?;
                 Some(driver)
             }

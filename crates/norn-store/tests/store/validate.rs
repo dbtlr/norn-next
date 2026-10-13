@@ -1957,10 +1957,8 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
 /// fixture, [`narrowable`] with a violation standing over it, and 50, then
 /// 500, bulk documents each with a warning standing over it, a validate
 /// narrowed by one part of each shape that keeps what it seeks narrows every
-/// page and summary statement by that shape — a walk's window, narrowed by
-/// none, aside (NORN-393) — runs the same statements and the same VM steps at
-/// both sizes, as a page of five, which walks the same window of the bulk
-/// before it drives from what the part matched, and as a summary, and steps
+/// page and summary statement by that shape, runs the same statements and
+/// the same VM steps at both sizes, as a page and as a summary, and steps
 /// through no full scan.
 #[test]
 fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
@@ -1979,14 +1977,10 @@ fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
         let small = with_narrowable("validate-driving-small", 50, order);
         let large = with_narrowable("validate-driving-large", 500, order);
         for (shape, part) in &table {
-            let narrowed = validating().with_predicates([part.clone()]).with_limit(5);
+            let narrowed = validating().with_predicates([part.clone()]);
             for params in [narrowed.clone(), narrowed.summarized()] {
                 for plan in small.plans(&params) {
-                    // A walk's window is narrowed by none of the parts
-                    // (NORN-393).
-                    if matches!(plan.statement, ReadStatement::Validate(_))
-                        && !plan.filters.is_empty()
-                    {
+                    if matches!(plan.statement, ReadStatement::Validate(_)) {
                         assert!(
                             plan.filters
                                 .iter()
@@ -2087,6 +2081,8 @@ fn work_leaving(
 #[test]
 fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
     for order in ROOTS {
+        // A hundred, so the walk's first window — eight findings per row a
+        // page of five reads — stands inside the bulk on both (NORN-393).
         let small = Validating::with_matched_bulk_under("validate-matched-small", 100, order);
         let mut large = Validating::with_matched_bulk_under("validate-matched-large", 500, order);
         for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
@@ -2277,9 +2273,9 @@ fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
 /// **A validate page and a repair batch drive from what a part matched exactly
 /// while it keeps no more documents than the ceiling (NORN-390, NORN-393).**
 /// In a vault too small to raise it, a page and a batch of one finding read
-/// two, so each walks sixteen findings — twenty documents ahead of the rest
-/// in path order hold a finding of the kind and not the word — and then asks
-/// at sixteen, which is the ceiling too: narrowed by the word `rare`, which
+/// two, so each asks first at two, then walks sixteen findings — twenty
+/// documents ahead of the rest in path order hold a finding of the kind and
+/// not the word — and asks again at sixteen, which is the ceiling too: narrowed by the word `rare`, which
 /// sixteen documents holding a finding carry, each is driven from what the
 /// match matched, and by seventeen each walks on through its kind's findings.
 #[test]

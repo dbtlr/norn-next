@@ -1333,18 +1333,13 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
             "documents_path_nocase",
         ),
     ] {
-        // Bulk documents ahead of the fixture in path order, none linking to
-        // it: a page of one row walks a window of them, then drives from
-        // what the part matched (NORN-393).
-        let mut linked = Linked::new(&format!("links-to-plan-{order:?}"), order, 64);
-        let params = request()
-            .with_predicates([Predicate::links_to(resolution("glossary"))])
-            .with_limit(1);
+        let mut linked = Linked::new(&format!("links-to-plan-{order:?}"), order, 0);
+        let params = request().with_predicates([Predicate::links_to(resolution("glossary"))]);
         let page_of = |linked: &Linked| {
             let plans = linked.plans(&params);
             let page = plans
                 .iter()
-                .rfind(|plan| {
+                .find(|plan| {
                     plan.filters == [ReadFilter::LinksTo(SuffixKey::under(order))]
                         && is_page(plan.statement)
                 })
@@ -1374,21 +1369,16 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
 // ---- the work bars ----
 
 /// **A links-to part's work follows the target's backlinks, not the vault**:
-/// the same part over the fixture beside 100, then 400, more documents that
-/// link among themselves, ahead of the fixture in path order, costs a page of
-/// five the same statements, steps and sorts — it walks the same window of
-/// them, then drives from what the part matched (NORN-393); and a target with
-/// more backlinks costs more.
+/// the same part over the fixture and over the fixture beside 400 more
+/// documents that link among themselves costs the same statements, steps and
+/// sorts; and a target with more backlinks costs more.
 #[test]
 fn a_links_to_parts_work_follows_its_backlinks_not_the_vault() {
-    let small = Linked::new("links-to-work-small", Sensitive, 100);
+    let small = Linked::new("links-to-work-small", Sensitive, 40);
     let large = Linked::new("links-to-work-large", Sensitive, 400);
     let work = |linked: &Linked, target: &str| {
-        let found = linked.find(
-            &request()
-                .with_predicates([Predicate::links_to(resolution(target))])
-                .with_limit(5),
-        );
+        let found =
+            linked.find(&request().with_predicates([Predicate::links_to(resolution(target))]));
         (
             found.work.statements,
             found.work.page_vm_steps,

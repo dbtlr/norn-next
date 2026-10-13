@@ -870,15 +870,17 @@ once over a drain; which part drives is the first in the request's order, not th
 A wider membership merges too many seeks to prepare for every page and drives no page from
 its source. A page no part can drive that way — narrowed by a range, a full-text match, a
 resolution or a links-to part, a wider membership, a membership or a presence descending,
-or any part on a field sort's page — walks its own order and asks its parts what they keep
-in rounds, against a budget that doubles. A round walks at most the budget's rows of the
+or any part on a field sort's page — first asks its parts in the request's order whether
+one keeps no more documents than the page reads, and the first that does drives the page
+from its seek, walking nothing; otherwise the page walks its own order and asks its parts
+what they keep in rounds, against a budget that doubles. A round walks at most the budget's rows of the
 page's order index past where the last round stopped — first reading the row a walk that
 long ends at, the page statement narrowed by no part and read one row past an offset, a
 field sort's missing section counting every document it passes, then walking to that row
 and testing every part at each document's key — and where that leaves the page short, asks
-its parts in the request's order whether one keeps at most the budget, by one count of the
-distinct documents among the rows of the part's index seek alone that stops one past it —
-every condition the index does not answer dropped, so a document the seek reaches and the
+its parts again whether one keeps at most the budget. Each ask is one count per part of the
+distinct documents among the rows of the part's index seek alone that stops one past its cap
+— every condition the index does not answer dropped, so a document the seek reaches and the
 part rejects counts too. The first part within it drives the rest of the page from its seek
 and sorts what it matched; otherwise the budget doubles. The budget starts at eight
 documents per row the page reads and stops at the ceiling, the greater of that and the
@@ -887,15 +889,17 @@ document row id; a page no part within the ceiling drives walks on unbounded. A 
 its budget and the budgets double, so a page costs about the last budget it reached, at most
 the ceiling. A part spread through the vault leaves a page to walk its rows over the part's
 share, and the rounds stop at the first budget past that walk, so the page costs the walk it
-needs, at least eight documents per row, and a drain is linear in the vault: what a round's
+needs, at least eight documents per row, beside a first count of a document per row, and a
+drain is linear in the vault: what a round's
 window passes past the page's last row, walked again by the next page, is at most its budget
 — eight per row on a first round, otherwise twice what the page walked before it. A part
 keeping at most the ceiling drives a page once the budget reaches what it keeps, so the page
 costs about what the part keeps, and a drain its pages times that — at most the vault where
 the vault's term sets the ceiling, eight documents per row it reads where the floor does. A
-selective first page walks eight documents per row, asks at that and drives from what the
-part matched, so it costs about its rows whatever the vault. Once the budget reaches the
-ceiling, a page walking past many documents to the next of a few pays for the many, each
+page whose part keeps no more documents than it reads is driven by its first count, reads no
+window and no span, and costs what the part keeps; one whose part keeps a few more walks
+eight documents per row, asks at that and drives from what the part matched, so it costs
+about its rows whatever the vault. Once the budget reaches the ceiling, a page walking past many documents to the next of a few pays for the many, each
 once over a drain, a declared limit: a part's documents bunched together, or a part whose
 seek reaches many documents it rejects — findings at paths no document stands at, values of
 the wrong declared shape or failing a folded key's typed order, links whose key names
@@ -917,7 +921,7 @@ narrowed by a part no page drives in its order — a range, a full-text match, a
 part, a membership of more than sixteen values, a presence descending and on a field's
 page — matching a fixed share of the vault, a find's, a validate's and a repair's alike,
 costs the same per matched document at two vault sizes, a first page narrowed by a part
-matching three documents costs the same at both, and every such drain answers the matched
+matching three documents costs the same at both and walks nothing, and every such drain answers the matched
 documents once in the answer's order whichever drive each page took. Each of these work
 bars counts every statement a page's drive ran — the walk's windows, the parts' counts and
 the vault's span beside the page statements. Each filter is one index seek, judged
