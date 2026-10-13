@@ -877,15 +877,20 @@ what they keep in rounds, against a budget that doubles. A round walks at most t
 documents of the page's order past where the last round stopped — first reading the document
 a walk that long ends at, then walking to it, every row at it included, and testing every
 part at each document's key — and where that leaves the page short, asks its parts again
-whether one keeps at most the budget. **A window is counted in documents**, the unit of the
-budget and of the counts, on every verb: a walk in the answer's path order — a path page, a
-field sort's missing section, which counts every document it passes, and a validate's or a
-repair's walk of findings — reads its window's end off `documents_path_nocase`, one document
-past an offset, narrowed by no part but a validate's path parts, which bound its walk; a
-field sort's valued section, one row per document, off its own statement narrowed by no part.
-A validate's walk reads every finding up to that document's path, every one at it included,
-so a finding at a path no document stands at, between two documents or past the last, falls
-inside the window its path does, and the next round resumes past the path. Each ask is one count per part of the
+whether one keeps at most the budget. **A window is counted in the page's own rows**, each
+read by the seek that walks them, so its cost follows the rows the walk passes and never the
+documents between them. A find's rows are documents: a path page, and a field sort's missing
+section, which walks every document in path order passing the ones that carry the key, read
+the window's end off `documents_path_nocase`, one document past an offset, narrowed by no
+part; a field sort's valued section, one row per document, off its own statement narrowed by
+no part. A validate's and a repair's rows are findings, and their window is read arm by arm:
+each kind the walk reads — over the rule's own rows where a rule is selected — names the path
+of its finding a budget past the walk's place by its kind's own page seek, narrowed by the
+path parts alone and read one finding past an offset, with no merge and no join; the window
+ends at the earliest of those paths in the answer's path order, an arm holding fewer than the
+budget bounds nothing, and where none holds that many the walk reads to the end. The walk
+reads every finding up to that path, every one at it included, from every arm, and the next
+round resumes past the path. Each ask is one count per part of the
 distinct documents among the rows of the part's index seek alone that stops one past its cap
 — every condition the index does not answer dropped, so a document the seek reaches and the
 part rejects counts too. The first part within it drives the rest of the page from its seek
@@ -893,18 +898,22 @@ and sorts what it matched; otherwise the budget doubles. The budget starts at ei
 documents per row the page reads and stops at the ceiling, the greater of that and the
 square root of those rows times the documents the vault may hold, read as its greatest
 document row id once, the first time a round leaves the page short; a page no part within
-the ceiling drives walks on unbounded. A round costs
-its budget in documents — its window that many index rows, each count at most one document
-past it, its walk the rows those documents hold — and the budgets double, so a page costs
-about the last budget it reached, at most the ceiling, in documents and the rows they hold. A
-validate's or a repair's walk reads every selected finding its documents hold, so where
-documents hold many findings a page walks that many more rows than documents, each once over
-a drain: the walk stops where the page fills, and the next page resumes past its last row. A part spread through the vault leaves a page to walk its rows over the part's
+the ceiling drives walks on unbounded. The budget is one number read in two units: a
+window counts it in the page's rows, on each arm, and a count in documents. A row stands at
+one document, so the budget's rows on an arm stand at no more than the budget's documents,
+and a part keeping at most the budget drives the rest of the page for about what a round
+already paid. A round costs its budget per arm — its window at most that many index rows on
+each, each count at most one document past it, its walk fewer than that many rows on every
+arm but the one its window ends on, and that one's up to the end path's findings — and the
+budgets double, so a page costs about the last budget it reached, at most the ceiling, times
+the arms it reads. A part spread through the vault leaves a page to walk its rows over the part's
 share, and the rounds stop at the first budget past that walk, so the page costs the walk it
 needs, at least eight documents per row, beside a first count of a document per row, and a
 drain is linear in the vault: what a round's
-window counts past the page's last row, counted again by the next page's, is at most its
-budget — eight per row on a first round, otherwise twice what the page walked before it. A part
+window counts past the page's last row on each arm, counted again by the next page's, is at
+most its budget — eight per row on a first round, otherwise twice what the page walked before
+it — and the walk reads no row past the page's last, so each row is counted a bounded number
+of times on its arm and walked once. A part
 keeping at most the ceiling drives a page once the budget reaches what it keeps, so the page
 costs about what the part keeps, and a drain its pages times that — at most the vault where
 the vault's term sets the ceiling, eight documents per row it reads where the floor does. A
@@ -914,19 +923,18 @@ eight documents per row, asks at that and drives from what the part matched, so 
 about its rows whatever the vault — the price of walking before it asks: a page whose part
 keeps more documents than the page reads but no more than about eight per row pays its
 first window, up to about five times the steps it took when such a page asked at the
-ceiling first, a constant that does not grow with the vault. Once the budget reaches the ceiling, a page walking past many documents to the next of a few pays for the many, each
+ceiling first, a constant that does not grow with the vault. Once the budget reaches the ceiling, a page walking past many rows to the next of a few pays for the many, each
 once over a drain, a declared limit: a part's documents bunched together, or a part whose
 seek reaches many documents it rejects — findings at paths no document stands at, values of
 the wrong declared shape or failing a folded key's typed order, links whose key names
 another document, documents the ambiguity-ignore set leaves out, paths under a glob's
 literal prefix the glob rejects — which its count takes for kept, so the page walks on — or a
-part keeping many documents of which few hold the rows the page selects — a validate's
-findings of one kind, severity or rule, or a field sort's section of documents carrying
-its key — whose count is of documents and not of those rows, so the page walks on past the
-ceiling though the drain stays linear: its rounds to the ceiling, windows counted in
-documents that hold few of its rows and counts, come to a few times the documents the page
-passes, and each row past them is walked once; no index holds such a part's documents in a
-page's order. Inequality and absence seek the
+part keeping many documents of which few hold the rows the page selects, among many rows at
+documents it rejects — a validate's findings of one kind, severity or rule, or a field
+sort's section of documents carrying its key — whose count is of documents and not of those rows, so the page walks on past the
+ceiling though the drain stays linear: its rounds to the ceiling, windows counted in its
+own rows and counts, come to a few times the rows the page passes, and each row past them is
+walked once; no index holds such a part's documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
@@ -943,7 +951,9 @@ part, a membership of more than sixteen values, a presence descending and on a f
 page — or by a full-text match beside a path part, which bounds a validate's walk and its
 windows and drives a find's path page from its source, matching a fixed share of the vault,
 a find's, a validate's and a repair's alike, costs the same per matched document at two
-vault sizes, a first page narrowed by a part
+vault sizes, a validate's and a repair's drain of a kind one document in a hundred holds,
+under a part matching every document, costs past its first page what a drain of as many
+findings one document in twenty-five holds costs, a first page narrowed by a part
 matching three documents costs the same at both and walks nothing, and every such drain answers the matched
 documents once in the answer's order whichever drive each page took. Each of these work
 bars counts every statement a page's drive ran — the walk's windows, the parts' counts and
@@ -1046,7 +1056,7 @@ sought from the page's place and each one's findings at its path, so a continuat
 the documents it reads from its place to its last finding however many the part matched,
 those holding no finding the page selects included, each read once per kind a drain pages — while
 where no such part narrows it, the section walks and asks as a find's page does (its budget
-counted per finding row the page reads, its window in documents), a part within
+counted per finding row the page reads, its window in the kind's own findings), a part within
 the budget drives it from the documents it matched, and otherwise the section seeks its kind
 and tests each document; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
@@ -1083,7 +1093,7 @@ and no index added for it. Where a document part keeping its documents in the an
 narrows the batch, the read is one arm instead: the part's documents from the batch's place,
 read once, each seeking every kind read at its path, so only one document's findings are
 ordered among themselves; where no such part narrows it, the read walks and asks as a find's
-page does, its window in documents, a part within the budget driving each arm from
+page does, its window the earliest of its arms' own, a part within the budget driving each arm from
 the documents it matched, which the arm sorts, and otherwise each arm seeks its kind and
 tests each document. A batch holds about
 its limit in findings and never splits a document's selected findings: where the limit falls
