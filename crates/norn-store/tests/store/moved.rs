@@ -246,11 +246,19 @@ fn tombstone_at_path_returns_one_or_none() {
 }
 
 /// A folding root reads deaths at the folded place and names them in path order.
+/// A death sharing the folded suffix key under another extension is not at
+/// the place, and three deaths at one place still name only the first two.
 #[test]
 fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
     let scratch = Scratch::new("moved-folded-exact");
     let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
-    deaths(&mut store, &[("Old/Target.md", Provenance::PlanDelete)]);
+    deaths(
+        &mut store,
+        &[
+            ("Old/Target.md", Provenance::PlanDelete),
+            ("Old/Target.txt", Provenance::PlanDelete),
+        ],
+    );
     let read = snapshot(&store);
     for spelling in ["old/target.md", "OLD/TARGET.MD"] {
         let found = read
@@ -272,6 +280,7 @@ fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
         let mut entries = [
             ("x/Target.md", Provenance::PlanDelete),
             ("x/target.md", Provenance::WatcherRemoval),
+            ("x/target.MD", Provenance::HealPrune),
         ];
         if reversed {
             entries.reverse();
@@ -285,7 +294,7 @@ fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
             .collect();
         assert_eq!(
             found,
-            vec![path("x/Target.md"), path("x/target.md")],
+            vec![path("x/Target.md"), path("x/target.MD")],
             "reversed {reversed}"
         );
     }
