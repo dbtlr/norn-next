@@ -353,20 +353,17 @@ impl Filter {
         }
         match self {
             Filter::Path(part) => {
-                // The answer order's folded range, on either root, rather than
-                // the root's range a set reads: the source hands documents
-                // back in the answer's order, and the glob decides each.
-                let (lower, upper) = super::answer_order::answer_range(&part.pattern);
-                let (lower, upper) = (binder.bind(Value::Text(lower)), binder.bind(upper));
+                // The reach is the seek: a page a path part drives folds the
+                // part's range in the answer order into where its source
+                // starts and stops ([`answer_range`]), so the source seeks
+                // from the page's place, and the glob decides each document.
+                // A bound of the range's own beside the reach's would be a
+                // second bound on the same column, which SQLite may seek by
+                // instead, from the range's opening on every page.
+                //
+                // [`answer_range`]: super::answer_order::answer_range
                 let glob = part.glob_test("dg.path", binder);
-                let rows = Rows::new(
-                    "documents AS dg",
-                    "dg.id",
-                    format!(
-                        "dg.path >= {lower} COLLATE NOCASE AND dg.path < {upper} COLLATE NOCASE \
-                         AND {glob}"
-                    ),
-                );
+                let rows = Rows::new("documents AS dg", "dg.id", glob);
                 Some(reach.arm(&rows, false, binder))
             }
             Filter::Bound {
