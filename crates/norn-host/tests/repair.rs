@@ -3215,9 +3215,12 @@ fn a_previews_route_plan_lands_through_apply() {
 /// answers.** Repair judges its resolved plan by the applier's own preview
 /// judgment on a read hold of its own, and the architecture states the two
 /// answers equal. The plan here routes a document, fills a default and skips
-/// a finding, so the comparison holds something in every part of the report.
-/// Nothing is excluded: a preview's report is the plan and its forecast, and
-/// neither is per-call.
+/// a finding, and the route's move leaves a link it cannot respell (a
+/// wikilink in a flow sequence) that the forecast advises on, so the
+/// comparison holds something in every part of the report: the plan's
+/// operations and provenance, and the forecast's removed folders and link
+/// advisories. Nothing is excluded: a preview's report is the plan and its
+/// forecast, and neither is per-call.
 #[test]
 fn a_repair_preview_answers_what_a_preview_of_its_plan_through_apply_answers() {
     let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
@@ -3231,14 +3234,22 @@ fn a_repair_preview_answers_what_a_preview_of_its_plan_through_apply_answers() {
                 "h.md",
                 b"---\nsee: \"[[zz-repair/loose/a]]\"\n---\nUp [[zz-repair/loose/a]]\n",
             ),
+            (
+                "g.md",
+                b"---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\n",
+            ),
         ],
     );
     let _lease = attach::attach_and_wait(&host, vault.name());
 
     let repair = planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
-    let ApplyReport::Previewed { plan, .. } = &repair else {
+    let ApplyReport::Previewed { plan, forecast, .. } = &repair else {
         panic!("a repair preview answered {repair:?}");
     };
+    assert!(
+        !forecast.links.is_empty(),
+        "the forecast advises on a link the move cannot respell: {forecast:?}"
+    );
     assert!(
         plan.operations
             .iter()
