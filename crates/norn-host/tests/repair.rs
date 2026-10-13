@@ -3137,6 +3137,62 @@ fn a_previews_route_plan_lands_through_apply() {
     assert!(findings_beneath(&host, &vault).is_empty());
 }
 
+/// **A repair preview answers what `Host::apply`'s preview of the same plan
+/// answers.** Repair judges its resolved plan by the applier's own preview
+/// judgment on a read hold of its own, and the architecture states the two
+/// answers equal. The plan here routes a document, fills a default and skips
+/// a finding, so the comparison holds something in every part of the report.
+/// Nothing is excluded: a preview's report is the plan and its forecast, and
+/// neither is per-call.
+#[test]
+fn a_repair_preview_answers_what_a_preview_of_its_plan_through_apply_answers() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-preview-equals-apply-preview",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("tasks/b.md", b"---\ntype: task\n---\nSee [[nowhere]].\n"),
+            (
+                "h.md",
+                b"---\nsee: \"[[zz-repair/loose/a]]\"\n---\nUp [[zz-repair/loose/a]]\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let repair = planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    let ApplyReport::Previewed { plan, .. } = &repair else {
+        panic!("a repair preview answered {repair:?}");
+    };
+    assert!(
+        plan.operations
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::MoveDocument { .. })),
+        "the plan routes: {:?}",
+        plan.operations
+    );
+    assert!(
+        plan.operations
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::SetFrontmatter { .. })),
+        "the plan fills a default: {:?}",
+        plan.operations
+    );
+    assert!(
+        !provenance(plan).skipped.is_empty(),
+        "the plan skips: {:?}",
+        provenance(plan)
+    );
+
+    let through_apply = planned(host.apply(ApplyParams::new(
+        ApplyMode::Preview,
+        PlanDocument::resolved(plan.clone()),
+    )));
+
+    assert_eq!(through_apply, repair);
+}
+
 /// **A repair plan routing by no route that reads the clock reads it not at
 /// all.**
 #[test]
