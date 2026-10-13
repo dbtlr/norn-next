@@ -58,11 +58,12 @@ pub enum ValidateStatement {
     /// among themselves, and otherwise one keeping few enough documents from
     /// the documents it matched, which are sorted. Where none does, the
     /// statement seeks its kind and tests each finding's document; where a
-    /// window of the page's walk bounds it, the path of the document the
-    /// window ends at bounds the seek above on the same row value, every
-    /// finding at it included. The window is counted in documents, the
-    /// documents the path parts admit in the answer's path order read one
-    /// past an offset ([`crate::FindStatement::PathPage`]).
+    /// window of the page's walk bounds it, the path the window ends at
+    /// bounds the seek above on the same row value, every finding at it
+    /// included. The window is counted in the page's own findings: this
+    /// statement narrowed by its path parts alone, read one finding past an
+    /// offset, handing back that finding's path from the same seek with
+    /// nothing joined, so it costs the index rows it passes.
     KindPage,
     /// How many findings stand, one tally per kind and severity: an aggregate
     /// over `findings_fingerprint_kind_severity_nocase`, which covers every
@@ -83,7 +84,8 @@ pub enum ValidateStatement {
     /// rule row reaching its finding by row id. A path part bounds the seek
     /// as it bounds a kind page's; a document part that keeps what it seeks
     /// drives the statement, each matched document reaching the rule's rows by
-    /// one seek at its path.
+    /// one seek at its path. A walk's window is read off the rule's rows as a
+    /// kind page's is off the findings, reaching no finding.
     RulePage,
     /// How many findings citing one rule stand, one tally per kind and
     /// severity: an aggregate over
@@ -114,9 +116,10 @@ pub enum ValidateStatement {
     /// one arm instead, driven from its source at the batch's place, each
     /// document seeking every kind read at its path; otherwise a document part
     /// keeping few enough documents drives each arm, and those are sorted, and
-    /// where none does each arm seeks its kind, bounded above at the path of
-    /// the document a window of the walk ends at, as a kind page's section
-    /// is. Each
+    /// where none does each arm seeks its kind, bounded above at the path a
+    /// window of the walk ends at, as a kind page's section is. The window is
+    /// each arm's own, read as its kind's page reads one, merged by no
+    /// statement: it ends at the earliest path any arm's window ends at. Each
     /// arm, or the one, also reaches the link its finding is about, where it
     /// is about one, by two seeks behind its own (`documents_path`, then
     /// `links_document_ordinal`), which neither sort nor reorder the merge.
@@ -203,9 +206,16 @@ pub(crate) struct Findings<'a> {
     /// them all.
     pub(crate) rows: usize,
     /// The last path a walked page or merged page may read, every finding at
-    /// it included: the document the walk's window ends at
+    /// it included: the path the walk's window ends at
     /// ([`crate::read::Paged::window`]), or `None` where it reads to its end.
     pub(crate) until: Option<&'a str>,
+    /// Where a [`ValidateStatement::KindPage`] or a
+    /// [`ValidateStatement::RulePage`] names where a walk's window ends
+    /// rather than reads a page: the findings it passes before the one whose
+    /// path it hands back — the window's length less one — narrowed by the
+    /// path parts alone, handing back that path and reaching no other row.
+    /// `None` for a page, a summary, a merged read and a document's tail.
+    pub(crate) window: Option<usize>,
 }
 
 impl Findings<'_> {
@@ -362,9 +372,18 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     let narrowed = Narrowed::of(findings.filters, findings.driver);
     let seeked = Seeked::of(findings.ruled());
     let limit = |binder: &mut Binder| {
-        binder.bind(Value::Integer(
+        let limit = binder.bind(Value::Integer(
             i64::try_from(findings.rows).expect("a page's row count fits i64"),
-        ))
+        ));
+        match findings.window {
+            None => limit,
+            Some(offset) => format!(
+                "{limit} OFFSET {}",
+                binder.bind(Value::Integer(
+                    i64::try_from(offset).expect("a window's length fits i64")
+                ))
+            ),
+        }
     };
     let text = match findings.statement {
         ValidateStatement::KindPage | ValidateStatement::RulePage => {
@@ -483,13 +502,13 @@ fn ordering(narrowed: &Narrowed<'_>, statement: ValidateStatement, column: &str)
 /// drives the statement from the documents it matched, and on a summary the
 /// documents every keeping part matched do, so it costs what they matched and
 /// sorts that. Where none drives — every part excludes, the page walks a
-/// window of documents before it asks a part what it keeps, every part
+/// window of its findings before it asks a part what it keeps, every part
 /// keeps more than the ceiling, or the statement is a document's tail — the
 /// statement seeks its kind as an unnarrowed one does and tests each
 /// finding's document row, one seek of `documents_path` at its path and one
-/// per part at the document's key; the path of the document a window ends at,
-/// where one bounds the walk, bounds the seek above on the same row value as
-/// its place does below, every finding at that path included.
+/// per part at the document's key; the path a window ends at, where one
+/// bounds the walk, bounds the seek above on the same row value as its place
+/// does below, every finding at that path included.
 fn compose_arm(
     findings: &Findings<'_>,
     narrowed: &Narrowed<'_>,
@@ -510,6 +529,17 @@ fn compose_arm(
             | ValidateStatement::DocumentTail
     );
     let ruled = findings.ruled();
+    // A window names the path its last finding stands at, which the seeked
+    // rows carry themselves, a rule's as a finding's.
+    let window = findings.window.is_some();
+    assert!(
+        !window
+            || matches!(
+                statement,
+                ValidateStatement::KindPage | ValidateStatement::RulePage
+            ),
+        "a window is read off one kind's or one rule's page"
+    );
     let seeked = Seeked::of(ruled);
     let (table, seek, id) = (seeked.table, seeked.alias, seeked.id);
     let column = |name: &str| seeked.column(name);
@@ -657,9 +687,9 @@ fn compose_arm(
             }
             .spelled(),
         );
-        // A window ends at a document's path, and the walk reads every
-        // finding at it: the bound names the path alone, on the same row
-        // value the place is sought past.
+        // A window ends at a path, the earliest its arms' own windows end
+        // at, and the walk reads every finding at it: the bound names the
+        // path alone, on the same row value the place is sought past.
         if let Some(until) = findings.until {
             let (folded, path) = answer_place(until);
             let (folded, path) = (
@@ -697,8 +727,9 @@ fn compose_arm(
     }
 
     // A rule's page reaches each finding it pages from the rule's row, by the
-    // finding's row id; its tally reads the rule's rows alone.
-    let reached = if ruled && rows {
+    // finding's row id; its tally and a walk's window read the rule's rows
+    // alone.
+    let reached = if ruled && rows && !window {
         "\n                     CROSS JOIN findings AS f ON f.id = fr.finding"
     } else {
         ""
@@ -764,6 +795,7 @@ fn compose_arm(
 
     let conditions = conditions.join("\n                       AND ");
     let selected = match statement {
+        ValidateStatement::KindPage | ValidateStatement::RulePage if window => path_column,
         ValidateStatement::KindPage | ValidateStatement::RulePage => {
             FINDING_ROW_COLUMNS.to_string()
         }

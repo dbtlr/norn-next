@@ -848,30 +848,22 @@ impl Snapshot {
     }
 
     /// The path of the document `offset` documents past `after` in the
-    /// answer's path order, run `direction`'s way, among the documents every
-    /// one of `parts` — path parts — admits, or `None` where no more than
-    /// `offset` stand past it: where a walk's window ends, every verb's walk
-    /// in the answer's path order reading it here.
+    /// answer's path order, run `direction`'s way, or `None` where no more
+    /// than `offset` stand past it: where a find's walk in that order ends a
+    /// window — a path page's, and a field sort's missing section's, which
+    /// walks every document in path order passing the ones that carry the
+    /// key. A page of documents counts its window in its own rows.
     ///
-    /// It is a [`FindStatement::PathPage`] read one document past an offset,
-    /// a seek of `documents_path_nocase` past the place that costs the
-    /// documents it passes, each an index row. Narrowed by no part it walks
-    /// the order's own index; a path part drives it from its source, which
-    /// seeks the part's folded range, so a window counts only the documents
-    /// the range holds, as the walk it bounds reads only the rows the range
-    /// holds.
+    /// It is a [`FindStatement::PathPage`] narrowed by no part, read one
+    /// document past an offset: a seek of `documents_path_nocase` past the
+    /// place that costs the documents it passes, each an index row.
     pub(crate) fn window_end(
         &self,
         record: &mut Vec<Ran>,
         direction: PageDirection,
         after: Option<&str>,
-        parts: &[Filter],
         offset: usize,
     ) -> Result<Option<String>, StoreError> {
-        debug_assert!(
-            parts.iter().all(|part| part.path_part().is_some()),
-            "a window is narrowed by path parts alone"
-        );
         let statement = FindStatement::PathPage(direction);
         let composed = compose_page(&Section {
             statement,
@@ -880,19 +872,14 @@ impl Snapshot {
                 sort: None,
                 path: after,
             },
-            filters: parts,
-            driver: if parts.is_empty() {
-                Driver::Walked
-            } else {
-                Driver::Ordered(0)
-            },
+            filters: &[],
+            driver: Driver::Walked,
             rows: 1,
             until: None,
             offset,
         });
-        let shapes = parts.iter().map(Filter::shape).collect();
         Ok(self
-            .read_keys(record, Ran::new(statement, composed).narrowed_by(shapes))?
+            .read_keys(record, Ran::new(statement, composed))?
             .into_iter()
             .next()
             .map(|paged| paged.key.path))
@@ -1058,7 +1045,7 @@ impl Paged for FindPages<'_> {
         match section.statement {
             FindStatement::PathPage(direction) | FindStatement::FieldMissingPage(_, direction) => {
                 let end =
-                    snapshot.window_end(record, direction, section.path.as_deref(), &[], offset)?;
+                    snapshot.window_end(record, direction, section.path.as_deref(), offset)?;
                 Ok(end.map(|path| FindPosition { sort: None, path }))
             }
             statement => {

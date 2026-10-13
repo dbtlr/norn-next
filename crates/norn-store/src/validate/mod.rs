@@ -128,10 +128,9 @@ use norn_wire::{
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
-use crate::find::PageDirection;
 use crate::read::{
     Conjunction, Driver, Filter, FindingBase, Lookups, PageRefusal, Paged, Ran, ReadFilter,
-    ReadStatement, ResolvesPart, Settled, Stepped, cursor_position, finding_base,
+    ReadStatement, ResolvesPart, Settled, Stepped, answer_place, cursor_position, finding_base,
     linked_finding_base, page_limit,
 };
 use crate::request::unreadable;
@@ -558,6 +557,7 @@ impl Snapshot {
             driver: None,
             rows: 0,
             until: None,
+            window: None,
         });
         let summary = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let read = self
@@ -637,10 +637,12 @@ fn past_document(path: &str) -> (&str, i64, i64) {
 
 /// A request's finding statements as the drive reads them ([`Paged`]): a
 /// kind's or a rule's page, one section per kind, or a batch's merged page,
-/// one section reading every kind, whose kind is unread. A walk's window ends
-/// at a document, counted in documents past the section's path among those
-/// the path parts admit ([`Snapshot::window_end`]), and the walk reads every
-/// finding up to that document's path, every one at it included.
+/// one section reading every kind, whose kind is unread. A walk's window is
+/// counted in the page's own findings, arm by arm: each kind the section
+/// reads names the path of its finding a budget past the section's place
+/// among those the path parts admit, by its own seek, and the window ends at
+/// the earliest of those paths; the walk reads every finding up to that path,
+/// every one at it included.
 struct FindingPages<'n> {
     narrowing: &'n Narrowing,
     statement: ValidateStatement,
@@ -661,6 +663,50 @@ impl<'n> FindingPages<'n> {
                 .cloned()
                 .collect(),
         }
+    }
+}
+
+impl FindingPages<'_> {
+    /// The path of `kind`'s finding `offset` findings past `section`'s place,
+    /// among those the path parts admit, or `None` where no more than
+    /// `offset` stand past it: where one arm's window ends. One kind's or one
+    /// rule's page statement — the seek the arm reads — narrowed by the path
+    /// parts alone, which bound the seek rather than judge a document.
+    fn arm_window(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &KindSection,
+        kind: &str,
+        offset: usize,
+    ) -> Result<Option<String>, StoreError> {
+        let statement = match self.narrowing.rule {
+            Some(_) => ValidateStatement::RulePage,
+            None => ValidateStatement::KindPage,
+        };
+        let composed = compose_findings(&Findings {
+            statement,
+            fingerprint: &self.narrowing.fingerprint,
+            rule: self.narrowing.rule.as_deref(),
+            kinds: std::slice::from_ref(&kind),
+            severities: self.narrowing.severities.as_deref(),
+            after: section
+                .1
+                .as_ref()
+                .map(|(path, position, id)| (path.as_str(), *position, *id)),
+            filters: &self.path_parts,
+            driver: Some(Driver::Walked),
+            rows: 1,
+            until: None,
+            window: Some(offset),
+        });
+        let shapes = self.path_parts.iter().map(Filter::shape).collect();
+        let ran = Ran::new(statement, composed).narrowed_by(shapes);
+        Ok(snapshot
+            .run_statement(record, ran, |row| row.get::<_, String>(0))
+            .map_err(|problem| error::sql("reading where a walk's window ends", problem))?
+            .into_iter()
+            .next())
     }
 }
 
@@ -700,6 +746,7 @@ impl Paged for FindingPages<'_> {
             driver: Some(driver),
             rows,
             until: until.map(String::as_str),
+            window: None,
         });
         let ran = Ran::new(self.statement, composed).narrowed_by(self.narrowing.shapes());
         let read = |row: &norn_db::rusqlite::Row<'_>| {
@@ -723,14 +770,25 @@ impl Paged for FindingPages<'_> {
         section: &KindSection,
         offset: usize,
     ) -> Result<Option<String>, StoreError> {
-        let after = section.1.as_ref().map(|(path, _, _)| path.as_str());
-        snapshot.window_end(
-            record,
-            PageDirection::Ascending,
-            after,
-            &self.path_parts,
-            offset,
-        )
+        let one_kind = [section.0];
+        let arms: &[&str] = if self.statement == ValidateStatement::MergedPage {
+            &self.narrowing.kinds
+        } else {
+            &one_kind
+        };
+        let mut end: Option<String> = None;
+        for kind in arms {
+            let Some(path) = self.arm_window(snapshot, record, section, kind, offset)? else {
+                continue;
+            };
+            // A page reads its findings ascending in the answer's path order,
+            // so the window ends at the least path an arm's ends at.
+            end = match end {
+                Some(held) if answer_place(&held) <= answer_place(&path) => Some(held),
+                _ => Some(path),
+            };
+        }
+        Ok(end)
     }
 
     fn resumed(&self, section: &KindSection, bound: &String) -> KindSection {

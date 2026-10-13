@@ -33,8 +33,8 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 /// statement sorting what that seek handed it. A page that walks its order
 /// first reads where a window of its walk ends, one document past an offset —
 /// a valued section's own statement narrowed by no filter, and otherwise a
-/// [`FindStatement::PathPage`] narrowed by no filter but a validate's path
-/// parts — and then walks no further than that document.
+/// [`FindStatement::PathPage`] narrowed by none — and then walks no further
+/// than that document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
@@ -42,9 +42,9 @@ pub enum FindStatement {
     ActiveFingerprint,
     /// A page in the answer's path order — ASCII case folded, with the
     /// bytewise path as the tie-break — on `documents_path_nocase`. Read one
-    /// document past an offset, it is also where every walk in that order
-    /// ends a window: a path page's, a missing section's, and a validate's or
-    /// a repair's walk of findings, narrowed by the validate's path parts.
+    /// document past an offset, narrowed by no filter, it is also where a
+    /// find's walk in that order ends a window: a path page's and a missing
+    /// section's.
     PathPage(PageDirection),
     /// The documents a field sort orders by value: one marker row per document,
     /// its least value under the order, in `(value, path COLLATE NOCASE, path)`
@@ -372,11 +372,10 @@ pub(crate) struct Section<'a> {
 /// bounds it, the window's last row is a second bound on the same row value
 /// the section seeks past its place, so the seek stops there.
 ///
-/// **A walk's window is a section narrowed by no document filter**, reading
-/// one row past an offset: the document a walk of that many documents past
-/// the place stops at, as the order's index hands it back — a valued
-/// section's own, and otherwise the path page's, which a path part drives
-/// from its source so the window counts only the documents its range holds.
+/// **A walk's window is a section narrowed by no filter**, reading one row
+/// past an offset: the document a walk of that many documents past the place
+/// stops at, as the order's index hands it back — a valued section's own, and
+/// otherwise the path page's.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let text = |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.into()));

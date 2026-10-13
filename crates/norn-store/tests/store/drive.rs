@@ -15,8 +15,8 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, unread_block, write_documents};
 use crate::find::{map, request, sorted, string};
 use norn_store::{
-    ContentModel, FieldOrder, FindStatement, FindingFacts, LinkFact, LinkFamily, PageDirection,
-    ReadFilter, ReadStatement, RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder,
+    ContentModel, FieldOrder, FindStatement, FindingFacts, LinkFact, LinkFamily, ReadFilter,
+    ReadStatement, RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder,
     ValidateStatement, Validation,
 };
 use norn_wire::{
@@ -102,7 +102,8 @@ struct Spread {
     reader: Arc<SnapshotReader>,
     /// The documents under `bulk/`.
     size: usize,
-    /// The matched documents' paths, in the answer's path order.
+    /// The matched documents' paths, in the answer's path order: where only
+    /// some documents hold a warning, the matched ones that do.
     matched: Vec<String>,
 }
 
@@ -118,17 +119,29 @@ impl Spread {
     }
 
     fn matching(label: &str, size: usize, matched: impl Fn(usize) -> bool) -> Self {
-        Self::warned(label, 0, size, 1, matched)
+        Self::warned(label, 0, size, |_| 1, matched)
     }
 
-    /// `size` documents, those `matched` names matched, beside `pads` no part
-    /// matches standing before them in the answer's path order, each of all
-    /// with `warnings` warnings standing over it.
+    /// `size` documents, every one matched, of which only every `gap`th, from
+    /// the first, holds a warning: the kind a page selects is sparse among
+    /// the documents its part keeps. The matched paths are the warned ones,
+    /// which are what a drain answers.
+    fn sparse_kind(label: &str, size: usize, gap: usize) -> Self {
+        let warned = |at: usize| at.is_multiple_of(gap);
+        let mut spread = Self::warned(label, 0, size, |at| usize::from(warned(at)), |_| true);
+        spread.matched = (0..size).filter(|&at| warned(at)).map(bulk).collect();
+        spread
+    }
+
+    /// `size` documents, those `matched` names matched and the `at`th with
+    /// `warnings(at)` warnings standing over it, beside `pads` no part
+    /// matches standing before them in the answer's path order, each with
+    /// one warning.
     fn warned(
         label: &str,
         pads: usize,
         size: usize,
-        warnings: usize,
+        warnings: impl Fn(usize) -> usize,
         matched: impl Fn(usize) -> bool,
     ) -> Self {
         let scratch = Scratch::new(label);
@@ -158,7 +171,11 @@ impl Spread {
         }
         let mut request = store.begin_request();
         write_documents(&mut request, &documents);
-        for path in pads.into_iter().chain((0..size).map(bulk)) {
+        let counted = pads
+            .into_iter()
+            .map(|path| (path, 1))
+            .chain((0..size).map(|at| (bulk(at), warnings(at))));
+        for (path, warnings) in counted {
             for _ in 0..warnings {
                 request
                     .record_finding(&warning(&path))
@@ -247,11 +264,13 @@ fn find_drains() -> Vec<(String, FindParams)> {
 struct Drained {
     paths: Vec<String>,
     vm_steps: u64,
+    /// The steps the first page's snapshot took, of `vm_steps`.
+    first_vm_steps: u64,
 }
 
 /// Every page of a find of `params`, `limit` rows at a time.
 fn find_drain(spread: &Spread, params: &FindParams, limit: u32) -> Drained {
-    let (mut paths, mut vm_steps) = (Vec::new(), 0);
+    let (mut paths, mut vm_steps, mut first_vm_steps) = (Vec::new(), 0, None);
     let mut after: Option<Cursor> = None;
     loop {
         let mut page = params.clone().with_limit(limit);
@@ -263,10 +282,17 @@ fn find_drain(spread: &Spread, params: &FindParams, limit: u32) -> Drained {
             .find(&page, &declared())
             .unwrap_or_else(|refusal| panic!("a find of {page:?}: {refusal}"));
         vm_steps += snapshot.counters().vm_steps();
+        first_vm_steps.get_or_insert(vm_steps);
         paths.extend(found.rows.iter().map(|row| row.path.as_str().to_string()));
         match found.next {
             Some(next) => after = Some(next),
-            None => return Drained { paths, vm_steps },
+            None => {
+                return Drained {
+                    paths,
+                    vm_steps,
+                    first_vm_steps: first_vm_steps.unwrap_or(vm_steps),
+                };
+            }
         }
         assert!(paths.len() <= 100_000, "the pages of {params:?} do not end");
     }
@@ -274,7 +300,7 @@ fn find_drain(spread: &Spread, params: &FindParams, limit: u32) -> Drained {
 
 /// Every page of a validate of `params`, `limit` findings at a time.
 fn validate_drain(spread: &Spread, params: &ValidateParams, limit: u32) -> Drained {
-    let (mut paths, mut vm_steps) = (Vec::new(), 0);
+    let (mut paths, mut vm_steps, mut first_vm_steps) = (Vec::new(), 0, None);
     let mut after: Option<Cursor> = None;
     loop {
         let mut page = params.clone().with_limit(limit);
@@ -286,13 +312,20 @@ fn validate_drain(spread: &Spread, params: &ValidateParams, limit: u32) -> Drain
             .validate(&page, &declared())
             .unwrap_or_else(|refusal| panic!("a validate of {page:?}: {refusal}"));
         vm_steps += snapshot.counters().vm_steps();
+        first_vm_steps.get_or_insert(vm_steps);
         let Validation::Findings { rows, next, .. } = validated.answer else {
             panic!("a page of {page:?} answered a summary");
         };
         paths.extend(rows.iter().map(|row| row.path.as_str().to_string()));
         match next {
             Some(next) => after = Some(next),
-            None => return Drained { paths, vm_steps },
+            None => {
+                return Drained {
+                    paths,
+                    vm_steps,
+                    first_vm_steps: first_vm_steps.unwrap_or(vm_steps),
+                };
+            }
         }
         assert!(paths.len() <= 100_000, "the pages of {params:?} do not end");
     }
@@ -300,7 +333,7 @@ fn validate_drain(spread: &Spread, params: &ValidateParams, limit: u32) -> Drain
 
 /// Every batch of a repair of `params`, `limit` findings at a time.
 fn repair_drain(spread: &Spread, params: &RepairParams, limit: u32) -> Drained {
-    let (mut paths, mut vm_steps) = (Vec::new(), 0);
+    let (mut paths, mut vm_steps, mut first_vm_steps) = (Vec::new(), 0, None);
     let mut after: Option<Cursor> = None;
     loop {
         let mut batch = params.clone().with_limit(limit);
@@ -312,10 +345,17 @@ fn repair_drain(spread: &Spread, params: &RepairParams, limit: u32) -> Drained {
             .repair_batch(&RepairSelection::from(&batch), &declared())
             .unwrap_or_else(|refusal| panic!("a batch of {batch:?}: {refusal}"));
         vm_steps += snapshot.counters().vm_steps();
+        first_vm_steps.get_or_insert(vm_steps);
         paths.extend(read.rows.iter().map(|row| row.path.as_str().to_string()));
         match read.next {
             Some(next) => after = Some(next),
-            None => return Drained { paths, vm_steps },
+            None => {
+                return Drained {
+                    paths,
+                    vm_steps,
+                    first_vm_steps: first_vm_steps.unwrap_or(vm_steps),
+                };
+            }
         }
         assert!(
             paths.len() <= 100_000,
@@ -474,6 +514,66 @@ fn grown(small: &Spread, large: &Spread) -> Vec<String> {
         }
     }
     grew
+}
+
+/// The warnings each vault of the sparse-kind bar holds.
+const SPARSE_KIND_WARNINGS: usize = 80;
+
+/// **A page of a kind few documents hold costs the findings it walks, not the
+/// documents between them (NORN-393).** Over two vaults whose every document
+/// every part of [`spread_parts`] matches, each holding
+/// [`SPARSE_KIND_WARNINGS`] warnings — on every 25th of 2000 documents, then
+/// on every 100th of 8000 — a validate and a repair of warnings narrowed by
+/// each part, five at a time, cost the same past their first page at both,
+/// within [`LINEAR_SLACK`]. No part keeps few enough documents to drive a
+/// page, so each page walks; a window counted in the page's own findings
+/// reads them off the warnings' own index and passes no document between
+/// them, where one counted in documents would pass four times as many in the
+/// sparser vault, in rounds and counts that grow toward its ceiling. A first
+/// batch also counts what remains of the selection, which costs what the
+/// part matched, so the bar starts past it.
+#[test]
+fn a_page_of_a_sparse_kind_costs_its_findings_not_the_documents_between_them() {
+    let spreads = [(2000, 25), (8000, 100)].map(|(size, gap)| {
+        let spread = Spread::sparse_kind(&format!("drive-sparse-kind-{gap}"), size, gap);
+        assert_eq!(spread.matched.len(), SPARSE_KIND_WARNINGS);
+        spread
+    });
+    let drains = |spread: &Spread| {
+        let mut drains = Vec::new();
+        for (name, part) in spread_parts() {
+            drains.push((
+                format!("a validate by {name}"),
+                validate_drain(spread, &validating(&part), 5),
+            ));
+            drains.push((
+                format!("a repair by {name}"),
+                repair_drain(spread, &repairing(&part), 5),
+            ));
+        }
+        drains
+    };
+    let [dense, sparse] = &spreads;
+    let mut grew = Vec::new();
+    for ((name, at_dense), (_, at_sparse)) in drains(dense).iter().zip(&drains(sparse)) {
+        for (drain, spread) in [(at_dense, dense), (at_sparse, sparse)] {
+            assert_eq!(drain.paths, spread.matched, "{name} over {}", spread.size);
+        }
+        let past_first = |drain: &Drained| drain.vm_steps - drain.first_vm_steps;
+        let (dense_steps, sparse_steps) = (past_first(at_dense), past_first(at_sparse));
+        eprintln!(
+            "{name}, one warning in 25 then in 100: {dense_steps} then {sparse_steps} VM steps \
+             past the first page"
+        );
+        if sparse_steps as f64 > dense_steps as f64 * LINEAR_SLACK {
+            grew.push(format!("{name}: {dense_steps} -> {sparse_steps}"));
+        }
+    }
+    assert!(
+        grew.is_empty(),
+        "a drain of a sparse kind grew with the documents between its warnings:\n{}",
+        grew.join("\n")
+    );
 }
 
 /// **A first page a selective part narrows costs about its rows, whatever
@@ -642,25 +742,32 @@ fn the_row_a_window_ends_at_is_answered() {
 /// three, which the first matched document holds, so the batch is cut there,
 /// and reads one finding past it to say more remain.
 ///
-/// A window is counted in documents, whatever findings each holds. Over 400
-/// documents of which the first two of every sixteen are matched, the batch's
-/// first window of twenty-four documents holds both of the first two: the
-/// read past the first walks on to the end of that window and finds the
-/// second, so it asks no part what it keeps again and reads no window of its
-/// own — the batch runs one count and one window. Over 1500 documents of
-/// which every forty-eighth from the sixty-first is matched, the first read
-/// walks a window of twenty-four documents, reads the vault's span, asks at
-/// twenty-four and walks forty-eight to fill; the read past it walks to the
-/// end of that window, then, its budget started over at twenty-four, asks
-/// nothing there, which the first read answered, and walks a window of
-/// forty-eight to the next matched document — two counts, a span, three
-/// windows and four walks over the batch.
+/// A window is counted in the batch's own findings, arm by arm: each kind's
+/// page statement, read one finding past an offset. Over 400 documents of
+/// which the first two of every sixteen are matched, the batch's first window
+/// of twenty-four findings holds both of the first two: the read past the
+/// first walks on to the end of that window and finds the second, so it asks
+/// no part what it keeps again and reads no window of its own — the batch
+/// runs one count and one window. Over 1000 documents of which every
+/// sixteenth from the twenty-first is matched, the first read walks a window
+/// of twenty-four findings, reads the vault's span, asks at twenty-four and
+/// walks forty-eight to fill; the read past it walks to the end of that
+/// window, then, its budget started over at twenty-four, asks nothing there,
+/// which the first read answered, and walks a window of forty-eight to the
+/// next matched document — two counts, a span, three windows and four walks
+/// over the batch.
 #[test]
 fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
-    let near = Spread::warned("drive-cut-batch-near", 0, 400, 3, |at| at % 16 < 2);
-    let far = Spread::warned("drive-cut-batch-far", 0, 1500, 3, |at| {
-        at >= 60 && (at - 60).is_multiple_of(48)
-    });
+    let near = Spread::warned("drive-cut-batch-near", 0, 400, |_| 3, |at| at % 16 < 2);
+    // Spaced for windows of findings, three to a document: a window counted
+    // in documents would hold three times the findings and fill sooner.
+    let far = Spread::warned(
+        "drive-cut-batch-far",
+        0,
+        1000,
+        |_| 3,
+        |at| at >= 20 && (at - 20).is_multiple_of(16),
+    );
     for (spread, ran_past) in [(&near, (1, 0, 1, 2)), (&far, (2, 1, 3, 4))] {
         for (name, part) in spread_parts() {
             let batch = repairing(&part).with_limit(2);
@@ -686,7 +793,9 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
                     })
                     .count()
             };
-            let window = ReadStatement::Find(FindStatement::PathPage(PageDirection::Ascending));
+            // A repair's window is its one kind's page statement, read one
+            // finding past an offset and narrowed by no part here.
+            let window = ReadStatement::Validate(ValidateStatement::KindPage);
             let merged = ReadStatement::Validate(ValidateStatement::MergedPage);
             assert_eq!(
                 (
@@ -710,9 +819,10 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
 /// 600 under it, of which the range matches the fourth, the seventeenth and
 /// every fourth from the 401st — 52 in all, more than any budget the page
 /// asks at. A page reads two findings, so its first count is at two and its
-/// first window sixteen documents under `bulk/` — a path page the path part
-/// drives, bounding the window as it bounds the walk; the vault's 641
-/// documents set its ceiling at the square root of twice them, 35.
+/// first window sixteen findings of its kind under `bulk/` — its kind's page
+/// statement narrowed by the path part alone, which bounds the window as it
+/// bounds the walk; the vault's 641 documents set its ceiling at the square
+/// root of twice them, 35.
 ///
 /// The first page walks its first window to the fourth document, reads the
 /// span and asks at sixteen, then walks a window of 32 to the seventeenth,
@@ -728,7 +838,7 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
 #[test]
 fn each_round_of_a_walk_runs_its_pinned_statements() {
     let matched = |at: usize| at == 3 || at == 16 || (at >= 400 && at.is_multiple_of(4));
-    let spread = Spread::warned("drive-rounds-pinned", 40, 600, 1, matched);
+    let spread = Spread::warned("drive-rounds-pinned", 40, 600, |_| 1, matched);
     let range = Predicate::before("status", "p");
     let params = ValidateParams::new(vault())
         .with_kinds([FindingKind::UndeclaredTag])
@@ -761,12 +871,13 @@ fn each_round_of_a_walk_runs_its_pinned_statements() {
                 })
                 .count()
         };
+        // A window is the kind's page statement narrowed by the path part
+        // alone, and a walk the same statement narrowed by the range too.
         let page = ReadStatement::Validate(ValidateStatement::KindPage);
-        let window = ReadStatement::Find(FindStatement::PathPage(PageDirection::Ascending));
         [
             of(ReadStatement::Find(FindStatement::PartCeiling), None),
             of(ReadStatement::Find(FindStatement::DocumentSpan), None),
-            of(window, Some(false)),
+            of(page, Some(false)),
             of(page, Some(true)),
         ]
     };
