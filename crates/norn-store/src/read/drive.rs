@@ -143,14 +143,85 @@ pub(crate) trait Paged {
     fn resumed(&self, section: &Self::Section, row: &Self::Row) -> Self::Section;
 }
 
+/// What a read of a page has established about how its request is driven,
+/// which a later read of the same request, further on in the same order,
+/// takes up rather than establish again.
+#[derive(Clone, Debug)]
+pub(crate) enum Settled<R> {
+    /// Nothing yet: the read asks from its first count.
+    Unasked,
+    /// The driver the read settled on, which a later read takes as it is.
+    Driver(Driver),
+    /// The read filled — or read to its end — within a round of its walk,
+    /// before any part was found to drive it or its budget reached the
+    /// ceiling; a later read walks on from that round.
+    Walking(Round<R>),
+}
+
+impl<R> Settled<R> {
+    /// This, for a later read that resumes where `ahead` says whether it
+    /// resumes before a row: a round's window stays the walk's where the
+    /// later read resumes before the row the window ends at, and is read
+    /// again from where the later read resumes otherwise.
+    pub(crate) fn resumed_where(self, ahead: impl FnOnce(&R) -> bool) -> Self {
+        match self {
+            Settled::Walking(Round {
+                budget,
+                ceiling,
+                window: Window::EndsAt(end),
+            }) if !ahead(&end) => Settled::Walking(Round {
+                budget,
+                ceiling,
+                window: Window::Unread,
+            }),
+            settled => settled,
+        }
+    }
+}
+
+/// A round of a page's walk, as far as it went.
+#[derive(Clone, Debug)]
+pub(crate) struct Round<R> {
+    /// The round's budget: every part keeping what it seeks has been asked
+    /// at the rows the page reads and at each smaller budget, and kept more,
+    /// and none has been asked at this one.
+    budget: usize,
+    /// The ceiling the budget stops at, once a round has read the vault's
+    /// span.
+    ceiling: Option<usize>,
+    /// Where the round's window ends.
+    window: Window<R>,
+}
+
+impl<R> Round<R> {
+    /// The first round of a page of `scale` rows, which reads its window.
+    fn first(scale: usize) -> Self {
+        Round {
+            budget: scale.saturating_mul(MATCHED_DRIVE_FACTOR).max(1),
+            ceiling: None,
+            window: Window::Unread,
+        }
+    }
+}
+
+/// Where a round's window ends.
+#[derive(Clone, Debug)]
+pub(crate) enum Window<R> {
+    /// Not read: the round reads it first, its budget past where the round
+    /// starts ([`Paged::window`]).
+    Unread,
+    /// At this row, which the walk reads up to.
+    EndsAt(R),
+    /// Past the section's end, which the walk reads to.
+    SectionEnds,
+}
+
 /// What a page the drive read holds and cost.
 pub(crate) struct Driven<T> {
     /// The rows, at most the page's bound, in the page's order.
     pub(crate) rows: Vec<T>,
-    /// The driver the page settled on, and `None` where it filled — or read
-    /// to its end — while it walked within its budget, before any part was
-    /// found to drive it or the budget reached the ceiling.
-    pub(crate) settled: Option<Driver>,
+    /// What the read established about how its request is driven.
+    pub(crate) settled: Settled<T>,
     /// What SQLite counted stepping every statement the drive ran: the
     /// walk's windows, the parts' counts and the vault's span beside the
     /// page statements.
@@ -183,9 +254,10 @@ impl Snapshot {
     /// of the page from what it matched, and otherwise the budget doubles.
     /// The budget starts at [`MATCHED_DRIVE_FACTOR`] per row of `scale` and
     /// stops at the ceiling ([`Snapshot::drive_ceiling`]); a page no part
-    /// within the ceiling drives walks on unbounded past it. `settled` is a
-    /// driver an earlier read of the same request settled on, which this read
-    /// takes without asking again.
+    /// within the ceiling drives walks on unbounded past it. `settled` is
+    /// what an earlier read of the same request established, which this read
+    /// takes up without asking again: the driver it settled on, or the round
+    /// its walk filled in, which this read walks on from.
     #[allow(clippy::too_many_arguments)] // One page's every input, each named at its call.
     pub(crate) fn drive_page<P: Paged>(
         &self,
@@ -195,27 +267,42 @@ impl Snapshot {
         scale: usize,
         sections: Vec<P::Section>,
         rows: usize,
-        settled: Option<Driver>,
+        settled: Settled<P::Row>,
         lookups: &mut Lookups,
     ) -> Result<Driven<P::Row>, StoreError> {
         let ran_before = lookups.ran.len();
         let mut found: Vec<P::Row> = Vec::new();
         let mut queue: VecDeque<P::Section> = sections.into();
-        let settled = match settled.or_else(|| settled_driver(parts, descending)) {
-            Some(driver) => {
+        let settled = match settled {
+            Settled::Unasked => match settled_driver(parts, descending) {
+                Some(driver) => Settled::Driver(driver),
+                None => Settled::Unasked,
+            },
+            settled => settled,
+        };
+        let settled = match settled {
+            Settled::Driver(driver) => {
                 self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
-                Some(driver)
+                Settled::Driver(driver)
             }
             // A page with no section to read asks nothing.
-            None if queue.is_empty() => None,
+            settled if queue.is_empty() => settled,
             // A part keeping no more documents than the page reads drives it
             // from what it matched before anything is walked.
-            None if let Some(at) = self.first_within(parts, scale, lookups)? => {
+            Settled::Unasked if let Some(at) = self.first_within(parts, scale, lookups)? => {
                 let driver = Driver::Matched(at);
                 self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
-                Some(driver)
+                Settled::Driver(driver)
             }
-            None => self.walk_rounds(paged, parts, scale, rows, &mut found, &mut queue, lookups)?,
+            Settled::Unasked => {
+                let first = Round::first(scale);
+                self.walk_rounds(
+                    paged, parts, scale, rows, first, &mut found, &mut queue, lookups,
+                )?
+            }
+            Settled::Walking(round) => self.walk_rounds(
+                paged, parts, scale, rows, round, &mut found, &mut queue, lookups,
+            )?,
         };
         let mut stepped = Stepped::default();
         for ran in &lookups.ran[ran_before..] {
@@ -250,13 +337,14 @@ impl Snapshot {
     }
 
     /// `found` filled to `rows` from the sections `queue` holds by a walk in
-    /// rounds, for a page of `scale` rows no part drove before it walked:
-    /// each round walks at most its budget past where the last stopped, and
-    /// where that leaves the page short, asks `parts` whether one keeps at
-    /// most the budget; the first that does drives the rest of the page, and
-    /// otherwise the budget doubles, to the ceiling, where the page walks on.
-    /// The driver the page settled on, and `None` where it filled, or read
-    /// every section, within a round.
+    /// rounds from `round`, for a page of `scale` rows no part drove before
+    /// it walked: each round walks at most its budget past where the last
+    /// stopped — up to its window's end, read first where it is not known —
+    /// and where that leaves the page short, asks `parts` whether one keeps
+    /// at most the budget; the first that does drives the rest of the page,
+    /// and otherwise the budget doubles, to the ceiling, where the page walks
+    /// on. The driver the page settled on, or the round it filled — or read
+    /// every section — in.
     #[allow(clippy::too_many_arguments)] // One walk's every input, each named at its call.
     fn walk_rounds<P: Paged>(
         &self,
@@ -264,18 +352,22 @@ impl Snapshot {
         parts: &[&Filter],
         scale: usize,
         rows: usize,
+        mut round: Round<P::Row>,
         found: &mut Vec<P::Row>,
         queue: &mut VecDeque<P::Section>,
         lookups: &mut Lookups,
-    ) -> Result<Option<Driver>, StoreError> {
-        let mut budget = scale.saturating_mul(MATCHED_DRIVE_FACTOR).max(1);
-        // The ceiling, once a round has read the vault's span.
-        let mut known_ceiling: Option<usize> = None;
+    ) -> Result<Settled<P::Row>, StoreError> {
         loop {
             let Some(section) = queue.front().cloned() else {
-                return Ok(None);
+                return Ok(Settled::Walking(round));
             };
-            let end = paged.window(self, &mut lookups.ran, &section, budget - 1)?;
+            let end = match std::mem::replace(&mut round.window, Window::Unread) {
+                Window::Unread => {
+                    paged.window(self, &mut lookups.ran, &section, round.budget - 1)?
+                }
+                Window::EndsAt(end) => Some(end),
+                Window::SectionEnds => None,
+            };
             let walked = paged.read(
                 self,
                 &mut lookups.ran,
@@ -286,7 +378,11 @@ impl Snapshot {
             )?;
             found.extend(walked);
             if found.len() >= rows {
-                return Ok(None);
+                round.window = match end {
+                    Some(end) => Window::EndsAt(end),
+                    None => Window::SectionEnds,
+                };
+                return Ok(Settled::Walking(round));
             }
             let Some(end) = end else {
                 // The section ended inside the window, so the walk read all
@@ -295,21 +391,21 @@ impl Snapshot {
                 continue;
             };
             queue[0] = paged.resumed(&section, &end);
-            let ceiling = match known_ceiling {
+            let ceiling = match round.ceiling {
                 Some(ceiling) => ceiling,
-                None => *known_ceiling.insert(self.drive_ceiling(scale, lookups)?),
+                None => *round.ceiling.insert(self.drive_ceiling(scale, lookups)?),
             };
-            let cap = budget.min(ceiling);
+            let cap = round.budget.min(ceiling);
             let driver = match self.first_within(parts, cap, lookups)? {
                 Some(at) => Driver::Matched(at),
                 None if cap >= ceiling => Driver::Walked,
                 None => {
-                    budget = budget.saturating_mul(2).min(ceiling);
+                    round.budget = round.budget.saturating_mul(2).min(ceiling);
                     continue;
                 }
             };
             self.read_rest(paged, rows, driver, found, queue, lookups)?;
-            return Ok(Some(driver));
+            return Ok(Settled::Driver(driver));
         }
     }
 

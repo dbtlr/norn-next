@@ -214,7 +214,7 @@ use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
     Compared, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Paged,
-    Ran, ReadFilter, ReadStatement, Report, ResolvesPart, page_limit,
+    Ran, ReadFilter, ReadStatement, Report, ResolvesPart, Settled, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -835,7 +835,7 @@ impl Snapshot {
             limit + 1,
             sections,
             limit + 1,
-            None,
+            Settled::Unasked,
             lookups,
         )?;
         let page = driven.into_page(limit);

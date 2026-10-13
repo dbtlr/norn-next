@@ -61,7 +61,8 @@ use super::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Driver, FindingBase, FindingLink, Lookups, PageRefusal, Ran, linked_finding_base, page_limit,
+    Driver, FindingBase, FindingLink, Lookups, PageRefusal, Ran, Settled, linked_finding_base,
+    page_limit,
 };
 use crate::store::Snapshot;
 
@@ -305,7 +306,7 @@ impl Snapshot {
             limit + 1,
             vec![merged_section(after.map(past_document))],
             limit + 1,
-            None,
+            Settled::Unasked,
             lookups,
         )?;
         work.rows_read += first.rows.len() as u64;
@@ -324,8 +325,12 @@ impl Snapshot {
         let tail = self.document_tail(narrowing, (&path, position, id), lookups, work)?;
         found.extend(tail);
         // One finding past the document says whether more remain, read by
-        // the driver the first read settled on, or walked within a budget of
-        // its own where that read filled before it settled on one.
+        // the driver the first read settled on, or, where that read filled
+        // within a round of its walk, walked on from that round: its budget,
+        // the counts below it, and where its window ends. The first read's
+        // last finding stands at the cut document, so the window ends past
+        // the document, where the read resumes, unless it ends inside it.
+        let settled = first.settled.resumed_where(|end| end.path != path);
         let beyond = self.drive_page(
             &merged,
             &parts,
@@ -333,7 +338,7 @@ impl Snapshot {
             limit + 1,
             vec![merged_section(Some(past_document(&path)))],
             1,
-            first.settled,
+            settled,
             lookups,
         )?;
         work.rows_read += beyond.rows.len() as u64;

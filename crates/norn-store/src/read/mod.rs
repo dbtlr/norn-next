@@ -55,7 +55,7 @@ pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub use drive::MATCHED_DRIVE_FACTOR;
-pub(crate) use drive::{Driver, Paged};
+pub(crate) use drive::{Driver, Paged, Settled};
 pub(crate) use filter::{Binder, Filter, PathPart, Reach};
 pub use filter::{MERGED_SOURCE_VALUES, READ_FILTERS, ReadFilter};
 pub use finding::FindingLink;

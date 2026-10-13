@@ -130,8 +130,8 @@ use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
     Conjunction, Driver, Filter, FindingBase, Lookups, PageRefusal, Paged, Ran, ReadFilter,
-    ReadStatement, ResolvesPart, Stepped, cursor_position, finding_base, linked_finding_base,
-    page_limit,
+    ReadStatement, ResolvesPart, Settled, Stepped, cursor_position, finding_base,
+    linked_finding_base, page_limit,
 };
 use crate::request::unreadable;
 use crate::store::Snapshot;
@@ -523,7 +523,7 @@ impl Snapshot {
             limit + 1,
             sections,
             limit + 1,
-            None,
+            Settled::Unasked,
             lookups,
         )?;
         let page = driven.into_page(limit);
