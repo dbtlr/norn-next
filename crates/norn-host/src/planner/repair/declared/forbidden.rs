@@ -120,6 +120,8 @@ pub(super) fn fix(
         },
     )?;
     Ok(Fix {
+        removed_field: matches!(remedy, Remedy::Remove)
+            .then(|| (row.path.clone(), field.to_string())),
         operations: edits,
         cited: vec![cited(row, Confidence::Declared, Vec::new())],
         state: composed,

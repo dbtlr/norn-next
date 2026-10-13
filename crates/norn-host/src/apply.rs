@@ -279,6 +279,7 @@ where
         &resolution.plan.operations,
         &resolution.plan.conditions,
         &resolution.forecast.links,
+        planned.removed_fields,
     );
     let skipped = repair::skipped_still_held(planned.skipped, batch.rows, batch.links, &landing);
     Ok(Repaired {

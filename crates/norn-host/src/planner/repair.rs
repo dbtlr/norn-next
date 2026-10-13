@@ -67,10 +67,13 @@
 //! heading that is not there which the plan makes resolve to no document or
 //! to several, are dropped, each judged by the link at the finding's ordinal
 //! (its syntax and its address, with its holder and address as the plan's
-//! routes and cascade leave them); a link with no entry in
-//! that set keeps its finding, whether the plan leaves its resolution as it
-//! was or removes the link with a declared `field/forbidden` removal
-//! (NORN-389).
+//! routes and cascade leave them). A declared `field/forbidden` removal
+//! drops a link finding whose stored frontmatter field it deletes from the
+//! finding's holder, keyed by the finding row's path before any route.
+//! Planning records these removals only for admitted fixes whose operations
+//! enter the plan; a rename keeps the link in its new field and records no
+//! removal. A body link has no field, and any other link with no entry in
+//! the resolution change set keeps its finding.
 //! **A declared limit**: a missing-anchor link that now resolves to
 //! another single document stands, since whether that document holds the
 //! anchor is the store's anchor predicate and not asked here.
@@ -137,6 +140,9 @@ use crate::planner::view::{Barrier, Body, Entry, VaultView};
 pub(crate) struct Planned {
     /// The operations, in plan order, numbered `repair-1`, `repair-2` and on.
     pub(crate) operations: Vec<Operation>,
+    /// Fields deleted by admitted declared forbidden removals, keyed by the
+    /// finding row's holder path and field, before any route.
+    pub(crate) removed_fields: BTreeSet<(DocumentPath, String)>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
     /// The findings left alone, in batch order: every link finding among

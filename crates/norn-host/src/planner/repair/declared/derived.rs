@@ -106,6 +106,7 @@ pub(super) fn reshape(
     )?;
     document.within_threshold(Confidence::Derived, row, &set)?;
     Ok(Fix {
+        removed_field: None,
         operations: vec![set],
         cited: vec![cited(row, Confidence::Derived, Vec::new())],
         state: composed,
