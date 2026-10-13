@@ -4,11 +4,11 @@
 //!
 //! The fixture is one vault read by all three verbs: `size` documents under
 //! `bulk/`, each with an undeclared-tag warning standing over it, every
-//! [`SPREAD`]th of them matched by every part of [`spread_parts`] and the rest
-//! by none, beside the one document the matched ones link to. So the matched
-//! set is a fixed fraction of the vault, spread evenly through it, and a
-//! drain's cost per matched document reads whether the drain is linear in the
-//! vault.
+//! [`SPREAD`]th — or [`SPARSE`]th — of them matched by every part of
+//! [`spread_parts`] and the rest by none, beside the one document the matched
+//! ones link to. So the matched set is a fixed fraction of the vault, spread
+//! evenly through it, and a drain's cost per matched document reads whether
+//! the drain is linear in the vault.
 
 use std::sync::Arc;
 
@@ -30,6 +30,12 @@ const DRIVE_SCHEMA: &str = "drive-schema";
 
 /// One document in this many is matched.
 const SPREAD: usize = 4;
+
+/// One document in this many is matched where a page's walk reaches past its
+/// first window: at five rows a page, its first window of forty-eight rows
+/// holds about three matched documents, so a page asks and doubles its budget
+/// before it fills.
+const SPARSE: usize = 16;
 
 /// The document every matched one links to.
 const TARGET: &str = "target";
@@ -98,9 +104,14 @@ struct Spread {
 }
 
 impl Spread {
+    /// Every `spread`th of `size` documents matched, from the first.
+    fn every(label: &str, size: usize, spread: usize) -> Self {
+        Self::matching(label, size, |at| at % spread == 0)
+    }
+
     /// Every [`SPREAD`]th of `size` documents matched, from the first.
     fn even(label: &str, size: usize) -> Self {
-        Self::matching(label, size, |at| at % SPREAD == 0)
+        Self::every(label, size, SPREAD)
     }
 
     fn matching(label: &str, size: usize, matched: impl Fn(usize) -> bool) -> Self {
@@ -332,6 +343,12 @@ fn every_drain(spread: &Spread, limit: u32) -> Vec<(String, Drained)> {
 const SMALL: usize = 500;
 const LARGE: usize = 4 * SMALL;
 
+/// The vault sizes the sparse drain pair compares, large enough that a page
+/// of a part keeping one document in [`SPARSE`] keeps more than its ceiling
+/// and walks rounds past its first.
+const SPARSE_SMALL: usize = 2000;
+const SPARSE_LARGE: usize = 4 * SPARSE_SMALL;
+
 /// How much more a drain may cost per matched document over the larger vault
 /// than over the smaller one, in VM steps: a linear drain costs the same per
 /// document at both sizes, up to the pages that straddle the bulk's edges.
@@ -339,21 +356,45 @@ const LINEAR_SLACK: f64 = 1.1;
 
 /// **A drain a part no page drives in its order narrows is linear in the
 /// vault (NORN-393).** Over [`SMALL`], then [`LARGE`], documents one in
-/// [`SPREAD`] of which every part matches, a validate, a repair and a find
-/// narrowed by each such part — a range, a full-text match, a links-to part
-/// and a membership of seventeen values, and for a find a presence on a page
-/// descending and on a field's page — drained five at a time, costs the same
-/// per matched document at both sizes, within [`LINEAR_SLACK`], counted over
-/// every statement its snapshots ran: the drive's own counts and walks
-/// included. An equality, which drives each page in its order, is the
-/// control, and holds alike.
+/// [`SPREAD`] of which every part matches, and over [`SPARSE_SMALL`], then
+/// [`SPARSE_LARGE`], documents one in [`SPARSE`] of which it does, a
+/// validate, a repair and a find narrowed by each such part — a range, a
+/// full-text match, a links-to part and a membership of seventeen values, and
+/// for a find a presence on a page descending and on a field's page — drained
+/// five at a time, costs the same per matched document at both sizes, within
+/// [`LINEAR_SLACK`], counted over every statement its snapshots ran: the
+/// drive's own counts and walks included. The sparse pair's pages walk past
+/// their first window, so their budgets double: a page that asked at the
+/// ceiling at once would cost the ceiling, which grows with the vault. An
+/// equality, which drives each page in its order, is the control, and holds
+/// alike.
 #[test]
 fn a_drain_no_part_drives_in_its_order_is_linear_in_the_vault() {
-    let (small, large) = (
-        Spread::even("drive-linear-small", SMALL),
-        Spread::even("drive-linear-large", LARGE),
+    let pairs = [
+        (
+            Spread::even("drive-linear-small", SMALL),
+            Spread::even("drive-linear-large", LARGE),
+        ),
+        (
+            Spread::every("drive-sparse-small", SPARSE_SMALL, SPARSE),
+            Spread::every("drive-sparse-large", SPARSE_LARGE, SPARSE),
+        ),
+    ];
+    let mut grew = Vec::new();
+    for (small, large) in &pairs {
+        grew.extend(grown(small, large));
+    }
+    assert!(
+        grew.is_empty(),
+        "a drain grew per matched document with the vault:\n{}",
+        grew.join("\n")
     );
-    let (at_small, at_large) = (every_drain(&small, 5), every_drain(&large, 5));
+}
+
+/// Each drain of [`every_drain`] that costs more per matched document over
+/// `large` than over `small`, past [`LINEAR_SLACK`], named with its costs.
+fn grown(small: &Spread, large: &Spread) -> Vec<String> {
+    let (at_small, at_large) = (every_drain(small, 5), every_drain(large, 5));
     let mut grew = Vec::new();
     for ((name, small_drain), (_, large_drain)) in at_small.iter().zip(&at_large) {
         let per = |drain: &Drained, spread: &Spread| {
@@ -365,17 +406,19 @@ fn a_drain_no_part_drives_in_its_order_is_linear_in_the_vault() {
             );
             drain.vm_steps as f64 / spread.matched.len() as f64
         };
-        let (per_small, per_large) = (per(small_drain, &small), per(large_drain, &large));
-        eprintln!("{name}: {per_small:.1} then {per_large:.1} VM steps per matched document");
+        let (per_small, per_large) = (per(small_drain, small), per(large_drain, large));
+        let sizes = (small.matched.len(), large.matched.len());
+        eprintln!(
+            "{name} over {sizes:?} matched: {per_small:.1} then {per_large:.1} VM steps per \
+             matched document"
+        );
         if per_large > per_small * LINEAR_SLACK {
-            grew.push(format!("{name}: {per_small:.1} -> {per_large:.1}"));
+            grew.push(format!(
+                "{name} over {sizes:?} matched: {per_small:.1} -> {per_large:.1}"
+            ));
         }
     }
-    assert!(
-        grew.is_empty(),
-        "a drain grew per matched document with the vault:\n{}",
-        grew.join("\n")
-    );
+    grew
 }
 
 /// **A first page a selective part narrows costs about its rows, whatever
@@ -514,5 +557,26 @@ fn every_drain_answers_the_matched_documents_whichever_drive() {
                 );
             }
         }
+    }
+}
+
+/// **The row a walk's window ends at is the walk's own (NORN-393).** Over 200
+/// documents of which only the sixteenth, the forty-first and the fifty-first
+/// are matched, each drain of [`every_drain`], one row at a time, answers the
+/// matched documents in the answer's path order — a find's descending page in
+/// reverse. A page of one reads two rows, so its first window is sixteen rows
+/// and ends exactly at the first matched document, where the walk leaves the
+/// page short: a window whose end the walk read as exclusive would drop it.
+#[test]
+fn the_row_a_window_ends_at_is_answered() {
+    let spread = Spread::matching("drive-window-end", 200, |at| {
+        at == 15 || at == 40 || at == 50
+    });
+    for (name, drained) in every_drain(&spread, 1) {
+        let mut expected = spread.matched.clone();
+        if name.contains("descending") {
+            expected.reverse();
+        }
+        assert_eq!(drained.paths, expected, "{name}");
     }
 }
