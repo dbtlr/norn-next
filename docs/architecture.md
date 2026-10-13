@@ -1190,6 +1190,9 @@ payload bar holds that no statement a search runs reads a document's body, its f
 or the full-text body column: a `MATCH` and `bm25()` read the index through the column
 FTS5 names after its table, never the text the index is over. A full-text match is read
 through a find's `matches` part or a search's query, and through no other read.
+Loading the index, FTS5 reads its own configuration end to end, every row of
+`documents_fts_config`: the store sets no option there, so the table holds the module's
+version row alone, and the read costs that one row whatever the vault holds.
 
 **The suffix/stem resolve shape has a builder that answers one document**: the get builder
 resolves a target through the one resolver — the class a find's `resolves` part reads, under
