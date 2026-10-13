@@ -871,13 +871,17 @@ A wider membership merges too many seeks to prepare for every page and drives no
 its source. A page no part can drive that way — narrowed by a range, a full-text match, a
 resolution or a links-to part, a wider membership, a membership or a presence descending,
 or any part on a field sort's page — asks its parts in the request's order whether one
-keeps at most a ceiling of documents, eight per row the page reads, by one count of the
-part's own seek that stops one row past the ceiling: the first that does drives the page
-from its seek and sorts what it matched, so the page costs at most the ceiling; where none
-does, the page walks its own order index from where it resumes and tests every part at each
-document's key, so it costs the documents it walks to fill its rows, and a drain walks each
-document once. A page past a few documents a part keeps among many it walks pays for the
-many, a declared limit: no index holds such a part's documents in a page's order. Inequality and absence seek the
+keeps at most a ceiling, by one count of the rows of the part's own seek that stops one row
+past it, a document reached by several rows counting once per row. The ceiling is the
+greater of eight per row the page reads and the square root of those rows times the
+documents the vault may hold, read once as its greatest document row id. The first part
+within it drives the page from its seek and sorts what it matched, so the page costs at most
+the ceiling and a drain at most the vault; where none is, the page walks its own order index
+from where it resumes and tests every part at each document's key, so it costs the
+documents it walks to fill its rows — for a part spread through the vault, at most the
+ceiling — and a drain walks each document once. A page walking past many documents to the
+next of a part's bunched documents pays for the many, each once over a drain, a declared
+limit: no index holds such a part's documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
@@ -885,7 +889,7 @@ steps through a full scan, no page without a filter builds a temporary B-tree or
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
 handed it and sorts at most once per page statement; a path page a filter's source drives
 seeks that filter's index from its place and sorts nothing; a part's ceiling count is the
-part's own seek, costing the same however many documents the part keeps; and a page's
+part's own seek, costing the same however many documents the part keeps past the ceiling; and a page's
 continuation narrowed by any part, in path order and in a field's, near the start of what
 the part matched and near the end, costs the same while the documents the part matches grow
 with the vault. Each filter is one index seek, judged
@@ -986,8 +990,8 @@ documents in the answer's path order drives instead from its source — the part
 sought from the page's place and each one's findings at its path, so a continuation costs
 the documents it reads from its place to its last finding however many the part matched,
 those holding no finding the page selects included, each read once per kind a drain pages — while
-where no such part narrows it, a part keeping at most the find's ceiling of documents
-drives it from the documents it matched, and otherwise the section seeks its kind and
+where no such part narrows it, a part within the ceiling a find's page asks (counted per
+finding row the page reads) drives it from the documents it matched, and otherwise the section seeks its kind and
 tests each document; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
@@ -1021,8 +1025,8 @@ ALL` and ordered together, which SQLite runs as a merge of the arms' own orders 
 and no index added for it. Where a document part keeping its documents in the answer's path order
 narrows the batch, the read is one arm instead: the part's documents from the batch's place,
 read once, each seeking every kind read at its path, so only one document's findings are
-ordered among themselves; where no such part narrows it, a part keeping at most the find's
-ceiling of documents drives each arm from the documents it matched, and the arm sorts
+ordered among themselves; where no such part narrows it, a part keeping at most the ceiling a
+find's page asks drives each arm from the documents it matched, and the arm sorts
 those, and otherwise each arm seeks its kind and tests each document. A batch holds about
 its limit in findings and never splits a document's selected findings: where the limit falls
 inside a document, a second statement reads that document's remaining findings, pinning its

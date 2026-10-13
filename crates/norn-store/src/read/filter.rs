@@ -518,9 +518,9 @@ impl Rows {
 /// its values bound by `binder` in the order the condition names them.
 ///
 /// Every shape reads the same rows either way but a finding's: the set of
-/// documents a finding kind stands over is the documents at the paths it
-/// stands at, and one document's question is whether one stands at its path,
-/// which a seek at that path answers.
+/// documents a finding kind stands over is its findings, each joined to the
+/// document at its path, and one document's question is whether one stands
+/// at its path, which a seek at that path answers.
 fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut Binder) -> Rows {
     // The number this fragment's first value takes: a fragment's values
     // are bound in the order it names them, so they number from here.
@@ -663,19 +663,30 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         }
         ReadFilter::Finding => {
             let (fingerprint, kind) = (next(), next());
-            let standing = match reached {
-                Reached::Set => format!(
-                    "df.path IN (SELECT fg.path FROM findings AS fg
-                         WHERE fg.vault_schema_fingerprint = {fingerprint}
-                           AND fg.kind = {kind})"
-                ),
-                Reached::OneDocument => format!(
-                    "EXISTS (SELECT 1 FROM findings AS fg
+            match reached {
+                // The kind's findings, off its index in the answer's path
+                // order, each joined to the document at its path: rows a
+                // reader can stop reading at any point, so a count of them
+                // bounded at a ceiling costs the ceiling.
+                Reached::Set => Rows {
+                    table: "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path"
+                        .to_string(),
+                    document: "df.id".to_string(),
+                    path: "fg.path".to_string(),
+                    condition: format!(
+                        "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
+                    ),
+                },
+                Reached::OneDocument => Rows::new(
+                    "documents AS df",
+                    "df.id",
+                    format!(
+                        "EXISTS (SELECT 1 FROM findings AS fg
                          WHERE fg.path = df.path AND fg.vault_schema_fingerprint = {fingerprint}
                            AND {compared}fg.kind = {kind})"
+                    ),
                 ),
-            };
-            Rows::new("documents AS df", "df.id", standing)
+            }
         }
     }
 }
@@ -715,7 +726,7 @@ fn source_bound(
     binder: &mut Binder,
 ) -> String {
     match shape {
-        ReadFilter::Equal(_) | ReadFilter::Tag => {
+        ReadFilter::Equal(_) | ReadFilter::Tag | ReadFilter::Finding => {
             let rows = rows_of(shape, values, Reached::Set, binder);
             reach.arm(&rows, true, binder)
         }
@@ -744,24 +755,7 @@ fn source_bound(
                 .collect();
             reach.merged(arms)
         }
-        ReadFilter::Finding => {
-            // The set reads each document's path among the kind's findings';
-            // a source reads the findings themselves, off the kind's index in
-            // path order, each joined to the document at its path.
-            let (fingerprint, kind) = (
-                binder.bind(values[0].clone()),
-                binder.bind(values[1].clone()),
-            );
-            let rows = Rows {
-                table: "findings AS fg CROSS JOIN documents AS df ON df.path = fg.path".to_string(),
-                document: "df.id".to_string(),
-                path: "fg.path".to_string(),
-                condition: format!(
-                    "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
-                ),
-            };
-            reach.arm(&rows, true, binder)
-        }
+
         ReadFilter::NotEqual(_)
         | ReadFilter::Absent
         | ReadFilter::Before(_)

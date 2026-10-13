@@ -437,7 +437,7 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
         | FindStatement::ClassTotal
         | FindStatement::CandidateSuffixes
         | FindStatement::LinkTargets => "a_read_of_targets_seeks_the_class_or_the_path_each_names",
-        FindStatement::PartCeiling => {
+        FindStatement::PartCeiling | FindStatement::DocumentSpan => {
             "a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling"
         }
     }
@@ -525,7 +525,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         crate::find_advisory::OFFSET_PROBES.to_vec(),
         hydration_statements(),
         crate::links::LINK_READS.to_vec(),
-        vec![FindStatement::PartCeiling],
+        vec![FindStatement::PartCeiling, FindStatement::DocumentSpan],
     ];
     let mut slots: Vec<usize> = Vec::new();
     for statements in &per_bar {
@@ -1854,15 +1854,17 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
 
 /// **A part ceiling probe reads the part's own seek and stops one row past the
 /// ceiling (NORN-390).** A page no part drives from its documents in the
-/// page's order — a field sort's — asks, part by part, whether one keeps at
-/// most [`norn_store::MATCHED_DRIVE_FACTOR`] documents per row it reads: one
-/// [`FindStatement::PartCeiling`] per part asked, each the seek the filter
-/// bar names for its part and no full scan. Over 64, then 640, bulk documents
-/// the tag `bulk` stands on, a page of one row asks the tag's probe at the same
-/// VM steps either way: the probe stops one row past the ceiling, 16 rows, so
-/// it costs that whatever the part keeps. **The answer decides the drive**: a
-/// part keeping more than the ceiling is tested at each document the page
-/// walks, and one keeping fewer drives the page from what it matched.
+/// page's order — a field sort's — reads the vault's greatest document row id
+/// once ([`FindStatement::DocumentSpan`], one seek of `documents`) and asks,
+/// part by part, whether one keeps at most the ceiling it scales: one
+/// [`FindStatement::PartCeiling`] per part asked, each the seek the filter bar
+/// names for its part and no full scan. **A probe costs the ceiling whatever
+/// the part keeps**: over 500 bulk documents of which 50, then all 500, match
+/// every part of [`drained_parts`], a page of one row asks each part's probe
+/// at the same VM steps — the vault, so the ceiling, is the same, and each
+/// part keeps more than it. **The answer decides the drive**: a part keeping
+/// more than the ceiling is tested at each document the page walks, and one
+/// keeping fewer drives the page from what it matched.
 ///
 /// Control: a probe rebuilt to read its table end to end fails the bar.
 #[test]
@@ -1883,18 +1885,32 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
                 &field_page().with_predicates([part.clone()]),
                 &declared_readings(),
             );
-            let probes: Vec<&FindPlan> = plans
-                .iter()
-                .filter(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
-                .collect();
+            let of = |statement: FindStatement| -> Vec<&FindPlan> {
+                plans
+                    .iter()
+                    .filter(|plan| plan.statement == ReadStatement::Find(statement))
+                    .collect()
+            };
+            let (probes, spans) = (
+                of(FindStatement::PartCeiling),
+                of(FindStatement::DocumentSpan),
+            );
             if shape.excludes() {
                 assert!(
-                    probes.is_empty(),
+                    probes.is_empty() && spans.is_empty(),
                     "an excluding {part:?} was asked what it keeps"
                 );
                 continue;
             }
             assert_eq!(probes.len(), 1, "{part:?} was asked other than once");
+            assert_eq!(
+                spans.len(),
+                1,
+                "{part:?} read the vault's span other than once"
+            );
+            let span = plan(spans[0]);
+            span.assert_no_full_scan();
+            rows_of(&span, "documents").assert_searches("documents");
             let probe = plan(probes[0]);
             judge_filter(&probe, seek);
             judged.get_or_insert(probe);
@@ -1917,37 +1933,54 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     );
     failure_of("a probe read end to end", || scanned.assert_no_full_scan());
 
+    // Each part's probe over a vault of one size, the part keeping fewer and
+    // then more documents, every count past the ceiling.
+    let probed = |seeded: &Seeded, parts: &[Predicate]| {
+        seeded
+            .plans(&field_page().with_predicates(parts.to_vec()).with_limit(1))
+            .into_iter()
+            .filter(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
+            .map(|plan| plan.vm_steps)
+            .collect::<Vec<u64>>()
+    };
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let fewer = Seeded::with_partly_matched_bulk_under("find-ceiling-fewer", 50, 500, order);
+        let more = Seeded::with_partly_matched_bulk_under("find-ceiling-more", 500, 500, order);
+        for (shape, parts) in drained_parts(FindingKind::BodyBytesNotUtf8) {
+            if parts.len() > 1 {
+                continue;
+            }
+            let at_fewer = probed(&fewer, &parts);
+            assert!(!at_fewer.is_empty(), "{shape:?} was asked nothing");
+            assert_eq!(
+                at_fewer,
+                probed(&more, &parts),
+                "a {shape:?} part's probe grew with what it keeps under {order:?}"
+            );
+        }
+    }
+
     let tagged = |seeded: &Seeded| {
         let params = field_page()
             .with_predicates([Predicate::tag("bulk")])
             .with_limit(1);
-        let plans = seeded.plans(&params);
-        let probe = plans
-            .iter()
-            .find(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
-            .expect("the tag's probe")
-            .vm_steps;
-        let page = plan_of(
-            &plans,
+        plan_of(
+            &seeded.plans(&params),
             FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
-        );
-        (probe, page.sql().to_string())
+        )
+        .sql()
+        .to_string()
     };
-    let (fewer, fewer_page) = tagged(&Seeded::with_bulk("find-ceiling-fewer", 64));
-    let (more, more_page) = tagged(&Seeded::with_bulk("find-ceiling-more", 640));
-    assert_eq!(
-        fewer, more,
-        "the probe's steps grew with what the tag keeps"
+    let past = tagged(&Seeded::with_bulk("find-ceiling-past", 640));
+    assert!(
+        past.contains("EXISTS (SELECT 1 FROM document_tags AS tg")
+            && !past.contains("IN (SELECT tg.document"),
+        "a page past the ceiling was driven from what the tag matched: {past}"
     );
-    for page in [fewer_page, more_page] {
-        assert!(
-            page.contains("EXISTS (SELECT 1 FROM document_tags AS tg")
-                && !page.contains("IN (SELECT tg.document"),
-            "a page past the ceiling was driven from what the tag matched: {page}"
-        );
-    }
-    // Within the ceiling, the tag drives the page from what it matched.
-    let (_, within) = tagged(&Seeded::with_bulk("find-ceiling-within", 4));
+    let within = tagged(&Seeded::with_bulk("find-ceiling-within", 4));
     assert!(
         within.contains("IN (SELECT tg.document"),
         "a page within the ceiling was not driven from what the tag matched: {within}"
@@ -2647,6 +2680,27 @@ fn a_continuation_among_paths_that_fold_together_costs_its_page() {
 }
 
 impl Seeded {
+    /// The fixture and `bulk` documents under `bulk/`, the first `matched`
+    /// of them [`matched_by_every_part`], each with a violation standing over
+    /// it, and the rest plain: a vault of one size whose matched documents
+    /// are as many as `matched`.
+    fn with_partly_matched_bulk_under(
+        label: &str,
+        matched: usize,
+        bulk: usize,
+        order: StoredPathOrder,
+    ) -> Self {
+        let mut seeded = Self::with_matched_bulk_under(label, matched, order);
+        let plain: Vec<_> = (matched..bulk)
+            .map(|at| {
+                let at = format!("bulk/{at:04}.md");
+                document(&at, &format!("hash-{at}"), "a plain body\n")
+            })
+            .collect();
+        write_documents(&mut seeded.store.begin_request(), &plain);
+        seeded
+    }
+
     /// The fixture and `bulk` more documents under `bulk/`, each one
     /// [`matched_by_every_part`] with a violation standing over it: so every
     /// part of [`drained_parts`] matches the bulk, and the documents a part
@@ -2764,21 +2818,24 @@ fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
 
 /// **A page a document part drives answers what one page holding every
 /// match answers, drained a row and two rows at a time, either way, on either
-/// root (NORN-390).** Over the fixture and twelve bulk documents every part of
+/// root (NORN-390).** Over the fixture and forty bulk documents every part of
 /// [`drained_parts`] matches — each reached by its part twice, a value or a
 /// tag written twice — and, where the root tells spellings apart, `BULK/0003.md`
 /// and `Bulk/0003.md` beside `bulk/0003.md`, every page of each part's drain
 /// continues exactly where the one before it stopped: the drain holds each
 /// matched document once, in the answer's path order, and every bulk document
-/// among them.
+/// among them. A page of one or two rows walks its order past the ceiling a
+/// part with no path order may keep, and the one page holding every match is
+/// driven from what the part matched, so the two drives answer alike; a drain
+/// in a field's order answers what its one page does too.
 #[test]
 fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
     for order in [
         StoredPathOrder::Sensitive,
         StoredPathOrder::AsciiCaseInsensitive,
     ] {
-        let mut seeded = Seeded::with_matched_bulk_under("find-matched-drain", 12, order);
-        let mut bulk: Vec<String> = (0..12).map(|at| format!("bulk/{at:04}.md")).collect();
+        let mut seeded = Seeded::with_matched_bulk_under("find-matched-drain", 40, order);
+        let mut bulk: Vec<String> = (0..40).map(|at| format!("bulk/{at:04}.md")).collect();
         if order == StoredPathOrder::Sensitive {
             let declared = declared();
             let variants = ["BULK/0003.md", "Bulk/0003.md"];
@@ -2817,14 +2874,39 @@ fn a_drain_a_document_part_drives_answers_its_matches_once_in_path_order() {
                 );
                 for limit in [1, 2] {
                     assert_eq!(
-                        drained(&seeded, &params, limit),
+                        drained_whole(&seeded, &params, limit),
                         whole,
                         "{part:?} {direction:?} drained {limit} at a time under {order:?}"
                     );
                 }
+                let by_field =
+                    sorted(SortKey::field("status"), direction).with_predicates(part.clone());
+                let whole = seeded.paths(&by_field.clone().with_limit(MAX_PAGE as u32));
+                assert_eq!(
+                    drained_whole(&seeded, &by_field, 2),
+                    whole,
+                    "{part:?} by `status` {direction:?} drained two at a time under {order:?}"
+                );
             }
         }
     }
+}
+
+/// Every path `params` answers, drained `limit` rows at a time with no cap on
+/// how many pages that takes beyond the vault's own size.
+fn drained_whole(seeded: &Seeded, params: &FindParams, limit: u32) -> Vec<String> {
+    let first = params.clone().with_limit(limit);
+    let mut request = first.clone();
+    let mut paths = Vec::new();
+    for _ in 0..1000 {
+        let page = seeded.page(&request);
+        paths.extend(row_paths(&page));
+        let Some(next) = page.next else {
+            return paths;
+        };
+        request = first.clone().with_after(next);
+    }
+    panic!("the pages did not end: {paths:?}");
 }
 
 /// **A path page a part drives reads no document past a path part's range,

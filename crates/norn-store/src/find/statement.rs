@@ -130,17 +130,24 @@ pub enum FindStatement {
     /// every read that carries links, however many it carries.
     LinkTargets,
     /// Whether a part that keeps what it seeks keeps few enough documents to
-    /// drive a page from what it matched: its own seek, read until one row
-    /// past [`crate::MATCHED_DRIVE_FACTOR`] rows per row the page reads and
-    /// counted, so it costs at most that whatever the part keeps. Run once per
-    /// part, in the request's order until one keeps few enough, by a page no
-    /// part drives from its documents in the page's order
-    /// ([`crate::ReadFilter::is_path_ordered`]).
+    /// drive a page from what it matched: the rows of its own seek, read until
+    /// one row past the ceiling and counted, so it costs at most the ceiling
+    /// whatever the part keeps. A document reached by several rows counts
+    /// once per row, so a part is never taken to keep fewer documents than it
+    /// does. Run once per part, in the request's order until one keeps few
+    /// enough, by a find, validate or repair page no part drives from its
+    /// documents in the page's order ([`crate::ReadFilter::is_path_ordered`]);
+    /// the ceiling is the read module's driver choice's.
     PartCeiling,
+    /// The greatest document row id: one seek of the row ids' last entry,
+    /// which bounds how many documents the vault holds — a deleted document's
+    /// id is never reused below it — and so scales the ceiling a part is
+    /// asked against. Run once by a page that asks any part's ceiling.
+    DocumentSpan,
 }
 
 /// How many statement shapes [`FindStatement::all`] holds.
-pub const FIND_STATEMENTS: usize = 21;
+pub const FIND_STATEMENTS: usize = 22;
 
 impl FindStatement {
     /// Every statement shape, in slot order.
@@ -171,6 +178,7 @@ impl FindStatement {
             Self::LinkTargets,
             Self::OffsetSpellings,
             Self::PartCeiling,
+            Self::DocumentSpan,
         ]
     }
 
@@ -199,6 +207,7 @@ impl FindStatement {
             Self::LinkTargets => 18,
             Self::OffsetSpellings => 19,
             Self::PartCeiling => 20,
+            Self::DocumentSpan => 21,
         };
         assert!(
             slot < FIND_STATEMENTS,
@@ -372,7 +381,8 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
         | FindStatement::ClassTotal
         | FindStatement::CandidateSuffixes
         | FindStatement::LinkTargets
-        | FindStatement::PartCeiling => {
+        | FindStatement::PartCeiling
+        | FindStatement::DocumentSpan => {
             unreachable!("{:?} is not a page section", section.statement)
         }
         FindStatement::PathPage(direction) => {
@@ -621,6 +631,15 @@ fn spelled(direction: PageDirection) -> (&'static str, &'static str, &'static st
 fn id_list(ids: &[i64]) -> Value {
     let listed: Vec<String> = ids.iter().map(i64::to_string).collect();
     Value::Text(format!("[{}]", listed.join(",")))
+}
+
+/// [`FindStatement::DocumentSpan`]: the greatest document row id, zero where
+/// the vault holds none.
+pub(crate) fn compose_document_span() -> (String, Vec<Value>) {
+    (
+        "SELECT coalesce(max(id), 0) FROM documents".to_string(),
+        Vec::new(),
+    )
 }
 
 /// [`FindStatement::KnownKey`]: whether any document carries `key`.

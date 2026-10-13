@@ -2209,6 +2209,65 @@ fn a_driven_page_orders_a_documents_findings_by_position_then_id() {
     }
 }
 
+/// **A drain a document part narrows answers what one page holding every
+/// finding answers, whichever drive (NORN-390).** Over the fixture and forty
+/// bulk documents every part of [`drained_parts`] matches, each with an
+/// undeclared-tag warning and a breach citing `tasks`, a validate of every
+/// kind drained two findings at a time, and a repair drained two at a time,
+/// each narrowed by each selection, answer the findings one page holding
+/// every finding answers, in its order, on either root. Two rows walk past
+/// the ceiling a part with no path order may keep, and the one page is driven
+/// from what the part matched, so the drives answer alike.
+#[test]
+fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
+    for order in ROOTS {
+        let validating_store = Validating::with_matched_bulk_under("validate-walked", 40, order);
+        for (shape, parts) in drained_parts(FindingKind::UndeclaredTag) {
+            let params = validating().with_predicates(parts.clone());
+            let (whole, _) = validating_store.page(&params.clone().with_limit(MAX_PAGE as u32));
+            let mut paged = Vec::new();
+            let mut after: Option<Cursor> = None;
+            loop {
+                let mut page = params.clone().with_limit(2);
+                if let Some(cursor) = after.take() {
+                    page = page.with_after(cursor);
+                }
+                let (rows, next) = validating_store.page(&page);
+                paged.extend(rows);
+                match next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+                assert!(
+                    paged.len() <= whole.len(),
+                    "the pages of {params:?} do not end"
+                );
+            }
+            assert_eq!(
+                paged.iter().map(named).collect::<Vec<_>>(),
+                whole.iter().map(named).collect::<Vec<_>>(),
+                "a validate a {shape:?} part narrows, drained two at a time, under {order:?}"
+            );
+            let repair = batch::selecting(&params);
+            let batched: Vec<_> = batch::drained(&validating_store, &repair, 2)
+                .into_iter()
+                .flatten()
+                .map(|row| named(&row))
+                .collect();
+            let whole: Vec<_> = validating_store
+                .batch(&repair.with_limit(MAX_PAGE as u32))
+                .rows
+                .iter()
+                .map(named)
+                .collect();
+            assert_eq!(
+                batched, whole,
+                "a repair a {shape:?} part narrows, drained two at a time, under {order:?}"
+            );
+        }
+    }
+}
+
 /// **Two document parts together admit exactly the findings whose document
 /// both admit, whichever drives, on either root (NORN-390).** Over the
 /// fixture, six bulk documents every part matches and the [`mixed_documents`]

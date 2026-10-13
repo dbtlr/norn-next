@@ -8,33 +8,37 @@
 //! documents in another order, so driving a page from it costs every document
 //! it matched, sorted, on every page, which over a drain is quadratic in what
 //! it matched. So the page asks, part by part in the request's order, whether
-//! one keeps at most [`MATCHED_DRIVE_FACTOR`] documents per row the page
-//! reads ([`crate::FindStatement::PartCeiling`]); the first that does drives
-//! the page from what it matched, and where none does the page walks its own
-//! order and tests every part at each document's key.
+//! one keeps at most a ceiling of documents ([`FindStatement::PartCeiling`]);
+//! the first that does drives the page from what it matched, and where none
+//! does the page walks its own order and tests every part at each document's
+//! key.
 //!
-//! **What a page costs is therefore bounded, and a drain is linear.** A page
-//! driven from what a part matched costs at most the ceiling's documents. A
-//! page that walks its order costs the documents it walks to fill its rows:
-//! where every part keeps more than the ceiling, those are the documents
-//! between the place it resumes at and its last row, and a drain walks each
-//! once. A page past a few documents a part keeps among many it walks pays for
-//! the many, a declared limit: no index holds a range's, a full-text match's,
-//! a resolution's or a links-to part's documents in a page's order.
+//! **The ceiling scales with the page and the vault**: the greater of
+//! [`MATCHED_DRIVE_FACTOR`] documents per row the page reads and the square
+//! root of the rows the page reads times the documents the vault holds
+//! ([`FindStatement::DocumentSpan`]). A page driven from what a part matched
+//! costs at most the ceiling's documents. A page that walks its order costs
+//! the documents it walks to fill its rows: a part keeping more than the
+//! ceiling spread through the vault leaves about the vault over the ceiling
+//! documents between two of its own, so a page walks about its rows times
+//! that, which is at most the ceiling, and a drain walks each document once.
+//! A drain driven from what a part matched costs its pages times the ceiling,
+//! at most the vault. **What stays a declared limit** is a part's documents
+//! bunched together: a page walking past many documents to the next of a
+//! bunch pays for the many, each once over a drain, since no index holds a
+//! range's, a full-text match's, a resolution's or a links-to part's
+//! documents in a page's order.
 
-use crate::error::StoreError;
-use crate::find::FindStatement;
+use crate::error::{self, StoreError};
+use crate::find::{FindStatement, compose_document_span};
 use crate::store::Snapshot;
 
 use super::{Filter, Lookups, Ran};
 
-/// How many documents, per row a page reads, a part may keep and still drive
-/// the page from what it matched.
-///
-/// A page driven from what a part matched costs those documents, sorted, and a
-/// page that walks its order costs the documents it walks to its rows, so the
-/// factor is where the two meet for a part keeping one document in that many
-/// of the page's order.
+/// The fewest documents, per row a page reads, a part may keep and still
+/// drive the page from what it matched, however small the vault: a floor on
+/// the ceiling, so a page in a small vault sorts at most this many documents
+/// per row rather than walking it.
 pub const MATCHED_DRIVE_FACTOR: usize = 8;
 
 /// How a page reaches the documents its parts keep, by the part's position
@@ -78,7 +82,10 @@ impl Snapshot {
         {
             return Ok(Driver::Ordered(at));
         }
-        let ceiling = rows.saturating_mul(MATCHED_DRIVE_FACTOR);
+        if keeping().next().is_none() {
+            return Ok(Driver::Walked);
+        }
+        let ceiling = self.drive_ceiling(rows, lookups)?;
         for (at, part) in keeping() {
             let probe = Ran::new(FindStatement::PartCeiling, part.kept_within(ceiling))
                 .narrowed_by(vec![part.shape()]);
@@ -91,5 +98,28 @@ impl Snapshot {
             }
         }
         Ok(Driver::Walked)
+    }
+
+    /// How many documents a part may keep and still drive a page reading
+    /// `rows` rows from what it matched: the greater of
+    /// [`MATCHED_DRIVE_FACTOR`] per row and the square root of `rows` times
+    /// the vault's greatest document row id. One
+    /// [`FindStatement::DocumentSpan`].
+    fn drive_ceiling(&self, rows: usize, lookups: &mut Lookups) -> Result<usize, StoreError> {
+        const OPERATION: &str = "reading how many documents the vault may hold";
+        let span: i64 = self
+            .run_statement(
+                &mut lookups.ran,
+                Ran::new(FindStatement::DocumentSpan, compose_document_span()),
+                |row| row.get(0),
+            )
+            .map_err(|problem| error::sql(OPERATION, problem))?
+            .into_iter()
+            .next()
+            .unwrap_or(0);
+        let span = usize::try_from(span).unwrap_or(0);
+        Ok(rows
+            .saturating_mul(MATCHED_DRIVE_FACTOR)
+            .max(rows.saturating_mul(span).isqrt()))
     }
 }
