@@ -171,7 +171,8 @@ pub(crate) enum Settled<R> {
     Driver(Driver),
     /// The read filled — or read to its end — within a round of its walk,
     /// before any part was found to drive it or its budget reached the
-    /// ceiling; a later read walks on from that round.
+    /// ceiling; a later read walks on from that round's window, and asks no
+    /// count it answered.
     Walking(Round<R>),
 }
 
@@ -183,13 +184,15 @@ impl<R> Settled<R> {
     pub(crate) fn resumed_where(self, ahead: impl FnOnce(&R) -> bool) -> Self {
         match self {
             Settled::Walking(Round {
-                budget,
-                ceiling,
                 window: Window::EndsAt(end),
-            }) if !ahead(&end) => Settled::Walking(Round {
                 budget,
+                asked,
                 ceiling,
+            }) if !ahead(&end) => Settled::Walking(Round {
                 window: Window::Unread,
+                budget,
+                asked,
+                ceiling,
             }),
             settled => settled,
         }
@@ -199,10 +202,12 @@ impl<R> Settled<R> {
 /// A round of a page's walk, as far as it went.
 #[derive(Clone, Debug)]
 pub(crate) struct Round<R> {
-    /// The round's budget: every part keeping what it seeks has been asked
-    /// at the rows the page reads and at each smaller budget, and kept more,
-    /// and none has been asked at this one.
+    /// The round's budget.
     budget: usize,
+    /// The greatest cap every part keeping what it seeks has been counted at
+    /// and found to keep more than: the rows the page reads, then each budget
+    /// a round asked at. A round whose budget is no greater asks no count.
+    asked: usize,
     /// The ceiling the budget stops at, once a round has read the vault's
     /// span.
     ceiling: Option<usize>,
@@ -211,12 +216,27 @@ pub(crate) struct Round<R> {
 }
 
 impl<R> Round<R> {
-    /// The first round of a page of `scale` rows, which reads its window.
+    /// The first round of a page of `scale` rows, whose first count, at
+    /// `scale`, found every part keeping more: it reads its window.
     fn first(scale: usize) -> Self {
         Round {
             budget: scale.saturating_mul(MATCHED_DRIVE_FACTOR).max(1),
+            asked: scale,
             ceiling: None,
             window: Window::Unread,
+        }
+    }
+
+    /// This round, taken up by a later read of a page of `scale` rows: its
+    /// window, the counts it answered and its ceiling kept, its budget
+    /// started over at the first round's. A later read that needs fewer rows
+    /// may find them in a window short of the budget the earlier read
+    /// reached, and the budgets it doubles through again ask no count below
+    /// that one, so walking them costs about one window of it.
+    fn taken_up(self, scale: usize) -> Self {
+        Round {
+            budget: Round::<R>::first(scale).budget,
+            ..self
         }
     }
 }
@@ -317,9 +337,12 @@ impl Snapshot {
                     paged, parts, scale, rows, first, &mut found, &mut queue, lookups,
                 )?
             }
-            Settled::Walking(round) => self.walk_rounds(
-                paged, parts, scale, rows, round, &mut found, &mut queue, lookups,
-            )?,
+            Settled::Walking(round) => {
+                let round = round.taken_up(scale);
+                self.walk_rounds(
+                    paged, parts, scale, rows, round, &mut found, &mut queue, lookups,
+                )?
+            }
         };
         let mut stepped = Stepped::default();
         for ran in &lookups.ran[ran_before..] {
@@ -413,10 +436,18 @@ impl Snapshot {
                 None => *round.ceiling.insert(self.drive_ceiling(scale, lookups)?),
             };
             let cap = round.budget.min(ceiling);
-            let driver = match self.first_within(parts, cap, lookups)? {
+            // Where every part was counted at this cap or past it and kept
+            // more, the page asks nothing again.
+            let within = if cap > round.asked {
+                self.first_within(parts, cap, lookups)?
+            } else {
+                None
+            };
+            let driver = match within {
                 Some(at) => Driver::Matched(at),
                 None if cap >= ceiling => Driver::Walked,
                 None => {
+                    round.asked = round.asked.max(cap);
                     round.budget = round.budget.saturating_mul(2).min(ceiling);
                     continue;
                 }
