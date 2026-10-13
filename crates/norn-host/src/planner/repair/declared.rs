@@ -3504,6 +3504,47 @@ mod tests {
         );
     }
 
+    /// **A wrap composed with a declared synonym is derived and stays below
+    /// a declared threshold.** The combined proposal writes the synonym in a list.
+    #[test]
+    fn a_wrap_composed_with_a_declared_synonym_carries_the_weaker_derived_level() {
+        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+        let documents = [("a.md", "---\nstatus: complete\n---\n")];
+        let row = judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "status",
+            &AuthoredValue::string("complete"),
+        );
+
+        let planned = Vault::of(schema, &documents).plan(std::slice::from_ref(&row));
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "status", list(&["done"]))]
+        );
+        assert_eq!(
+            planned.citations,
+            vec![citing_derived(1, &[(1, "complete")])]
+        );
+        assert!(planned.skipped.is_empty());
+
+        let strict = Vault::of(schema, &documents)
+            .at(Confidence::Declared)
+            .plan(&[row]);
+
+        assert!(strict.operations.is_empty());
+        assert_eq!(
+            strict.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::BelowThreshold)
+                    .with_value(head(&AuthoredValue::string("complete")))
+                    .with_proposed(proposing("a.md", "status", list(&["done"])))
+            ]
+        );
+    }
+
     /// **A combined value refused by the judge is carried as the candidate.**
     #[test]
     fn a_combined_wrap_the_judge_refuses_carries_the_combined_candidate() {
