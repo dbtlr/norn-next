@@ -3018,7 +3018,18 @@ and its declared default where the fix brings in a rule requiring a field the do
 so),
 and `judge_would_refuse` with its candidates where it introduces any other violation, or
 where a route fills to no folder a document can be moved into, `below_threshold` and
-`excluded_class` as above. A
+`excluded_class` as above. A broken link's suggested fix is skipped as `too_common` where
+the similarity query's rarest trigrams needed exceed the postings cap (the entry carries the
+query stem, and its note names the trigram past the cap), as `too_short` where the stem is
+below the shortest admitted query, three characters, and, for a link whose target moved,
+as `no_recorded_hash` where the one tombstone found recorded no content hash, `no_holder`
+where no live document holds it, `several_holders` where at least two live documents do,
+and `several_tombstones` where at least two tombstones match; the last two read to two and
+stop, so the note names the two paths and says "at least two" and the entry carries no
+candidate head. A link fix with one answer that cannot be written to it, because no spelling
+reads back to the destination uniquely from the holder or the text layer refuses the edit, is
+`link_not_rewritable`, its note carrying the reason. A suggestion's score is note text, never
+a field. A
 finding the rules conflict over is `rules_conflict`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
@@ -3040,7 +3051,17 @@ what it was planned from: the write generation of the snapshot it read, the find
 operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
 batch covered, present exactly when more findings remain. A first batch, one request
 carrying no `after`, also carries `remaining`, the exact number of selected findings left
-after it. The store's batch read takes that count in the same call, as one more statement
+after it. The first batch also carries
+`advisories`, what the repair noticed about the vault's fields and schema that no single
+finding states, in one of three states: `omitted` with the reason `narrowed` where a path or
+document predicate narrowed the repair, since advisories describe the whole vault;
+`computed` with its `items` and `total` on an unnarrowed repair, truncated exactly when it
+holds fewer items than its total; and absent from a continuation batch. An advisory is a
+record that names fields, rules and a bounded sample of documents (at most five, with their
+exact total) and carries no operation: its kinds are `mixed_types`, `mixed_shapes`,
+`undeclared_uniform` and `near_duplicate_fields`, the last two with a `yaml` fragment, and
+`schema_hygiene` for a rule that matches nothing, a closed-set value no document holds, or
+two rules whose combination admits no document. The store's batch read takes that count in the same call, as one more statement
 a validate's summary reads — the selection's tally less the findings the batch holds — so
 it is counted into the batch's work and explained with its plans, costs the findings the
 selection admits, and describes the batch's own snapshot; a continuation carries none and

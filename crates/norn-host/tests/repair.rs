@@ -35,8 +35,8 @@ use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Citation, CitedFinding,
     Confidence, Cursor, DocumentPath, ErrorDetail, ErrorEnvelope, FieldChange, FindingKind,
     NewParams, Operation, OperationId, OperationKind, PagedRows, PlanDocument, Predicate,
-    Provenance, ReasonCode, RepairParams, RequiredField, RequiredFieldHead, ResolvedPlan,
-    SetParams, Severity, SkipReason, SkippedCandidates, SkippedFinding, Unsatisfied,
+    Provenance, ReasonCode, RepairAdvisories, RepairParams, RequiredField, RequiredFieldHead,
+    ResolvedPlan, SetParams, Severity, SkipReason, SkippedCandidates, SkippedFinding, Unsatisfied,
     ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, VaultAddress, WriteTarget,
 };
 
@@ -583,15 +583,17 @@ fn the_selection_narrows_by_kind_severity_rule_and_path() {
 
 /// **A plan's provenance decides nothing an apply does.** Altered — its
 /// skipped findings emptied, its cursor and count taken off, a finding
-/// generation that never stood — the preview's plan applies as the plan it
-/// came back as.
+/// generation that never stood, and advisories the repair never computed —
+/// the preview's plan applies as the plan it came back as.
 #[test]
 fn a_plan_applies_the_same_whatever_its_provenance_says() {
     let (_sandbox, vault, host) = a_vault("host-repair-provenance");
     let _lease = attach::attach_and_wait(&host, vault.name());
     let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)));
     let mut altered = plan.clone();
-    altered.provenance = Some(Provenance::new(u64::MAX, Vec::new()));
+    altered.provenance = Some(
+        Provenance::new(u64::MAX, Vec::new()).with_advisories(RepairAdvisories::omitted_narrowed()),
+    );
 
     let apply = |plan: ResolvedPlan| {
         host.apply(ApplyParams::new(
