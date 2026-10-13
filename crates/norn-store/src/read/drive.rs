@@ -81,7 +81,7 @@ use crate::error::{self, StoreError};
 use crate::find::{FindStatement, compose_document_span};
 use crate::store::Snapshot;
 
-use super::page::KeysetPage;
+use super::page::{KeysetPage, fill_from};
 use super::{Filter, Lookups, Ran, Stepped};
 
 /// The fewest documents, per row a page reads, a part may keep and still
@@ -201,24 +201,9 @@ impl Snapshot {
         let ran_before = lookups.ran.len();
         let mut found: Vec<P::Row> = Vec::new();
         let mut queue: VecDeque<P::Section> = sections.into();
-        let read_rest = |snapshot: &Snapshot,
-                         record: &mut Vec<Ran>,
-                         found: &mut Vec<P::Row>,
-                         queue: &mut VecDeque<P::Section>,
-                         driver: Driver|
-         -> Result<(), StoreError> {
-            while found.len() < rows
-                && let Some(section) = queue.pop_front()
-            {
-                let more =
-                    paged.read(snapshot, record, &section, driver, None, rows - found.len())?;
-                found.extend(more);
-            }
-            Ok(())
-        };
         let settled = match settled.or_else(|| settled_driver(parts, descending)) {
             Some(driver) => {
-                read_rest(self, &mut lookups.ran, &mut found, &mut queue, driver)?;
+                self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
                 Some(driver)
             }
             // A page with no section to read asks nothing.
@@ -227,54 +212,10 @@ impl Snapshot {
             // from what it matched before anything is walked.
             None if let Some(at) = self.first_within(parts, scale, lookups)? => {
                 let driver = Driver::Matched(at);
-                read_rest(self, &mut lookups.ran, &mut found, &mut queue, driver)?;
+                self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
                 Some(driver)
             }
-            None => {
-                let mut budget = scale.saturating_mul(MATCHED_DRIVE_FACTOR).max(1);
-                let mut ceiling: Option<usize> = None;
-                loop {
-                    let Some(section) = queue.front().cloned() else {
-                        break None;
-                    };
-                    let end = paged.window(self, &mut lookups.ran, &section, budget - 1)?;
-                    let walked = paged.read(
-                        self,
-                        &mut lookups.ran,
-                        &section,
-                        Driver::Walked,
-                        end.as_ref(),
-                        rows - found.len(),
-                    )?;
-                    found.extend(walked);
-                    if found.len() >= rows {
-                        break None;
-                    }
-                    let Some(end) = end else {
-                        // The section ended inside the window, so the walk
-                        // read all of it: the next one starts a window of
-                        // its own.
-                        queue.pop_front();
-                        continue;
-                    };
-                    queue[0] = paged.resumed(&section, &end);
-                    let ceiling = match ceiling {
-                        Some(ceiling) => ceiling,
-                        None => *ceiling.insert(self.drive_ceiling(scale, lookups)?),
-                    };
-                    let cap = budget.min(ceiling);
-                    let driver = match self.first_within(parts, cap, lookups)? {
-                        Some(at) => Driver::Matched(at),
-                        None if cap >= ceiling => Driver::Walked,
-                        None => {
-                            budget = budget.saturating_mul(2).min(ceiling);
-                            continue;
-                        }
-                    };
-                    read_rest(self, &mut lookups.ran, &mut found, &mut queue, driver)?;
-                    break Some(driver);
-                }
-            }
+            None => self.walk_rounds(paged, parts, scale, rows, &mut found, &mut queue, lookups)?,
         };
         let mut stepped = Stepped::default();
         for ran in &lookups.ran[ran_before..] {
@@ -285,6 +226,91 @@ impl Snapshot {
             settled,
             stepped,
         })
+    }
+
+    /// `found` filled to `rows` from the sections `queue` holds, each read
+    /// whole by `driver`, as a page reads its sections ([`fill_from`]).
+    fn read_rest<P: Paged>(
+        &self,
+        paged: &P,
+        rows: usize,
+        driver: Driver,
+        found: &mut Vec<P::Row>,
+        queue: &mut VecDeque<P::Section>,
+        lookups: &mut Lookups,
+    ) -> Result<(), StoreError> {
+        fill_from(
+            queue.drain(..),
+            rows,
+            found,
+            &mut lookups.ran,
+            |record, section, room| paged.read(self, record, &section, driver, None, room),
+        )?;
+        Ok(())
+    }
+
+    /// `found` filled to `rows` from the sections `queue` holds by a walk in
+    /// rounds, for a page of `scale` rows no part drove before it walked:
+    /// each round walks at most its budget past where the last stopped, and
+    /// where that leaves the page short, asks `parts` whether one keeps at
+    /// most the budget; the first that does drives the rest of the page, and
+    /// otherwise the budget doubles, to the ceiling, where the page walks on.
+    /// The driver the page settled on, and `None` where it filled, or read
+    /// every section, within a round.
+    #[allow(clippy::too_many_arguments)] // One walk's every input, each named at its call.
+    fn walk_rounds<P: Paged>(
+        &self,
+        paged: &P,
+        parts: &[&Filter],
+        scale: usize,
+        rows: usize,
+        found: &mut Vec<P::Row>,
+        queue: &mut VecDeque<P::Section>,
+        lookups: &mut Lookups,
+    ) -> Result<Option<Driver>, StoreError> {
+        let mut budget = scale.saturating_mul(MATCHED_DRIVE_FACTOR).max(1);
+        // The ceiling, once a round has read the vault's span.
+        let mut known_ceiling: Option<usize> = None;
+        loop {
+            let Some(section) = queue.front().cloned() else {
+                return Ok(None);
+            };
+            let end = paged.window(self, &mut lookups.ran, &section, budget - 1)?;
+            let walked = paged.read(
+                self,
+                &mut lookups.ran,
+                &section,
+                Driver::Walked,
+                end.as_ref(),
+                rows - found.len(),
+            )?;
+            found.extend(walked);
+            if found.len() >= rows {
+                return Ok(None);
+            }
+            let Some(end) = end else {
+                // The section ended inside the window, so the walk read all
+                // of it: the next one starts a window of its own.
+                queue.pop_front();
+                continue;
+            };
+            queue[0] = paged.resumed(&section, &end);
+            let ceiling = match known_ceiling {
+                Some(ceiling) => ceiling,
+                None => *known_ceiling.insert(self.drive_ceiling(scale, lookups)?),
+            };
+            let cap = budget.min(ceiling);
+            let driver = match self.first_within(parts, cap, lookups)? {
+                Some(at) => Driver::Matched(at),
+                None if cap >= ceiling => Driver::Walked,
+                None => {
+                    budget = budget.saturating_mul(2).min(ceiling);
+                    continue;
+                }
+            };
+            self.read_rest(paged, rows, driver, found, queue, lookups)?;
+            return Ok(Some(driver));
+        }
     }
 
     /// The first of `parts` that keeps what it seeks and keeps at most `cap`

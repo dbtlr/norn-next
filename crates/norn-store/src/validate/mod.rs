@@ -557,7 +557,7 @@ impl Snapshot {
             driver: None,
             rows: 0,
             until: None,
-            offset: 0,
+            window: None,
         });
         let summary = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let read = self
@@ -660,7 +660,9 @@ impl<'n> FindingPages<'n> {
         }
     }
 
-    /// `section`'s statement over `filters`, run, its findings read by `read`.
+    /// `section`'s statement over `filters`, run, its findings read by `read`:
+    /// a page, or where `window` names an offset, the finding that far past
+    /// the section's place where a walk's window ends.
     #[allow(clippy::too_many_arguments)] // One statement's every input, each named at its call.
     fn run(
         &self,
@@ -671,7 +673,7 @@ impl<'n> FindingPages<'n> {
         driver: Driver,
         until: Option<&FindingBase>,
         rows: usize,
-        offset: usize,
+        window: Option<usize>,
     ) -> Result<Vec<FindingBase>, StoreError> {
         let one_kind = [section.0];
         let merged = self.statement == ValidateStatement::MergedPage;
@@ -694,7 +696,7 @@ impl<'n> FindingPages<'n> {
             driver: Some(driver),
             rows,
             until: until.map(|row| (row.path.as_str(), row.position(), row.id)),
-            offset,
+            window,
         });
         let shapes = filters.iter().map(Filter::shape).collect();
         let ran = Ran::new(self.statement, composed).narrowed_by(shapes);
@@ -727,7 +729,9 @@ impl Paged for FindingPages<'_> {
         rows: usize,
     ) -> Result<Vec<FindingBase>, StoreError> {
         let filters = &self.narrowing.conjunction.filters;
-        self.run(snapshot, record, section, filters, driver, until, rows, 0)
+        self.run(
+            snapshot, record, section, filters, driver, until, rows, None,
+        )
     }
 
     fn window(
@@ -747,7 +751,7 @@ impl Paged for FindingPages<'_> {
                 Driver::Walked,
                 None,
                 1,
-                offset,
+                Some(offset),
             )?
             .into_iter()
             .next())

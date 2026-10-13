@@ -364,7 +364,7 @@ impl Snapshot {
             driver: Some(Driver::Walked),
             rows: 0,
             until: None,
-            offset: 0,
+            window: None,
         });
         let tail = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let found: Vec<FindingBase> = self

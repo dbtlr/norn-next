@@ -206,10 +206,11 @@ pub(crate) struct Findings<'a> {
     /// inclusive: the end of the walk's window
     /// ([`crate::read::Paged::window`]), or `None` where it reads to its end.
     pub(crate) until: Option<(&'a str, i64, i64)>,
-    /// The findings a page passes before the first it hands back: zero for a
-    /// page, and the window's length less one where the page, narrowed by no
-    /// document part, names where a walk's window ends.
-    pub(crate) offset: usize,
+    /// Where the read names where a walk's window ends rather than reads a
+    /// page: the findings it passes before the one it hands back, the
+    /// window's length less one, narrowed by no document part, handing back
+    /// no link. `None` for a page, a summary and a document's tail.
+    pub(crate) window: Option<usize>,
 }
 
 impl Findings<'_> {
@@ -374,9 +375,9 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
         let limit = binder.bind(Value::Integer(
             i64::try_from(findings.rows).expect("a page's row count fits i64"),
         ));
-        match findings.offset {
-            0 => limit,
-            offset => format!(
+        match findings.window {
+            None => limit,
+            Some(offset) => format!(
                 "{limit} OFFSET {}",
                 binder.bind(Value::Integer(
                     i64::try_from(offset).expect("a window's length fits i64")
@@ -779,7 +780,7 @@ fn compose_arm(
         format!("FROM {table} AS {seek}{reached}")
     };
     // A walk's window hands back where it ends and no link, so it joins none.
-    let window = findings.offset > 0;
+    let window = findings.window.is_some();
     let from = match statement {
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail if !window => {
             format!("{from}{MERGE_LINK_JOINS}")
