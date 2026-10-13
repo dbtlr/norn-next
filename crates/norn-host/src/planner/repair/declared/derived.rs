@@ -16,11 +16,14 @@
 //!   list holding a scalar is set to the one-item list of that scalar, its
 //!   YAML type kept; a field declared single holding a one-item list is set
 //!   to that item. A list of any other length under single has no derived
-//!   fix. Where the judge refuses the plain reshape, the element fixes it
-//!   exposes compose with it as one addition, at their weakest confidence
-//!   and with their notes. An exposed element's skipped proposal is the shape
-//!   finding's skip, with its reason and decision data; any exposed link
-//!   type mismatch waits for the settled routes to decide it.
+//!   fix. Where the plain reshape is refused only for the element findings
+//!   it exposes or the required fields it brings in, the element fixes it
+//!   exposes compose with it as one addition, judged afresh, at their
+//!   weakest confidence and with their notes. An exposed element's skipped
+//!   proposal is the shape finding's skip, with its reason and decision
+//!   data, save that a reshape bringing in required fields keeps that skip;
+//!   any exposed link type mismatch waits for the settled routes to decide
+//!   it. A reshape introducing any other violation keeps its refusal.
 //! - **Unquoted wikilinks** on link fields answer exactly `[["s"]]`, YAML's
 //!   reading of `[[s]]`, where the text layer reads one whole wikilink.
 //!   Obsidian's frontmatter link is a quoted string: a non-list field's whole
@@ -172,8 +175,9 @@ pub(super) enum Reshaping {
 }
 
 /// The shape fix of `row`, composed with every exposed element fix where
-/// the judge refuses the plain reshape; a plain reshape bringing in required
-/// fields keeps that skip. A bare link answer waits for `links`.
+/// the plain reshape is refused for those elements or for the required
+/// fields it brings in; a reshape bringing in required fields keeps that skip
+/// where its elements do not compose. A bare link answer waits for `links`.
 pub(super) fn reshape(
     document: &Document<'_>,
     state: &State,
@@ -244,13 +248,22 @@ pub(super) fn reshape(
         }
         Err(skip) => skip,
     };
-    // Only a reshape the judge refuses is answered by the elements it
-    // exposes; one bringing in required fields keeps that refusal.
-    if refused.reason != SkipReason::JudgeWouldRefuse {
+    // Only a reshape refused for the elements it exposes, or for the
+    // required fields it brings in, composes with them: any other violation
+    // it introduces keeps the plain refusal.
+    if introduced.iter().any(|violation| {
+        violation.kind != FindingKind::RequiredMissing
+            && !(violation.target.as_deref() == Some(field) && elements::is_exposed(violation.kind))
+    }) {
         return Err(refused);
     }
+    // A composed value is judged afresh, so it reports the required fields it
+    // brings in itself; where nothing composes, the plain reshape's
+    // `brings_in_required_fields` stands over its element's skip.
+    let bringing_in = refused.reason == SkipReason::BringsInRequiredFields;
     match elements::after_reshape(document, &exposed, row, field, &reshaped, links) {
         elements::Reshaped::Unanswered => Err(refused),
+        elements::Reshaped::Skipped(_) if bringing_in => Err(refused),
         elements::Reshaped::Skipped(skip) => Err(skip),
         elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
         elements::Reshaped::Replaced(replacement) => {

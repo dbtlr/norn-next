@@ -3890,6 +3890,54 @@ mod tests {
         assert_eq!(skipped.required_fields, Some(fields));
     }
 
+    /// **A wrap bringing in required fields composes with the element fix it
+    /// exposes, judged afresh**: `kind: [complete]` selects the rule
+    /// requiring `status`, but the synonym makes it `[done]`, which selects
+    /// none, so the combined change stands with no skip.
+    #[test]
+    fn a_wrap_bringing_in_required_fields_composes_where_its_element_fix_brings_in_none() {
+        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  legacy:\n    match: {frontmatter: {kind: complete}}\n    required:\n      status: {default: todo}\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [done, todo], synonyms: {complete: done}}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\nkind: complete\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "kind",
+            &AuthoredValue::string("complete"),
+        )]);
+
+        assert_eq!(
+            planned.operations,
+            vec![set_to(1, "a.md", "kind", list(&["done"]))]
+        );
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// **A wrap refused for a violation other than its exposed elements keeps
+    /// `judge_would_refuse`**: `kind: [task]` brings `draft` under the rule
+    /// forbidding it, so the tie `task` folding to `Task` and `TASK` is not
+    /// the shape finding's skip.
+    #[test]
+    fn a_wrap_introducing_another_violation_keeps_judge_would_refuse_over_its_elements_tie() {
+        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    forbidden:\n      draft:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [Task, TASK]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\nkind: task\ndraft: x\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "kind",
+            &AuthoredValue::string("task"),
+        )]);
+
+        assert!(planned.operations.is_empty());
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
+        };
+        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
+    }
+
     const TYPE_MISMATCH: FindingKind = FindingKind::TypeMismatch;
 
     const FLAGS: &str =

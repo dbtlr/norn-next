@@ -2879,8 +2879,9 @@ holds none. A list's boolean or
 closed-set elements are fixed one by one into the same single `set_frontmatter` of the whole
 list as its synonyms are. Every derived fix is composed and judged on the composed state as a
 declared one is, so a wrap that brings in required fields is `brings_in_required_fields`.
-A plain wrap or unwrap the judge admits stands alone. Otherwise it composes with the field's
-own element fixes for the violations the reshape exposes — boolean case, a closed-set
+A plain wrap or unwrap the judge admits stands alone. One refused only for the violations it
+exposes in the field's elements or for the required fields it brings in composes with the
+field's own element fixes for the violations the reshape exposes — boolean case, a closed-set
 synonym or fold, or a bare value made a link — as one `set_frontmatter`, judged once from
 the state the shape fix composes onto. The combined change cites the shape finding at the
 weaker confidence of the shape and every element fix, carrying the element fixes' notes.
@@ -2889,11 +2890,13 @@ one below the threshold is `below_threshold` with the combined operation as `pro
 Where an exposed element has no answer or its fix skips, the shape finding carries that
 skip's reason and decision data: `ambiguous_link` with its documents, `no_declared_fix` with
 its note where it has one, a tie with its candidates, or an excluded class with its note.
-The skip keeps the shape finding's id and value. `judge_would_refuse` remains where the
-change itself is refused, including a combined value the judge or respell veto refuses;
-a plain reshape refused for another reason or whose element cannot be matched keeps that
-refusal. An exposed link-field type mismatch composes in the link phase with its respell
-veto, after the batch's routes settle;
+The skip keeps the shape finding's id and value. A reshape bringing in required fields keeps
+`brings_in_required_fields` where its elements do not compose; a combined value is judged
+afresh, so it brings in only the required fields its own value selects.
+`judge_would_refuse` remains where the change itself is refused, including a combined value
+the judge or respell veto refuses; a plain reshape introducing any other violation, or whose
+element cannot be matched, keeps that refusal. An exposed link-field type mismatch composes
+in the link phase with its respell veto, after the batch's routes settle;
 a plain link wrap or unwrap the judge admits keeps its place in finding order.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is

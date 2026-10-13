@@ -313,6 +313,15 @@ fn named_element<'v>(
         .find(|element| matches_element(element, schema, field, offending))
 }
 
+/// Whether a finding of `kind` on a reshaped field is one of the element
+/// findings a reshape exposes.
+pub(super) fn is_exposed(kind: FindingKind) -> bool {
+    matches!(
+        kind,
+        FindingKind::TypeMismatch | FindingKind::NotOneOf | FindingKind::TooLong
+    )
+}
+
 /// What the element fixes exposed by a reshape can answer together.
 pub(super) enum Reshaped {
     Unanswered,
@@ -337,13 +346,11 @@ pub(super) fn after_reshape(
     let mut notes = Vec::new();
     let mut folds = derived::FoldCache::default();
     let mut any = false;
-    for held in state.holds.iter().filter(|held| {
-        held.field.as_deref() == Some(field)
-            && matches!(
-                held.kind,
-                FindingKind::TypeMismatch | FindingKind::NotOneOf | FindingKind::TooLong
-            )
-    }) {
+    for held in state
+        .holds
+        .iter()
+        .filter(|held| held.field.as_deref() == Some(field) && is_exposed(held.kind))
+    {
         let Some(text) = held.value.as_deref() else {
             return Reshaped::Unanswered;
         };
