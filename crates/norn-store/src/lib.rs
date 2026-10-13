@@ -14,9 +14,14 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed, save one rule [ADR 0027] rules into it: link health,
-//! judged in SQL and filed inside every changeset
-//! ([`Request::apply_increment`]). It takes
+//! query is composed, save two exceptions. One is the rule [ADR 0027] rules
+//! into it: link health, judged in SQL and filed inside every changeset
+//! ([`Request::apply_increment`]). The other is the similarity measure
+//! ([`similarity`]): the stem fold, the padded trigram set, the Jaccard score,
+//! its cutoff and the least shared count the cutoff implies. The stem trigram
+//! index is written by it and the repair planner scores by it, so it lives in
+//! one module beside the index, and the two cannot disagree about what a
+//! trigram is. The store takes
 //! **typed facts rather than documents**: parsing is orchestration's job, so
 //! nothing here reads document text.
 //!
@@ -74,6 +79,11 @@
 //! - [`Snapshot::held_links`] — the links one document holds, as derived,
 //!   beside the content hash they were derived from, read by its path
 //!   without its body. [`Snapshot::held_links_plans`] explains what it ran.
+//! - [`Snapshot::similar_stems`] — the documents whose stems may reach the
+//!   similarity cutoff against a query stem, retrieved through the stem
+//!   trigram index's rarest query trigrams under a postings cap, with the
+//!   counts a score is computed from, or too common past the cap.
+//!   [`Snapshot::similar_stems_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -106,6 +116,7 @@
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
+pub mod similarity;
 
 mod anchor;
 mod count;
@@ -178,7 +189,8 @@ pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
 pub use read::{
     DEFAULT_PAGE, FieldMatch, FieldOrder, FindingLink, IN_VALUES_CEILING, MATCHED_DRIVE_FACTOR,
     MERGED_SOURCE_VALUES, MatchedColumn, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement, TargetAmbiguity, page_limit,
+    ReadStatement, SimilarStems, SimilarStemsPlan, SimilarStemsWork, StemCandidate, StemMatches,
+    TargetAmbiguity, page_limit,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

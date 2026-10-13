@@ -407,6 +407,7 @@ pub(crate) fn apply(
     counters.add(Counter::BlockRowsWritten, tally.block_rows);
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
     counters.add(Counter::FieldRowsWritten, tally.field_rows);
+    counters.add(Counter::TrigramRowsWritten, tally.trigram_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
     tally.findings_discarded += redecided.discarded;
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
@@ -448,6 +449,7 @@ struct Tally {
     block_rows: u64,
     tag_rows: u64,
     field_rows: u64,
+    trigram_rows: u64,
     projections: u64,
     findings_discarded: u64,
     affected_classes: BTreeSet<ClassKey>,
@@ -470,6 +472,7 @@ struct Statements<'t> {
     insert_block: CachedStatement<'t>,
     insert_tag: CachedStatement<'t>,
     insert_field: CachedStatement<'t>,
+    insert_stem_trigram: CachedStatement<'t>,
     delete_document: CachedStatement<'t>,
     record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
@@ -545,6 +548,10 @@ impl<'t> Statements<'t> {
             insert_block: registered(WriteStatement::InsertBlock, "preparing a block write")?,
             insert_tag: registered(WriteStatement::InsertTag, "preparing a tag write")?,
             insert_field: registered(WriteStatement::InsertField, "preparing a field write")?,
+            insert_stem_trigram: registered(
+                WriteStatement::InsertStemTrigram,
+                "preparing a stem trigram write",
+            )?,
             delete_document: registered(
                 WriteStatement::DeleteDocument,
                 "preparing a document delete",
@@ -598,6 +605,12 @@ fn upsert(
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
+    // Path is row identity: an edit at a standing path changes no stem.
+    let stood: bool = statements
+        .row_at
+        .query_row(params![facts.path.as_str()], |row| row.get(0))
+        .map_err(|error| error::sql("probing a document row", error))?;
+
     let document: i64 = statements
         .upsert_document
         .query_row(
@@ -620,6 +633,16 @@ fn upsert(
             |row| row.get(0),
         )
         .map_err(|error| error::sql("writing a document row", error))?;
+
+    if !stood {
+        for trigram in crate::similarity::trigrams(facts.path.stem()) {
+            tally.trigram_rows += statements
+                .insert_stem_trigram
+                .execute(params![trigram, document])
+                .map_err(|error| error::sql("writing a stem trigram", error))?
+                as u64;
+        }
+    }
 
     for statement in &mut statements.discard_facts {
         tally.fact_rows_discarded += statement

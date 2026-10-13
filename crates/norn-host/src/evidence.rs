@@ -806,6 +806,26 @@ pub(crate) fn clock_reads_of<T>(run: impl FnOnce() -> T) -> (T, u64) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_similar_stems_read_reaches_the_account_and_its_window() {
+        let evidence = ReadEvidence::default();
+        let cost = SimilarStemsCost::of(&norn_store::SimilarStemsWork {
+            rarity_rows_read: 17,
+            postings_rows_read: 9,
+        });
+        evidence.count_similar_stems(cost);
+        let earlier = evidence.read();
+        evidence.count_similar_stems(cost);
+        assert_eq!(
+            evidence.read().since(earlier).similar_stems,
+            SimilarStemsCost {
+                reads: 1,
+                rarity_rows_read: 17,
+                postings_rows_read: 9,
+            }
+        );
+    }
+
     fn outcome() -> IncrementOutcome {
         IncrementOutcome {
             generation: Some(1),
@@ -1079,6 +1099,7 @@ pub(crate) struct ReadEvidence {
     settle_expiries: AtomicU64,
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
+    similar_stems: SimilarStemsAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
 }
@@ -1243,6 +1264,8 @@ pub struct ReadReading {
     /// What the batch reads of the repairs this host planned reported of
     /// themselves, over every repair.
     pub repair_batches: RepairBatchCost,
+    /// Work reported by similarity candidate reads.
+    pub similar_stems: SimilarStemsCost,
     /// What the read holds this host planned on ran on their snapshots, over
     /// every preview and repair.
     pub planning_holds: PlanningHoldCost,
@@ -1295,6 +1318,8 @@ pub struct ReadsSince {
     pub preview_link_judgments: LinkJudgmentCost,
     /// What this window's batch reads reported of themselves.
     pub repair_batches: RepairBatchCost,
+    /// Work reported by similarity candidate reads.
+    pub similar_stems: SimilarStemsCost,
     /// What this window's planning holds ran on their snapshots.
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
@@ -1329,6 +1354,7 @@ impl ReadReading {
                 .preview_link_judgments
                 .since(earlier.preview_link_judgments),
             repair_batches: self.repair_batches.since(earlier.repair_batches),
+            similar_stems: self.similar_stems.since(earlier.similar_stems),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
         }
@@ -1358,6 +1384,7 @@ impl ReadEvidence {
             settle_expiries: get(&self.settle_expiries),
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
+            similar_stems: self.similar_stems.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
         }
@@ -1373,6 +1400,19 @@ impl ReadEvidence {
     /// read answered.
     pub(crate) fn count_repair_batch(&self, cost: RepairBatchCost) {
         self.repair_batches.add(cost);
+    }
+
+    /// Count a similarity read from NORN-400's repair planning hold. No caller
+    /// reaches this dormant carrier until the broken-link suggestion lands.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "NORN-400 will count its similarity reads from the planning hold"
+        )
+    )]
+    pub(crate) fn count_similar_stems(&self, cost: SimilarStemsCost) {
+        self.similar_stems.add(cost);
     }
 
     /// Record what one planning hold ran on its snapshot, where the hold is
@@ -1759,6 +1799,73 @@ impl RepairBatchAccount {
             validate_full_scan_steps: get(&self.validate_full_scan_steps),
             validate_sorts: get(&self.validate_sorts),
             validate_vm_steps: get(&self.validate_vm_steps),
+        }
+    }
+}
+
+/// Logical rows spent retrieving similarity candidates, summed across reads.
+/// NORN-400's broken-link similarity suggestion will report these from its
+/// planning hold; no production caller reaches the account's writer yet.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SimilarStemsCost {
+    pub reads: u64,
+    pub rarity_rows_read: u64,
+    pub postings_rows_read: u64,
+}
+
+impl SimilarStemsCost {
+    /// One read's logical work, including a TooCommon answer.
+    pub fn of(work: &norn_store::SimilarStemsWork) -> Self {
+        Self {
+            reads: 1,
+            rarity_rows_read: work.rarity_rows_read,
+            postings_rows_read: work.postings_rows_read,
+        }
+    }
+
+    /// Work spent between an earlier total and this one.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            reads: self.reads.saturating_sub(earlier.reads),
+            rarity_rows_read: self
+                .rarity_rows_read
+                .saturating_sub(earlier.rarity_rows_read),
+            postings_rows_read: self
+                .postings_rows_read
+                .saturating_sub(earlier.postings_rows_read),
+        }
+    }
+}
+
+/// A running account whose counters can be added to from any planning thread.
+#[derive(Debug, Default)]
+struct SimilarStemsAccount {
+    reads: AtomicU64,
+    rarity_rows_read: AtomicU64,
+    postings_rows_read: AtomicU64,
+}
+
+impl SimilarStemsAccount {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "NORN-400 will write the similarity account")
+    )]
+    fn add(&self, cost: SimilarStemsCost) {
+        for (field, value) in [
+            (&self.reads, cost.reads),
+            (&self.rarity_rows_read, cost.rarity_rows_read),
+            (&self.postings_rows_read, cost.postings_rows_read),
+        ] {
+            field.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> SimilarStemsCost {
+        SimilarStemsCost {
+            reads: self.reads.load(Ordering::Relaxed),
+            rarity_rows_read: self.rarity_rows_read.load(Ordering::Relaxed),
+            postings_rows_read: self.postings_rows_read.load(Ordering::Relaxed),
         }
     }
 }

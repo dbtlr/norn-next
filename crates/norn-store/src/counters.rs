@@ -87,6 +87,7 @@ pub(crate) enum Counter {
     BlockRowsWritten,
     TagRowsWritten,
     FieldRowsWritten,
+    TrigramRowsWritten,
     FactRowsDiscarded,
     /// Frontmatter value trees written as canonical JSON. **Storage encoding,
     /// not derivation** — see this module's Composed bar.
@@ -119,6 +120,7 @@ impl Counter {
         Counter::BlockRowsWritten,
         Counter::TagRowsWritten,
         Counter::FieldRowsWritten,
+        Counter::TrigramRowsWritten,
         Counter::FactRowsDiscarded,
         Counter::FrontmatterProjections,
         Counter::TombstonesRecorded,
@@ -142,6 +144,7 @@ impl Counter {
             Counter::BlockRowsWritten => "block_rows_written",
             Counter::TagRowsWritten => "tag_rows_written",
             Counter::FieldRowsWritten => "field_rows_written",
+            Counter::TrigramRowsWritten => "trigram_rows_written",
             Counter::FactRowsDiscarded => "fact_rows_discarded",
             Counter::FrontmatterProjections => "frontmatter_projections",
             Counter::TombstonesRecorded => "tombstones_recorded",

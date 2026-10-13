@@ -118,6 +118,7 @@ pub struct StoreProjection {
     documents: Vec<ProjectedDocument>,
     findings: Vec<ProjectedFinding>,
     terms: Vec<IndexedTerm>,
+    trigrams: Vec<(DocumentPath, String)>,
     vault_schema: Option<ProjectedSchema>,
     /// Every rule set the store holds, by the fingerprint it is held under and
     /// its names, in that order.
@@ -215,6 +216,7 @@ pub struct Population {
     pub facts: usize,
     pub findings: usize,
     pub indexed_terms: usize,
+    pub indexed_trigrams: usize,
     pub vault_schema_pinned: bool,
 }
 
@@ -225,6 +227,7 @@ impl Population {
         self.documents == 0
             && self.findings == 0
             && self.indexed_terms == 0
+            && self.indexed_trigrams == 0
             && !self.vault_schema_pinned
     }
 }
@@ -233,11 +236,12 @@ impl std::fmt::Display for Population {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} documents, {} derived fact rows, {} findings, {} indexed terms, {}",
+            "{} documents, {} derived fact rows, {} findings, {} indexed terms, {} indexed trigrams, {}",
             self.documents,
             self.facts,
             self.findings,
             self.indexed_terms,
+            self.indexed_trigrams,
             if self.vault_schema_pinned {
                 "a pinned vault schema"
             } else {
@@ -331,6 +335,7 @@ impl StoreProjection {
             documents: Vec::new(),
             findings: Vec::new(),
             terms: Vec::new(),
+            trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
         };
@@ -440,6 +445,14 @@ impl StoreProjection {
             projection.terms.extend(page);
         }
 
+        let mut trigram = None;
+        loop {
+            let page = request.indexed_trigrams_after(trigram.as_ref(), PAGE)?;
+            let Some(last) = page.last() else { break };
+            trigram = Some(last.clone());
+            projection.trigrams.extend(page);
+        }
+
         let mut after = None;
         loop {
             let page = request.stored_rule_sets_after(after, PAGE)?;
@@ -469,6 +482,11 @@ impl StoreProjection {
     /// [`DerivedRows`] holds.
     pub fn findings(&self) -> &[ProjectedFinding] {
         &self.findings
+    }
+
+    /// The stem index's rows in document-path and trigram order.
+    pub fn indexed_trigrams(&self) -> &[(DocumentPath, String)] {
+        &self.trigrams
     }
 
     pub fn indexed_terms(&self) -> &[IndexedTerm] {
@@ -505,6 +523,7 @@ impl StoreProjection {
                 .sum(),
             findings: self.findings.len(),
             indexed_terms: self.terms.len(),
+            indexed_trigrams: self.trigrams.len(),
             vault_schema_pinned: self.vault_schema.is_some(),
         }
     }
@@ -561,6 +580,11 @@ impl StoreProjection {
             ("derived fact rows", held.facts, floor.facts),
             ("findings", held.findings, floor.findings),
             ("indexed terms", held.indexed_terms, floor.indexed_terms),
+            (
+                "indexed trigrams",
+                held.indexed_trigrams,
+                floor.indexed_trigrams,
+            ),
         ]
         .into_iter()
         .find(|(_, held, floor)| held < floor);
@@ -671,6 +695,12 @@ impl StoreProjection {
                 entries.push((format!("{at}.rule[{index}]"), quoted(rule)));
             }
             *ordinal += 1;
+        }
+        for (path, trigram) in &self.trigrams {
+            entries.push((
+                format!("indexed trigram[{}][{}]", path.as_str(), quoted(trigram)),
+                "present".to_string(),
+            ));
         }
         for term in &self.terms {
             // The columns the full-text vocabulary reports a term's counts in.
@@ -1473,6 +1503,7 @@ mod tests {
                 documents: 1,
                 occurrences: 1,
             }],
+            trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
         }

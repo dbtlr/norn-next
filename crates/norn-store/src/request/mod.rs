@@ -1186,6 +1186,39 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next page of indexed stem trigrams, in (document path, trigram)
+    /// order. This drains the projection itself, so equivalence compares what
+    /// is indexed rather than what recomputing the document paths would yield.
+    /// `after` is exclusive; neither row identities nor insertion order enter
+    /// the comparison of two stores derived by different changesets.
+    pub fn indexed_trigrams_after(
+        &self,
+        after: Option<&(DocumentPath, String)>,
+        limit: usize,
+    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "an indexed-trigram page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            INDEXED_TRIGRAM_PAGE_SQL,
+            params![
+                after.map(|row| row.0.as_str()),
+                after.map(|row| row.1.as_str()),
+                limit as i64
+            ],
+            |row| {
+                let path: String = row.get(0)?;
+                let trigram: String = row.get(1)?;
+                Ok(DocumentPath::new(&path).map(|path| (path, trigram)))
+            },
+            "reading the indexed-trigram page",
+        )
+    }
+
     /// The last write generation committed to this store.
     ///
     /// Every write that takes a generation moves it, whether or not the write
@@ -2618,6 +2651,14 @@ const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key, a
              WHERE path > COALESCE(?1, '')
              ORDER BY path
              LIMIT ?2";
+
+/// The projection's page order follows paths first and each document's
+/// trigram index second. The paired cursor is the seek's floor, so a later
+/// page reaches its first path without reading the paths already drained.
+const INDEXED_TRIGRAM_PAGE_SQL: &str = "SELECT d.path, t.trigram
+    FROM documents AS d JOIN document_trigrams AS t ON t.document = d.id
+    WHERE (d.path, t.trigram) > (COALESCE(?1, ''), COALESCE(?2, ''))
+    ORDER BY d.path, t.trigram LIMIT ?3";
 
 /// The statement [`Request::indexed_terms_after`] emits.
 ///

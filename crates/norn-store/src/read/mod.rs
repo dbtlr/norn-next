@@ -33,7 +33,9 @@ mod naming;
 mod page;
 mod reading;
 mod run;
+mod stems;
 mod suggest;
+pub use stems::{SimilarStems, SimilarStemsPlan, SimilarStemsWork, StemCandidate, StemMatches};
 
 use norn_wire::{
     AnswerShape, CandidateHead, CollectionSelector, Cursor, CursorOrderChanged, Direction, Hint,
@@ -221,6 +223,10 @@ impl FieldMatch {
 /// stays its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStatement {
+    /// A bounded cap+1 probe of one query trigram's postings.
+    StemRarity,
+    /// The selected trigram's postings, joined to document paths.
+    StemPostings,
     /// A statement [`FindStatement`] names.
     Find(FindStatement),
     /// A statement [`CountStatement`] names.

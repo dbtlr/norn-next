@@ -38,16 +38,17 @@ use crate::write_path::WriteStatement;
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
     DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
-    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
-    RuleSetCursor, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder,
-    SubjectScope, SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
-    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
-    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
-    finding_page_sql, finding_paths_sql, finding_rules_sql, finding_subject_parameters,
-    finding_subjects_sql, findings_in_class_sql, folded_value_discard_sql, probe_parameters,
-    rule_set_page_parameters, rule_set_page_sql, stored_document_sql, stored_facts_document_sql,
-    stored_findings_sql, subject_discard_parameters, subject_discard_sql, suffix_candidates_sql,
-    text_page_parameters, tombstone_feed_sql,
+    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, INDEXED_TRIGRAM_PAGE_SQL, MAX_PAGE,
+    PATH_DISCARD_SQL, PathKey, Request, RuleSetCursor, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL,
+    StoreError, StoredPathOrder, SubjectScope, SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL,
+    TYPED_VALUE_DISCARD_SQL, TargetClass, document_feed_sql, document_page_parameters,
+    document_page_sql, feed_page_parameters, finding_candidates_sql, finding_classes_sql,
+    finding_id_parameters, finding_page_parameters, finding_page_sql, finding_paths_sql,
+    finding_rules_sql, finding_subject_parameters, finding_subjects_sql, findings_in_class_sql,
+    folded_value_discard_sql, probe_parameters, rule_set_page_parameters, rule_set_page_sql,
+    stored_document_sql, stored_facts_document_sql, stored_findings_sql,
+    subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
+    tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -140,6 +141,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredTombstonePage => TOMBSTONE_PAGE_SQL.to_string(),
             ExplainedStatement::StoredSuffixKeyPage => SUFFIX_KEY_PAGE_SQL.to_string(),
             ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
+            ExplainedStatement::IndexedTrigramPage => INDEXED_TRIGRAM_PAGE_SQL.to_string(),
             ExplainedStatement::DocumentFeedPage => document_feed_sql(),
             ExplainedStatement::TombstoneFeedPage => tombstone_feed_sql(),
             ExplainedStatement::StoredDocument(_) => stored_document_sql(),
@@ -242,6 +244,14 @@ impl<'a> Request<'a> {
                     )),
                 )
             }
+            ExplainedStatement::IndexedTrigramPage => database.emitted_plan(
+                &sql,
+                params![
+                    EXPLAINED_PAGE_CURSOR_LEAF,
+                    EXPLAINED_TERM_CURSOR,
+                    MAX_PAGE as i64
+                ],
+            ),
             ExplainedStatement::IndexedTermPage => database.emitted_plan(
                 &sql,
                 params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
@@ -507,6 +517,8 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::indexed_terms_after`], the page a caller drains the full-text
     /// index's own vocabulary through.
     IndexedTermPage,
+    /// [`Request::indexed_trigrams_after`], the path-ordered stem index drain.
+    IndexedTrigramPage,
     /// [`Request::changed_documents_after`], the generation-ordered walk a
     /// lane-2 consumer reads live document rows through.
     DocumentFeedPage,
@@ -652,7 +664,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 44;
+pub const STATEMENTS: usize = 45;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -729,6 +741,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredRuleSetPage,
             Self::FindingRules(ids),
             Self::FoldedValueDiscard,
+            Self::IndexedTrigramPage,
         ]
     }
 
@@ -785,6 +798,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredRuleSetPage => 41,
             Self::FindingRules(_) => 42,
             Self::FoldedValueDiscard => 43,
+            Self::IndexedTrigramPage => 44,
         };
         assert!(
             slot < STATEMENTS,
@@ -849,6 +863,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::StoredFindingPage
             | Self::StoredTombstonePage
             | Self::StoredSuffixKeyPage
+            | Self::IndexedTrigramPage
             | Self::IndexedTermPage
             | Self::DocumentFeedPage
             | Self::TombstoneFeedPage

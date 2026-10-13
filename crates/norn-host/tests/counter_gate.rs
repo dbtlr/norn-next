@@ -52,7 +52,9 @@
 //!   among them. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together. Every read pair has a control that
 //!   grows with the vault, run at the same two attachments, and each control
-//!   must read more at the larger scale on the counts it names. A plan's
+//!   must read more at the larger scale on the counts it names. The similar-stems
+//!   pair reads planted stems whose trigrams no generated stem carries, beside
+//!   a generated stem control whose rarity rows grow with the vault. A plan's
 //!   links are held the same way: judging the links a hub's delete reaches,
 //!   and generating the cascade a hub's move plans, each cost the hub's
 //!   in-links at both scales. A hub's write and the judgment of its delete
@@ -5742,4 +5744,103 @@ fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_ga
         "with the overlap removed the bar must fail on contention alone, and it found: \
          {failed:#?}"
     );
+}
+
+/// A similarity prefix reads only the same planted stems at both profile sizes.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_similar_stems_read_costs_the_same_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let (small_reading, small_control) = planted_stem_read(&small);
+    let (large_reading, large_control) = planted_stem_read(&large);
+    SizeIndependencePair::new(
+        "retrieving the planted similar stems",
+        ScaleObservation::new(&small, small_reading),
+        ScaleObservation::new(&large, large_reading),
+    )
+    .assert_size_independent();
+    assert!(
+        large_control > small_control,
+        "the similar-stems control did not grow with the vault on `rarity_rows_read`, \
+         reading {small_control} over {} generated documents and {large_control} over {}",
+        small.docs,
+        large.docs,
+    );
+}
+
+/// Plant stems whose entire trigram vocabulary is absent from generated names,
+/// then read the same near-match query and generated stem control on each
+/// attachment's snapshot.
+fn planted_stem_read(profile: &norn_fixtures::Profile) -> (CounterSnapshot, u64) {
+    use norn_store::similarity::{POSTINGS_CAP, required_shared, trigrams};
+    const STEMS: [&str; 3] = ["龘靐齉麤", "龘靐齉麟", "龘靐齉鸞"];
+    const QUERY: &str = "龘靐齉龍";
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("stem-pair-{}", profile.name),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    for stem in STEMS {
+        std::fs::write(vault.path().join(format!("{stem}.md")), "# Planted\n")
+            .expect("planting a document");
+    }
+    {
+        let host = vault.host();
+        attach::attach_and_wait(&host, vault.name());
+    }
+    let mut store = vault.store();
+    assert_eq!(
+        attach::derived_documents(&mut store),
+        profile.docs + STEMS.len()
+    );
+    let planted: std::collections::BTreeSet<_> = STEMS.into_iter().flat_map(trigrams).collect();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .begin_request()
+            .indexed_trigrams_after(cursor.as_ref(), MAX_PAGE)
+            .expect("a trigram page");
+        let Some(last) = page.last() else { break };
+        cursor = Some(last.clone());
+        for (path, trigram) in page {
+            if !STEMS.contains(&path.stem()) {
+                assert!(
+                    !planted.contains(&trigram),
+                    "a generated stem carries planted trigram {trigram:?}"
+                );
+            }
+        }
+    }
+    let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
+    let snapshot = reader
+        .try_take()
+        .expect("a free reader")
+        .establish()
+        .expect("a snapshot");
+    let answer = snapshot.similar_stems(QUERY).expect("stem candidates");
+    let norn_store::StemMatches::Candidates(candidates) = answer.matches else {
+        panic!("rare planted stems")
+    };
+    assert_eq!(candidates.len(), STEMS.len());
+    let t = answer.query_trigrams;
+    assert!(answer.work.rarity_rows_read > 0 && answer.work.postings_rows_read > 0);
+    assert!(answer.work.rarity_rows_read <= (t * (POSTINGS_CAP + 1)) as u64);
+    assert!(answer.work.postings_rows_read <= ((t - required_shared(t) + 1) * POSTINGS_CAP) as u64);
+    let reading: CounterSnapshot = answer
+        .work
+        .readings()
+        .chain([("candidate_count", candidates.len() as u64)])
+        .collect();
+    record_the_counters(&format!("similar stems over `{}`", profile.name), &reading);
+    // The generator's unique stems combine a DOC_WORDS word with a four-digit suffix.
+    let control = snapshot
+        .similar_stems("sprout-0160")
+        .expect("a generated stem control");
+    record_the_counters(
+        &format!("similar stems control over `{}`", profile.name),
+        &control.work.readings().collect(),
+    );
+    (reading, control.work.rarity_rows_read)
 }

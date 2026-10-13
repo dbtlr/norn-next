@@ -111,6 +111,7 @@ mod tests {
             facts: documents,
             findings: 0,
             indexed_terms: documents,
+            indexed_trigrams: documents,
             vault_schema_pinned: true,
         }
     }

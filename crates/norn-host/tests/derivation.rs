@@ -12,7 +12,7 @@
 //! So the corpus below is attached by a real host, which derives it from zero
 //! through the heal every attach runs — the main vault, and a second one for
 //! the tag stance the main vault does not take, since a stance is a vault's own
-//! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints, their raw and
+//! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints, their stem trigrams, their raw and
 //! folded suffix keys and their admitting counts, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
 //! with their typed halves, the offset spelling beside a typed date and a tag key's folds, every finding with its candidates, classes and path keys, the
@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(11),
-    "2a51f3244b7a3598bda8b612fa71659d752f28a7c73a0301d118f1406f196033",
+    DerivationVersion::new(12),
+    "1ab7023b9b70dcc1ef1aaa7b0cb4fd4d7525453f24d55344adca7677054f3925",
 );
 
 /// The vault schema the main corpus is derived under: a field of every

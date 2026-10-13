@@ -1901,6 +1901,7 @@ impl Churned {
             facts: documents,
             findings: self.census.without_rows.len() + degraded,
             indexed_terms: documents,
+            indexed_trigrams: documents,
             vault_schema_pinned: true,
         }
     }

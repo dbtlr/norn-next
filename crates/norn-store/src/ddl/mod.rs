@@ -69,6 +69,7 @@ pub(crate) mod findings;
 pub(crate) mod fts;
 pub(crate) mod meta;
 pub(crate) mod migrations;
+pub(crate) mod stems;
 pub(crate) mod tombstones;
 
 /// The store schema version, pinned at 1 through the pre-release build.
@@ -97,6 +98,7 @@ const AREAS: &[fn() -> Vec<String>] = &[
     fields::statements,
     tombstones::statements,
     fts::statements,
+    stems::statements,
     findings::statements,
     migrations::statements,
 ];

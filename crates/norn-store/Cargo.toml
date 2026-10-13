@@ -28,10 +28,13 @@ publish.workspace = true
 # what lets a consumer triage before it fetches, and stamping it anywhere else
 # would put a second answer to "what is at rest here" outside the write that
 # put it there.
+# `unicode-normalization` carries the NFC fold of document stems, shared by
+# the transactional trigram index and the repair planner's similarity read.
 [dependencies]
 norn-db = { path = "../norn-db" }
 norn-wire = { path = "../norn-wire" }
 sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
 
 # `induced-failure` gates `induced_failure`, the module of out-of-band
 # arrangements the store's own suite reaches through to reach a rung or a
