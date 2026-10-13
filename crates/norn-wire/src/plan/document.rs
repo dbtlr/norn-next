@@ -502,8 +502,9 @@ pub enum SkipReason {
     // The next seven are Layer 5C's link-fix reasons: the move-following fix
     // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders` and
     // `several_tombstones`, the similarity suggestion (NORN-400) emits
-    // `too_common` and `too_short`, and either link fix emits
-    // `link_not_rewritable`. No repair runs those fixes yet, so nothing in the
+    // `too_common` and `too_short`, and each link fix — those two and the
+    // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
+    // No repair runs those fixes yet, so nothing in the
     // current call graph reaches them and each is a dormant carrier until its
     // producer lands; NORN-396 lands the vocabulary first. The notes live
     // here rather than in the doc comments schemars lifts.
