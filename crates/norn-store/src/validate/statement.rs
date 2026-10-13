@@ -57,7 +57,11 @@ pub enum ValidateStatement {
     /// from the page's place, so only one document's findings are ordered
     /// among themselves, and otherwise one keeping few enough documents from
     /// the documents it matched, which are sorted. Where none does, the
-    /// statement seeks its kind and tests each finding's document.
+    /// statement seeks its kind and tests each finding's document; where a
+    /// window of the page's walk bounds it, the window's last finding bounds
+    /// the seek above on the same row value, and the window itself is this
+    /// statement narrowed by its path parts alone, read one finding past an
+    /// offset.
     KindPage,
     /// How many findings stand, one tally per kind and severity: an aggregate
     /// over `findings_fingerprint_kind_severity_nocase`, which covers every
@@ -109,7 +113,10 @@ pub enum ValidateStatement {
     /// one arm instead, driven from its source at the batch's place, each
     /// document seeking every kind read at its path; otherwise a document part
     /// keeping few enough documents drives each arm, and those are sorted, and
-    /// where none does each arm seeks its kind. Each
+    /// where none does each arm seeks its kind, bounded above at a window's
+    /// last finding where one bounds the walk; the window is this read
+    /// narrowed by its path parts alone, one finding past an offset, and
+    /// reaches no link. Each
     /// arm, or the one, also reaches the link its finding is about, where it
     /// is about one, by two seeks behind its own (`documents_path`, then
     /// `links_document_ordinal`), which neither sort nor reorder the merge.
@@ -188,13 +195,21 @@ pub(crate) struct Findings<'a> {
     /// and every other part the document row at it.
     pub(crate) filters: &'a [Filter],
     /// How a page or a batch reaches the documents its document parts keep,
-    /// by a part's position among them, chosen once per request
-    /// ([`crate::store::Snapshot::choose_driver`]); `None` for a summary,
+    /// by a part's position among them, as the page settles it
+    /// ([`crate::store::Snapshot::drive_page`]); `None` for a summary,
     /// which the documents every keeping part matched drive.
     pub(crate) driver: Option<Driver>,
     /// The rows a page reads at most; a summary and a document's tail read
     /// them all.
     pub(crate) rows: usize,
+    /// The last `(path, position, id)` a walked page or merged page may read,
+    /// inclusive: the end of the walk's window
+    /// ([`crate::read::Paged::window`]), or `None` where it reads to its end.
+    pub(crate) until: Option<(&'a str, i64, i64)>,
+    /// The findings a page passes before the first it hands back: zero for a
+    /// page, and the window's length less one where the page, narrowed by no
+    /// document part, names where a walk's window ends.
+    pub(crate) offset: usize,
 }
 
 impl Findings<'_> {
@@ -238,6 +253,11 @@ const MERGE_ID: &str = "order_id";
 /// is untouched.
 const MERGE_LINK_JOINS: &str = "\n                     LEFT JOIN documents AS dl ON dl.path = f.path\n                     LEFT JOIN links AS lk ON lk.document = dl.id AND lk.ordinal = f.ordinal";
 
+/// The link columns a merged read's walk window hands back in place of
+/// [`FINDING_LINK_COLUMNS`]: none, so the window skips the rows before its
+/// end without seeking each one's link.
+const WINDOW_LINK_COLUMNS: &str = "NULL AS link_family, NULL AS link_protocol, NULL AS link_target";
+
 /// The table one arm seeks, the alias it takes, and the column that holds the
 /// finding's id there.
 struct Seeked {
@@ -277,8 +297,8 @@ struct Narrowed<'a> {
     /// Whether some document part keeps what it seeks, so the matched
     /// documents drive the statement.
     driven: bool,
-    /// How a page or a batch reaches the documents `documents` keep, chosen
-    /// once per request; `None` on a summary.
+    /// How a page or a batch reaches the documents `documents` keep, as the
+    /// page settles it; `None` on a summary.
     driver: Option<Driver>,
 }
 
@@ -351,9 +371,18 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     let narrowed = Narrowed::of(findings.filters, findings.driver);
     let seeked = Seeked::of(findings.ruled());
     let limit = |binder: &mut Binder| {
-        binder.bind(Value::Integer(
+        let limit = binder.bind(Value::Integer(
             i64::try_from(findings.rows).expect("a page's row count fits i64"),
-        ))
+        ));
+        match findings.offset {
+            0 => limit,
+            offset => format!(
+                "{limit} OFFSET {}",
+                binder.bind(Value::Integer(
+                    i64::try_from(offset).expect("a window's length fits i64")
+                ))
+            ),
+        }
     };
     let text = match findings.statement {
         ValidateStatement::KindPage | ValidateStatement::RulePage => {
@@ -471,11 +500,14 @@ fn ordering(narrowed: &Narrowed<'_>, statement: ValidateStatement, column: &str)
 /// at its key. Where no such part does, a part keeping few enough documents
 /// drives the statement from the documents it matched, and on a summary the
 /// documents every keeping part matched do, so it costs what they matched and
-/// sorts that. Where none drives — every part excludes, every part keeps more
-/// than the ceiling, or the statement is a document's tail — the statement
-/// seeks its kind as an unnarrowed one does and tests each finding's document
-/// row, one seek of `documents_path` at its path and one per part at the
-/// document's key.
+/// sorts that. Where none drives — every part excludes, the page walks a
+/// window of its findings before it asks a part what it keeps, every part
+/// keeps more than the ceiling, or the statement is a document's tail — the
+/// statement seeks its kind as an unnarrowed one does and tests each
+/// finding's document row, one seek of `documents_path` at its path and one
+/// per part at the document's key; a window's last finding, where one bounds
+/// the walk, bounds the seek above on the same row value as its place does
+/// below.
 fn compose_arm(
     findings: &Findings<'_>,
     narrowed: &Narrowed<'_>,
@@ -643,6 +675,34 @@ fn compose_arm(
             }
             .spelled(),
         );
+        if let Some((until, position, until_id)) = findings.until {
+            let (folded, path) = answer_place(until);
+            let (folded, path, position, until_id) = (
+                binder.bind(Value::Text(folded)),
+                binder.bind(Value::Text(path)),
+                binder.bind(Value::Integer(position)),
+                binder.bind(Value::Integer(until_id)),
+            );
+            conditions.push(
+                AnswerSeek {
+                    reach: seek_reach,
+                    comparison: "<=",
+                    lead: None,
+                    path: &path_column,
+                    folded: &folded,
+                    bytewise: &path,
+                    trail: Some(Term {
+                        column: &position_column,
+                        bound: &position,
+                    }),
+                    id: Some(Term {
+                        column: id,
+                        bound: &until_id,
+                    }),
+                }
+                .spelled(),
+            );
+        }
     } else if !parts.is_empty() {
         conditions.push(format!(
             "{path_column} >= {} COLLATE NOCASE",
@@ -718,11 +778,18 @@ fn compose_arm(
         }
         format!("FROM {table} AS {seek}{reached}")
     };
+    // A walk's window hands back where it ends and no link, so it joins none.
+    let window = findings.offset > 0;
     let from = match statement {
-        ValidateStatement::MergedPage | ValidateStatement::DocumentTail => {
+        ValidateStatement::MergedPage | ValidateStatement::DocumentTail if !window => {
             format!("{from}{MERGE_LINK_JOINS}")
         }
         _ => from,
+    };
+    let links = if window {
+        WINDOW_LINK_COLUMNS
+    } else {
+        FINDING_LINK_COLUMNS
     };
 
     let conditions = conditions.join("\n                       AND ");
@@ -732,7 +799,7 @@ fn compose_arm(
         }
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail => format!(
             "{FINDING_ROW_COLUMNS}, {path_column} AS {MERGE_PATH}, \
-             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {FINDING_LINK_COLUMNS}"
+             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {links}"
         ),
         ValidateStatement::Summary | ValidateStatement::RuleSummary => {
             format!("{}, {}, COUNT(*)", column("kind"), column("severity"))

@@ -197,6 +197,16 @@ pub(crate) fn seed(store: &mut Store) {
         .expect("recording a finding");
 }
 
+/// How many documents [`Seeded::padded_under`] stands on each side of the
+/// fixture: more than a page of [`PADDED_PAGE`] rows walks before it asks a
+/// part what it keeps, [`norn_store::MATCHED_DRIVE_FACTOR`] per row it reads,
+/// one past its bound included.
+const PADDING: usize = 8 * norn_store::MATCHED_DRIVE_FACTOR;
+
+/// The rows a page over [`Seeded::padded_under`] reads: more than any part
+/// matches of the fixture, so a page drives on through every section.
+const PADDED_PAGE: u32 = 5;
+
 /// A seeded store and the read handle its snapshots are established on.
 pub(crate) struct Seeded {
     _scratch: Scratch,
@@ -221,6 +231,27 @@ impl Seeded {
     /// behaviour, which every snapshot of it reads under.
     fn under(label: &str, order: StoredPathOrder) -> Self {
         Self::with_bulk_under(label, 0, order)
+    }
+
+    /// The fixture beside [`PADDING`] documents no part matches standing
+    /// before it in the answer's path order and as many after it, none
+    /// carrying a field: so a page of [`PADDED_PAGE`] rows in path order
+    /// either way, or a field's page reading its missing section first,
+    /// walks a window of them before it reaches a document a part matches,
+    /// and then drives from what the part matched (NORN-393).
+    fn padded_under(label: &str, order: StoredPathOrder) -> Self {
+        Self::padded_with(label, order, PADDING)
+    }
+
+    /// [`Seeded::padded_under`] with `padding` documents on each side.
+    fn padded_with(label: &str, order: StoredPathOrder, padding: usize) -> Self {
+        let mut seeded = Self::under(label, order);
+        let padding: Vec<_> = (0..padding)
+            .flat_map(|at| [format!("0pad/{at:02}.md"), format!("zz-pad/{at:02}.md")])
+            .map(|at| document(&at, &format!("hash-{at}"), "padding\n"))
+            .collect();
+        write_documents(&mut seeded.store.begin_request(), &padding);
+        seeded
     }
 
     fn with_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
@@ -353,12 +384,17 @@ fn plan(emitted: &FindPlan) -> QueryPlan {
     )
 }
 
-/// The one plan `plans` holds for `statement`.
+/// The one plan `plans` holds for `statement`, a walk's windows set aside:
+/// where some run of a page statement is narrowed by the request's parts, a
+/// run narrowed by none is where a walk's window ends (NORN-393).
 pub(crate) fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
-    let matching: Vec<&FindPlan> = plans
+    let mut matching: Vec<&FindPlan> = plans
         .iter()
         .filter(|plan| plan.statement == ReadStatement::Find(statement))
         .collect();
+    if matching.iter().any(|plan| !plan.filters.is_empty()) {
+        matching.retain(|plan| !plan.filters.is_empty());
+    }
     assert_eq!(
         matching.len(),
         1,
@@ -366,6 +402,20 @@ pub(crate) fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan
         matching.len()
     );
     plan(matching[0])
+}
+
+/// The last plan `plans` holds for `statement` narrowed by the request's
+/// parts: the run a page settled on, where it walked a window first and then
+/// drove from a part's matches (NORN-393).
+pub(crate) fn settled_plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
+    plan(
+        plans
+            .iter()
+            .rfind(|plan| {
+                plan.statement == ReadStatement::Find(statement) && !plan.filters.is_empty()
+            })
+            .unwrap_or_else(|| panic!("the request runs no {statement:?} its parts narrow")),
+    )
 }
 
 /// The rows of `plan` that read the relation a statement calls `alias`, as a
@@ -1745,6 +1795,15 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
         Seeded::under("find-filters", StoredPathOrder::Sensitive),
         Seeded::under("find-filters-folded", StoredPathOrder::AsciiCaseInsensitive),
     ];
+    // A part that keeps what it seeks is judged where its page drives from
+    // it: past a window of padding its walk meets first (NORN-393).
+    let padded = [
+        Seeded::padded_under("find-filters-padded", StoredPathOrder::Sensitive),
+        Seeded::padded_under(
+            "find-filters-padded-folded",
+            StoredPathOrder::AsciiCaseInsensitive,
+        ),
+    ];
     let on = |shape: ReadFilter| match root_of(shape) {
         StoredPathOrder::Sensitive => 0,
         StoredPathOrder::AsciiCaseInsensitive => 1,
@@ -1759,14 +1818,32 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                     FindStatement::FieldValuePage(FieldOrder::Raw, PageDirection::Ascending),
                 ),
             ] {
-                let plans = roots[on(*shape)].plans_under(
-                    &params.with_predicates([part.clone()]),
-                    &declared_readings(),
-                );
+                let plans = if shape.excludes() {
+                    roots[on(*shape)].plans_under(
+                        &params.with_predicates([part.clone()]),
+                        &declared_readings(),
+                    )
+                } else {
+                    padded[on(*shape)].plans_under(
+                        &params
+                            .with_predicates([part.clone()])
+                            .with_limit(PADDED_PAGE),
+                        &declared_readings(),
+                    )
+                };
+                // The page statement the part narrows as it settled: past
+                // the walk's window and its probe, where it walked first.
                 let page = plans
                     .iter()
-                    .find(|plan| plan.statement == ReadStatement::Find(statement))
-                    .expect("the page statement");
+                    .rfind(|plan| {
+                        plan.statement == ReadStatement::Find(statement) && !plan.filters.is_empty()
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{part:?} ran no {statement:?} it narrows: {:?}",
+                            plans.iter().map(|plan| plan.statement).collect::<Vec<_>>()
+                        )
+                    });
                 assert_eq!(
                     page.filters,
                     vec![*shape],
@@ -1853,25 +1930,29 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
 }
 
 /// **A part ceiling probe reads the part's own seek and stops one document
-/// past the ceiling (NORN-390).** A page no part drives from its documents in the
-/// page's order — a field sort's — reads the vault's greatest document row id
-/// once ([`FindStatement::DocumentSpan`], one seek of `documents`) and asks,
-/// part by part, whether one keeps at most the ceiling it scales: one
+/// past its cap (NORN-390, NORN-393).** A page no part drives from its
+/// documents in the page's order — a field sort's — walks a window of its
+/// order, and where that leaves it short reads the vault's greatest document
+/// row id once ([`FindStatement::DocumentSpan`], one seek of `documents`) and
+/// asks, part by part, whether one keeps at most the walk's budget: over the
+/// fixture beside padding its window walks first, one
 /// [`FindStatement::PartCeiling`] per part asked, each the seek the filter bar
-/// names for its part and no full scan. **A probe costs the ceiling whatever
-/// the part keeps**: over 500 bulk documents of which 50, then all 500, match
-/// every part of [`drained_parts`], a page of one row asks each part's probe
-/// at the same VM steps — the vault, so the ceiling, is the same, and each
-/// part keeps more than it. **The answer decides the drive**: a part keeping
-/// more than the ceiling is tested at each document the page walks, and one
-/// keeping fewer drives the page from what it matched.
+/// names for its part and no full scan. **A probe costs its cap whatever the
+/// part keeps**: over 500 bulk documents of which 50, then 400, match every
+/// part of [`drained_parts`], a field's page of one row, whose missing section
+/// walks the unmatched ones first, asks each part's probes at the same VM
+/// steps — the vault, so the ceiling the budget doubles to, is the same, and
+/// each part keeps more than it. **The answer decides the
+/// drive**: a part keeping more than the ceiling is tested at each document
+/// the page walks, and one keeping fewer than the budget drives the page from
+/// what it matched.
 ///
 /// Control: a probe rebuilt to read its table end to end fails the bar.
 #[test]
 fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     let roots = [
-        Seeded::under("find-ceiling", StoredPathOrder::Sensitive),
-        Seeded::under("find-ceiling-folded", StoredPathOrder::AsciiCaseInsensitive),
+        Seeded::padded_under("find-ceiling", StoredPathOrder::Sensitive),
+        Seeded::padded_under("find-ceiling-folded", StoredPathOrder::AsciiCaseInsensitive),
     ];
     let on = |shape: ReadFilter| match root_of(shape) {
         StoredPathOrder::Sensitive => &roots[0],
@@ -1882,7 +1963,9 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     for bar in filter_bars() {
         for (part, shape, seek) in &bar.probes {
             let plans = on(*shape).plans_under(
-                &field_page().with_predicates([part.clone()]),
+                &field_page()
+                    .with_predicates([part.clone()])
+                    .with_limit(PADDED_PAGE),
                 &declared_readings(),
             );
             let of = |statement: FindStatement| -> Vec<&FindPlan> {
@@ -1933,8 +2016,8 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     );
     failure_of("a probe read end to end", || scanned.assert_no_full_scan());
 
-    // Each part's probe over a vault of one size, the part keeping fewer and
-    // then more documents, every count past the ceiling.
+    // Each part's probes over a vault of one size, the part keeping fewer
+    // and then more documents, every count past the ceiling.
     let probed = |seeded: &Seeded, parts: &[Predicate]| {
         seeded
             .plans(&field_page().with_predicates(parts.to_vec()).with_limit(1))
@@ -1948,9 +2031,12 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
         StoredPathOrder::AsciiCaseInsensitive,
     ] {
         let fewer = Seeded::with_partly_matched_bulk_under("find-ceiling-fewer", 50, 500, order);
-        let more = Seeded::with_partly_matched_bulk_under("find-ceiling-more", 500, 500, order);
+        let more = Seeded::with_partly_matched_bulk_under("find-ceiling-more", 400, 500, order);
         for (shape, parts) in drained_parts(FindingKind::BodyBytesNotUtf8) {
-            if parts.len() > 1 {
+            // The unmatched documents' bodies hold `body` too, so the
+            // full-text part matches the walk's first window and fills the
+            // page before it asks anything.
+            if parts.len() > 1 || shape == ReadFilter::FullText {
                 continue;
             }
             let at_fewer = probed(&fewer, &parts);
@@ -1963,27 +2049,29 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
         }
     }
 
-    let tagged = |seeded: &Seeded| {
+    // The last missing-section statement the tag narrows: the one the page
+    // settled on, past the walk's window.
+    let tagged = |seeded: &Seeded, tag: &str| {
         let params = field_page()
-            .with_predicates([Predicate::tag("bulk")])
+            .with_predicates([Predicate::tag(tag)])
             .with_limit(1);
-        plan_of(
+        settled_plan_of(
             &seeded.plans(&params),
             FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
         )
         .sql()
         .to_string()
     };
-    let past = tagged(&Seeded::with_bulk("find-ceiling-past", 640));
+    let past = tagged(&Seeded::with_bulk("find-ceiling-past", 640), "bulk");
     assert!(
         past.contains("EXISTS (SELECT 1 FROM document_tags AS tg")
             && !past.contains("IN (SELECT tg.document"),
         "a page past the ceiling was driven from what the tag matched: {past}"
     );
-    let within = tagged(&Seeded::with_bulk("find-ceiling-within", 4));
+    let within = tagged(&Seeded::with_bulk("find-ceiling-within", 64), "draft");
     assert!(
         within.contains("IN (SELECT tg.document"),
-        "a page within the ceiling was not driven from what the tag matched: {within}"
+        "a page within the budget was not driven from what the tag matched: {within}"
     );
 }
 
@@ -2122,17 +2210,20 @@ fn with_edge_documents(seeded: &mut Seeded, count: usize) {
 }
 
 /// **A part drives a page from what it matched exactly while it keeps no more
-/// documents than the ceiling, and the first such part drives (NORN-390).**
-/// In a vault too small to raise it, a page of one row reads two, so its
-/// ceiling is [`norn_store::MATCHED_DRIVE_FACTOR`] times two, sixteen: a field
+/// documents than the budget it is asked at, which doubles to the ceiling,
+/// and the first such part drives (NORN-390, NORN-393).** Over the fixture
+/// beside twenty documents no part matches on each side of it, too few to
+/// raise the ceiling, a page of one row reads two, so it walks sixteen —
+/// [`norn_store::MATCHED_DRIVE_FACTOR`] times two — of the documents missing
+/// its sort field and then asks at sixteen, which is its ceiling too: a field
 /// sort narrowed by a tag sixteen documents carry is driven from what the tag
 /// matched, and by one seventeen carry walks its order. Of two parts within
-/// the ceiling, the first the request names drives, and the other is tested
-/// at each document's key. **What is counted is documents among the rows of
-/// the part's own index seek**: nine documents a range reaches twice each
-/// drive, a glob with no literal prefix, whose seek reaches every path, walks,
-/// and in a vault of 320 documents a tag twenty carry drives, the ceiling
-/// scaled by the vault past sixteen.
+/// the budget, the first the request names drives, and the other is tested at
+/// each document's key. **What is counted is documents among the rows of the
+/// part's own index seek**: nine documents a range reaches twice each drive, a
+/// glob with no literal prefix, whose seek reaches every path, walks, and in a
+/// vault of 320 documents a tag twenty carry drives, the budget doubling to a
+/// ceiling the vault scales past sixteen.
 #[test]
 fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
     let field_page = || {
@@ -2140,17 +2231,19 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
             .with_predicates([Predicate::tag("edge")])
             .with_limit(1)
     };
+    // The missing section's statement the page settled on, past its window.
     let page_sql = |seeded: &Seeded, params: &FindParams| {
-        plan_of(
+        settled_plan_of(
             &seeded.plans(params),
             FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
         )
         .sql()
         .to_string()
     };
+    let padded = |label: &str| Seeded::padded_with(label, StoredPathOrder::Sensitive, 20);
     let ceiling = 2 * norn_store::MATCHED_DRIVE_FACTOR;
     for (count, driven) in [(ceiling, true), (ceiling + 1, false)] {
-        let mut seeded = Seeded::new(&format!("find-ceiling-edge-{count}"));
+        let mut seeded = padded(&format!("find-ceiling-edge-{count}"));
         with_edge_documents(&mut seeded, count);
         let sql = page_sql(&seeded, &field_page());
         assert_eq!(
@@ -2162,7 +2255,7 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
 
     // A part's documents are counted, not its rows: nine documents each
     // holding `status: [open, open]` are eighteen rows of a range's seek.
-    let mut listed = Seeded::new("find-ceiling-listed");
+    let mut listed = padded("find-ceiling-listed");
     let declared = declared();
     let documents: Vec<_> = (0..9)
         .map(|at| {
@@ -2190,7 +2283,7 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
 
     // A glob with no literal prefix seeks every path, which its count reads
     // as kept whatever the glob then rejects: the page walks.
-    let mut globbed = Seeded::new("find-ceiling-globbed");
+    let mut globbed = padded("find-ceiling-globbed");
     with_edge_documents(&mut globbed, 20);
     let glob = page_sql(
         &globbed,
@@ -2205,7 +2298,8 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
     );
 
     // In a vault of 320 documents a page of one row's ceiling is the square
-    // root of two rows times them, 25: a tag twenty documents carry drives.
+    // root of two rows times them, 25: a tag twenty documents carry drives
+    // once the budget doubles past sixteen to it.
     let mut wide = Seeded::with_bulk("find-ceiling-wide", 300);
     with_edge_documents(&mut wide, 20);
     let scaled = page_sql(&wide, &field_page());
@@ -2214,7 +2308,7 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
         "a tag within the vault's ceiling did not drive: {scaled}"
     );
 
-    let mut seeded = Seeded::new("find-ceiling-first");
+    let mut seeded = padded("find-ceiling-first");
     with_edge_documents(&mut seeded, 4);
     let both = |first: Predicate, second: Predicate| {
         page_sql(
@@ -2462,16 +2556,31 @@ fn judge_driven_by_filter(page: &QueryPlan, alias: &str) {
     );
 }
 
-/// **A page with no filter is a seek of its order index; a page with a filter
-/// drives from the filter's seek and sorts the matched set.** Every page
-/// statement of every order, with no filter, builds no temporary B-tree. With
-/// a filter that keeps what it seeks — every filter shape but inequality and
-/// absence, in every form the filter bar spells it — every page statement
-/// reaches its own rows by the key each match carries and never reads
-/// `documents` end to end, so what it sorts is the filter's seek output and
-/// its cost is the match count. A page narrowed only by inequality or absence
-/// has no seek of what it keeps, and reads its order index as a page with no
-/// filter does: no temporary B-tree.
+/// Whether a page statement reaches its rows from a part — from its source,
+/// or from its matches with its own order index spelled out of reach behind a
+/// unary `+` — rather than walking that index.
+fn driven_by_a_part(page: &FindPlan) -> bool {
+    let sql = &page.plan.sql;
+    sql.contains("(+d.path")
+        || sql.contains("+f.least_")
+        || sql.contains("CROSS JOIN documents AS d ON d.id = dv.id")
+}
+
+/// **A page with no filter is a seek of its order index; a page a filter
+/// drives sorts the matched set, and a page that walks seeks its order.**
+/// Every page statement of every order, with no filter, builds no temporary
+/// B-tree. With a filter that keeps what it seeks — every filter shape but
+/// inequality and absence, in every form the filter bar spells it — over the
+/// fixture beside padding no part matches, a page of five walks a window of
+/// its order — a seek of its order index narrowed by no part, and the same
+/// seek bounded at the window's end and testing the part at each document —
+/// and then drives from the part, every statement that does reaching its own
+/// rows by the key each match carries and never reading `documents` end to
+/// end, so what it sorts is the filter's seek output and its cost is the
+/// match count (NORN-393). A path page ascending reaches that drive under
+/// every such filter that runs a page. A page narrowed only by inequality or absence has no
+/// seek of what it keeps, and reads its order index as a page with no filter
+/// does: no temporary B-tree.
 ///
 /// Controls: a page with no filter, which seeks its order index, fails the
 /// driven bar; `documents_path_nocase` dropped, the path page with no filter
@@ -2479,6 +2588,7 @@ fn judge_driven_by_filter(page: &QueryPlan, alias: &str) {
 #[test]
 fn a_filtered_page_drives_from_its_filter_and_an_unfiltered_page_seeks_its_order() {
     let mut seeded = Seeded::new("find-page-driver");
+    let padded = Seeded::padded_under("find-page-driver-padded", StoredPathOrder::Sensitive);
     for order in page_orders() {
         for plan in seeded.plans(&order) {
             if is_page(plan.statement) {
@@ -2487,16 +2597,33 @@ fn a_filtered_page_drives_from_its_filter_and_an_unfiltered_page_seeks_its_order
         }
         for bar in filter_bars() {
             for (part, shape, _) in &bar.probes {
-                let params = order.clone().with_predicates([part.clone()]);
-                for page in seeded.plans(&params) {
+                if root_of(*shape) != StoredPathOrder::Sensitive {
+                    continue;
+                }
+                let params = order
+                    .clone()
+                    .with_predicates([part.clone()])
+                    .with_limit(PADDED_PAGE);
+                let (mut paged, mut driven) = (false, false);
+                for page in padded.plans(&params) {
                     if !is_page(page.statement) {
                         continue;
                     }
-                    if shape.excludes() {
+                    paged = true;
+                    if shape.excludes() || !driven_by_a_part(&page) {
                         self::plan(&page).assert_no_temp_btree();
                     } else {
+                        driven = true;
                         judge_driven_by_filter(&self::plan(&page), page_alias(page.statement));
                     }
+                }
+                // A part naming a key the declaration does not know matches
+                // nothing, and runs no page.
+                if paged
+                    && !shape.excludes()
+                    && order == sorted(SortKey::path(), Direction::Ascending)
+                {
+                    assert!(driven, "no page statement {part:?} narrows drove from it");
                 }
             }
         }

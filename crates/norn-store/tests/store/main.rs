@@ -17,6 +17,7 @@ mod common;
 mod count;
 mod counters;
 mod describe;
+mod drive;
 mod equivalence;
 mod facts;
 mod fields;

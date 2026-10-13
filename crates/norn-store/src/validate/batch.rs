@@ -22,7 +22,9 @@
 //! bytewise: on a root that tells spellings apart `A.md` and `a.md` fold
 //! together and stand adjacent in this order, but they are two documents. When
 //! a document was cut, one more finding read past it tells whether more
-//! remain.
+//! remain, read by the driver the batch's first read settled on, or, where
+//! that read filled while it walked within its budget, by a walk and its
+//! counts of its own ([`crate::store::Snapshot::drive_page`]).
 //!
 //! # A first batch counts what remains
 //!
@@ -53,7 +55,9 @@ use norn_wire::{
 };
 
 use super::statement::{Findings, compose_findings};
-use super::{Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork};
+use super::{
+    FindingPages, KindSection, Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork,
+};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
@@ -292,16 +296,21 @@ impl Snapshot {
         if narrowing.conjunction.matches_nothing {
             return Ok((Vec::new(), false));
         }
-        let driver = self.page_driver(narrowing, limit + 1, lookups)?;
-        let mut found = self.read_merged(
-            narrowing,
-            driver,
-            ValidateStatement::MergedPage,
-            after.map(past_document),
+        let merged = FindingPages::new(narrowing, ValidateStatement::MergedPage);
+        let parts = narrowing.document_parts();
+        let first = self.drive_page(
+            &merged,
+            &parts,
+            Some(false),
             limit + 1,
+            vec![merged_section(after.map(past_document))],
+            limit + 1,
+            None,
             lookups,
-            work,
         )?;
+        work.rows_read += first.rows.len() as u64;
+        work.stepped(first.stepped);
+        let mut found = first.rows;
         if found.len() <= limit {
             return Ok((found, false));
         }
@@ -312,56 +321,54 @@ impl Snapshot {
         if !cut {
             return Ok((found, true));
         }
-        let tail = self.read_merged(
-            narrowing,
-            driver,
-            ValidateStatement::DocumentTail,
-            Some((&path, position, id)),
-            0,
-            lookups,
-            work,
-        )?;
+        let tail = self.document_tail(narrowing, (&path, position, id), lookups, work)?;
         found.extend(tail);
-        let beyond = self.read_merged(
-            narrowing,
-            driver,
-            ValidateStatement::MergedPage,
-            Some(past_document(&path)),
+        // One finding past the document says whether more remain, read by
+        // the driver the first read settled on, or walked within a budget of
+        // its own where that read filled before it settled on one.
+        let beyond = self.drive_page(
+            &merged,
+            &parts,
+            Some(false),
+            limit + 1,
+            vec![merged_section(Some(past_document(&path)))],
             1,
+            first.settled,
             lookups,
-            work,
         )?;
-        Ok((found, !beyond.is_empty()))
+        work.rows_read += beyond.rows.len() as u64;
+        work.stepped(beyond.stepped);
+        Ok((found, !beyond.rows.is_empty()))
     }
 
-    /// The findings one merged statement reads, counted into `work`: `rows`
-    /// at most for a merged page, and every finding of the document for its
-    /// tail. `driver` is the batch's, chosen once for its first read.
-    #[allow(clippy::too_many_arguments)] // One merged read's every input, each named at its call.
-    fn read_merged(
+    /// The rest of one document's selected findings, after the position and
+    /// id `after` names at its path, counted into `work`: one
+    /// [`ValidateStatement::DocumentTail`], which tests each part at the
+    /// document's row.
+    fn document_tail(
         &self,
         narrowing: &Narrowing,
-        driver: Driver,
-        statement: ValidateStatement,
-        after: Option<(&str, i64, i64)>,
-        rows: usize,
+        after: (&str, i64, i64),
         lookups: &mut Lookups,
         work: &mut ValidateWork,
     ) -> Result<Vec<FindingBase>, StoreError> {
+        let statement = ValidateStatement::DocumentTail;
         let composed = compose_findings(&Findings {
             statement,
             fingerprint: &narrowing.fingerprint,
             rule: narrowing.rule.as_deref(),
             kinds: &narrowing.kinds,
             severities: narrowing.severities.as_deref(),
-            after,
+            after: Some(after),
             filters: &narrowing.conjunction.filters,
-            driver: Some(driver),
-            rows,
+            driver: Some(Driver::Walked),
+            rows: 0,
+            until: None,
+            offset: 0,
         });
-        let merged = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
+        let tail = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let found: Vec<FindingBase> = self
-            .run_statement(&mut lookups.ran, merged, linked_finding_base)
+            .run_statement(&mut lookups.ran, tail, linked_finding_base)
             .map_err(|problem| error::sql("reading a batch of findings", problem))?
             .into_iter()
             .collect::<Result<_, _>>()?;
@@ -370,11 +377,20 @@ impl Snapshot {
             lookups
                 .ran
                 .last()
-                .expect("the merged read was just recorded")
+                .expect("the tail was just recorded")
                 .stepped,
         );
         Ok(found)
     }
+}
+
+/// A batch's one merged section, resuming after `after`: it reads every kind,
+/// so the kind a page's section names is unread.
+fn merged_section(after: Option<(&str, i64, i64)>) -> KindSection {
+    (
+        "",
+        after.map(|(path, position, id)| (path.to_string(), position, id)),
+    )
 }
 
 /// The place after every finding at `path`, which a batch resumes from: the

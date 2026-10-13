@@ -30,7 +30,10 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 /// instead — a path page from the filter's source where the filter keeps its
 /// documents in the answer's path order, and otherwise from the filter's seek
 /// where it keeps few enough documents ([`FindStatement::PartCeiling`]), the
-/// statement sorting what that seek handed it.
+/// statement sorting what that seek handed it. A page that walks its order
+/// first reads where a window of its walk ends with the same statement
+/// narrowed by no filter, one row at an offset — a missing section's window
+/// the path page's — and then walks no further than that row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindStatement {
     /// The pinned vault-schema fingerprint, read on the snapshot: what a
@@ -131,20 +134,21 @@ pub enum FindStatement {
     LinkTargets,
     /// Whether a part that keeps what it seeks keeps few enough documents to
     /// drive a page from what it matched: the distinct documents among the
-    /// rows of its index seek alone, read until one past the ceiling and
-    /// counted, so it costs the rows of at most that many documents whatever
-    /// the part keeps. Every condition the index does not answer is dropped,
-    /// so a document the seek reaches and the part rejects counts too, and a
-    /// part is never taken to keep fewer documents than it does. Run once per
-    /// part, in the request's order until one keeps few enough, by a find,
-    /// validate or repair page no part drives from its documents in the page's
-    /// order ([`crate::ReadFilter::is_path_ordered`]); the ceiling is the read
-    /// module's driver choice's.
+    /// rows of its index seek alone, read until one past the cap it is asked
+    /// at and counted, so it costs the rows of at most that many documents
+    /// whatever the part keeps. Every condition the index does not answer is
+    /// dropped, so a document the seek reaches and the part rejects counts
+    /// too, and a part is never taken to keep fewer documents than it does.
+    /// Run once per part, in the request's order until one keeps few enough,
+    /// each time a find, validate or repair page no part drives from its
+    /// documents in the page's order ([`crate::ReadFilter::is_path_ordered`])
+    /// is left short by a window of its walk; the cap is the walk's budget,
+    /// which doubles to a ceiling, as the read module's drive sets it.
     PartCeiling,
     /// The greatest document row id: one seek of the row ids' last entry,
     /// which bounds how many documents the vault holds — a deleted document's
     /// id is never reused below it — and so scales the ceiling a part is
-    /// asked against. Run once by a page that asks any part's ceiling.
+    /// asked against. Run once by a page that asks any part what it keeps.
     DocumentSpan,
 }
 
@@ -317,10 +321,18 @@ pub(crate) struct Section<'a> {
     pub(crate) key: Option<&'a str>,
     pub(crate) start: SectionStart<'a>,
     pub(crate) filters: &'a [Filter],
-    /// How the section reaches the documents its filters keep, chosen once
-    /// per request ([`crate::store::Snapshot::choose_driver`]).
+    /// How the section reaches the documents its filters keep, as the page
+    /// settles it ([`crate::store::Snapshot::drive_page`]).
     pub(crate) driver: Driver,
     pub(crate) rows: usize,
+    /// The last place a walked section may read, inclusive: the end of the
+    /// walk's window ([`crate::read::Paged::window`]), or `None` where the
+    /// section reads to its end.
+    pub(crate) until: Option<SectionStart<'a>>,
+    /// The rows the section passes before the first it hands back: zero for
+    /// a page, and the window's length less one where the section, narrowed
+    /// by no part, names where a walk's window ends.
+    pub(crate) offset: usize,
 }
 
 /// One page section's statement and its parameters, in the numbering the text
@@ -339,18 +351,24 @@ pub(crate) struct Section<'a> {
 /// blob, which SQLite orders after every text. So the text does not branch on
 /// whether the section resumes, and the plan is the same either way.
 ///
-/// **How a section reaches its documents is the request's driver**, chosen once
-/// for every section ([`Driver`]). A path page a filter keeping its documents
-/// in the answer's path order narrows is driven from that filter's source
+/// **How a section reaches its documents is the page's driver**, settled as
+/// the page reads ([`Driver`]). A path page a filter keeping its documents in
+/// the answer's path order narrows is driven from that filter's source
 /// ([`compose_ordered_path_page`]). A section a filter keeping few enough
 /// documents drives is driven from that filter's seek: the section's own order
 /// index is spelled out of reach — the term that would seek it stands behind a
 /// unary `+`, which SQLite reads as the same value and never as an index
 /// constraint — so the section reaches each document the filter's seek handed
 /// it by that document's key and sorts them: its cost is the filter's matches,
-/// at most the ceiling, not the order index's rows. Every other section seeks
-/// its order index and tests each row it reads at that document's key against
-/// every filter, the driving one's aside.
+/// at most the walk's budget, not the order index's rows. Every other section
+/// seeks its order index and tests each row it reads at that document's key
+/// against every filter, the driving one's aside; where a window of the walk
+/// bounds it, the window's last row is a second bound on the same row value
+/// the section seeks past its place, so the seek stops there.
+///
+/// **A walk's window is the section itself, narrowed by no filter**, reading
+/// one row past an offset: the row a walk of that many rows past the place
+/// stops at, as the section's own order index hands it back.
 pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let text = |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.into()));
@@ -391,10 +409,11 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let after = binder.bind(text(section.start.path));
             let (comparison, beyond, descending) = spelled(direction);
             let place = format!("COALESCE({after}, {beyond})");
+            let until = path_until(section, direction, &mut binder);
             (
                 format!(
                     "SELECT d.id, d.path, NULL, d.content_hash FROM documents AS d
-                     WHERE {}",
+                     WHERE {}{until}",
                     path_seek(order_seek, comparison, &place)
                 ),
                 answer_ordering("d.path", descending),
@@ -425,13 +444,34 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
                 trail: None,
                 id: None,
             };
+            let until = match section.until {
+                Some(until) => {
+                    let (sort, path) =
+                        (binder.bind(text(until.sort)), binder.bind(text(until.path)));
+                    let bound = AnswerSeek {
+                        reach: "",
+                        comparison: through(direction),
+                        lead: Some(Term {
+                            column: &lead,
+                            bound: &sort,
+                        }),
+                        path: "f.path",
+                        folded: &path,
+                        bytewise: &path,
+                        trail: None,
+                        id: None,
+                    };
+                    format!("\n                       AND {}", bound.spelled())
+                }
+                None => String::new(),
+            };
             (
                 format!(
                     "SELECT f.document, f.path, f.{column},
                          (SELECT h.content_hash FROM documents AS h WHERE h.id = f.document)
                      FROM document_fields AS f
                      WHERE f.key = {key} AND {order_seek}f.{marker} = 1
-                       AND {}",
+                       AND {}{until}",
                     seek.spelled()
                 ),
                 format!(
@@ -447,10 +487,11 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let (comparison, beyond, descending) = spelled(direction);
             let marker = order.marker();
             let place = format!("COALESCE({after}, {beyond})");
+            let until = path_until(section, direction, &mut binder);
             (
                 format!(
                     "SELECT d.id, d.path, NULL, d.content_hash FROM documents AS d
-                     WHERE {}
+                     WHERE {}{until}
                        AND NOT EXISTS (SELECT 1 FROM document_fields AS m
                            WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)",
                     path_seek(order_seek, comparison, &place)
@@ -479,12 +520,51 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
     let limit = binder.bind(Value::Integer(
         i64::try_from(section.rows).expect("a page's row count fits i64"),
     ));
+    let offset = match section.offset {
+        0 => String::new(),
+        offset => format!(
+            " OFFSET {}",
+            binder.bind(Value::Integer(
+                i64::try_from(offset).expect("a window's length fits i64")
+            ))
+        ),
+    };
     let sql = format!(
         "{head}{filters}
                      ORDER BY {ordering}
-                     LIMIT {limit}"
+                     LIMIT {limit}{offset}"
     );
     (sql, binder.into_values())
+}
+
+/// The comparison that holds a row at or before a place in the order a
+/// `direction` runs: `<=` ascending, `>=` descending.
+fn through(direction: PageDirection) -> &'static str {
+    match direction {
+        PageDirection::Ascending => "<=",
+        PageDirection::Descending => ">=",
+    }
+}
+
+/// The bound a section ordered by the path alone stops at, the window's end
+/// inclusive, as a seek of `documents_path_nocase` reads it — a further term
+/// on the same row value the section seeks past its place — or nothing where
+/// the section reads to its end.
+fn path_until(section: &Section<'_>, direction: PageDirection, binder: &mut Binder) -> String {
+    match section.until {
+        Some(until) => {
+            let place = binder.bind(
+                until
+                    .path
+                    .map_or(Value::Null, |path| Value::Text(path.into())),
+            );
+            format!(
+                "\n                       AND {}",
+                path_seek("", through(direction), &place)
+            )
+        }
+        None => String::new(),
+    }
 }
 
 /// A path page the filter at `at` drives from its source ([`Filter::source`]):

@@ -20,6 +20,26 @@ pub(crate) struct KeysetPage<T> {
     pub(crate) stepped: Stepped,
 }
 
+impl<T: Clone> KeysetPage<T> {
+    /// The page `rows` make, read one past a bound of `limit` where a next
+    /// page exists, and what SQLite counted reading them.
+    pub(crate) fn cut(mut rows: Vec<T>, limit: usize, stepped: Stepped) -> Self {
+        let read = rows.len() as u64;
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last().cloned()
+        } else {
+            None
+        };
+        KeysetPage {
+            rows,
+            next,
+            read,
+            stepped,
+        }
+    }
+}
+
 impl Snapshot {
     /// One page of at most `limit` rows, read from `sections` in order.
     ///
@@ -52,18 +72,6 @@ impl Snapshot {
                 stepped.add(ran.stepped);
             }
         }
-        let read = rows.len() as u64;
-        let next = if rows.len() > limit {
-            rows.truncate(limit);
-            rows.last().cloned()
-        } else {
-            None
-        };
-        Ok(KeysetPage {
-            rows,
-            next,
-            read,
-            stepped,
-        })
+        Ok(KeysetPage::cut(rows, limit, stepped))
     }
 }

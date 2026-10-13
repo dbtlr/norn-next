@@ -1957,8 +1957,10 @@ fn a_narrowing_part_narrows_a_validates_work_to_the_findings_it_matches() {
 /// fixture, [`narrowable`] with a violation standing over it, and 50, then
 /// 500, bulk documents each with a warning standing over it, a validate
 /// narrowed by one part of each shape that keeps what it seeks narrows every
-/// page and summary statement by that shape, runs the same statements and
-/// the same VM steps at both sizes, as a page and as a summary, and steps
+/// page and summary statement by that shape — a walk's window, narrowed by
+/// none, aside (NORN-393) — runs the same statements and the same VM steps at
+/// both sizes, as a page of five, which walks the same window of the bulk
+/// before it drives from what the part matched, and as a summary, and steps
 /// through no full scan.
 #[test]
 fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
@@ -1977,10 +1979,14 @@ fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
         let small = with_narrowable("validate-driving-small", 50, order);
         let large = with_narrowable("validate-driving-large", 500, order);
         for (shape, part) in &table {
-            let narrowed = validating().with_predicates([part.clone()]);
+            let narrowed = validating().with_predicates([part.clone()]).with_limit(5);
             for params in [narrowed.clone(), narrowed.summarized()] {
                 for plan in small.plans(&params) {
-                    if matches!(plan.statement, ReadStatement::Validate(_)) {
+                    // A walk's window is narrowed by none of the parts
+                    // (NORN-393).
+                    if matches!(plan.statement, ReadStatement::Validate(_))
+                        && !plan.filters.is_empty()
+                    {
                         assert!(
                             plan.filters
                                 .iter()
@@ -2068,7 +2074,7 @@ fn work_leaving(
 }
 
 /// **A continuation a document part drives costs its page, not the documents
-/// the part matched, on either root (NORN-390).** Over the fixture and 50,
+/// the part matched, on either root (NORN-390).** Over the fixture and 100,
 /// then 500, bulk documents every part of [`drained_parts`] matches, each with
 /// an undeclared-tag warning and a breach citing `tasks`, a page of five
 /// findings of each kind, and of the rule's, narrowed by each part, costs the
@@ -2081,7 +2087,7 @@ fn work_leaving(
 #[test]
 fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
     for order in ROOTS {
-        let small = Validating::with_matched_bulk_under("validate-matched-small", 50, order);
+        let small = Validating::with_matched_bulk_under("validate-matched-small", 100, order);
         let mut large = Validating::with_matched_bulk_under("validate-matched-large", 500, order);
         for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
             for selected in [
@@ -2269,11 +2275,13 @@ fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
 }
 
 /// **A validate page and a repair batch drive from what a part matched exactly
-/// while it keeps no more documents than the ceiling (NORN-390).** In a vault
-/// too small to raise it, a page and a batch of one finding read two, so the
-/// ceiling is sixteen: narrowed by the word `rare`, which sixteen documents
-/// holding a finding carry, each is driven from what the match matched, and by
-/// seventeen each walks its kind's findings.
+/// while it keeps no more documents than the ceiling (NORN-390, NORN-393).**
+/// In a vault too small to raise it, a page and a batch of one finding read
+/// two, so each walks sixteen findings — twenty documents ahead of the rest
+/// in path order hold a finding of the kind and not the word — and then asks
+/// at sixteen, which is the ceiling too: narrowed by the word `rare`, which
+/// sixteen documents holding a finding carry, each is driven from what the
+/// match matched, and by seventeen each walks on through its kind's findings.
 #[test]
 fn a_page_and_a_batch_drive_from_what_a_part_matched_exactly_within_the_ceiling() {
     let ceiling = 2 * norn_store::MATCHED_DRIVE_FACTOR;
@@ -2288,26 +2296,44 @@ fn a_page_and_a_batch_drive_from_what_a_part_matched_exactly_within_the_ceiling(
                 )
             })
             .collect();
+        let padding: Vec<_> = (0..20)
+            .map(|at| {
+                document(
+                    &format!("0pad/{at:02}.md"),
+                    &format!("hash-pad-{at}"),
+                    "padding\n",
+                )
+            })
+            .collect();
         let mut request = validating_store.store.begin_request();
         write_documents(&mut request, &documents);
+        write_documents(&mut request, &padding);
         for at in 0..count {
             request
                 .record_finding(&undeclared(&format!("rare/{at:02}.md"), "rare"))
                 .expect("recording a rare finding");
         }
+        for at in 0..20 {
+            request
+                .record_finding(&undeclared(&format!("0pad/{at:02}.md"), "padding"))
+                .expect("recording a padding finding");
+        }
         let params = validating()
             .with_kinds([FindingKind::UndeclaredTag])
             .with_predicates([Predicate::matches("rare")])
             .with_limit(1);
+        // The last statement of the page the part narrows: the one it
+        // settled on, past the walk's window.
         let drives = |plans: Vec<ValidatePlan>, statement: ValidateStatement| {
             plans
                 .iter()
-                .filter(|plan| plan.statement == ReadStatement::Validate(statement))
-                .all(|plan| {
-                    plan.plan
-                        .sql
-                        .contains("IN (SELECT rowid FROM documents_fts")
+                .rfind(|plan| {
+                    plan.statement == ReadStatement::Validate(statement) && !plan.filters.is_empty()
                 })
+                .expect("the page statement the part narrows")
+                .plan
+                .sql
+                .contains("IN (SELECT rowid FROM documents_fts")
         };
         assert_eq!(
             drives(validating_store.plans(&params), ValidateStatement::KindPage),

@@ -213,8 +213,8 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Compared, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Ran,
-    ReadFilter, ReadStatement, Report, ResolvesPart, page_limit,
+    Compared, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Paged,
+    Ran, ReadFilter, ReadStatement, Report, ResolvesPart, page_limit,
 };
 use crate::store::Snapshot;
 
@@ -828,28 +828,17 @@ impl Snapshot {
             PageOrder::Field { .. } => None,
         };
         let parts: Vec<&Filter> = compiled.filters.iter().collect();
-        let driver = if sections.is_empty() {
-            Driver::Walked
-        } else {
-            self.choose_driver(&parts, descending, limit + 1, lookups)?
-        };
-        let page = self.read_page(
+        let driven = self.drive_page(
+            &FindPages { compiled },
+            &parts,
+            descending,
+            limit + 1,
             sections,
-            limit,
-            &mut lookups.ran,
-            |record, (statement, start), rows| {
-                let composed = compose_page(&Section {
-                    statement,
-                    key: field_key(compiled.order),
-                    start,
-                    filters: &compiled.filters,
-                    driver,
-                    rows,
-                });
-                let section = Ran::new(statement, composed).narrowed_by(compiled.filter_shapes());
-                self.read_keys(record, section)
-            },
+            limit + 1,
+            None,
+            lookups,
         )?;
+        let page = driven.into_page(limit);
         work.keys_read = page.read;
         work.page_stepped(page.stepped);
         Ok((
@@ -882,45 +871,151 @@ fn field_key<'a>(order: PageOrder<'a>) -> Option<&'a str> {
     }
 }
 
+/// One section of a find's page, as the drive reads it: its statement and
+/// where it resumes, the sort value and the path of the row it stopped after.
+#[derive(Clone)]
+struct FindSection {
+    statement: FindStatement,
+    sort: Option<String>,
+    path: Option<String>,
+}
+
+impl FindSection {
+    /// The section's statement, starting at its first row.
+    fn first(statement: FindStatement) -> Self {
+        FindSection {
+            statement,
+            sort: None,
+            path: None,
+        }
+    }
+
+    /// The section's statement, resumed past `at`.
+    fn resumed(statement: FindStatement, at: &FindPosition) -> Self {
+        FindSection {
+            statement,
+            sort: at.sort.clone(),
+            path: Some(at.path.clone()),
+        }
+    }
+
+    fn start(&self) -> SectionStart<'_> {
+        SectionStart {
+            sort: self.sort.as_deref(),
+            path: self.path.as_deref(),
+        }
+    }
+}
+
 /// The sections a page reads from `at` on, in order, each with where it starts.
 ///
 /// A position whose sort is `None` stands in a field order's missing section;
 /// one carrying a sort stands in its valued section. A section after the one
 /// the position stands in starts at its first row.
-fn sections<'a>(
-    order: PageOrder<'_>,
-    at: Option<&'a FindPosition>,
-) -> Vec<(FindStatement, SectionStart<'a>)> {
-    let resumed = |at: &'a FindPosition| SectionStart {
-        sort: at.sort.as_deref(),
-        path: Some(at.path.as_str()),
+fn sections(order: PageOrder<'_>, at: Option<&FindPosition>) -> Vec<FindSection> {
+    let start = |statement: FindStatement| match at {
+        Some(at) => FindSection::resumed(statement, at),
+        None => FindSection::first(statement),
     };
     match order {
-        PageOrder::Path(direction) => vec![(
-            FindStatement::PathPage(direction),
-            at.map(resumed).unwrap_or_default(),
-        )],
+        PageOrder::Path(direction) => vec![start(FindStatement::PathPage(direction))],
         PageOrder::Field {
             order, direction, ..
         } => {
             let valued = FindStatement::FieldValuePage(order, direction);
             let missing = FindStatement::FieldMissingPage(order, direction);
-            let start = SectionStart::default();
+            let first = FindSection::first;
             let in_missing = at.is_some_and(|at| at.sort.is_none());
             match (direction, at) {
-                (PageDirection::Ascending, None) => vec![(missing, start), (valued, start)],
-                (PageDirection::Ascending, Some(at)) if in_missing => {
-                    vec![(missing, resumed(at)), (valued, start)]
+                (PageDirection::Ascending, None) => vec![first(missing), first(valued)],
+                (PageDirection::Ascending, Some(_)) if in_missing => {
+                    vec![start(missing), first(valued)]
                 }
-                (PageDirection::Ascending, Some(at)) => vec![(valued, resumed(at))],
-                (PageDirection::Descending, None) => vec![(valued, start), (missing, start)],
-                (PageDirection::Descending, Some(at)) if in_missing => {
-                    vec![(missing, resumed(at))]
-                }
-                (PageDirection::Descending, Some(at)) => {
-                    vec![(valued, resumed(at)), (missing, start)]
-                }
+                (PageDirection::Ascending, Some(_)) => vec![start(valued)],
+                (PageDirection::Descending, None) => vec![first(valued), first(missing)],
+                (PageDirection::Descending, Some(_)) if in_missing => vec![start(missing)],
+                (PageDirection::Descending, Some(_)) => vec![start(valued), first(missing)],
             }
         }
+    }
+}
+
+/// A find's page sections as the drive reads them ([`Paged`]): each section
+/// statement composed over the request's compiled parts, and a walk's window
+/// the same statement narrowed by none.
+struct FindPages<'c> {
+    compiled: &'c Compiled<'c>,
+}
+
+impl FindPages<'_> {
+    fn compose(
+        &self,
+        section: &FindSection,
+        filters: &[Filter],
+        driver: Driver,
+        until: Option<&PagedKey>,
+        rows: usize,
+        offset: usize,
+    ) -> (String, Vec<norn_db::rusqlite::types::Value>) {
+        compose_page(&Section {
+            statement: section.statement,
+            key: field_key(self.compiled.order),
+            start: section.start(),
+            filters,
+            driver,
+            rows,
+            until: until.map(|row| SectionStart {
+                sort: row.key.sort.as_deref(),
+                path: Some(row.key.path.as_str()),
+            }),
+            offset,
+        })
+    }
+}
+
+impl Paged for FindPages<'_> {
+    type Section = FindSection;
+    type Row = PagedKey;
+
+    fn read(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &FindSection,
+        driver: Driver,
+        until: Option<&PagedKey>,
+        rows: usize,
+    ) -> Result<Vec<PagedKey>, StoreError> {
+        let composed = self.compose(section, &self.compiled.filters, driver, until, rows, 0);
+        let read = Ran::new(section.statement, composed).narrowed_by(self.compiled.filter_shapes());
+        snapshot.read_keys(record, read)
+    }
+
+    fn window(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &FindSection,
+        offset: usize,
+    ) -> Result<Option<PagedKey>, StoreError> {
+        // A missing section walks every document in path order, passing the
+        // ones that carry the key, so its window is the path page's: a walk
+        // of documents, not of the ones missing the key.
+        let walked = match section.statement {
+            FindStatement::FieldMissingPage(_, direction) => FindSection {
+                statement: FindStatement::PathPage(direction),
+                ..section.clone()
+            },
+            _ => section.clone(),
+        };
+        let composed = self.compose(&walked, &[], Driver::Walked, None, 1, offset);
+        Ok(snapshot
+            .read_keys(record, Ran::new(walked.statement, composed))?
+            .into_iter()
+            .next())
+    }
+
+    fn resumed(&self, section: &FindSection, row: &PagedKey) -> FindSection {
+        FindSection::resumed(section.statement, &row.key.position())
     }
 }

@@ -129,8 +129,9 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Conjunction, Driver, Filter, FindingBase, Lookups, PageRefusal, Ran, ReadFilter, ReadStatement,
-    ResolvesPart, Stepped, cursor_position, finding_base, page_limit,
+    Conjunction, Driver, Filter, FindingBase, Lookups, PageRefusal, Paged, Ran, ReadFilter,
+    ReadStatement, ResolvesPart, Stepped, cursor_position, finding_base, linked_finding_base,
+    page_limit,
 };
 use crate::request::unreadable;
 use crate::store::Snapshot;
@@ -206,9 +207,11 @@ impl Validated {
 ///
 /// **The finding counters are the page or summary statements' cost as SQLite
 /// ran them**, read off each statement's own status once its rows are read
-/// and summed over those statements — never the probes the conjunction's
-/// compilation ran, nor the statements that read the page's candidate heads
-/// or its rule sets.
+/// and summed over those statements and every statement the page's drive ran
+/// beside them — the walk's windows, the parts' counts and the vault's span —
+/// never the probes the conjunction's compilation ran, nor the statements
+/// that read the page's candidate heads or its rule sets. The rows read are
+/// the page statements' alone.
 /// A pair of validates over two vault sizes reads whether a validate's work
 /// grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -285,6 +288,17 @@ struct Narrowing {
 }
 
 impl Narrowing {
+    /// The parts that judge the document row at a finding's path, which are
+    /// the parts a page's driver is chosen among: every part but a path
+    /// part, which judges the finding's own path.
+    fn document_parts(&self) -> Vec<&Filter> {
+        self.conjunction
+            .filters
+            .iter()
+            .filter(|filter| filter.path_part().is_none())
+            .collect()
+    }
+
     /// The shapes of the filters the statements read under, in the request's
     /// order.
     fn shapes(&self) -> Vec<ReadFilter> {
@@ -482,25 +496,6 @@ impl Snapshot {
         })
     }
 
-    /// How a page or a batch reading `rows` findings reaches the documents
-    /// `narrowing`'s document parts keep ([`Snapshot::choose_driver`]): its
-    /// findings stand in the answer's path order, so a part keeping its
-    /// documents in that order drives it.
-    fn page_driver(
-        &self,
-        narrowing: &Narrowing,
-        rows: usize,
-        lookups: &mut Lookups,
-    ) -> Result<Driver, StoreError> {
-        let parts: Vec<&Filter> = narrowing
-            .conjunction
-            .filters
-            .iter()
-            .filter(|filter| filter.path_part().is_none())
-            .collect();
-        self.choose_driver(&parts, Some(false), rows, lookups)
-    }
-
     /// One page of findings: at most `limit`, and the finding the next page
     /// continues after.
     fn page_findings(
@@ -511,45 +506,27 @@ impl Snapshot {
         lookups: &mut Lookups,
         work: &mut ValidateWork,
     ) -> Result<(Vec<FindingBase>, Option<FindingBase>), StoreError> {
-        let sections: Vec<(&'static str, Option<Resume<'_>>)> =
-            if narrowing.conjunction.matches_nothing {
-                Vec::new()
-            } else {
-                sections(&narrowing.kinds, at)
-            };
-        let shapes = narrowing.shapes();
+        let sections: Vec<KindSection> = if narrowing.conjunction.matches_nothing {
+            Vec::new()
+        } else {
+            sections(&narrowing.kinds, at)
+        };
         let statement = match narrowing.rule {
             Some(_) => ValidateStatement::RulePage,
             None => ValidateStatement::KindPage,
         };
-        let driver = if sections.is_empty() {
-            Driver::Walked
-        } else {
-            self.page_driver(narrowing, limit + 1, lookups)?
-        };
-        let page = self.read_page(
+        let pages = FindingPages::new(narrowing, statement);
+        let driven = self.drive_page(
+            &pages,
+            &narrowing.document_parts(),
+            Some(false),
+            limit + 1,
             sections,
-            limit,
-            &mut lookups.ran,
-            |record, (kind, after), rows| {
-                let composed = compose_findings(&Findings {
-                    statement,
-                    fingerprint: &narrowing.fingerprint,
-                    rule: narrowing.rule.as_deref(),
-                    kinds: &[kind],
-                    severities: narrowing.severities.as_deref(),
-                    after,
-                    filters: &narrowing.conjunction.filters,
-                    driver: Some(driver),
-                    rows,
-                });
-                let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
-                self.run_statement(record, section, finding_base)
-                    .map_err(|problem| error::sql("reading a page of findings", problem))?
-                    .into_iter()
-                    .collect()
-            },
+            limit + 1,
+            None,
+            lookups,
         )?;
+        let page = driven.into_page(limit);
         work.rows_read = page.read;
         work.stepped(page.stepped);
         Ok((page.rows, page.next))
@@ -579,6 +556,8 @@ impl Snapshot {
             filters: &narrowing.conjunction.filters,
             driver: None,
             rows: 0,
+            until: None,
+            offset: 0,
         });
         let summary = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let read = self
@@ -628,22 +607,153 @@ fn kinds_read(requested: &[FindingKind]) -> Vec<&'static str> {
 /// the path's findings and id.
 type Resume<'a> = (&'a str, i64, i64);
 
+/// One kind's section of a page, as the drive reads it: the kind, and the
+/// `(path, position, id)` it resumes after, or `None` from its first finding.
+type KindSection = (&'static str, Option<(String, i64, i64)>);
+
 /// The sections a page reads from `at` on, in order: one per kind, each with
 /// the place it resumes after.
 ///
 /// A position stands in its kind's section and resumes there; every kind after
 /// it starts at its first finding, and every kind before it has been read.
-fn sections<'a>(
-    kinds: &[&'static str],
-    at: Option<(&str, Resume<'a>)>,
-) -> Vec<(&'static str, Option<Resume<'a>>)> {
+fn sections(kinds: &[&'static str], at: Option<(&str, Resume<'_>)>) -> Vec<KindSection> {
+    let owned = |(path, position, id): Resume<'_>| Some((path.to_string(), position, id));
     kinds
         .iter()
         .filter_map(|kind| match at {
             None => Some((*kind, None)),
-            Some((at_kind, resume)) if *kind == at_kind => Some((*kind, Some(resume))),
+            Some((at_kind, resume)) if *kind == at_kind => Some((*kind, owned(resume))),
             Some((at_kind, _)) if *kind > at_kind => Some((*kind, None)),
             Some(_) => None,
         })
         .collect()
+}
+
+/// Where a finding stands in a page's order, as a section resumes past it.
+fn place(finding: &FindingBase) -> (String, i64, i64) {
+    (finding.path.clone(), finding.position(), finding.id)
+}
+
+/// A request's finding statements as the drive reads them ([`Paged`]): a
+/// kind's or a rule's page, one section per kind, or a batch's merged page,
+/// one section reading every kind, whose kind is unread; and a walk's window, the same statement narrowed by its path
+/// parts alone, which bound the seek rather than judge a document.
+struct FindingPages<'n> {
+    narrowing: &'n Narrowing,
+    statement: ValidateStatement,
+    /// The path parts, the only filters a window is narrowed by.
+    path_parts: Vec<Filter>,
+}
+
+impl<'n> FindingPages<'n> {
+    fn new(narrowing: &'n Narrowing, statement: ValidateStatement) -> Self {
+        FindingPages {
+            narrowing,
+            statement,
+            path_parts: narrowing
+                .conjunction
+                .filters
+                .iter()
+                .filter(|filter| filter.path_part().is_some())
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// `section`'s statement over `filters`, run, its findings read by `read`.
+    #[allow(clippy::too_many_arguments)] // One statement's every input, each named at its call.
+    fn run(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &KindSection,
+        filters: &[Filter],
+        driver: Driver,
+        until: Option<&FindingBase>,
+        rows: usize,
+        offset: usize,
+    ) -> Result<Vec<FindingBase>, StoreError> {
+        let one_kind = [section.0];
+        let merged = self.statement == ValidateStatement::MergedPage;
+        let kinds: &[&str] = if merged {
+            &self.narrowing.kinds
+        } else {
+            &one_kind
+        };
+        let composed = compose_findings(&Findings {
+            statement: self.statement,
+            fingerprint: &self.narrowing.fingerprint,
+            rule: self.narrowing.rule.as_deref(),
+            kinds,
+            severities: self.narrowing.severities.as_deref(),
+            after: section
+                .1
+                .as_ref()
+                .map(|(path, position, id)| (path.as_str(), *position, *id)),
+            filters,
+            driver: Some(driver),
+            rows,
+            until: until.map(|row| (row.path.as_str(), row.position(), row.id)),
+            offset,
+        });
+        let shapes = filters.iter().map(Filter::shape).collect();
+        let ran = Ran::new(self.statement, composed).narrowed_by(shapes);
+        let read = |row: &norn_db::rusqlite::Row<'_>| {
+            if merged {
+                linked_finding_base(row)
+            } else {
+                finding_base(row)
+            }
+        };
+        snapshot
+            .run_statement(record, ran, read)
+            .map_err(|problem| error::sql("reading a page of findings", problem))?
+            .into_iter()
+            .collect()
+    }
+}
+
+impl Paged for FindingPages<'_> {
+    type Section = KindSection;
+    type Row = FindingBase;
+
+    fn read(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &KindSection,
+        driver: Driver,
+        until: Option<&FindingBase>,
+        rows: usize,
+    ) -> Result<Vec<FindingBase>, StoreError> {
+        let filters = &self.narrowing.conjunction.filters;
+        self.run(snapshot, record, section, filters, driver, until, rows, 0)
+    }
+
+    fn window(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &KindSection,
+        offset: usize,
+    ) -> Result<Option<FindingBase>, StoreError> {
+        let filters = &self.path_parts;
+        Ok(self
+            .run(
+                snapshot,
+                record,
+                section,
+                filters,
+                Driver::Walked,
+                None,
+                1,
+                offset,
+            )?
+            .into_iter()
+            .next())
+    }
+
+    fn resumed(&self, section: &KindSection, row: &FindingBase) -> KindSection {
+        (section.0, Some(place(row)))
+    }
 }
