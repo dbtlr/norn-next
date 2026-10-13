@@ -4655,6 +4655,59 @@ fn a_forbidden_rename_keeps_its_link_findings_skipped() {
     }
 }
 
+/// A forbidden removal on a document its route moves drops the link findings
+/// its field held: the removal names the field at the document's path before
+/// the move, so the route does not hide it.
+#[test]
+fn a_forbidden_removal_on_a_routed_document_drops_its_link_findings() {
+    let schema = format!(
+        "{BANNED}    allowed_paths: {{paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}}\n"
+    );
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-settle-forbidden-remove-routed",
+        &schema,
+        &[
+            ("one/zz-twin.md", b"# One\n"),
+            ("two/zz-twin.md", b"# Two\n"),
+            ("zz-peer.md", b"# Peer\n"),
+            (
+                "inbox/h.md",
+                b"---\ntype: task\nscratch: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]]\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let linked = link_findings_of(&host, &vault, "inbox/h.md");
+    assert_eq!(linked.len(), 7);
+    let kept: BTreeSet<u64> = linked
+        .iter()
+        .filter(|row| row.span.expect("a literal link has a span").line != 3)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(kept.len(), 4);
+
+    let preview = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        provenance(&preview)
+            .skipped
+            .iter()
+            .map(|skip| skip.finding)
+            .collect::<BTreeSet<_>>(),
+        kept,
+    );
+    let ApplyReport::Applied { plan, .. } =
+        planned(host.repair(repairing_beneath(&vault, ApplyMode::Apply)))
+    else {
+        panic!("the repair applies");
+    };
+    assert_eq!(provenance(&preview).skipped, provenance(&plan).skipped);
+    assert_eq!(
+        written(&vault, "tasks/h.md"),
+        "---\ntype: task\nkept: '[[zz-absent]] [[zz-twin]] [[zz-peer#Nope]]'\n---\n[[zz-absent]]\n"
+    );
+    assert_eq!(link_findings_of(&host, &vault, "tasks/h.md").len(), 4);
+}
+
 /// The `link/*` findings standing over the document at `name`, in id order.
 fn link_findings_of(
     host: &attach::ServingHost,
