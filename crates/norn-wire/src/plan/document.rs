@@ -499,13 +499,22 @@ pub enum SkipReason {
     /// finding — so the respelling could change what the holder is judged
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
+    // The next seven are Layer 5C's link-fix reasons: the move-following fix
+    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders` and
+    // `several_tombstones`, the similarity suggestion (NORN-400) emits
+    // `too_common` and `too_short`, and either link fix emits
+    // `link_not_rewritable`. No repair runs those fixes yet, so nothing in the
+    // current call graph reaches them and each is a dormant carrier until its
+    // producer lands; NORN-396 lands the vocabulary first. The notes live
+    // here rather than in the doc comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest
     /// from. The entry's value is the query stem, and its note names the
     /// trigram past the cap.
     TooCommon,
     /// The broken link's stem is below the shortest admitted similarity
-    /// query, three characters. The note gives the shortest admitted query.
+    /// query, three characters. The entry's value is the query stem, and its
+    /// note gives the shortest admitted query.
     TooShort,
     /// Move-following found exactly one tombstone for the broken link, and
     /// it recorded no content hash to follow. The note names the tombstone's
@@ -585,7 +594,10 @@ pub struct SkippedFinding {
     /// Why the plan left it alone.
     pub reason: SkipReason,
     /// The finding's actual value, as its bounded head, and absent where the
-    /// finding is about none: a missing required field.
+    /// finding is about none: a missing required field. Where the reason is
+    /// `too_common` or `too_short`, it is the query stem the similarity
+    /// suggestion would have searched for, derived from the broken link and
+    /// not the finding's actual value.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -738,11 +750,12 @@ impl Citation {
     }
 }
 
-// `Host::repair` (Layer 5B, NORN-373) emits this: a repair plan cites the
-// finding generation it read, the findings each operation fixes and the
+// `Host::repair` (Layer 5B, NORN-373) emits this block: a repair plan cites
+// the finding generation it read, the findings each operation fixes and the
 // findings it skipped, and carries the cursor that continues a batch that
-// leaves more. Its published description stays wire-facing, so the note
-// lives here rather than in the doc comment schemars lifts.
+// leaves more. It does not yet set `advisories`; see that field. Its
+// published description stays wire-facing, so the note lives here rather
+// than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
 ///
@@ -773,10 +786,17 @@ pub struct Provenance {
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Box<Cursor>>,
-    /// What the repair noticed about the vault's fields and schema, in one of
-    /// two states: `omitted` when a path or document predicate narrowed the
-    /// repair, and `computed` with its items and total otherwise. Present on
-    /// the first batch only, and absent from every continuation batch.
+    // Dormant carrier: Layer 5C's advisory computation (NORN-402) fills this
+    // slot, on the first batch of a repair. `Host::repair` never sets it
+    // today, so it is absent on every batch; NORN-396 lands the vocabulary
+    // first. The note lives here rather than in the doc comment schemars
+    // lifts.
+    /// The repair advisories: what the repair noticed about the vault's
+    /// fields and schema. The slot is in one of three states: absent, where
+    /// the batch carries none, as every continuation batch does; `omitted`,
+    /// where a path or document predicate narrowed the repair; and
+    /// `computed`, with its items and total, where the repair was
+    /// unnarrowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisories: Option<RepairAdvisories>,
 }

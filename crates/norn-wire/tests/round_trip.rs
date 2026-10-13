@@ -14,44 +14,44 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, AdvisoriesOmitted, Advisory, AdvisoryShape, AdvisoryValueType, AmbiguousEnd,
-    Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams,
-    ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, Backlinks,
-    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation,
-    CitedFinding, Collection, CollectionPage, CollectionSelector, Column, ComparedBy, Confidence,
-    ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams,
-    Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams,
-    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath,
-    DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict, IllegalContentHash,
-    IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams, InitReport,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily,
-    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal, ModelIdentity, MoveParams,
-    MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung,
-    NonFiniteScore, NotReady, Operation, OperationId, OperationKind, OperationsTag, Page,
-    PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend,
-    Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams,
-    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
-    ReloadParams, ReloadReport, ReloadStage, RepairAdvisories, RepairAdvisory, RepairParams,
-    RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget,
-    ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams,
-    RollUp, RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix,
-    RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaHygiene,
-    SchemaRule, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams,
-    Severity, ShapeUse, SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot,
-    Sort, SortKey, Span, SpellingUse, StatusParams, StatusReport, TagRow, TagSource, TagStance,
-    Tally, TargetResult, TotalBelowHead, Transition, TrustState, TypeUse, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueCandidate,
-    ValueCandidateHead, ValueHead, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
-    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character, is_refused_segment,
-    leaf_stem,
+    Addressing, AdvisoriesOmitted, Advisory, AdvisoryValueType, AmbiguousEnd, Anchor,
+    AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams, ApplyReport,
+    AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, Backlinks, BlockRow,
+    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories,
+    Confidence, ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure,
+    CountParams, Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments,
+    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet,
+    FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams,
+    FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict,
+    IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
+    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
+    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RepairAdvisories,
+    RepairAdvisory, RepairParams, RequestBound, RequestPart, RequestScope, RequiredField,
+    RequiredFieldHead, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
+    Resolves, RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths, RuleClosedSet,
+    RuleExclude, RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet,
+    RungSkipReason, SchemaHygiene, SchemaRule, SchemaSource, SchemaViolation, Score, SearchParams,
+    SearchReport, SetParams, Severity, ShapeUse, SidecarRevision, SkipReason, SkippedCandidates,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, SpellingUse, StatusParams, StatusReport, TagRow,
+    TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, TypeUse,
+    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
+    UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams,
+    ValidateReport, ValueCandidate, ValueCandidateHead, ValueHead, ValueMap, Variables,
+    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
+    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    is_refused_character, is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -11714,9 +11714,9 @@ fn every_repair_advisory() -> Vec<(RepairAdvisory, &'static str)> {
             RepairAdvisory::mixed_shapes(
                 "tags",
                 vec![
-                    ShapeUse::new(AdvisoryShape::Scalar, 4),
-                    ShapeUse::new(AdvisoryShape::Sequence, 9),
-                    ShapeUse::new(AdvisoryShape::Map, 1),
+                    ShapeUse::new(ContainerKind::Scalar, 4),
+                    ShapeUse::new(ContainerKind::Sequence, 9),
+                    ShapeUse::new(ContainerKind::Map, 1),
                 ],
                 a_sample(1, 1),
             ),
@@ -11751,11 +11751,26 @@ fn every_repair_advisory() -> Vec<(RepairAdvisory, &'static str)> {
             r#"{"kind":"schema_hygiene","hygiene":{"case":"unused_one_of_value","rule":"status","field":"status","value":"someday"}}"#,
         ),
         (
+            // Given out of order, the rules are written in name order.
+            RepairAdvisory::schema_hygiene(SchemaHygiene::empty_combination(
+                ["beta".to_string(), "alpha".to_string()],
+                HygieneConflict::disjoint_placement(),
+            )),
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["alpha","beta"],"conflict":{"of":"disjoint_placement"}}}"#,
+        ),
+        (
             RepairAdvisory::schema_hygiene(SchemaHygiene::empty_combination(
                 ["alpha".to_string(), "beta".to_string()],
-                HygieneConflict::DisjointPlacement,
+                HygieneConflict::required_and_forbidden("owner"),
             )),
-            r#"{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["alpha","beta"],"conflict":"disjoint_placement"}}"#,
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["alpha","beta"],"conflict":{"of":"required_and_forbidden","field":"owner"}}}"#,
+        ),
+        (
+            RepairAdvisory::schema_hygiene(SchemaHygiene::empty_combination(
+                ["alpha".to_string(), "beta".to_string()],
+                HygieneConflict::empty_one_of("status"),
+            )),
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["alpha","beta"],"conflict":{"of":"empty_one_of","field":"status"}}}"#,
         ),
     ]
 }
@@ -11779,24 +11794,36 @@ fn every_repair_advisory_round_trips_with_its_contracted_bytes() {
         assert_eq!(wire(&value_type), format!("\"{text}\""));
         round_trip(&value_type);
     }
-    for (shape, text) in [
-        (AdvisoryShape::Scalar, "scalar"),
-        (AdvisoryShape::Sequence, "sequence"),
-        (AdvisoryShape::Map, "map"),
+    for conflict in [
+        HygieneConflict::required_and_forbidden("status"),
+        HygieneConflict::empty_one_of("status"),
+        HygieneConflict::disjoint_placement(),
     ] {
-        assert_eq!(wire(&shape), format!("\"{text}\""));
-        round_trip(&shape);
-    }
-    for (conflict, text) in [
-        (
-            HygieneConflict::RequiredAndForbidden,
-            "required_and_forbidden",
-        ),
-        (HygieneConflict::EmptyOneOf, "empty_one_of"),
-        (HygieneConflict::DisjointPlacement, "disjoint_placement"),
-    ] {
-        assert_eq!(wire(&conflict), format!("\"{text}\""));
         round_trip(&conflict);
+    }
+    assert_eq!(
+        wire(&HygieneConflict::required_and_forbidden("status")),
+        r#"{"of":"required_and_forbidden","field":"status"}"#
+    );
+    assert_eq!(
+        wire(&HygieneConflict::empty_one_of("status")),
+        r#"{"of":"empty_one_of","field":"status"}"#
+    );
+    assert_eq!(
+        wire(&HygieneConflict::disjoint_placement()),
+        r#"{"of":"disjoint_placement"}"#
+    );
+    for refused in [
+        r#"{"of":"disjoint_placement","field":"status"}"#,
+        r#"{"of":"empty_one_of"}"#,
+        r#"{"of":"required_and_forbidden","field":"status","surprise":true}"#,
+        r#"{"of":"unfair"}"#,
+        r#""empty_one_of""#,
+    ] {
+        assert!(
+            serde_json::from_str::<HygieneConflict>(refused).is_err(),
+            "{refused} read as a conflict"
+        );
     }
     for foreign in ["sequence", "date", "Null", ""] {
         assert!(
@@ -11804,9 +11831,10 @@ fn every_repair_advisory_round_trips_with_its_contracted_bytes() {
             "`{foreign}` read as a value type"
         );
     }
-    for foreign in ["string", "Map", ""] {
+    for foreign in ["string", "Map", "date", ""] {
         assert!(
-            serde_json::from_str::<AdvisoryShape>(&format!("\"{foreign}\"")).is_err(),
+            serde_json::from_str::<ShapeUse>(&format!(r#"{{"shape":"{foreign}","documents":1}}"#))
+                .is_err(),
             "`{foreign}` read as a shape"
         );
     }
@@ -11859,6 +11887,14 @@ fn a_provenance_carries_its_advisories_in_one_of_three_states() {
     assert_eq!((list.items().len(), list.total()), (2, 40));
     assert!(list.is_truncated());
     round_trip(&bare.with_advisories(truncated));
+
+    // Truncation is the total exceeding the items, and no sooner.
+    let whole = ComputedAdvisories::new(items[..2].to_vec(), 2).expect("a whole list");
+    assert!(!whole.is_truncated(), "a total equal to its items");
+    let empty = ComputedAdvisories::new(Vec::new(), 0).expect("an empty list");
+    assert!(!empty.is_truncated(), "no items out of none");
+    let cut = ComputedAdvisories::new(items[..2].to_vec(), 3).expect("a head");
+    assert!(cut.is_truncated(), "a total one above its items");
     assert_eq!(
         RepairAdvisories::omitted(AdvisoriesOmitted::Narrowed),
         RepairAdvisories::omitted_narrowed()
@@ -11895,6 +11931,9 @@ fn a_provenance_refuses_an_advisory_it_does_not_know() {
         "/advisories/computed/items/4/hygiene",
         "/advisories/computed/items/5/hygiene",
         "/advisories/computed/items/6/hygiene",
+        "/advisories/computed/items/6/hygiene/conflict",
+        "/advisories/computed/items/7/hygiene/conflict",
+        "/advisories/computed/items/8/hygiene/conflict",
     ] {
         assert!(
             serde_json::from_str::<Provenance>(&with_surprise(&json, pointer)).is_err(),
@@ -11913,8 +11952,8 @@ fn a_provenance_refuses_an_advisory_it_does_not_know() {
         r#"{"computed":{"items":[],"total":0,"surprise":true}}"#,
         r#"{"computed":{"items":[{"kind":"mixed_colors","key":"a"}],"total":1}}"#,
         r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"rule_is_loud","rule":"r"}}],"total":1}}"#,
-        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a"],"conflict":"empty_one_of"}}],"total":1}}"#,
-        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a","b"],"conflict":"unfair"}}],"total":1}}"#,
+        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a"],"conflict":{"of":"empty_one_of","field":"f"}}}],"total":1}}"#,
+        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a","b"],"conflict":{"of":"unfair"}}}],"total":1}}"#,
         r#""narrowed""#,
         "{}",
     ] {

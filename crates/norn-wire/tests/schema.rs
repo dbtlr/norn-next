@@ -11,36 +11,36 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, AdvisoriesOmitted, Advisory, AdvisoryShape, AdvisoryValueType, AmbiguousEnd,
-    Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams,
-    ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, BlockRow,
-    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding,
-    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories,
-    Confidence, ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor,
-    CursorKey, DeleteParams, DescribeParams, DescribeReport, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentPathHead,
-    DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
-    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, HygieneConflict, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId,
-    OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
-    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, RepairAdvisories, RepairAdvisory, RepairParams,
-    RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget,
-    ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp,
-    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaHygiene,
-    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity,
-    ShapeUse, SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort,
-    SortKey, Span, SpellingUse, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TargetResult, Transition, TrustState, TypeUse, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES,
-    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, ValueHead, ValueMap,
-    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
-    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    Addressing, AdvisoriesOmitted, Advisory, AdvisoryValueType, AmbiguousEnd, Anchor,
+    AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams, ApplyReport,
+    AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, BlockRow, BodyText,
+    CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories, Confidence,
+    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
+    DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentPathHead, DocumentRow, Drift,
+    EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
+    ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath,
+    FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints,
+    FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    HygieneConflict, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily,
+    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId, OperationKind, Page,
+    PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate,
+    Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport,
+    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
+    ReloadReport, RepairAdvisories, RepairAdvisory, RepairParams, RequestBound, RequestPart,
+    RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport,
+    RungSelection, RungSet, RungSkipReason, SchemaHygiene, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, ShapeUse, SidecarRevision, SkipReason,
+    SkippedCandidates, SkippedFinding, Snapshot, Sort, SortKey, Span, SpellingUse, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState,
+    TypeUse, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
+    Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueCandidate,
+    ValueCandidateHead, ValueHead, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName,
+    VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase,
+    WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -271,7 +271,6 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<SkippedFinding>(),
         schema_of::<DocumentPathHead>(),
         schema_of::<AdvisoryValueType>(),
-        schema_of::<AdvisoryShape>(),
         schema_of::<HygieneConflict>(),
         schema_of::<TypeUse>(),
         schema_of::<ShapeUse>(),
@@ -4517,6 +4516,33 @@ fn the_repair_advisories_advertise_the_shapes_they_are_read_through() {
             "empty_combination"
         ])
     );
+    let conflict = schema_of::<HygieneConflict>();
+    assert_eq!(
+        sorted(tag_constants(&conflict, "of")),
+        sorted([
+            "required_and_forbidden",
+            "empty_one_of",
+            "disjoint_placement"
+        ])
+    );
+    for branch in branches(&conflict) {
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+    }
+    for (conflicting, fields) in [
+        ("required_and_forbidden", vec!["of", "field"]),
+        ("empty_one_of", vec!["of", "field"]),
+        ("disjoint_placement", vec!["of"]),
+    ] {
+        let case = branch(&conflict, "of", conflicting);
+        assert_eq!(property_names(case), fields.into_iter().collect());
+        assert_eq!(required_names(case), property_names(case));
+    }
+    assert_eq!(
+        schema_of::<ShapeUse>()["properties"]["shape"]["$ref"].as_str(),
+        Some("#/$defs/ContainerKind"),
+        "a shape is the container the store records"
+    );
+    assert!(refuses_unknown_keys(&schema_of::<ShapeUse>()));
     let combination = branch(&hygiene, "case", "empty_combination");
     assert_eq!(combination["properties"]["rules"]["minItems"], 2);
     assert_eq!(combination["properties"]["rules"]["maxItems"], 2);

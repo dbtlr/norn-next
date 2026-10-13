@@ -2,7 +2,7 @@
 //! noticed about the vault's fields and schema while it planned, that no
 //! single finding states.
 //!
-//! **An advisory is a record, never an instruction.** It names the vault's
+//! **A repair advisory is a record, never an instruction.** It names the vault's
 //! fields, rules and a bounded sample of documents, and carries no operation:
 //! applying the plan it rides on neither reads nor acts on it, as the rest of
 //! [`Provenance`](crate::Provenance) is never checked at apply.
@@ -18,18 +18,19 @@
 //! bounded heads the rest of a repair plan uses, so a sample never exceeds
 //! [`CANDIDATE_HEAD`](crate::CANDIDATE_HEAD) documents.
 
-// Layer 5C's advisory computation builds these (NORN-396 lands the wire
-// vocabulary first): the repair planner reads the vault's field index and its
-// schema once per unnarrowed repair, and nothing in the current call graph
-// emits an advisory yet, so each type here is a dormant carrier until that
-// producer lands. The notes live here rather than in the doc comments schemars
-// lifts into the published schema.
+// Layer 5C's advisory computation (NORN-402) builds these; NORN-396 lands the
+// wire vocabulary first. That computation reads the vault's field index and
+// its schema once per unnarrowed repair, and nothing in the current call graph
+// runs it, so `Host::repair` never sets the slot and each type here is a
+// dormant carrier until NORN-402 lands. The notes live here rather than in the
+// doc comments schemars lifts into the published schema.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::document::TotalBelowHead;
 use crate::finding_row::DocumentPathHead;
+use crate::read::describe::ContainerKind;
 
 /// The type a field's value holds in a document, as an advisory names it.
 ///
@@ -52,36 +53,52 @@ pub enum AdvisoryValueType {
     Map,
 }
 
-/// How a field's value is shaped in a document, as an advisory names it: the
-/// container the store records it in.
-///
-/// On the wire a shape is the flat string itself: `"scalar"`, `"sequence"`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AdvisoryShape {
-    /// One value: a string, a number, a boolean or a null.
-    Scalar,
-    /// A sequence of values.
-    Sequence,
-    /// A mapping of values by key.
-    Map,
-}
-
-/// The way a schema's rules conflict when combined, as a schema-hygiene
+/// The way two schema rules conflict when combined, as a schema-hygiene
 /// advisory names it.
 ///
-/// On the wire a conflict is the flat string itself: `"empty_one_of"`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// On the wire a conflict is an object tagged `of`:
+/// `{"of":"required_and_forbidden","field":"owner"}`,
+/// `{"of":"empty_one_of","field":"status"}`, `{"of":"disjoint_placement"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "of", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum HygieneConflict {
-    /// A field one rule requires and another, or the same, forbids.
-    RequiredAndForbidden,
-    /// Closed sets over one field that share no value.
-    EmptyOneOf,
-    /// Allowed paths that share no document path.
-    DisjointPlacement,
+    /// One rule requires a field and the other forbids it.
+    #[non_exhaustive]
+    RequiredAndForbidden {
+        /// The field the two rules conflict on.
+        field: String,
+    },
+    /// The rules close one field to sets that share no value.
+    #[non_exhaustive]
+    EmptyOneOf {
+        /// The field the two rules conflict on.
+        field: String,
+    },
+    /// The rules allow paths that share no document path.
+    #[non_exhaustive]
+    DisjointPlacement {},
+}
+
+impl HygieneConflict {
+    /// One rule requires `field` and the other forbids it.
+    pub fn required_and_forbidden(field: impl Into<String>) -> Self {
+        HygieneConflict::RequiredAndForbidden {
+            field: field.into(),
+        }
+    }
+
+    /// The rules close `field` to sets that share no value.
+    pub fn empty_one_of(field: impl Into<String>) -> Self {
+        HygieneConflict::EmptyOneOf {
+            field: field.into(),
+        }
+    }
+
+    /// The rules allow paths that share no document path.
+    pub const fn disjoint_placement() -> Self {
+        HygieneConflict::DisjointPlacement {}
+    }
 }
 
 /// One type a field holds, and how many documents hold it.
@@ -115,15 +132,15 @@ impl TypeUse {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ShapeUse {
-    /// The shape.
-    pub shape: AdvisoryShape,
+    /// The shape: the container the store records the value in.
+    pub shape: ContainerKind,
     /// How many documents hold the field with this shape.
     pub documents: u64,
 }
 
 impl ShapeUse {
     /// The shape `shape`, held by `documents` documents.
-    pub const fn new(shape: AdvisoryShape, documents: u64) -> Self {
+    pub const fn new(shape: ContainerKind, documents: u64) -> Self {
         ShapeUse { shape, documents }
     }
 }
@@ -182,7 +199,8 @@ pub enum SchemaHygiene {
     /// document at all.
     #[non_exhaustive]
     EmptyCombination {
-        /// The two rules, in name order.
+        /// The two rules, in name order; a writer sorts them, and a reader
+        /// does not check it.
         rules: [String; 2],
         /// How they conflict.
         conflict: HygieneConflict,
@@ -209,9 +227,11 @@ impl SchemaHygiene {
         }
     }
 
-    /// The two `rules`, given in name order, admit no document together, for
-    /// the reason `conflict`.
-    pub const fn empty_combination(rules: [String; 2], conflict: HygieneConflict) -> Self {
+    /// The two `rules` admit no document together, for the reason `conflict`.
+    /// The names are sorted here, so a combination is written in name order
+    /// whichever order they are given in; the read does not enforce it.
+    pub fn empty_combination(mut rules: [String; 2], conflict: HygieneConflict) -> Self {
+        rules.sort();
         SchemaHygiene::EmptyCombination { rules, conflict }
     }
 }

@@ -109,7 +109,9 @@
 //! operation fixes, each a [`CitedFinding`] at a [`Confidence`], and the
 //! [`SkippedFinding`]s it left alone, each for a [`SkipReason`] with the
 //! [`SkippedCandidates`] or [`RequiredFieldHead`] it chose between, and where
-//! the next batch continues. A repair is asked for by [`RepairParams`] under the
+//! the next batch continues, with a slot for the [`RepairAdvisories`] it
+//! noticed about the vault's fields and schema, each a [`RepairAdvisory`]
+//! whose sample of documents is a [`DocumentPathHead`]. A repair is asked for by [`RepairParams`] under the
 //! `repair` verb. In a
 //! resolved plan an operation that moves, removes or retargets documents
 //! carries its link cascade, one [`LinkRewrite`] per document, syntax and
@@ -388,7 +390,12 @@
 //! [`RewriteWikilinkParams`] and [`RepairParams`], [`MoveSubject::new`],
 //! [`ValueCandidate::new`], [`ValueCandidate::by_rule`],
 //! [`RequiredField::new`], [`RequiredField::with_default`],
-//! [`ValueCandidateHead::new`], [`RequiredFieldHead::new`], and the
+//! [`ValueCandidateHead::new`], [`RequiredFieldHead::new`],
+//! [`DocumentPathHead::new`], [`TypeUse::new`], [`ShapeUse::new`],
+//! [`SpellingUse::new`], [`ComputedAdvisories::new`],
+//! [`RepairAdvisories::omitted`], [`RepairAdvisories::omitted_narrowed`],
+//! [`RepairAdvisories::computed`], the constructor on each [`RepairAdvisory`],
+//! [`SchemaHygiene`] and [`HygieneConflict`] variant, and the
 //! constructor on each [`FieldChange`], [`DocumentEdit`], [`MoveSubject`] and
 //! [`SkippedCandidates`] variant. The
 //! plan types the applier destructures, below, can be written as literals and
@@ -398,7 +405,8 @@
 //! [`PlanDocument`] variant, [`AuthoredValue::string`],
 //! [`AuthoredValue::float`], [`AuthoredValue::list`], [`AuthoredValue::map`],
 //! [`LinkRewrite::new`], [`LinkKey::new`], [`Transition::new`],
-//! [`SkippedFinding::new`], [`Provenance::new`], [`Citation::new`],
+//! [`SkippedFinding::new`], [`Provenance::new`], [`Provenance::with_advisories`],
+//! [`Citation::new`],
 //! [`CitedFinding::new`], [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
@@ -621,8 +629,8 @@ pub use finding_row::{
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::advisory::{
-    AdvisoriesOmitted, AdvisoryShape, AdvisoryValueType, ComputedAdvisories, HygieneConflict,
-    RepairAdvisories, RepairAdvisory, SchemaHygiene, ShapeUse, SpellingUse, TypeUse,
+    AdvisoriesOmitted, AdvisoryValueType, ComputedAdvisories, HygieneConflict, RepairAdvisories,
+    RepairAdvisory, SchemaHygiene, ShapeUse, SpellingUse, TypeUse,
 };
 pub use plan::backlinks::Backlinks;
 pub use plan::document::{

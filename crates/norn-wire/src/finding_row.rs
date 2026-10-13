@@ -480,12 +480,12 @@ bounded_head!(
     total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
 );
 
-// Layer 5C's repair advisories carry it (NORN-396): each advisory names a
-// bounded sample of the documents it concerns beside the exact count. Nothing
-// builds it yet; the Layer 5C advisory computation fills it, and the wire
-// vocabulary lands first so that producer has a type to emit. The note lives
-// here rather than in the doc comment schemars lifts into the published
-// schema.
+// Layer 5C's repair advisories carry it: each names a bounded sample of the
+// documents it concerns beside the exact count. The advisory computation
+// (NORN-402) fills it, and nothing in the current call graph runs that, so
+// the type is a dormant carrier until then; NORN-396 lands the wire
+// vocabulary first. The note lives here rather than in the doc comment
+// schemars lifts into the published schema.
 bounded_head!(
     DocumentPathHead of DocumentPath, paths,
     what: "document path",
