@@ -84,6 +84,11 @@
 //!   trigram index's rarest query trigrams under a postings cap, with the
 //!   counts a score is computed from, or too common past the cap.
 //!   [`Snapshot::similar_stems_plans`] explains what it ran.
+//! - [`Snapshot::tombstones_by_suffix`] — recorded deaths a wikilink suffix
+//!   names, bounded to two for Layer 5C move-following;
+//!   [`Snapshot::tombstone_at_path`] reads a death by exact path, and
+//!   [`Snapshot::live_holders`] reads at most two live documents holding a
+//!   content hash. Their `*_plans` methods explain what ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -137,6 +142,7 @@ mod held_links;
 mod increment;
 mod json;
 mod link;
+mod moved;
 mod path;
 mod read;
 mod request;
@@ -186,6 +192,7 @@ pub use json::{
     FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json, frontmatter_of_projection,
 };
 pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
+pub use moved::{MOVED_STATEMENTS, MovedPlan, MovedStatement, MovedTombstone};
 pub use read::{
     DEFAULT_PAGE, FieldMatch, FieldOrder, FindingLink, IN_VALUES_CEILING, MATCHED_DRIVE_FACTOR,
     MERGED_SOURCE_VALUES, MatchedColumn, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,

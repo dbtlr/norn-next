@@ -32,6 +32,7 @@ mod held_links;
 mod increments;
 mod lifecycle;
 mod links;
+mod moved;
 mod pillars;
 mod readers;
 mod redecision;

@@ -438,6 +438,7 @@ impl Snapshot {
             | ReadStatement::HeldLinks(_)
             | ReadStatement::StemRarity
             | ReadStatement::StemPostings
+            | ReadStatement::Moved(_)
             | ReadStatement::HeldFrontmatter(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {

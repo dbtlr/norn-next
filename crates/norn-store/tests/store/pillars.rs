@@ -470,8 +470,13 @@ fn a_tombstone_at_a_live_path_is_damage() {
 
     induced_failure::execute_out_of_band(
         &mut store,
-        "INSERT INTO tombstones (path, last_content_hash, provenance, generation, recorded_at)
-         VALUES ('docs/norn/glossary.md', 'hash-0', 'heal-prune', 1, 0)",
+        "INSERT INTO tombstones (
+             path, last_content_hash, provenance, generation, recorded_at,
+             suffix_key, folded_suffix_key
+         ) VALUES (
+             'docs/norn/glossary.md', 'hash-0', 'heal-prune', 1, 0,
+             'glossary/norn/docs/', 'glossary/norn/docs/'
+         )",
     )
     .expect("writing a pair nothing writes");
     let error = store.verify_integrity().unwrap_err();

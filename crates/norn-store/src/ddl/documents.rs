@@ -147,6 +147,9 @@
 //! - `derived_at` — unix seconds, for a person reading a report. It orders
 //!   nothing: `generation` does that.
 //!
+//! `documents_content_hash` lets move-following read live holders of a hash
+//! in path order without sorting.
+//!
 //! # The sub-fingerprints are stamped where the row is derived
 //!
 //! `content_hash` answers whether the *document* changed, and that is the
@@ -205,6 +208,7 @@ const STATEMENTS: &[&str] = &[
     CHECK ((frontmatter IS NULL) = (frontmatter_projection_hash IS NULL))
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
+    "CREATE INDEX documents_content_hash ON documents(content_hash, path)",
     "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
     "CREATE INDEX documents_folded_suffix_key ON documents(folded_suffix_key)",

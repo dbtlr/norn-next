@@ -211,8 +211,9 @@ impl WriteStatement {
             Self::DeleteDocument => "DELETE FROM documents WHERE path = ?1 RETURNING content_hash",
             Self::RecordTombstone => {
                 "INSERT INTO tombstones (
-                     path, last_content_hash, provenance, generation, recorded_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                     path, last_content_hash, provenance, generation, recorded_at,
+                     suffix_key, folded_suffix_key
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(path) DO UPDATE SET
                      last_content_hash = COALESCE(
                          excluded.last_content_hash, tombstones.last_content_hash
