@@ -959,9 +959,11 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 ///   target). The head reads the class's range off the suffix key the root
 ///   probes, which orders it by the key, and sorts by path only each run of
 ///   rows equal on the key, the head's `LIMIT` stopping the read: a run is the
-///   documents one key spells, which is one path on the raw key — its leaf's
-///   extension dropped, `crates/norn-store/src/path.rs:11-12` — and that
-///   path's case spellings on the folded key a folding root probes, where it
+///   documents one key spells, which on the raw key is one path's spellings
+///   of the document extension — its leaf's extension dropped,
+///   `crates/norn-store/src/path.rs:11-12`, and the extension read in any
+///   ASCII case, so at most four documents — and those paths' case spellings
+///   on the folded key a folding root probes, where it
 ///   holds one of them (`docs/architecture.md:2389-2391`); the class is read
 ///   through that seek at `docs/architecture.md:832-834`.
 fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
