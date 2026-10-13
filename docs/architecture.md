@@ -812,7 +812,7 @@ drain this bar is the strongest one available.
 None of those is a query shape's bar. **The predicate + sort + page shape has a builder**:
 the find builder compiles a request's conjunction, order and page bound into statements a
 read snapshot runs, and names them in an enumeration of its own under the same discipline —
-twenty statements and thirteen filter shapes, each explained as the find ran it (the text and
+twenty-two statements and thirteen filter shapes, each explained as the find ran it (the text and
 values the one site that runs a find's statements recorded) on the read-only connection,
 each carrying a plan bar with a negative control run against it, and a census that holds
 every statement slot and every filter slot to exactly one bar. The statements are the
@@ -838,7 +838,10 @@ the root orders by; and every candidate's minimal disambiguating suffix, one sta
 each spelling's range is the same seek stopping at its second member — so a page's links
 and candidates cost a fixed number of statements, however many there are; and the
 offset-spelling probe, two seeks of `document_fields_offset`, one at each spelling, run once
-for each key with a dated order the request sorts, groups or compares by. **A comparison
+for each key with a dated order the request sorts, groups or compares by; and the two reads a
+page's drive makes, below: a part's count, of the distinct documents among the rows of the
+part's own index seek, stopped one past its cap, and the vault's span, its greatest document
+row id. **A comparison
 that read an unstated offset as zero against a stated one is advised**: an answer carries a
 mixed-offset advisory, once per key and place, where its order, its grouping or a comparing
 part met both spellings. The advisory speaks for every value the key holds in the snapshot,
@@ -1187,6 +1190,9 @@ payload bar holds that no statement a search runs reads a document's body, its f
 or the full-text body column: a `MATCH` and `bm25()` read the index through the column
 FTS5 names after its table, never the text the index is over. A full-text match is read
 through a find's `matches` part or a search's query, and through no other read.
+Loading the index, FTS5 reads its own configuration end to end, every row of
+`documents_fts_config`: the store sets no option there, so the table holds the module's
+version row alone, and the read costs that one row whatever the vault holds.
 
 **The suffix/stem resolve shape has a builder that answers one document**: the get builder
 resolves a target through the one resolver — the class a find's `resolves` part reads, under

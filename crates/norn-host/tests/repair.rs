@@ -723,39 +723,66 @@ fn an_apply_drains_the_selection_along_its_cursors_covering_every_finding_once()
     assert_eq!(seen, by_id.keys().copied().collect::<Vec<_>>());
 }
 
-/// **A block that changes nothing about what applies, shown on a plan that
-/// writes.** The resolved plan of a status edit lands the same bytes and the
-/// same target outcomes with no provenance, with the block a repair attached,
-/// and with it altered: skipped findings emptied, cursor and count taken off,
-/// a finding generation that never stood.
+/// **A block that changes nothing about what applies, shown on a real repair
+/// plan.** A repair under [`DEFAULTING`] writes two cited operations and skips
+/// a finding. Every part of its block is then altered: the generation, a
+/// citation (an operation the plan does not hold, a finding that never stood,
+/// another confidence, a value and notes), a skipped finding carrying every
+/// kind of decision data (a proposed delete included), the count and the
+/// cursor. The altered plan applies with the operations, transitions,
+/// changeset, targets and written bytes the unaltered plan does.
 #[test]
-fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
-    const EDITED: &str = "edited.md";
-    let documents: Vec<(&str, &[u8])> = DOCUMENTS
-        .iter()
-        .copied()
-        .chain([(
-            EDITED,
-            &b"---\ntype: task\nstatus: todo\n---\n# Edited\n"[..],
-        )])
-        .collect();
-    let edit = |vault: &attach::Vault, host: &attach::ServingHost| {
-        previewed(host.set(SetParams::new(
-            address(vault),
-            ApplyMode::Preview,
-            WriteTarget::path(
-                norn_wire::DocumentPath::new(format!("{FOLDER}{EDITED}")).expect("a document path"),
-            ),
-            vec![FieldChange::set("status", AuthoredValue::string("done"))],
-        )))
-    };
-    let landing = |label: &str, block: &dyn Fn(&ResolvedPlan) -> Option<Provenance>| {
-        let (_sandbox, vault, host) = a_vault_holding(label, &documents);
+fn a_cited_repair_plan_applies_the_same_whatever_every_part_of_its_block_says() {
+    let docs: [(&str, &[u8]); 2] = [
+        ("a.md", b"---\ntype: task\n---\nSee [[nowhere-a]].\n"),
+        ("b.md", b"---\ntype: task\n---\n# B\n"),
+    ];
+    let landing = |label: &str, alter: bool| {
+        let (_sandbox, vault, host) = a_vault_under(label, DEFAULTING, &docs);
         let _lease = attach::attach_and_wait(&host, vault.name());
-        let mut plan = edit(&vault, &host);
-        assert_eq!(plan.operations.len(), 1, "the edit is an operation");
-        let repair = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)));
-        plan.provenance = block(&repair);
+        let mut plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+        let original = provenance(&plan).clone();
+        assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+        assert_eq!(original.citations.len(), 2, "the plan cites: {original:?}");
+        assert!(!original.skipped.is_empty(), "the plan skips: {original:?}");
+        assert!(original.cursor.is_none());
+        if alter {
+            let cursor = provenance(&previewed(
+                host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)),
+            ))
+            .cursor
+            .clone()
+            .expect("a cursor");
+            let altered = norn_store::value_head("altered");
+            plan.provenance = Some(
+                Provenance::new(
+                    original.finding_generation.wrapping_add(1_000_000),
+                    vec![
+                        SkippedFinding::new(u64::MAX, SkipReason::Tie)
+                            .with_value(altered.clone())
+                            .with_candidates(candidates(&[("x", "nobody"), ("y", "nobody")]))
+                            .with_required_fields(
+                                RequiredFieldHead::new([RequiredField::new("ghost")], 1)
+                                    .expect("a head"),
+                            )
+                            .with_proposed(Operation::new(OperationKind::delete_document(at(
+                                "b.md",
+                            ))))
+                            .with_note("altered"),
+                    ],
+                )
+                .with_citations(vec![Citation::new(
+                    OperationId::new("repair-99").expect("an id"),
+                    vec![
+                        CitedFinding::new(u64::MAX, Confidence::Suggested)
+                            .with_value(altered)
+                            .with_notes(vec!["altered".into()]),
+                    ],
+                )])
+                .with_remaining(12345)
+                .continued_by(*cursor),
+            );
+        }
         let applied = host
             .apply(ApplyParams::new(
                 ApplyMode::Apply,
@@ -774,29 +801,24 @@ fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
         else {
             panic!("an apply answered {applied:?}");
         };
-        // The plan's root is the fixture's own, so it is the one thing that
-        // differs between three equivalent vaults.
-        let written = std::fs::read(vault.path().join(FOLDER).join(EDITED)).expect("read");
+        // The plan's root is the fixture's own, so only the parts that
+        // would differ with the block are compared, not the whole plan.
         (
             plan.operations,
             plan.transitions,
             changeset,
             targets,
-            written,
+            written(&vault, "a.md"),
+            written(&vault, "b.md"),
         )
     };
 
-    let none = landing("host-repair-block-none", &|_| None);
-    let original = landing("host-repair-block-original", &|repair| {
-        repair.provenance.clone()
-    });
-    let altered = landing("host-repair-block-altered", &|_| {
-        Some(Provenance::new(u64::MAX, Vec::new()))
-    });
+    let unaltered = landing("host-repair-block-unaltered", false);
+    let altered = landing("host-repair-block-altered", true);
 
-    assert!(String::from_utf8_lossy(&none.4).contains("status: done"));
-    assert_eq!(original, none);
-    assert_eq!(altered, none);
+    assert!(unaltered.4.contains("status: todo"), "{}", unaltered.4);
+    assert!(unaltered.5.contains("status: todo"), "{}", unaltered.5);
+    assert_eq!(altered, unaltered);
 }
 
 /// The documents a previewed repair of the vault's ambiguous links skipped
@@ -1799,8 +1821,9 @@ struct ClockFilled {
     days: Vec<String>,
     /// The date folder of each route's destination, in plan order.
     folders: Vec<String>,
-    /// The after-state of each stamped document's transition, as planned.
-    stamped_after: Vec<norn_wire::FileState>,
+    /// The after-state of each document's transition a clock default fills,
+    /// as planned, with whether the document is stamped with an instant.
+    filled_after: Vec<(bool, norn_wire::FileState)>,
 }
 
 /// `path` with the date folder a route reads the clock for set to `DATE`, the
@@ -1818,19 +1841,23 @@ fn without_the_route_date(path: &DocumentPath, folders: &mut Vec<String>) -> Doc
 
 /// `plan` with only what the clock fills set apart: the date folder in a
 /// route's paths (a move's destination, a write's target, the transitions
-/// landing there), the value of a `created` or `day` default, and the
-/// after-state of a document stamped with an instant, whose bytes hold it.
+/// landing there, the citation notes naming a destination), the value of a `created` or `day` default, and the
+/// after-state of every document a clock default fills with an instant, whose
+/// bytes hold it. The after-state of a document a default fills with a day
+/// alone is masked only for `across_days`, as two readings that straddle local
+/// midnight differ in it and two on one day do not.
 /// Each masked value is checked to be a well-formed clock reading. Everything
 /// else, the rest of each destination path included, stays as planned.
-fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
+fn with_the_clock_masked(plan: &ResolvedPlan, across_days: bool) -> (ResolvedPlan, ClockFilled) {
     let mut masked = plan.clone();
     let mut filled = ClockFilled {
         instants: Vec::new(),
         days: Vec::new(),
         folders: Vec::new(),
-        stamped_after: Vec::new(),
+        filled_after: Vec::new(),
     };
     let mut stamped = BTreeSet::new();
+    let mut clock_filled = BTreeSet::new();
     for operation in &mut masked.operations {
         match &mut operation.kind {
             OperationKind::MoveDocument { to, .. } => {
@@ -1847,6 +1874,7 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
             } => {
                 if field == "created" || field == "day" {
                     let reading = value.scalar_text().expect("a clock reading");
+                    clock_filled.insert(path.as_str().to_string());
                     if field == "created" {
                         assert!(is_an_instant(&reading), "an instant: {reading}");
                         stamped.insert(path.as_str().to_string());
@@ -1865,13 +1893,54 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
     for transition in &mut masked.transitions {
         let was = transition.path.as_str().to_string();
         transition.path = without_the_route_date(&transition.path, &mut Vec::new());
-        if stamped.contains(&was) {
-            filled.stamped_after.push(transition.after.clone());
-            transition.after =
-                norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+        if clock_filled.contains(&was) {
+            let with_an_instant = stamped.contains(&was);
+            filled
+                .filled_after
+                .push((with_an_instant, transition.after.clone()));
+            if with_an_instant || across_days {
+                transition.after =
+                    norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+            }
+        }
+    }
+    // A citation's note names a route's destination, date folder included.
+    if let Some(block) = &mut masked.provenance {
+        for note in block
+            .citations
+            .iter_mut()
+            .flat_map(|citation| &mut citation.findings)
+            .flat_map(|finding| &mut finding.notes)
+        {
+            for date in &filled.folders {
+                *note = note.replace(date.as_str(), "DATE");
+            }
         }
     }
     (masked, filled)
+}
+
+/// Both plans with only what the clock fills masked, the hash of a day-only
+/// document masked only where the two plans' days differ: each plan's masked
+/// form with what it held, the first plan's then the second's.
+fn masked_alike(
+    first: &ResolvedPlan,
+    second: &ResolvedPlan,
+) -> ((ResolvedPlan, ClockFilled), (ResolvedPlan, ClockFilled)) {
+    let day_of = |plan| with_the_clock_masked(plan, true).1.days[0].clone();
+    let across_days = day_of(first) != day_of(second);
+    (
+        with_the_clock_masked(first, across_days),
+        with_the_clock_masked(second, across_days),
+    )
+}
+
+/// `plan` as the clock would have filled it on `then`'s day instead of `now`'s,
+/// every date it holds (folders, `day` values, the day of each instant)
+/// respelled.
+fn read_on_another_day(plan: &ResolvedPlan, now: &str, then: &str) -> ResolvedPlan {
+    let text = serde_json::to_string(plan).expect("a plan serializes");
+    serde_json::from_str(&text.replace(now, then)).expect("a plan deserializes")
 }
 
 /// **An apply plans what its preview did, apart from what the clock fills.**
@@ -1879,8 +1948,10 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
 /// whose default reads no clock: a second apart, the preview and the apply
 /// read the clock at different instants, so the `created` instants differ.
 /// With only what the clock fills masked (each default's value, the date
-/// folder of each route's paths, and the after-state of the two documents
-/// stamped with an instant), each checked to be a well-formed reading, and the
+/// folder of each route's paths, and the after-state of the two documents a
+/// clock default fills with an instant, and of the one it fills with a day
+/// alone only if the two readings' days differ, as they do across local
+/// midnight), each checked to be a well-formed reading, and the
 /// rest of every destination path left as planned, the two plans are equal in
 /// operations, transitions, conditions and provenance (citations, skipped
 /// findings, remaining count and cursor), and the review's fix stands alike
@@ -1913,8 +1984,8 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
     };
     assert_eq!(changeset, ChangesetOutcome::Committed);
 
-    let (preview_masked, preview_filled) = with_the_clock_masked(&preview);
-    let (apply_masked, apply_filled) = with_the_clock_masked(&apply);
+    let ((preview_masked, preview_filled), (apply_masked, apply_filled)) =
+        masked_alike(&preview, &apply);
     for (plan, filled) in [(&preview, &preview_filled), (&apply, &apply_filled)] {
         assert_eq!(
             (
@@ -1940,16 +2011,69 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         preview_filled.instants, apply_filled.instants,
         "the two readings of the clock are one instant"
     );
-    // The stamped documents' bytes hold the instant, so their hashes differ
-    // between the plans; the unstamped `b.md` is not masked.
-    assert_eq!(preview_filled.stamped_after.len(), 2);
-    assert!(
-        preview_filled
-            .stamped_after
+    // `a.md` and `c.md` hold an instant, so their hashes differ between the
+    // plans and are masked. `b.md` holds a day alone, which two readings share
+    // unless they straddle local midnight, so its hash is masked only then.
+    let instants_of = |filled: &ClockFilled| -> Vec<norn_wire::FileState> {
+        filled
+            .filled_after
             .iter()
-            .zip(&apply_filled.stamped_after)
-            .all(|(then, now)| then != now),
+            .filter(|(stamped, _)| *stamped)
+            .map(|(_, after)| after.clone())
+            .collect()
+    };
+    assert_eq!(preview_filled.filled_after.len(), 3);
+    assert_eq!(
+        preview_filled
+            .filled_after
+            .iter()
+            .map(|(stamped, _)| *stamped)
+            .collect::<Vec<_>>(),
+        apply_filled
+            .filled_after
+            .iter()
+            .map(|(stamped, _)| *stamped)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        instants_of(&preview_filled)
+            .iter()
+            .zip(instants_of(&apply_filled))
+            .all(|(then, now)| *then != now),
         "a stamped document's hash is its instant's"
+    );
+    // A day-only document's hash is the day's: with the two readings on one
+    // day, a hash that differs is a difference, not the clock's.
+    let set_day_only_hash = |plan: &mut ResolvedPlan, hash: [u8; 32]| {
+        plan.transitions
+            .iter_mut()
+            .find(|transition| {
+                transition.path.as_str().starts_with(ROUTE_ROOT)
+                    && transition.path.as_str().ends_with("/b.md")
+            })
+            .expect("the day-only document's transition")
+            .after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256(hash));
+    };
+    let mut other = apply.clone();
+    set_day_only_hash(&mut other, [7; 32]);
+    let (apply_alike, other_alike) = masked_alike(&apply, &other);
+    assert_ne!(
+        other_alike.0, apply_alike.0,
+        "a day-only document's hash passed the mask on one day"
+    );
+    // The readings on different days, as across local midnight, differ in the
+    // day-only hash, which then passes the mask, and in nothing else.
+    let day = apply_filled.days[0].clone();
+    let mut straddling = read_on_another_day(&apply, &day, "2099-01-01");
+    set_day_only_hash(&mut straddling, [7; 32]);
+    let (preview_alike, straddling_alike) = masked_alike(&preview, &straddling);
+    assert_eq!(
+        straddling_alike.1.days[0], "2099-01-01",
+        "the plan reads another day"
+    );
+    assert_eq!(
+        straddling_alike.0, preview_alike.0,
+        "a day-only document's hash was not masked across days"
     );
     // A difference that is not the clock's is not masked: the apply landing
     // a document under another name, or in a subfolder, is a difference.
@@ -1960,11 +2084,25 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         };
         *to = DocumentPath::new(altered.replace("DATE", "2026-01-01")).expect("a path");
         assert_ne!(
-            with_the_clock_masked(&other).0,
+            masked_alike(&preview, &other).1.0,
             preview_masked,
             "{altered} passed the mask"
         );
     }
+    // Nor is a document no clock default fills: the review's after-state
+    // differing is a difference.
+    let mut other = apply.clone();
+    let review = other
+        .transitions
+        .iter_mut()
+        .find(|transition| transition.path.as_str().ends_with("/r.md"))
+        .expect("the review's transition");
+    review.after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32]));
+    assert_ne!(
+        masked_alike(&preview, &other).1.0,
+        preview_masked,
+        "an unfilled document's hash passed the mask"
+    );
     assert!(
         preview
             .operations
@@ -3115,6 +3253,70 @@ fn a_previews_route_plan_lands_through_apply() {
     assert!(findings_beneath(&host, &vault).is_empty());
 }
 
+/// **A repair preview answers what `Host::apply`'s preview of the same plan
+/// answers.** Repair judges its resolved plan by the applier's own preview
+/// judgment on a read hold of its own, and the architecture states the two
+/// answers equal. The plan here routes a document, fills a default and skips
+/// a finding, and the route's move leaves a link it cannot respell (a
+/// wikilink in a flow sequence) that the forecast advises on, so the
+/// comparison holds something in every part of the report: the plan's
+/// operations and provenance, and the forecast's removed folders and link
+/// advisories. Nothing is excluded: a preview's report is the plan and its
+/// forecast, and neither is per-call.
+#[test]
+fn a_repair_preview_answers_what_a_preview_of_its_plan_through_apply_answers() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-preview-equals-apply-preview",
+        schema,
+        &[
+            ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
+            ("tasks/b.md", b"---\ntype: task\n---\nSee [[nowhere]].\n"),
+            (
+                "h.md",
+                b"---\nsee: \"[[zz-repair/loose/a]]\"\n---\nUp [[zz-repair/loose/a]]\n",
+            ),
+            ("g.md", b"---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let repair = planned(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+    let ApplyReport::Previewed { plan, forecast, .. } = &repair else {
+        panic!("a repair preview answered {repair:?}");
+    };
+    assert!(
+        !forecast.links.is_empty(),
+        "the forecast advises on a link the move cannot respell: {forecast:?}"
+    );
+    assert!(
+        plan.operations
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::MoveDocument { .. })),
+        "the plan routes: {:?}",
+        plan.operations
+    );
+    assert!(
+        plan.operations
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::SetFrontmatter { .. })),
+        "the plan fills a default: {:?}",
+        plan.operations
+    );
+    assert!(
+        !provenance(plan).skipped.is_empty(),
+        "the plan skips: {:?}",
+        provenance(plan)
+    );
+
+    let through_apply = planned(host.apply(ApplyParams::new(
+        ApplyMode::Preview,
+        PlanDocument::resolved(plan.clone()),
+    )));
+
+    assert_eq!(through_apply, repair);
+}
+
 /// **A repair plan routing by no route that reads the clock reads it not at
 /// all.**
 #[test]
@@ -3868,12 +4070,14 @@ const LINKED_PAIR: [(&str, &[u8]); 2] = [
 /// The address resolution a repair of [`LINKED_PAIR`] records: `zz-target`,
 /// written in the holder, names the target at `lands`.
 fn linking_to(lands: &str) -> norn_wire::PlanCondition {
+    linking_from("zz-holder.md", lands)
+}
+
+/// The address resolution a repair records for `zz-target`, written in the
+/// holder at `holder`, naming the target at `lands`.
+fn linking_from(holder: &str, lands: &str) -> norn_wire::PlanCondition {
     norn_wire::PlanCondition::address_resolution(
-        norn_wire::LinkKey::new(
-            at("zz-holder.md"),
-            norn_wire::LinkFamily::Wikilink,
-            "zz-target",
-        ),
+        norn_wire::LinkKey::new(at(holder), norn_wire::LinkFamily::Wikilink, "zz-target"),
         norn_wire::Resolves::one(at(lands)),
     )
 }
@@ -4045,6 +4249,68 @@ fn a_refused_plans_fresh_plan_carries_the_resolution_and_refuses_where_the_evide
             );
         }
     }
+}
+
+/// **Declared limit (NORN-371): a refused plan's fresh plan also carries the
+/// address resolution of an operation it leaves unresolved.** A condition
+/// names no operation, so where another writer removes one holder of a
+/// two-link repair plan the fresh plan lists that holder's operation as
+/// unresolved and still carries the condition recorded for its link, and may
+/// refuse on evidence for an operation it no longer holds.
+#[test]
+fn declared_limit_a_refused_repair_plans_fresh_plan_carries_the_condition_of_an_operation_it_left_unresolved()
+ {
+    const HOLDER_B: &str = "zz-holder-b.md";
+    let documents: [(&str, &[u8]); 3] = [
+        ("zz-holder.md", b"---\nup: zz-target\n---\n# Holder\n"),
+        (HOLDER_B, b"---\nup: zz-target\n---\n# Holder B\n"),
+        ("zz-target.md", b"# Target\n"),
+    ];
+    let (_sandbox, vault, host) = a_vault_under("host-repair-fresh-limit", LINKING, &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+    assert_eq!(
+        plan.conditions,
+        vec![
+            linking_from(HOLDER_B, "zz-target.md"),
+            linking_to("zz-target.md")
+        ]
+    );
+    // Another writer changes one holder, which refuses the plan, and removes
+    // the other, which leaves its operation nothing to write to.
+    std::fs::write(
+        vault.path().join(FOLDER).join("zz-holder.md"),
+        "---\nup: zz-target\nnote: x\n---\n# Holder\n",
+    )
+    .expect("another writer changes a holder");
+    std::fs::remove_file(vault.path().join(FOLDER).join(HOLDER_B))
+        .expect("another writer removes the other holder");
+
+    let (refusal, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("refused with {:?}", refusal.detail());
+    };
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "the removed holder's operation is left to the caller: {unresolved:?}"
+    );
+    assert_eq!(
+        kinds(&fresh),
+        vec![setting(1, "zz-holder.md", "up", "[[zz-target]]").kind],
+        "the fresh plan holds the changed holder's operation alone"
+    );
+    // The limit: the condition for the operation the fresh plan no longer
+    // holds is carried all the same.
+    assert_eq!(
+        fresh.conditions,
+        vec![
+            linking_from(HOLDER_B, "zz-target.md"),
+            linking_to("zz-target.md")
+        ]
+    );
 }
 
 /// **A route in the same batch moving the target leaves a plan that applies

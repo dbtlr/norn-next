@@ -1780,6 +1780,21 @@ mod tests {
         );
     }
 
+    /// **Co-selecting rules agreeing on a default fill the field once, cited
+    /// once.** A third co-selecting rule requiring the field with no default
+    /// proposes nothing, so it neither disagrees nor skips the field.
+    #[test]
+    fn agreeing_defaults_of_co_selecting_rules_fill_the_field_once() {
+        let schema = "version: 1\nrules:\n  a-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n  b-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n  c-rule:\n    match: {frontmatter: {type: task}}\n    required:\n      status:\n";
+        let vault = Vault::of(schema, &[("a.md", "---\ntype: task\n---\n")]);
+
+        let planned = vault.plan(&[missing(2, "a.md", "status")]);
+
+        assert_eq!(planned.operations, vec![set(1, "a.md", "status", "todo")]);
+        assert_eq!(planned.citations, vec![citing(1, &[2])]);
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
     /// **A default reading a capture its rule's `match.path` binds several
     /// ways skips as an ambiguous capture**, noting two of the bindings.
     #[test]
@@ -1902,15 +1917,17 @@ mod tests {
     /// **Fixes compose in finding order, and a fix the judge refuses skips
     /// while earlier ones stand**: `a_owner` fills, `kind` would bring in
     /// the rule forbidding `scratch` and skips, and `z_due` composes without
-    /// it — whatever order the batch read the rows in.
+    /// it — whatever order the batch read the rows in. The ids run against
+    /// the field order (`a_owner` 9, `kind` 8, `z_due` 7), so the field
+    /// component of the order is told from the id that breaks its ties.
     #[test]
     fn fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand() {
         let vault = Vault::of(COMPOSED, &[("a.md", "---\ntype: task\nscratch: x\n---\n")]);
 
         let planned = vault.plan(&[
-            missing(9, "a.md", "z_due"),
+            missing(7, "a.md", "z_due"),
             missing(8, "a.md", "kind"),
-            missing(7, "a.md", "a_owner"),
+            missing(9, "a.md", "a_owner"),
         ]);
 
         assert_eq!(
@@ -1920,7 +1937,7 @@ mod tests {
                 set(2, "a.md", "z_due", "soon")
             ]
         );
-        assert_eq!(planned.citations, vec![citing(1, &[7]), citing(2, &[9])]);
+        assert_eq!(planned.citations, vec![citing(1, &[9]), citing(2, &[7])]);
         assert_eq!(
             planned.skipped,
             vec![
