@@ -87,7 +87,10 @@ fn trigram_maintenance_cost_follows_inserted_stems_at_both_store_sizes() {
 
 /// The retrieval prefix misses no candidate reaching the Jaccard cutoff.
 /// Returned candidates carry the shared and total trigram counts computed over
-/// their stems, in path order.
+/// their stems, in path order. `xy` against `xyzxy` sits exactly at the
+/// cutoff: its three trigrams are half the query's six and all inside it, so a
+/// least shared count one too large selects only the query's unposted
+/// trigrams and misses it.
 #[test]
 fn similar_stems_candidates_are_complete_and_shared_counts_match_brute_force() {
     let scratch = Scratch::new("stem-candidates");
@@ -98,12 +101,13 @@ fn similar_stems_candidates_are_complete_and_shared_counts_match_brute_force() {
         "alpine.md",
         "beta.md",
         "nested/ALPHA.md",
+        "xy.md",
     ]
     .map(|at| document(at, "hash", "body"));
     write_documents(&mut store.begin_request(), &documents);
     let reader = std::sync::Arc::new(store.open_reader().reader.unwrap());
     let snapshot = reader.try_take().unwrap().establish().unwrap();
-    for query in ["alpha", "alphas", "alpine", "beta", "ÁLPHA"] {
+    for query in ["alpha", "alphas", "alpine", "beta", "ÁLPHA", "xyzxy"] {
         let answer = snapshot.similar_stems(query).unwrap();
         let norn_store::StemMatches::Candidates(candidates) = answer.matches else {
             panic!("small postings")
