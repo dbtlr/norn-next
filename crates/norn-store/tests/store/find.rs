@@ -229,13 +229,19 @@ impl Seeded {
     /// page reading its missing section first, walks a window of them before
     /// it reaches a document a part matches (NORN-393).
     fn padded_with(label: &str, order: StoredPathOrder, padding: usize) -> Self {
-        let mut seeded = Self::under(label, order);
+        Self::under(label, order).padded(padding)
+    }
+
+    /// This fixture beside `padding` documents no part matches standing
+    /// before it in the answer's path order and as many after it, none
+    /// carrying a field ([`Seeded::padded_with`]).
+    fn padded(mut self, padding: usize) -> Self {
         let padding: Vec<_> = (0..padding)
-            .flat_map(|at| [format!("0pad/{at:02}.md"), format!("zz-pad/{at:02}.md")])
+            .flat_map(|at| [format!("0pad/{at:03}.md"), format!("zz-pad/{at:03}.md")])
             .map(|at| document(&at, &format!("hash-{at}"), "padding\n"))
             .collect();
-        write_documents(&mut seeded.store.begin_request(), &padding);
-        seeded
+        write_documents(&mut self.store.begin_request(), &padding);
+        self
     }
 
     fn with_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
@@ -1977,10 +1983,7 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
         let fewer = Seeded::with_partly_matched_bulk_under("find-ceiling-fewer", 50, 500, order);
         let more = Seeded::with_partly_matched_bulk_under("find-ceiling-more", 400, 500, order);
         for (shape, parts) in drained_parts(FindingKind::BodyBytesNotUtf8) {
-            // The unmatched documents' bodies hold `body` too, so the
-            // full-text part matches the walk's first window and fills the
-            // page before it asks past the page's rows.
-            if parts.len() > 1 || shape == ReadFilter::FullText {
+            if parts.len() > 1 {
                 continue;
             }
             // Past the page's rows, the page reads the vault's span once.
@@ -2007,24 +2010,44 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
         }
     }
 
-    let tagged = |seeded: &Seeded| {
-        let params = field_page()
+    let tagged_page = || {
+        field_page()
             .with_predicates([Predicate::tag("bulk")])
-            .with_limit(1);
-        plan_of(
-            &seeded.plans(&params),
-            FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
-        )
-        .sql()
-        .to_string()
+            .with_limit(1)
     };
-    let past = tagged(&Seeded::with_bulk("find-ceiling-past", 640));
+    let missing = FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending);
+    // 640 tagged documents, half missing the sort key, beside 120 untagged
+    // ones the missing section walks first: more than the rounds' windows
+    // reach before the budget meets the ceiling, about forty, so the page
+    // asks the tag at its ceiling, and the tag, keeping more, leaves it to
+    // walk on. The statement it settles on is then the one after that
+    // count, and not a round's walk after its window.
+    let plans = Seeded::with_bulk("find-ceiling-past", 640)
+        .padded(120)
+        .plans(&tagged_page());
+    let settled = plans
+        .iter()
+        .rposition(|plan| {
+            plan.statement == ReadStatement::Find(missing) && !plan.filters.is_empty()
+        })
+        .expect("the page walks its missing section");
+    assert_eq!(
+        plans[settled - 1].statement,
+        ReadStatement::Find(FindStatement::PartCeiling),
+        "the page filled inside a round before it asked the tag at its ceiling"
+    );
+    let past = settled_plan_of(&plans, missing).sql().to_string();
     assert!(
         past.contains("EXISTS (SELECT 1 FROM document_tags AS tg")
             && !past.contains("IN (SELECT tg.document"),
         "a page past the ceiling was driven from what the tag matched: {past}"
     );
-    let within = tagged(&Seeded::with_bulk("find-ceiling-within", 1));
+    let within = plan_of(
+        &Seeded::with_bulk("find-ceiling-within", 1).plans(&tagged_page()),
+        missing,
+    )
+    .sql()
+    .to_string();
     assert!(
         within.contains("IN (SELECT tg.document"),
         "a page within the ceiling was not driven from what the tag matched: {within}"
@@ -3020,8 +3043,10 @@ fn a_continuation_among_paths_that_fold_together_costs_its_page() {
 impl Seeded {
     /// The fixture and `bulk` documents under `bulk/`, the first `matched`
     /// of them [`matched_by_every_part`], each with a violation standing over
-    /// it, and the rest plain: a vault of one size whose matched documents
-    /// are as many as `matched`.
+    /// it, and the rest plain, their bodies holding no `body`, a word the
+    /// matched ones hold: a vault of one size whose matched documents are as
+    /// many as `matched`, for every part of [`drained_parts`] the full-text
+    /// match's included.
     fn with_partly_matched_bulk_under(
         label: &str,
         matched: usize,
@@ -3032,7 +3057,7 @@ impl Seeded {
         let plain: Vec<_> = (matched..bulk)
             .map(|at| {
                 let at = format!("bulk/{at:04}.md");
-                document(&at, &format!("hash-{at}"), "a plain body\n")
+                document(&at, &format!("hash-{at}"), "plain text\n")
             })
             .collect();
         write_documents(&mut seeded.store.begin_request(), &plain);
