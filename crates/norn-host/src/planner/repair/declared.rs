@@ -3860,6 +3860,36 @@ mod tests {
         assert_eq!(skipped.required_fields, Some(fields));
     }
 
+    /// **A wrap bringing in required fields keeps that refusal though the
+    /// element it exposes skips too**: `kind: [task]` brings in the rule
+    /// requiring `status`, and `task` folding to both `Task` and `TASK` is a
+    /// tie the shape finding does not carry instead.
+    #[test]
+    fn a_wrap_bringing_in_required_fields_keeps_that_skip_over_its_elements_tie() {
+        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [Task, TASK]}\n";
+        let vault = Vault::of(schema, &[("a.md", "---\nkind: task\n---\n")]);
+
+        let planned = vault.plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "kind",
+            &AuthoredValue::string("task"),
+        )]);
+
+        assert!(planned.operations.is_empty());
+        let fields = RequiredFieldHead::new(
+            [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+            1,
+        )
+        .expect("a head");
+        let [skipped] = planned.skipped.as_slice() else {
+            panic!("one skip: {:?}", planned.skipped);
+        };
+        assert_eq!(skipped.reason, SkipReason::BringsInRequiredFields);
+        assert_eq!(skipped.required_fields, Some(fields));
+    }
+
     const TYPE_MISMATCH: FindingKind = FindingKind::TypeMismatch;
 
     const FLAGS: &str =

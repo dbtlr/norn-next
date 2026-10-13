@@ -16,9 +16,9 @@
 //!   list holding a scalar is set to the one-item list of that scalar, its
 //!   YAML type kept; a field declared single holding a one-item list is set
 //!   to that item. A list of any other length under single has no derived
-//!   fix. Where the plain reshape is refused, the element fixes it exposes
-//!   compose with it as one addition, at their weakest confidence and with
-//!   their notes. An exposed element's skipped proposal is the shape
+//!   fix. Where the judge refuses the plain reshape, the element fixes it
+//!   exposes compose with it as one addition, at their weakest confidence
+//!   and with their notes. An exposed element's skipped proposal is the shape
 //!   finding's skip, with its reason and decision data; any exposed link
 //!   type mismatch waits for the settled routes to decide it.
 //! - **Unquoted wikilinks** on link fields answer exactly `[["s"]]`, YAML's
@@ -172,7 +172,8 @@ pub(super) enum Reshaping {
 }
 
 /// The shape fix of `row`, composed with every exposed element fix where
-/// the plain reshape is refused. A bare link answer waits for `links`.
+/// the judge refuses the plain reshape; a plain reshape bringing in required
+/// fields keeps that skip. A bare link answer waits for `links`.
 pub(super) fn reshape(
     document: &Document<'_>,
     state: &State,
@@ -243,6 +244,11 @@ pub(super) fn reshape(
         }
         Err(skip) => skip,
     };
+    // Only a reshape the judge refuses is answered by the elements it
+    // exposes; one bringing in required fields keeps that refusal.
+    if refused.reason != SkipReason::JudgeWouldRefuse {
+        return Err(refused);
+    }
     match elements::after_reshape(document, &exposed, row, field, &reshaped, links) {
         elements::Reshaped::Unanswered => Err(refused),
         elements::Reshaped::Skipped(skip) => Err(skip),
