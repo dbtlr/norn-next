@@ -24,9 +24,9 @@
 //! a document was cut, one more finding read past it tells whether more
 //! remain, read by the driver the batch's first read settled on, or, where
 //! that read filled within a round of its walk, by a walk on from that round
-//! — to the end of its window where that lies past the cut document, then the
-//! counts and rounds past its budget — asking no count the first read asked
-//! ([`crate::store::Snapshot::drive_page`]).
+//! — to the end of its window where that lies past the cut document, then in
+//! rounds from the first budget again — asking no count the first read
+//! answered ([`crate::store::Snapshot::drive_page`]).
 //!
 //! # A first batch counts what remains
 //!
@@ -328,10 +328,10 @@ impl Snapshot {
         found.extend(tail);
         // One finding past the document says whether more remain, read by
         // the driver the first read settled on, or, where that read filled
-        // within a round of its walk, walked on from that round: its budget,
-        // the counts below it, and where its window ends. The first read's
-        // last finding stands at the cut document, so the window ends past
-        // the document, where the read resumes, unless it ends inside it.
+        // within a round of its walk, walked on from that round: where its
+        // window ends, and the counts it answered. The first read's last
+        // finding stands at the cut document, so the window ends past the
+        // document, where the read resumes, unless it ends inside it.
         let settled = first.settled.resumed_where(|end| end.path != path);
         let beyond = self.drive_page(
             &merged,

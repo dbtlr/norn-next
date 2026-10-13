@@ -87,10 +87,13 @@
 //! **A later read of the same request walks on from where an earlier one
 //! stopped** ([`Settled`]): a repair batch cut inside a document reads one
 //! finding past it to tell whether more remain, and where the batch's first
-//! read filled within a round of its walk, that read takes up the round — to
-//! the end of its window where that lies past where the read resumes, then
-//! the counts and rounds past its budget — and asks no count the first read
-//! asked.
+//! read filled within a round of its walk, that read takes up the round: it
+//! walks to the end of the round's window where that lies past where it
+//! resumes, then in rounds from the first budget again, asking no count the
+//! first read answered. It needs one finding where the first read needed a
+//! page, so a first window short of the budget the first read reached may
+//! hold it, and the budgets it doubles through below that one cost a window
+//! each and no count.
 
 use std::collections::VecDeque;
 

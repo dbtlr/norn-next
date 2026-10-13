@@ -1077,8 +1077,8 @@ path by the folded and the bytewise equality together so that it still seeks and
 document at its key against every document part, and a third
 probe of one finding tells whether documents remain, by the drive the first read settled
 on, or, where that read filled within a round of its walk, by a walk on from that round: to
-the end of its window where that lies past the cut document, then the counts and rounds
-past its budget, asking no count the first read asked. Two paths that differ only in case are
+the end of its window where that lies past the cut document, then in rounds from the first
+budget again, asking no count the first read answered. Two paths that differ only in case are
 two documents, compared bytewise. The cursor a batch mints names the last document it
 covered, under no fingerprint, only where more remain, and is its own row type, so a
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a

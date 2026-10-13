@@ -606,51 +606,68 @@ fn the_row_a_window_ends_at_is_answered() {
 }
 
 /// **A cut batch's more-remain read walks on from where its first read
-/// stopped (NORN-393).** Over 400 documents, each with three warnings, of
-/// which the first two of every sixteen are matched, a repair batch of two
-/// findings reads three, which its first window of twenty-four findings
-/// holds inside the first matched document, so the batch is cut there. The
-/// read of one finding past that document walks on to the end of the same
-/// window, where the second matched document stands: it asks no part what it
-/// keeps again and reads no window of its own, so the batch runs one count
-/// and one window, and says more remain.
+/// stopped, and asks no count that read answered (NORN-393).** Over
+/// documents each with three warnings, a repair batch of two findings reads
+/// three, which the first matched document holds, so the batch is cut there,
+/// and reads one finding past it to say more remain.
+///
+/// Over 400 documents of which the first two of every sixteen are matched,
+/// the batch's first window of twenty-four findings holds both of the first
+/// two: the read past the first walks on to the end of that window and finds
+/// the second, so it asks no part what it keeps again and reads no window of
+/// its own — the batch runs one count and one window. Over 1000 documents of
+/// which every sixteenth from the twenty-first is matched, the first read
+/// walks a window of twenty-four findings, reads the vault's span, asks at
+/// twenty-four and walks forty-eight to fill; the read past it walks to the
+/// end of that window, then, its budget started over at twenty-four, asks
+/// nothing there, which the first read answered, and walks a window of
+/// forty-eight to the next matched document — two counts, a span, three
+/// windows and four walks over the batch.
 #[test]
 fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
-    let spread = Spread::warned("drive-cut-batch", 0, 400, 3, |at| at % 16 < 2);
-    for (name, part) in spread_parts() {
-        let batch = repairing(&part).with_limit(2);
-        let selection = RepairSelection::from(&batch);
-        let read = spread
-            .snapshot()
-            .repair_batch(&selection, &declared())
-            .expect("a batch");
-        assert_eq!(
-            (read.rows.len(), read.next.is_some()),
-            (3, true),
-            "a batch by {name} covered other than the first matched document"
-        );
-        let plans = spread
-            .snapshot()
-            .repair_batch_plans(&selection, &declared())
-            .expect("the plans of a batch");
-        let ran = |statement: ReadStatement, narrowed: bool| {
-            plans
-                .iter()
-                .filter(|plan| plan.statement == statement && plan.filters.is_empty() != narrowed)
-                .count()
-        };
-        let merged = ReadStatement::Validate(ValidateStatement::MergedPage);
-        assert_eq!(
-            (
-                ran(ReadStatement::Find(FindStatement::PartCeiling), true),
-                ran(ReadStatement::Find(FindStatement::DocumentSpan), false),
-                ran(merged, false),
-                ran(merged, true),
-            ),
-            (1, 0, 1, 2),
-            "a batch by {name} asked or walked again past its cut document: \
-             (counts, spans, windows, walks)"
-        );
+    let near = Spread::warned("drive-cut-batch-near", 0, 400, 3, |at| at % 16 < 2);
+    let far = Spread::warned("drive-cut-batch-far", 0, 1000, 3, |at| {
+        at >= 20 && (at - 20).is_multiple_of(16)
+    });
+    for (spread, ran_past) in [(&near, (1, 0, 1, 2)), (&far, (2, 1, 3, 4))] {
+        for (name, part) in spread_parts() {
+            let batch = repairing(&part).with_limit(2);
+            let selection = RepairSelection::from(&batch);
+            let read = spread
+                .snapshot()
+                .repair_batch(&selection, &declared())
+                .expect("a batch");
+            assert_eq!(
+                (read.rows.len(), read.next.is_some()),
+                (3, true),
+                "a batch by {name} covered other than the first matched document"
+            );
+            let plans = spread
+                .snapshot()
+                .repair_batch_plans(&selection, &declared())
+                .expect("the plans of a batch");
+            let ran = |statement: ReadStatement, narrowed: bool| {
+                plans
+                    .iter()
+                    .filter(|plan| {
+                        plan.statement == statement && plan.filters.is_empty() != narrowed
+                    })
+                    .count()
+            };
+            let merged = ReadStatement::Validate(ValidateStatement::MergedPage);
+            assert_eq!(
+                (
+                    ran(ReadStatement::Find(FindStatement::PartCeiling), true),
+                    ran(ReadStatement::Find(FindStatement::DocumentSpan), false),
+                    ran(merged, false),
+                    ran(merged, true),
+                ),
+                ran_past,
+                "a batch by {name} over {} documents asked or walked again past its cut \
+                 document: (counts, spans, windows, walks)",
+                spread.size
+            );
+        }
     }
 }
 
