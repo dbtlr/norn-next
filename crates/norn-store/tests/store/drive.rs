@@ -677,7 +677,7 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
 /// than these.
 #[test]
 fn each_round_of_a_walk_runs_its_pinned_statements() {
-    let matched = |at: usize| at == 3 || at == 16 || (at >= 400 && at % 4 == 0);
+    let matched = |at: usize| at == 3 || at == 16 || (at >= 400 && at.is_multiple_of(4));
     let spread = Spread::warned("drive-rounds-pinned", 40, 600, 1, matched);
     let range = Predicate::before("status", "p");
     let params = ValidateParams::new(vault())
