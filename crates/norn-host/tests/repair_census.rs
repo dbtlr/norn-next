@@ -314,6 +314,25 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         .filter_map(|sql| judged(sql))
         .collect();
     let planned: BTreeSet<String> = plans.iter().map(|plan| plan.sql().to_string()).collect();
+    // `judged` drops only the start of a trigger's program. Any other
+    // statement it dropped would leave `begun` and `planned` alike, and the
+    // difference below would not see it.
+    let dropped: Vec<&String> = ran
+        .iter()
+        .chain(&after)
+        .filter(|sql| judged(sql).is_none())
+        .filter(|sql| !sql.starts_with("-- TRIGGER "))
+        .collect();
+    assert!(
+        dropped.is_empty(),
+        "the census drops a statement that is not a trigger's start: {dropped:?}"
+    );
+    // The statements nested in another are planned too: the full-text index's
+    // configuration is read by the module, nested in a match.
+    assert!(
+        planned.contains("SELECT k, v FROM 'main'.'documents_fts_config'"),
+        "the census planned no read of the full-text configuration: {planned:?}"
+    );
     assert_eq!(
         begun.symmetric_difference(&planned).collect::<Vec<_>>(),
         Vec::<&String>::new(),
