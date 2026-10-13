@@ -100,6 +100,8 @@ struct Spread {
     _scratch: Scratch,
     _store: Store,
     reader: Arc<SnapshotReader>,
+    /// The documents under `bulk/`.
+    size: usize,
     /// The matched documents' paths, in the answer's path order.
     matched: Vec<String>,
 }
@@ -173,6 +175,7 @@ impl Spread {
             _scratch: scratch,
             _store: store,
             reader,
+            size,
             matched: paths,
         }
     }
@@ -428,14 +431,14 @@ fn grown(small: &Spread, large: &Spread) -> Vec<String> {
             drain.vm_steps as f64 / spread.matched.len() as f64
         };
         let (per_small, per_large) = (per(small_drain, small), per(large_drain, large));
-        let sizes = (small.matched.len(), large.matched.len());
+        let sizes = format!("{} then {} documents", small.size, large.size);
         eprintln!(
-            "{name} over {sizes:?} matched: {per_small:.1} then {per_large:.1} VM steps per \
-             matched document"
+            "{name} over {sizes}: {per_small:.1} then {per_large:.1} VM steps per matched \
+             document"
         );
         if per_large > per_small * LINEAR_SLACK {
             grew.push(format!(
-                "{name} over {sizes:?} matched: {per_small:.1} -> {per_large:.1}"
+                "{name} over {sizes}: {per_small:.1} -> {per_large:.1}"
             ));
         }
     }
