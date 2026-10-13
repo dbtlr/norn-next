@@ -6,16 +6,17 @@ date: 2026-10-13
 # 0039 — a repair fix is declared on the constraint it serves, a built-in fix exists only where its answer is unique or a deterministic heuristic's single best, an unquoted frontmatter wikilink is written as the link it spells, no link fix matches a link by a rule Obsidian does not apply, and every proposed change carries one of three confidence levels
 
 Supersedes [ADR 0038](0038-a-link-fix-never-matches-a-link-by-a-rule-obsidian-does-not-apply.md),
-whose contract this decision restates whole with one change: the derived fixes gain an
-unquoted frontmatter wikilink. YAML reads `up: [[note]]`, written without quotes, as a list
-holding the one-string list `["note"]`, so a field declared `link` holds no link and the
-finding names a nested list. The text the author wrote is exactly the wikilink's spelling,
-so the link it spells is the only answer: on a field declared `link`, the value is written as
-that link, a string, as a single value or, on a field declared a list, as each element so
-read. Any other nested shape — `[[a, b]]`, a
-list holding two strings — spells no single wikilink and has no derived fix. The fix writes a
-link, so the plan records the written link's resolution as it does for every link a repair
-writes ([ADR 0037](0037-a-plan-refuses-exactly-the-violations-it-introduces.md)).
+whose contract this decision restates whole with two changes: an exact unquoted frontmatter
+wikilink gains a derived fix, and a wrap or unwrap carries the skip of an exposed element
+that has no admitted fix. Obsidian's frontmatter link is a quoted string. YAML reads the
+text `[[s]]` as `[["s"]]`, a one-item list holding a one-string list. Only that exact value
+is answered, where `[[s]]` reads as exactly one whole wikilink: on a non-list field declared
+`link`, the whole value becomes `"[[s]]"`; on a list-shaped link field, each element of that
+value becomes `"[[s]]"`. Thus flow `ups: [[[a]], [[b]]]` and block-list items `- [[a]]` write
+link strings. A one-string list `["s"]`, from `[s]`, `ups: [[a]]` or `ups: [[a], [b]]` on a
+list field, and any other nested shape have no derived unquoted-wikilink fix. The fix writes
+a link, so the plan records its resolution as it does for every link a repair writes
+([ADR 0037](0037-a-plan-refuses-exactly-the-violations-it-introduces.md)).
 
 Repair compiles findings into one resolved plan. For each finding it needs an answer — the
 value a field should hold, the path a document belongs at — or a reason it has none. Some
@@ -54,9 +55,10 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   paths, or a rename onto a field the same rule forbids or renames.
 - **Built-in fixes are bounded by what can be shown.** A **derived** fix is one whose answer
   is provably the only one: wrapping a single value as a one-item list or unwrapping a
-  one-item list, a bare value made a link where it resolves uniquely, an unquoted
-  frontmatter wikilink on a field declared `link` — a nested list holding exactly one string
-  — written as the link it spells, a closed-set value
+  one-item list, a bare value made a link where it resolves uniquely, an exact unquoted
+  frontmatter wikilink written as the quoted link string Obsidian reads — only `[["s"]]`,
+  YAML's reading of `[[s]]`, as a non-list link field's whole value or a list link field's
+  element, never a one-string list `["s"]` or another nested shape — a closed-set value
   differing from exactly one member only by case or whitespace, boolean case, or a broken
   link followed to the single live document holding the content a removed target last held.
   A **suggested** fix is a deterministic heuristic's single best answer, without proof: a
@@ -97,7 +99,9 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   [ADR 0027](0027-link-health-rides-the-changeset.md)).
 - **A finding nothing answers is handed back whole.** A finding with no answer at any
   admitted level is skipped with its reason and its decision data — the actual value and,
-  for an ambiguous link, its resolution candidates — for the caller to decide.
+  for an ambiguous link, its resolution candidates — for the caller to decide. A wrap or
+  unwrap refused because an element it exposes has no admitted fix carries that element's
+  skip, with its reason and decision data, keyed to the shape finding's id and value.
 
 ## Considered options
 
@@ -127,10 +131,12 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
   question about file naming rather than a repair of a broken link.
 
 - **No fix for an unquoted wikilink, leaving it to the author.** ADR 0038's catalogue had
-  none, so `up: [[note]]` stood reported as a type mismatch on a nested list. Rejected: the
-  author wrote the wikilink's exact spelling and only YAML's flow syntax reads it as a list,
-  so the answer is as unique as a wrap's, and a nested list on a `link` field has no other
-  reading a repair could choose.
+  none, so `up: [[note]]` stood reported as a type mismatch on a nested list. Rejected:
+  Obsidian reads a frontmatter link as a quoted string, and the exact `[[s]]` spelling,
+  read by YAML as `[["s"]]`, has the unique answer `"[[s]]"`, as a non-list link field's
+  whole value or a list link field's element. A one-string list `["s"]`, including the
+  elements of `ups: [[a]]` or `ups: [[a], [b]]`, and any other nested shape have no such
+  answer.
 - **Making the unquoted wikilink a link only where it resolves, as a bare value is.**
   Rejected: a bare value becomes a link only by the repair's choice, so it qualifies only
   where the link reaches one document; an unquoted wikilink already spells a link, and
@@ -142,10 +148,13 @@ admits, identically in preview and apply. Ties never pick, and no model answers 
 - Every operation a repair plan holds names its confidence level, so a caller knows which
   changes to check, and a preview applied later is the plan the threshold shaped.
 - A rename onto a field the document already holds is skipped rather than overwriting it.
-- An unquoted wikilink on a field declared `link` is written as the link string at the
-  default threshold, whether or not it resolves, and records what it resolves to; a nested
-  list on a field of any other type, or one holding anything but exactly one string, is
-  left reported.
+- Obsidian's frontmatter link is a quoted string. The exact unquoted `[[s]]` spelling,
+  read as `[["s"]]`, is written as `"[[s]]"` at the default threshold, as a non-list link
+  field's whole value or a list link field's element, whether or not it resolves, and
+  records what it resolves to. On a list-shaped link field, one-string list elements
+  `["s"]`, including `[a]` and the elements of `ups: [[a]]` or `ups: [[a], [b]]`, and every
+  other nested element are left reported with `no_declared_fix`. A field of another type
+  receives no unquoted-wikilink fix.
 - Suggested fixes stay out of a plan unless a caller lowers the threshold to admit them.
 - Following an out-of-band move reads the content a removed document last held from its
   tombstone, so it answers only where a tombstone recording that content is retained, and a

@@ -2886,9 +2886,14 @@ the state the shape fix composes onto. The combined change cites the shape findi
 weaker confidence of the shape and every element fix, carrying the element fixes' notes.
 A combined value the judge refuses is `judge_would_refuse` with that value as its candidate;
 one below the threshold is `below_threshold` with the combined operation as `proposed`.
-Where an exposed element has no answer or its fix skips, the shape fix is
-`judge_would_refuse` with the plain reshape as its candidate. A shape fix needing a bare-link
-answer composes in the link phase with its respell veto, after the batch's routes settle;
+Where an exposed element has no answer or its fix skips, the shape finding carries that
+skip's reason and decision data: `ambiguous_link` with its documents, `no_declared_fix` with
+its note where it has one, a tie with its candidates, or an excluded class with its note.
+The skip keeps the shape finding's id and value. `judge_would_refuse` remains where the
+change itself is refused, including a combined value the judge or respell veto refuses;
+a plain reshape refused for another reason or whose element cannot be matched keeps that
+refusal. An exposed link-field type mismatch composes in the link phase with its respell
+veto, after the batch's routes settle;
 a plain link wrap or unwrap the judge admits keeps its place in finding order.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
@@ -2929,13 +2934,16 @@ is by construction what the applier computes. One document: the link is written,
 fix. Several documents: `ambiguous_link` with the head of the candidates; none:
 `no_declared_fix`, the note saying the link would resolve to no document.
 **An unquoted frontmatter wikilink on a field declared `link` is written as the link it
-spells.** A list holding exactly one string spells `[[string]]` where the text layer reads
-exactly one wikilink spanning that whole text. A field not declared a list whose whole
-value holds that one list is set to the link string, answering its type or shape mismatch;
-a field declared a list replaces each such element in the one write of the field, leaving
-its other elements alone. Any other nested shape has no derived fix, and this fix answers
-no field of another type. The fix is derived whether the link resolves to one document,
-several or none, and records that resolution as every written link's is.
+spells.** Obsidian's frontmatter link is a quoted string. YAML reads `[[s]]` as `[["s"]]`,
+a one-item list holding a one-string list, and only that exact value is answered where
+`[[s]]` reads as one wikilink spanning the whole text. A non-list link field holding that
+whole value is set to `"[[s]]"`; on a list-shaped link field each element of that value is
+replaced in the one write of the field, leaving its other elements alone. Flow
+`ups: [[[a]], [[b]]]` and block-list items `- [[a]]` both write link strings. On a list-shaped
+link field, any other nested element, including the one-string list `["s"]` in `ups: [[s]]`,
+`ups: [[a], [b]]` or block-list items `- [s]`, stays a finding with `no_declared_fix`.
+This fix answers no field of another type. The fix is derived whether the link resolves to
+one document, several or none, and records that resolution as every written link's is.
 **A fix that writes a link value records what the link resolves to.** For every wikilink a
 fix's `set_frontmatter` writes — a bare value made a link, an unquoted wikilink written as
 its link string, and as well a wrap, an unwrap, a
