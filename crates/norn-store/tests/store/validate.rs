@@ -2165,7 +2165,9 @@ fn a_driven_page_stops_where_a_path_parts_range_does() {
 /// thirty-ninth, so their ids run against their positions. A page of the kind
 /// and a repair batch narrowed by the tag answer `a.md`'s findings in the
 /// order the unnarrowed ones hold them, where every finding is sought off its
-/// kind's index in that order.
+/// kind's index in that order. The batch is what holds a driven merged page's
+/// order, every kind read in one arm; the page reads one kind, whose findings
+/// at one document its index hands back in that order already.
 #[test]
 fn a_driven_page_orders_a_documents_findings_by_position_then_id() {
     for order in ROOTS {
