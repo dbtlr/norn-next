@@ -26,7 +26,8 @@
 //! The budget starts at [`MATCHED_DRIVE_FACTOR`] documents per row the page
 //! reads and stops at the ceiling: the greater of that and the square root of
 //! the rows the page reads times the documents the vault holds
-//! ([`FindStatement::DocumentSpan`], read once a page first asks). A page
+//! ([`FindStatement::DocumentSpan`], read once, the first time a round of the
+//! walk leaves the page short). A page
 //! asked at the ceiling that no part drives walks on unbounded. A field
 //! sort's missing section walks every document in path order, passing the
 //! ones that carry the key, so its window is counted in documents too.
@@ -60,7 +61,11 @@
 //! - **A selective page**, whose part keeps no more documents than the page
 //!   reads, is driven from what the part matched by its first count, reading
 //!   no window and no span of the vault: it costs what the part keeps, as it
-//!   did before any walk.
+//!   did before any walk. A nearly selective one, whose part keeps more than
+//!   the page reads but no more than eight documents per row, walks its first
+//!   window before its second count drives it: the price of walking before
+//!   asking, up to about five times the steps such a page took when it asked
+//!   at the ceiling first, and constant in the vault.
 //!
 //! **What stays a declared limit** is a page that walks past many documents
 //! to reach the next of a few once the budget reaches the ceiling: a part
@@ -70,10 +75,22 @@
 //! key's typed order, links whose key names another document, documents the
 //! ambiguity-ignore set leaves out, paths under a glob's literal prefix the
 //! glob rejects — which its count takes for documents it keeps, so the page
-//! walks on. Each such document is walked once over a drain past the
-//! ceiling's rounds: no index holds a range's, a full-text match's, a
+//! walks on — or a part keeping many documents of which few hold the rows the
+//! page selects: a validate's findings of one kind, severity or rule, or a
+//! field sort's section of documents carrying its key, where the count is of
+//! documents and not of those rows, so the page walks on past the ceiling.
+//! Each such row is walked once over a drain past the ceiling's rounds, so
+//! the drain stays linear: no index holds a range's, a full-text match's, a
 //! resolution's or a links-to part's documents in a page's order, and a
 //! count that judged each row would read without bound.
+//!
+//! **A later read of the same request walks on from where an earlier one
+//! stopped** ([`Settled`]): a repair batch cut inside a document reads one
+//! finding past it to tell whether more remain, and where the batch's first
+//! read filled within a round of its walk, that read takes up the round — to
+//! the end of its window where that lies past where the read resumes, then
+//! the counts and rounds past its budget — and asks no count the first read
+//! asked.
 
 use std::collections::VecDeque;
 

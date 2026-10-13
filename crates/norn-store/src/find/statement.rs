@@ -139,17 +139,18 @@ pub enum FindStatement {
     /// whatever the part keeps. Every condition the index does not answer is
     /// dropped, so a document the seek reaches and the part rejects counts
     /// too, and a part is never taken to keep fewer documents than it does.
-    /// Run once per part, in the request's order until one keeps few enough,
-    /// by a find, validate or repair page no part drives from its documents
-    /// in the page's order ([`crate::ReadFilter::is_path_ordered`]): first at
-    /// the rows the page reads, then each time a window of its walk leaves it
-    /// short, at the walk's budget, which doubles to a ceiling, as the read
-    /// module's drive sets it.
+    /// Run once per part per ask, in the request's order until one keeps few
+    /// enough, by a find, validate or repair page no part drives from its
+    /// documents in the page's order ([`crate::ReadFilter::is_path_ordered`]):
+    /// first at the rows the page reads, then each time a window of its walk
+    /// leaves it short, at the walk's budget, which doubles to a ceiling, as
+    /// the read module's drive sets it.
     PartCeiling,
     /// The greatest document row id: one seek of the row ids' last entry,
     /// which bounds how many documents the vault holds — a deleted document's
     /// id is never reused below it — and so scales the ceiling a part is
-    /// asked against. Run once by a page that asks any part what it keeps.
+    /// asked against. Read once by a page, the first time a round of its walk
+    /// leaves it short.
     DocumentSpan,
 }
 

@@ -23,8 +23,10 @@
 //! together and stand adjacent in this order, but they are two documents. When
 //! a document was cut, one more finding read past it tells whether more
 //! remain, read by the driver the batch's first read settled on, or, where
-//! that read filled while it walked within its budget, by a walk and its
-//! counts of its own ([`crate::store::Snapshot::drive_page`]).
+//! that read filled within a round of its walk, by a walk on from that round
+//! — to the end of its window where that lies past the cut document, then the
+//! counts and rounds past its budget — asking no count the first read asked
+//! ([`crate::store::Snapshot::drive_page`]).
 //!
 //! # A first batch counts what remains
 //!

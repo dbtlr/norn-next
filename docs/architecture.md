@@ -884,8 +884,9 @@ distinct documents among the rows of the part's index seek alone that stops one 
 part rejects counts too. The first part within it drives the rest of the page from its seek
 and sorts what it matched; otherwise the budget doubles. The budget starts at eight
 documents per row the page reads and stops at the ceiling, the greater of that and the
-square root of those rows times the documents the vault may hold, read once as its greatest
-document row id; a page no part within the ceiling drives walks on unbounded. A round costs
+square root of those rows times the documents the vault may hold, read as its greatest
+document row id once, the first time a round leaves the page short; a page no part within
+the ceiling drives walks on unbounded. A round costs
 its budget and the budgets double, so a page costs about the last budget it reached, at most
 the ceiling. A part spread through the vault leaves a page to walk its rows over the part's
 share, and the rounds stop at the first budget past that walk, so the page costs the walk it
@@ -899,13 +900,20 @@ the vault's term sets the ceiling, eight documents per row it reads where the fl
 page whose part keeps no more documents than it reads is driven by its first count, reads no
 window and no span, and costs what the part keeps; one whose part keeps a few more walks
 eight documents per row, asks at that and drives from what the part matched, so it costs
-about its rows whatever the vault. Once the budget reaches the ceiling, a page walking past many documents to the next of a few pays for the many, each
+about its rows whatever the vault — the price of walking before it asks: a page whose part
+keeps more documents than the page reads but no more than about eight per row pays its
+first window, up to about five times the steps it took when such a page asked at the
+ceiling first, a constant that does not grow with the vault. Once the budget reaches the ceiling, a page walking past many documents to the next of a few pays for the many, each
 once over a drain, a declared limit: a part's documents bunched together, or a part whose
 seek reaches many documents it rejects — findings at paths no document stands at, values of
 the wrong declared shape or failing a folded key's typed order, links whose key names
 another document, documents the ambiguity-ignore set leaves out, paths under a glob's
-literal prefix the glob rejects — which its count takes for kept, so the page walks on; no
-index holds such a part's documents in a page's order. Inequality and absence seek the
+literal prefix the glob rejects — which its count takes for kept, so the page walks on — or a
+part keeping many documents of which few hold the rows the page selects — a validate's
+findings of one kind, severity or rule, or a field sort's section of documents carrying
+its key — whose count is of documents and not of those rows, so the page walks on past the
+ceiling though the drain stays linear, each row walked once; no index holds such a part's
+documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
@@ -1068,7 +1076,9 @@ inside a document, a second statement reads that document's remaining findings, 
 path by the folded and the bytewise equality together so that it still seeks and testing the
 document at its key against every document part, and a third
 probe of one finding tells whether documents remain, by the drive the first read settled
-on, or by a walk and counts of its own where that read filled within its budget. Two paths that differ only in case are
+on, or, where that read filled within a round of its walk, by a walk on from that round: to
+the end of its window where that lies past the cut document, then the counts and rounds
+past its budget, asking no count the first read asked. Two paths that differ only in case are
 two documents, compared bytewise. The cursor a batch mints names the last document it
 covered, under no fingerprint, only where more remain, and is its own row type, so a
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
