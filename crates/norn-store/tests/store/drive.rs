@@ -15,9 +15,9 @@ use std::sync::Arc;
 use crate::common::{Scratch, document, unread_block, write_documents};
 use crate::find::{map, request, sorted, string};
 use norn_store::{
-    ContentModel, FindStatement, FindingFacts, LinkFact, LinkFamily, ReadStatement,
-    RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder, ValidateStatement,
-    Validation,
+    ContentModel, FieldOrder, FindStatement, FindingFacts, LinkFact, LinkFamily, ReadFilter,
+    ReadStatement, RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder,
+    ValidateStatement, Validation,
 };
 use norn_wire::{
     ApplyMode, Cursor, Direction, FindParams, FindingKind, Predicate, RepairParams,
@@ -116,12 +116,19 @@ impl Spread {
     }
 
     fn matching(label: &str, size: usize, matched: impl Fn(usize) -> bool) -> Self {
-        Self::warned(label, size, 1, matched)
+        Self::warned(label, 0, size, 1, matched)
     }
 
-    /// `size` documents, those `matched` names matched, each with `warnings`
-    /// warnings standing over it.
-    fn warned(label: &str, size: usize, warnings: usize, matched: impl Fn(usize) -> bool) -> Self {
+    /// `size` documents, those `matched` names matched, beside `pads` no part
+    /// matches standing before them in the answer's path order, each of all
+    /// with `warnings` warnings standing over it.
+    fn warned(
+        label: &str,
+        pads: usize,
+        size: usize,
+        warnings: usize,
+        matched: impl Fn(usize) -> bool,
+    ) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open_under(StoredPathOrder::Sensitive);
         store
@@ -134,6 +141,11 @@ impl Spread {
             "hash-target",
             "the target\n",
         )];
+        let pads: Vec<String> = (0..pads).map(|at| format!("a-pad/{at:03}.md")).collect();
+        documents.extend(
+            pads.iter()
+                .map(|path| spread_document(path, false, &declared)),
+        );
         let mut paths = Vec::new();
         for at in 0..size {
             let path = bulk(at);
@@ -144,10 +156,10 @@ impl Spread {
         }
         let mut request = store.begin_request();
         write_documents(&mut request, &documents);
-        for at in 0..size {
+        for path in pads.into_iter().chain((0..size).map(bulk)) {
             for _ in 0..warnings {
                 request
-                    .record_finding(&warning(&bulk(at)))
+                    .record_finding(&warning(&path))
                     .expect("recording a warning");
             }
         }
@@ -601,7 +613,7 @@ fn the_row_a_window_ends_at_is_answered() {
 /// and one window, and says more remain.
 #[test]
 fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
-    let spread = Spread::warned("drive-cut-batch", 400, 3, |at| at % 16 < 2);
+    let spread = Spread::warned("drive-cut-batch", 0, 400, 3, |at| at % 16 < 2);
     for (name, part) in spread_parts() {
         let batch = repairing(&part).with_limit(2);
         let selection = RepairSelection::from(&batch);
@@ -637,4 +649,76 @@ fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
              (counts, spans, windows, walks)"
         );
     }
+}
+
+/// **What each round of a walk runs is pinned, page by page (NORN-393).** A
+/// validate of one finding at a time, narrowed by a path part over `bulk/`
+/// and a range, over forty unmatched documents standing before `bulk/` and
+/// 600 under it, of which the range matches the fourth, the seventeenth and
+/// every fourth from the 401st — 52 in all, more than any budget the page
+/// asks at. A page reads two findings, so its first count is at two and its
+/// first window sixteen findings of its kind under `bulk/`, the path part
+/// bounding the window as it bounds the walk; the vault's 641 documents set
+/// its ceiling at the square root of twice them, 35.
+///
+/// The first page walks its first window to the fourth document, reads the
+/// span and asks at sixteen, then walks a window of 32 to the seventeenth,
+/// and is full: two counts, a span, two windows and two walks. The page past
+/// it walks its first window to the seventeenth, asks at sixteen, walks 32
+/// and asks at 32, walks the 35 its ceiling allows and asks at 35, and then,
+/// asked at its ceiling, walks on to the 401st: four counts, a span, three
+/// windows and four walks. A window one finding longer fills the first page
+/// in its first round; a window the path part did not bound would count the
+/// unmatched documents before `bulk/`; and a page asked at its ceiling that
+/// kept walking in rounds would keep asking — each runs other statements
+/// than these.
+#[test]
+fn each_round_of_a_walk_runs_its_pinned_statements() {
+    let matched = |at: usize| at == 3 || at == 16 || (at >= 400 && at % 4 == 0);
+    let spread = Spread::warned("drive-rounds-pinned", 40, 600, 1, matched);
+    let range = Predicate::before("status", "p");
+    let params = ValidateParams::new(vault())
+        .with_kinds([FindingKind::UndeclaredTag])
+        .with_predicates([Predicate::path("bulk/**"), range])
+        .with_limit(1);
+    let first = spread
+        .snapshot()
+        .validate(&params, &declared())
+        .expect("a validate");
+    let Validation::Findings { rows, next, .. } = first.answer else {
+        panic!("a page answered a summary");
+    };
+    assert_eq!(rows[0].path.as_str(), bulk(3), "the first page");
+    let second = params
+        .clone()
+        .with_after(next.expect("a page past the first"));
+    let ran = |params: &ValidateParams| {
+        let plans = spread
+            .snapshot()
+            .validate_plans(params, &declared())
+            .expect("the plans of a validate");
+        let of = |statement: ReadStatement, walked: Option<bool>| {
+            plans
+                .iter()
+                .filter(|plan| {
+                    plan.statement == statement
+                        && walked.is_none_or(|walked| {
+                            plan.filters.contains(&ReadFilter::Before(FieldOrder::Raw)) == walked
+                        })
+                })
+                .count()
+        };
+        let page = ReadStatement::Validate(ValidateStatement::KindPage);
+        [
+            of(ReadStatement::Find(FindStatement::PartCeiling), None),
+            of(ReadStatement::Find(FindStatement::DocumentSpan), None),
+            of(page, Some(false)),
+            of(page, Some(true)),
+        ]
+    };
+    assert_eq!(
+        [ran(&params), ran(&second)],
+        [[2, 1, 2, 2], [4, 1, 3, 4]],
+        "the first two pages' counts, spans, windows and walks"
+    );
 }
