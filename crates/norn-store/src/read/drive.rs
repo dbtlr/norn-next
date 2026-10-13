@@ -29,13 +29,14 @@
 //! each document once. **What stays a declared limit** is a page that walks
 //! past many documents to reach the next of a few: a part's documents bunched
 //! together, or a part whose seek reaches many documents it rejects — findings
-//! at paths no document stands at, values of the wrong declared shape, links
-//! whose key names another document, documents the ambiguity-ignore set
-//! leaves out, paths a glob with no literal prefix rejects — which its count
-//! takes for documents it keeps, so the page walks. Each such document is
-//! walked once over a drain: no index holds a range's, a full-text match's, a
-//! resolution's or a links-to part's documents in a page's order, and a count
-//! that judged each row would read without bound.
+//! at paths no document stands at, values of the wrong declared shape or
+//! failing a folded key's typed order, links whose key names another document,
+//! documents the ambiguity-ignore set leaves out, paths under a glob's literal
+//! prefix the glob rejects — which its count takes for documents it keeps, so
+//! the page walks. Each such document is walked once over a drain: no index
+//! holds a range's, a full-text match's, a resolution's or a links-to part's
+//! documents in a page's order, and a count that judged each row would read
+//! without bound.
 
 use crate::error::{self, StoreError};
 use crate::find::{FindStatement, compose_document_span};

@@ -885,9 +885,10 @@ through the vault, at most the ceiling — and a drain walks each document once.
 walking past many documents to the next of a few pays for the many, each once over a drain,
 a declared limit: a part's documents bunched together, or a part whose seek reaches many
 documents it rejects — findings at paths no document stands at, values of the wrong declared
-shape, links whose key names another document, documents the ambiguity-ignore set leaves
-out, paths a glob with no literal prefix rejects — which its count takes for kept, so the
-page walks; no index holds such a part's documents in a page's order. Inequality and absence seek the
+shape or failing a folded key's typed order, links whose key names another document,
+documents the ambiguity-ignore set leaves out, paths under a glob's literal prefix the glob
+rejects — which its count takes for kept, so the page walks; no index holds such a part's
+documents in a page's order. Inequality and absence seek the
 documents a page must not hold, so a page they alone narrow seeks its order index as a page
 with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or

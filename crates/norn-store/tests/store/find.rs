@@ -1852,8 +1852,8 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
     }
 }
 
-/// **A part ceiling probe reads the part's own seek and stops one row past the
-/// ceiling (NORN-390).** A page no part drives from its documents in the
+/// **A part ceiling probe reads the part's own seek and stops one document
+/// past the ceiling (NORN-390).** A page no part drives from its documents in the
 /// page's order — a field sort's — reads the vault's greatest document row id
 /// once ([`FindStatement::DocumentSpan`], one seek of `documents`) and asks,
 /// part by part, whether one keeps at most the ceiling it scales: one
