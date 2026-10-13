@@ -1987,10 +1987,117 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
     );
 }
 
+/// `seeded` holding `count` more documents under `edge/`, each with the tag
+/// `edge`, `status: open` and the word `rare` in its body.
+fn with_edge_documents(seeded: &mut Seeded, count: usize) {
+    let declared = declared();
+    let documents: Vec<_> = (0..count)
+        .map(|at| {
+            let at = format!("edge/{at:04}.md");
+            let mut facts = document(&at, &format!("hash-{at}"), "a rare body\n")
+                .with_frontmatter(Some(map(vec![("status", string("open"))])), &declared);
+            facts.tags.push(TagFact {
+                name: "edge".to_string(),
+                source: TagSource::Body,
+                span: None,
+            });
+            facts
+        })
+        .collect();
+    write_documents(&mut seeded.store.begin_request(), &documents);
+}
+
+/// **A part drives a page from what it matched exactly while it keeps no more
+/// documents than the ceiling, and the first such part drives (NORN-390).**
+/// In a vault too small to raise it, a page of one row reads two, so its
+/// ceiling is [`norn_store::MATCHED_DRIVE_FACTOR`] times two, sixteen: a field
+/// sort narrowed by a tag sixteen documents carry is driven from what the tag
+/// matched, and by one seventeen carry walks its order. Of two parts within
+/// the ceiling, the first the request names drives, and the other is tested
+/// at each document's key.
+#[test]
+fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
+    let field_page = || {
+        sorted(SortKey::field("status"), Direction::Ascending)
+            .with_predicates([Predicate::tag("edge")])
+            .with_limit(1)
+    };
+    let page_sql = |seeded: &Seeded, params: &FindParams| {
+        plan_of(
+            &seeded.plans(params),
+            FindStatement::FieldMissingPage(FieldOrder::Raw, PageDirection::Ascending),
+        )
+        .sql()
+        .to_string()
+    };
+    let ceiling = 2 * norn_store::MATCHED_DRIVE_FACTOR;
+    for (count, driven) in [(ceiling, true), (ceiling + 1, false)] {
+        let mut seeded = Seeded::new(&format!("find-ceiling-edge-{count}"));
+        with_edge_documents(&mut seeded, count);
+        let sql = page_sql(&seeded, &field_page());
+        assert_eq!(
+            sql.contains("IN (SELECT tg.document"),
+            driven,
+            "a tag {count} documents carry, against a ceiling of {ceiling}: {sql}"
+        );
+    }
+
+    let mut seeded = Seeded::new("find-ceiling-first");
+    with_edge_documents(&mut seeded, 4);
+    let both = |first: Predicate, second: Predicate| {
+        page_sql(
+            &seeded,
+            &sorted(SortKey::field("status"), Direction::Ascending)
+                .with_predicates([first, second])
+                .with_limit(1),
+        )
+    };
+    let tag_first = both(Predicate::tag("edge"), Predicate::matches("rare"));
+    assert!(
+        tag_first.contains("IN (SELECT tg.document")
+            && tag_first.contains("EXISTS (SELECT 1 FROM documents_fts"),
+        "the tag, named first, did not drive: {tag_first}"
+    );
+    let match_first = both(Predicate::matches("rare"), Predicate::tag("edge"));
+    assert!(
+        match_first.contains("IN (SELECT rowid FROM documents_fts")
+            && match_first.contains("EXISTS (SELECT 1 FROM document_tags"),
+        "the match, named first, did not drive: {match_first}"
+    );
+}
+
+/// **A page a part drives from what it matched tests every other part at each
+/// document's key (NORN-390).** Over the fixture, four documents the word
+/// `rare` stands in, and 50, then 500, bulk documents every part of
+/// [`drained_parts`] matches, a field-sorted page narrowed by `rare` and by a
+/// range the bulk all falls in is driven from what `rare` matched, and costs
+/// the same at both sizes: the range is tested at each of the four, never
+/// read as the set it keeps.
+#[test]
+fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let mut small = Seeded::with_matched_bulk_under("find-rare-small", 50, order);
+        let mut large = Seeded::with_matched_bulk_under("find-rare-large", 500, order);
+        with_edge_documents(&mut small, 4);
+        with_edge_documents(&mut large, 4);
+        let params = sorted(SortKey::field("status"), Direction::Ascending)
+            .with_predicates([Predicate::matches("rare"), Predicate::before("status", "p")])
+            .with_limit(2);
+        assert_eq!(
+            small.page(&params).work,
+            large.page(&params).work,
+            "a page `rare` drives grew with what the range keeps under {order:?}"
+        );
+    }
+}
+
 // ---- the work bar ----
 
 /// Whether `statement` is a page section rather than a probe or a hydration.
-fn is_page(statement: ReadStatement) -> bool {
+pub(crate) fn is_page(statement: ReadStatement) -> bool {
     matches!(
         statement,
         ReadStatement::Find(

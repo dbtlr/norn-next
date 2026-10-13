@@ -28,7 +28,7 @@ use crate::common::{
     DOCUMENT_PAYLOAD, Scratch, document, heading_anchor, planned_get_work, reads_of, span,
     violation, write_documents,
 };
-use crate::find::{failure_of, rows_of};
+use crate::find::{failure_of, is_page, rows_of};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
 
@@ -1339,7 +1339,10 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
             let plans = linked.plans(&params);
             let page = plans
                 .iter()
-                .find(|plan| plan.filters == [ReadFilter::LinksTo(SuffixKey::under(order))])
+                .find(|plan| {
+                    plan.filters == [ReadFilter::LinksTo(SuffixKey::under(order))]
+                        && is_page(plan.statement)
+                })
                 .expect("the page statement");
             plan(page)
         };

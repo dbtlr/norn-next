@@ -8,6 +8,7 @@ use super::{FieldMatch, FieldOrder, MatchedColumn};
 use crate::facts::StoredPathOrder;
 use crate::fields::FieldContainer;
 use crate::path::SuffixKey;
+use crate::request::range_predicate_from;
 use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
@@ -234,7 +235,7 @@ impl Filter {
             document,
             condition,
             ..
-        } = self.kept_rows(binder);
+        } = self.kept_rows(Reached::Set, binder);
         let membership = if self.shape().excludes() {
             "NOT IN"
         } else {
@@ -246,16 +247,23 @@ impl Filter {
         )
     }
 
-    /// Whether the documents this filter keeps are at most `ceiling` rows of
-    /// its seek, as one statement answers it: the rows counted, stopping one
-    /// past the ceiling, so the count costs at most the ceiling whatever the
-    /// filter keeps. A document reached by several rows counts once per row,
+    /// Whether the documents this filter keeps are at most `ceiling`, as one
+    /// statement answers it: the distinct documents among the rows its index
+    /// seek reaches, read until one past the ceiling and counted. Every
+    /// condition the index does not answer — a glob, a reading's shape or fold,
+    /// a links-to part's ambiguity, a resolution's ignore set, a finding's
+    /// document row — is dropped, so the count reads no row past the seek's
+    /// own and costs the ceiling's documents' rows whatever the filter keeps.
+    /// A dropped condition can only count a document the filter does not keep,
     /// so a filter is never taken to keep fewer documents than it does.
     pub(crate) fn kept_within(&self, ceiling: usize) -> (String, Vec<Value>) {
         let mut binder = Binder::default();
         let Rows {
-            table, condition, ..
-        } = self.kept_rows(&mut binder);
+            table,
+            document,
+            condition,
+            ..
+        } = self.kept_rows(Reached::Seek, &mut binder);
         let ceiling = i64::try_from(ceiling).expect("a ceiling fits i64");
         let (within, past) = (
             binder.bind(Value::Integer(ceiling)),
@@ -263,7 +271,7 @@ impl Filter {
         );
         (
             format!(
-                "SELECT count(*) <= {within} FROM (SELECT 1 FROM {table}
+                "SELECT count(*) <= {within} FROM (SELECT DISTINCT {document} FROM {table}
                      WHERE {condition}
                      LIMIT {past})"
             ),
@@ -271,10 +279,10 @@ impl Filter {
         )
     }
 
-    /// The rows this filter's seek reads for the set of documents it keeps:
-    /// a path part's glob range under the root's order, then the glob and the
-    /// order; every other part its own rows.
-    fn kept_rows(&self, binder: &mut Binder) -> Rows {
+    /// The rows this filter's seek reads, read for `reached`: a path part's
+    /// glob range under the root's order, then the glob and the order; every
+    /// other part its own rows.
+    fn kept_rows(&self, reached: Reached, binder: &mut Binder) -> Rows {
         match self {
             Filter::Path(part) => {
                 let (lower, upper) = super::glob::path_range(&part.pattern, part.order);
@@ -286,11 +294,11 @@ impl Filter {
                         Value::Text(part.pattern.as_str().to_string()),
                         Value::Text(part.order.as_str().to_string()),
                     ],
-                    Reached::Set,
+                    reached,
                     binder,
                 )
             }
-            Filter::Bound { shape, values, .. } => rows_of(*shape, values, Reached::Set, binder),
+            Filter::Bound { shape, values, .. } => rows_of(*shape, values, reached, binder),
         }
     }
 
@@ -482,11 +490,14 @@ fn test_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binder
 }
 
 /// What a filter's rows are read for: the set of every document they stand
-/// for, or whether they stand for one document.
+/// for, whether they stand for one document, or the rows its index seek
+/// reaches alone — every condition the index does not answer dropped, so a
+/// count of them stops where the seek does.
 #[derive(Clone, Copy, PartialEq)]
 enum Reached {
     Set,
     OneDocument,
+    Seek,
 }
 
 /// The rows a filter reads: the table they stand in, the column naming the
@@ -530,9 +541,10 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
     // value and never as an index constraint: an index on the value would
     // otherwise reach every row holding it across the vault.
     let compared = match reached {
-        Reached::Set => "",
+        Reached::Set | Reached::Seek => "",
         Reached::OneDocument => "+",
     };
+    let seek_only = reached == Reached::Seek;
     let mut bound = values.iter().cloned();
     let mut next = || {
         binder.bind(
@@ -554,7 +566,11 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         ReadFilter::Equal(matched) | ReadFilter::NotEqual(matched) => {
             let column = matched.column();
             let (key, value) = (next(), next());
-            let conditions = reading_conditions(matched, &mut next);
+            let conditions = if seek_only {
+                String::new()
+            } else {
+                reading_conditions(matched, &mut next)
+            };
             Rows::new(
                 "document_fields AS fv",
                 "fv.document",
@@ -564,7 +580,11 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         ReadFilter::Member(matched) => {
             let column = matched.column();
             let (key, values) = (next(), next());
-            let conditions = reading_conditions(matched, &mut next);
+            let conditions = if seek_only {
+                String::new()
+            } else {
+                reading_conditions(matched, &mut next)
+            };
             Rows::new(
                 "document_fields AS fv",
                 "fv.document",
@@ -593,27 +613,41 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             )
         }
         ReadFilter::PathGlob(order) => {
-            let (lower, upper, pattern, recorded) = (next(), next(), next(), next());
+            let (lower, upper) = (next(), next());
             let collation = order.collation();
-            Rows::new(
-                "documents AS dg",
-                "dg.id",
+            let range = format!("dg.path >= {lower}{collation} AND dg.path < {upper}{collation}");
+            let condition = if seek_only {
+                range
+            } else {
+                let (pattern, recorded) = (next(), next());
                 format!(
-                    "dg.path >= {lower}{collation} AND dg.path < {upper}{collation}
+                    "{range}
                        AND {}",
                     glob_test(&pattern, "dg.path", &recorded)
-                ),
-            )
+                )
+            };
+            Rows::new("documents AS dg", "dg.id", condition)
         }
         ReadFilter::Resolves(key) => {
             // Each value takes its number in turn, and the resolution's
             // predicate spells its ranges and its exclusion over those
             // numbers from `first`: two bounds per range, then the ignore
             // set, the target's segment count and the path order.
+            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
+            if seek_only {
+                for _ in 0..ranges * 2 {
+                    next();
+                }
+                let column = format!("dr.{}", key.column());
+                return Rows::new(
+                    "documents AS dr",
+                    "dr.id",
+                    format!("({})", range_predicate_from(&column, ranges, first)),
+                );
+            }
             for _ in values {
                 next();
             }
-            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
             Rows::new(
                 "documents AS dr",
                 "dr.id",
@@ -632,8 +666,15 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             let listed: Vec<String> = (0..values.len() - LINKS_TO_PARAMETERS)
                 .map(|_| next())
                 .collect();
-            let (ignored, order, path, document) = (next(), next(), next(), next());
             let link_key = resolve::link_key_column(key);
+            if seek_only {
+                return Rows::new(
+                    "link_keys AS lk",
+                    "lk.document",
+                    format!("lk.{link_key} IN ({})", listed.join(", ")),
+                );
+            }
+            let (ignored, order, path, document) = (next(), next(), next(), next());
             Rows::new(
                 "link_keys AS lk",
                 "lk.document",
@@ -686,6 +727,16 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                            AND {compared}fg.kind = {kind})"
                     ),
                 ),
+                // The kind's findings alone, each named by its path, a
+                // finding at a path no document stands at among them.
+                Reached::Seek => Rows {
+                    table: "findings AS fg".to_string(),
+                    document: "fg.path".to_string(),
+                    path: "fg.path".to_string(),
+                    condition: format!(
+                        "fg.vault_schema_fingerprint = {fingerprint} AND fg.kind = {kind}"
+                    ),
+                },
             }
         }
     }

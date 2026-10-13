@@ -2268,6 +2268,52 @@ fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
     }
 }
 
+/// **A page a part drives from what it matched tests every other document
+/// part at each document's key (NORN-390).** Over the fixture, four documents
+/// the word `rare` stands in, each with an undeclared-tag warning, and 50,
+/// then 500, bulk documents every part of [`drained_parts`] matches, a page
+/// narrowed by `rare` and by a range the bulk all falls in is driven from what
+/// `rare` matched and costs the same at both sizes: the range is tested at
+/// each of the four, never read as the set it keeps.
+#[test]
+fn a_page_driven_from_what_a_part_matched_tests_every_other_part() {
+    for order in ROOTS {
+        let rare = |label: &str, bulk: usize| {
+            let mut validating_store = Validating::with_matched_bulk_under(label, bulk, order);
+            let documents: Vec<_> = (0..4)
+                .map(|at| {
+                    document(
+                        &format!("rare/{at}.md"),
+                        &format!("hash-rare-{at}"),
+                        "a rare body\n",
+                    )
+                })
+                .collect();
+            let mut request = validating_store.store.begin_request();
+            write_documents(&mut request, &documents);
+            for at in 0..4 {
+                request
+                    .record_finding(&undeclared(&format!("rare/{at}.md"), "rare"))
+                    .expect("recording a rare finding");
+            }
+            validating_store
+        };
+        let (small, large) = (
+            rare("validate-rare-small", 50),
+            rare("validate-rare-large", 500),
+        );
+        let params = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::matches("rare"), Predicate::before("status", "p")])
+            .with_limit(2);
+        assert_eq!(
+            small.validate(&params).work,
+            large.validate(&params).work,
+            "a page `rare` drives grew with what the range keeps under {order:?}"
+        );
+    }
+}
+
 /// **Two document parts together admit exactly the findings whose document
 /// both admit, whichever drives, on either root (NORN-390).** Over the
 /// fixture, six bulk documents every part matches and the [`mixed_documents`]
