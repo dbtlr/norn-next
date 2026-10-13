@@ -1711,6 +1711,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
             ("links_redecided", 7),
             ("tag_rows_written", 6),
             ("tombstones_recorded", 1),
+            ("trigram_rows_written", 15),
         ]
     );
     assert_eq!(

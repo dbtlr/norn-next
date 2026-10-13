@@ -111,6 +111,7 @@ fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
                 facts: profile.docs,
                 findings: 1,
                 indexed_terms: profile.docs,
+                indexed_trigrams: profile.docs,
                 vault_schema_pinned: true,
             },
         );

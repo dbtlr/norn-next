@@ -54,8 +54,8 @@ fn every_reading_carries_every_counter() {
     // compared at all.
     assert_eq!(
         empty.differences(&worked).len(),
-        1,
-        "only the counter that moved should differ: {:?}",
+        2,
+        "the document and trigram write counts should differ: {:?}",
         empty.differences(&worked)
     );
 }
@@ -88,6 +88,7 @@ fn a_document_write_counts_what_it_wrote() {
             ("link_rows_written", 2),
             ("links_redecided", 2),
             ("tag_rows_written", 2),
+            ("trigram_rows_written", 9),
             ("block_rows_written", 2),
         ]
         .into_iter()

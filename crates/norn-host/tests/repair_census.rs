@@ -399,6 +399,8 @@ const REACHED: &[&[&str]] = &[
     // The apply's changeset: its written links re-decided, and the rule sets
     // its findings cite.
     &["documents_change_feed"],
+    // A moved document's death cascades into its stem trigrams by document.
+    &["document_trigrams_document_trigram"],
     &["rule_sets_fingerprint_rules"],
 ];
 

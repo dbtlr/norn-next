@@ -933,6 +933,7 @@ fn a_store_written_through_its_own_api_is_operationally_valid() {
             facts: 8,
             findings: 0,
             indexed_terms: 1,
+            indexed_trigrams: 1,
             vault_schema_pinned: true,
         },
     );

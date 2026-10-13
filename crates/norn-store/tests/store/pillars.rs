@@ -980,6 +980,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::StoredDocumentPage(..) => {
             "a_heal_page_seeks_the_index_that_holds_its_order"
         }
+        ExplainedStatement::IndexedTrigramPage => "stem_statements_seek_without_scans_or_sorts",
         ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
         | ExplainedStatement::StoredSuffixKeyPage
@@ -1372,6 +1373,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(ExplainedStatement::point_reads(&subject))
     .chain(FINDING_DETAIL.iter().map(|detail| detail(width)))
     .chain([ExplainedStatement::FindingRules(width)])
+    .chain([ExplainedStatement::IndexedTrigramPage])
     // The write registry is one slot here, and its own census is the bar's.
     .chain([ExplainedStatement::Write(WriteStatement::all()[0])])
     .collect();
@@ -1400,6 +1402,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks",
             "the_link_health_judgment_seeks_every_row_it_reads",
             "the_path_discard_seeks_finding_paths_path_key",
+            "stem_statements_seek_without_scans_or_sorts",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<&str>>()
@@ -1697,6 +1700,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
         | ExplainedStatement::StoredSuffixKeyPage
+        | ExplainedStatement::IndexedTrigramPage
         | ExplainedStatement::IndexedTermPage
         | ExplainedStatement::DocumentFeedPage
         | ExplainedStatement::TombstoneFeedPage
@@ -4318,6 +4322,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertBlock
         | InsertTag
         | InsertField
+        | InsertStemTrigram
         | RecordTombstone
         | InsertFinding
         | InsertFindingCandidate

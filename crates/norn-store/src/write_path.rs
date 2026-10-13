@@ -16,10 +16,11 @@
 //! # What is registered
 //!
 //! The increment's prepared statements — the document upsert, the per-table fact
-//! discards and inserts, the document delete, the tombstone record and the row
-//! probe — the findings writes, the rule-set writes a finding citing rules
-//! makes, the generation and pinned-scalar writes, and the discard a schema pin
-//! runs over findings stamped under another fingerprint. One registered
+//! discards and inserts, the stem-trigram insert a newly created row takes, the
+//! document delete, the tombstone record and the row probe — the findings
+//! writes, the rule-set writes a finding citing rules makes, the generation and
+//! pinned-scalar writes, and the discard a schema pin runs over findings
+//! stamped under another fingerprint. One registered
 //! statement is run by a trigger rather than prepared:
 //! [`WriteStatement::CollectRuleSet`] is the body of
 //! `findings_collect_rule_set`, which the DDL builds from this text, so its
@@ -86,6 +87,8 @@ registry! {
     InsertBlock,
     InsertTag,
     InsertField,
+    /// One distinct trigram of a newly created document's folded padded stem.
+    InsertStemTrigram,
     /// The death of a document: the row removed, its content hash returned for
     /// the tombstone.
     DeleteDocument,
@@ -217,6 +220,9 @@ impl WriteStatement {
                      provenance        = excluded.provenance,
                      generation        = excluded.generation,
                      recorded_at       = excluded.recorded_at"
+            }
+            Self::InsertStemTrigram => {
+                "INSERT INTO document_trigrams (trigram, document) VALUES (?1, ?2)"
             }
             Self::RowAt => "SELECT EXISTS (SELECT 1 FROM documents WHERE path = ?1)",
             Self::InsertFinding => {

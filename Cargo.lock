@@ -566,6 +566,7 @@ dependencies = [
  "norn-text",
  "norn-wire",
  "sha2",
+ "unicode-normalization",
 ]
 
 [[package]]
