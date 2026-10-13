@@ -59,6 +59,7 @@ use norn_wire::{
 use super::statement::{Findings, compose_findings};
 use super::{
     FindingPages, KindSection, Narrowing, Selected, ValidatePlan, ValidateStatement, ValidateWork,
+    past_document,
 };
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
@@ -332,7 +333,7 @@ impl Snapshot {
         // window ends, and the counts it answered. The first read's last
         // finding stands at the cut document, so the window ends past the
         // document, where the read resumes, unless it ends inside it.
-        let settled = first.settled.resumed_where(|end| end.path != path);
+        let settled = first.settled.resumed_where(|end| *end != path);
         let beyond = self.drive_page(
             &merged,
             &parts,
@@ -371,7 +372,6 @@ impl Snapshot {
             driver: Some(Driver::Walked),
             rows: 0,
             until: None,
-            window: None,
         });
         let tail = Ran::new(statement, composed).narrowed_by(narrowing.shapes());
         let found: Vec<FindingBase> = self
@@ -398,10 +398,4 @@ fn merged_section(after: Option<(&str, i64, i64)>) -> KindSection {
         "",
         after.map(|(path, position, id)| (path.to_string(), position, id)),
     )
-}
-
-/// The place after every finding at `path`, which a batch resumes from: the
-/// greatest position and id there are.
-fn past_document(path: &str) -> (&str, i64, i64) {
-    (path, i64::MAX, i64::MAX)
 }

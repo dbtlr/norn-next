@@ -519,24 +519,30 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             format!("\n                       AND {spelled}")
         })
         .collect();
+    let limit = limited(section, &mut binder);
+    let sql = format!(
+        "{head}{filters}
+                     ORDER BY {ordering}
+                     LIMIT {limit}"
+    );
+    (sql, binder.into_values())
+}
+
+/// A section's `LIMIT` operand: its rows, and the rows it passes before the
+/// first it hands back where it names where a walk's window ends.
+fn limited(section: &Section<'_>, binder: &mut Binder) -> String {
     let limit = binder.bind(Value::Integer(
         i64::try_from(section.rows).expect("a page's row count fits i64"),
     ));
-    let offset = match section.offset {
-        0 => String::new(),
+    match section.offset {
+        0 => limit,
         offset => format!(
-            " OFFSET {}",
+            "{limit} OFFSET {}",
             binder.bind(Value::Integer(
                 i64::try_from(offset).expect("a window's length fits i64")
             ))
         ),
-    };
-    let sql = format!(
-        "{head}{filters}
-                     ORDER BY {ordering}
-                     LIMIT {limit}{offset}"
-    );
-    (sql, binder.into_values())
+    }
 }
 
 /// The comparison that holds a row at or before a place in the order a
@@ -603,9 +609,7 @@ fn compose_ordered_path_page(
         )
     };
     let (_, _, order) = spelled(direction);
-    let limit = binder.bind(Value::Integer(
-        i64::try_from(section.rows).expect("a page's row count fits i64"),
-    ));
+    let limit = limited(section, &mut binder);
     let sql = format!(
         "SELECT d.id, d.path, NULL, d.content_hash FROM ({source}) AS dv
                      CROSS JOIN documents AS d ON d.id = dv.id{tested}

@@ -847,6 +847,57 @@ impl Snapshot {
         ))
     }
 
+    /// The path of the document `offset` documents past `after` in the
+    /// answer's path order, run `direction`'s way, among the documents every
+    /// one of `parts` — path parts — admits, or `None` where no more than
+    /// `offset` stand past it: where a walk's window ends, every verb's walk
+    /// in the answer's path order reading it here.
+    ///
+    /// It is a [`FindStatement::PathPage`] read one document past an offset,
+    /// a seek of `documents_path_nocase` past the place that costs the
+    /// documents it passes, each an index row. Narrowed by no part it walks
+    /// the order's own index; a path part drives it from its source, which
+    /// seeks the part's folded range, so a window counts only the documents
+    /// the range holds, as the walk it bounds reads only the rows the range
+    /// holds.
+    pub(crate) fn window_end(
+        &self,
+        record: &mut Vec<Ran>,
+        direction: PageDirection,
+        after: Option<&str>,
+        parts: &[Filter],
+        offset: usize,
+    ) -> Result<Option<String>, StoreError> {
+        debug_assert!(
+            parts.iter().all(|part| part.path_part().is_some()),
+            "a window is narrowed by path parts alone"
+        );
+        let statement = FindStatement::PathPage(direction);
+        let composed = compose_page(&Section {
+            statement,
+            key: None,
+            start: SectionStart {
+                sort: None,
+                path: after,
+            },
+            filters: parts,
+            driver: if parts.is_empty() {
+                Driver::Walked
+            } else {
+                Driver::Ordered(0)
+            },
+            rows: 1,
+            until: None,
+            offset,
+        });
+        let shapes = parts.iter().map(Filter::shape).collect();
+        Ok(self
+            .read_keys(record, Ran::new(statement, composed).narrowed_by(shapes))?
+            .into_iter()
+            .next()
+            .map(|paged| paged.key.path))
+    }
+
     /// Run one page section.
     fn read_keys(&self, record: &mut Vec<Ran>, section: Ran) -> Result<Vec<PagedKey>, StoreError> {
         self.run_statement(record, section, |row| {
@@ -942,7 +993,9 @@ fn sections(order: PageOrder<'_>, at: Option<&FindPosition>) -> Vec<FindSection>
 
 /// A find's page sections as the drive reads them ([`Paged`]): each section
 /// statement composed over the request's compiled parts, and a walk's window
-/// the same statement narrowed by none.
+/// the documents of the section's order narrowed by none — a path page's and a
+/// missing section's the documents in the answer's path order
+/// ([`Snapshot::window_end`]), and a valued section's its own statement.
 struct FindPages<'c> {
     compiled: &'c Compiled<'c>,
 }
@@ -953,7 +1006,7 @@ impl FindPages<'_> {
         section: &FindSection,
         filters: &[Filter],
         driver: Driver,
-        until: Option<&PagedKey>,
+        until: Option<&FindPosition>,
         rows: usize,
         offset: usize,
     ) -> (String, Vec<norn_db::rusqlite::types::Value>) {
@@ -964,9 +1017,9 @@ impl FindPages<'_> {
             filters,
             driver,
             rows,
-            until: until.map(|row| SectionStart {
-                sort: row.key.sort.as_deref(),
-                path: Some(row.key.path.as_str()),
+            until: until.map(|at| SectionStart {
+                sort: at.sort.as_deref(),
+                path: Some(at.path.as_str()),
             }),
             offset,
         })
@@ -976,6 +1029,7 @@ impl FindPages<'_> {
 impl Paged for FindPages<'_> {
     type Section = FindSection;
     type Row = PagedKey;
+    type Bound = FindPosition;
 
     fn read(
         &self,
@@ -983,7 +1037,7 @@ impl Paged for FindPages<'_> {
         record: &mut Vec<Ran>,
         section: &FindSection,
         driver: Driver,
-        until: Option<&PagedKey>,
+        until: Option<&FindPosition>,
         rows: usize,
     ) -> Result<Vec<PagedKey>, StoreError> {
         let composed = self.compose(section, &self.compiled.filters, driver, until, rows, 0);
@@ -997,25 +1051,28 @@ impl Paged for FindPages<'_> {
         record: &mut Vec<Ran>,
         section: &FindSection,
         offset: usize,
-    ) -> Result<Option<PagedKey>, StoreError> {
+    ) -> Result<Option<FindPosition>, StoreError> {
         // A missing section walks every document in path order, passing the
         // ones that carry the key, so its window is the path page's: a walk
         // of documents, not of the ones missing the key.
-        let walked = match section.statement {
-            FindStatement::FieldMissingPage(_, direction) => FindSection {
-                statement: FindStatement::PathPage(direction),
-                ..section.clone()
-            },
-            _ => section.clone(),
-        };
-        let composed = self.compose(&walked, &[], Driver::Walked, None, 1, offset);
-        Ok(snapshot
-            .read_keys(record, Ran::new(walked.statement, composed))?
-            .into_iter()
-            .next())
+        match section.statement {
+            FindStatement::PathPage(direction) | FindStatement::FieldMissingPage(_, direction) => {
+                let end =
+                    snapshot.window_end(record, direction, section.path.as_deref(), &[], offset)?;
+                Ok(end.map(|path| FindPosition { sort: None, path }))
+            }
+            statement => {
+                let composed = self.compose(section, &[], Driver::Walked, None, 1, offset);
+                Ok(snapshot
+                    .read_keys(record, Ran::new(statement, composed))?
+                    .into_iter()
+                    .next()
+                    .map(|paged| paged.key.position()))
+            }
+        }
     }
 
-    fn resumed(&self, section: &FindSection, row: &PagedKey) -> FindSection {
-        FindSection::resumed(section.statement, &row.key.position())
+    fn resumed(&self, section: &FindSection, bound: &FindPosition) -> FindSection {
+        FindSection::resumed(section.statement, bound)
     }
 }

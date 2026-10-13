@@ -202,15 +202,10 @@ pub(crate) struct Findings<'a> {
     /// The rows a page reads at most; a summary and a document's tail read
     /// them all.
     pub(crate) rows: usize,
-    /// The last `(path, position, id)` a walked page or merged page may read,
-    /// inclusive: the end of the walk's window
+    /// The last path a walked page or merged page may read, every finding at
+    /// it included: the document the walk's window ends at
     /// ([`crate::read::Paged::window`]), or `None` where it reads to its end.
-    pub(crate) until: Option<(&'a str, i64, i64)>,
-    /// Where the read names where a walk's window ends rather than reads a
-    /// page: the findings it passes before the one it hands back, the
-    /// window's length less one, narrowed by no document part, handing back
-    /// no link. `None` for a page, a summary and a document's tail.
-    pub(crate) window: Option<usize>,
+    pub(crate) until: Option<&'a str>,
 }
 
 impl Findings<'_> {
@@ -253,11 +248,6 @@ const MERGE_ID: &str = "order_id";
 /// finding costs two seeks and the arm's order, which the joins sit behind,
 /// is untouched.
 const MERGE_LINK_JOINS: &str = "\n                     LEFT JOIN documents AS dl ON dl.path = f.path\n                     LEFT JOIN links AS lk ON lk.document = dl.id AND lk.ordinal = f.ordinal";
-
-/// The link columns a merged read's walk window hands back in place of
-/// [`FINDING_LINK_COLUMNS`]: none, so the window skips the rows before its
-/// end without seeking each one's link.
-const WINDOW_LINK_COLUMNS: &str = "NULL AS link_family, NULL AS link_protocol, NULL AS link_target";
 
 /// The table one arm seeks, the alias it takes, and the column that holds the
 /// finding's id there.
@@ -372,18 +362,9 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
     let narrowed = Narrowed::of(findings.filters, findings.driver);
     let seeked = Seeked::of(findings.ruled());
     let limit = |binder: &mut Binder| {
-        let limit = binder.bind(Value::Integer(
+        binder.bind(Value::Integer(
             i64::try_from(findings.rows).expect("a page's row count fits i64"),
-        ));
-        match findings.window {
-            None => limit,
-            Some(offset) => format!(
-                "{limit} OFFSET {}",
-                binder.bind(Value::Integer(
-                    i64::try_from(offset).expect("a window's length fits i64")
-                ))
-            ),
-        }
+        ))
     };
     let text = match findings.statement {
         ValidateStatement::KindPage | ValidateStatement::RulePage => {
@@ -676,13 +657,14 @@ fn compose_arm(
             }
             .spelled(),
         );
-        if let Some((until, position, until_id)) = findings.until {
+        // A window ends at a document's path, and the walk reads every
+        // finding at it: the bound names the path alone, on the same row
+        // value the place is sought past.
+        if let Some(until) = findings.until {
             let (folded, path) = answer_place(until);
-            let (folded, path, position, until_id) = (
+            let (folded, path) = (
                 binder.bind(Value::Text(folded)),
                 binder.bind(Value::Text(path)),
-                binder.bind(Value::Integer(position)),
-                binder.bind(Value::Integer(until_id)),
             );
             conditions.push(
                 AnswerSeek {
@@ -692,14 +674,8 @@ fn compose_arm(
                     path: &path_column,
                     folded: &folded,
                     bytewise: &path,
-                    trail: Some(Term {
-                        column: &position_column,
-                        bound: &position,
-                    }),
-                    id: Some(Term {
-                        column: id,
-                        bound: &until_id,
-                    }),
+                    trail: None,
+                    id: None,
                 }
                 .spelled(),
             );
@@ -779,18 +755,11 @@ fn compose_arm(
         }
         format!("FROM {table} AS {seek}{reached}")
     };
-    // A walk's window hands back where it ends and no link, so it joins none.
-    let window = findings.window.is_some();
     let from = match statement {
-        ValidateStatement::MergedPage | ValidateStatement::DocumentTail if !window => {
+        ValidateStatement::MergedPage | ValidateStatement::DocumentTail => {
             format!("{from}{MERGE_LINK_JOINS}")
         }
         _ => from,
-    };
-    let links = if window {
-        WINDOW_LINK_COLUMNS
-    } else {
-        FINDING_LINK_COLUMNS
     };
 
     let conditions = conditions.join("\n                       AND ");
@@ -800,7 +769,7 @@ fn compose_arm(
         }
         ValidateStatement::MergedPage | ValidateStatement::DocumentTail => format!(
             "{FINDING_ROW_COLUMNS}, {path_column} AS {MERGE_PATH}, \
-             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {links}"
+             {position_column} AS {MERGE_POSITION}, {id} AS {MERGE_ID}, {FINDING_LINK_COLUMNS}"
         ),
         ValidateStatement::Summary | ValidateStatement::RuleSummary => {
             format!("{}, {}, COUNT(*)", column("kind"), column("severity"))

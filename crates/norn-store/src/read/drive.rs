@@ -129,11 +129,13 @@ pub(crate) enum Driver {
 /// The sections of one page, read as the drive reads them.
 ///
 /// A section is one statement's reach in the page's order and the place it
-/// resumes past; a row is what the statement hands back, which names a place
-/// in that order too, so a section resumes past any row it handed back.
+/// resumes past; a row is what the statement hands back. A bound is a place in
+/// that order a walk's window ends at — a document's place, which a section
+/// reads up to, every row at it included, and resumes past.
 pub(crate) trait Paged {
     type Section: Clone;
     type Row;
+    type Bound: Clone;
 
     /// At most `rows` of `section`'s rows, driven by `driver`, and where
     /// `until` names one, none past it in the page's order: the walk's
@@ -144,23 +146,24 @@ pub(crate) trait Paged {
         record: &mut Vec<Ran>,
         section: &Self::Section,
         driver: Driver,
-        until: Option<&Self::Row>,
+        until: Option<&Self::Bound>,
         rows: usize,
     ) -> Result<Vec<Self::Row>, StoreError>;
 
-    /// The row `offset` rows past `section`'s place in its order, which no
-    /// document part narrows — the last row a walk of `offset + 1` rows
-    /// reaches — or `None` where the section holds no more than `offset`.
+    /// The document `offset` documents past `section`'s place in its order,
+    /// which no document part narrows — the last document a walk of `offset
+    /// + 1` documents reaches — or `None` where no more than `offset` stand
+    /// past it ([`Snapshot::window_end`]).
     fn window(
         &self,
         snapshot: &Snapshot,
         record: &mut Vec<Ran>,
         section: &Self::Section,
         offset: usize,
-    ) -> Result<Option<Self::Row>, StoreError>;
+    ) -> Result<Option<Self::Bound>, StoreError>;
 
-    /// `section`, resumed past `row`.
-    fn resumed(&self, section: &Self::Section, row: &Self::Row) -> Self::Section;
+    /// `section`, resumed past `bound` and every row at it.
+    fn resumed(&self, section: &Self::Section, bound: &Self::Bound) -> Self::Section;
 }
 
 /// What a read of a page has established about how its request is driven,
@@ -257,18 +260,18 @@ pub(crate) enum Window<R> {
 }
 
 /// What a page the drive read holds and cost.
-pub(crate) struct Driven<T> {
+pub(crate) struct Driven<T, B> {
     /// The rows, at most the page's bound, in the page's order.
     pub(crate) rows: Vec<T>,
     /// What the read established about how its request is driven.
-    pub(crate) settled: Settled<T>,
+    pub(crate) settled: Settled<B>,
     /// What SQLite counted stepping every statement the drive ran: the
     /// walk's windows, the parts' counts and the vault's span beside the
     /// page statements.
     pub(crate) stepped: Stepped,
 }
 
-impl<T: Clone> Driven<T> {
+impl<T: Clone, B> Driven<T, B> {
     /// The page of at most `limit` rows these are, read one past it.
     pub(crate) fn into_page(self, limit: usize) -> KeysetPage<T> {
         KeysetPage::cut(self.rows, limit, self.stepped)
@@ -307,9 +310,9 @@ impl Snapshot {
         scale: usize,
         sections: Vec<P::Section>,
         rows: usize,
-        settled: Settled<P::Row>,
+        settled: Settled<P::Bound>,
         lookups: &mut Lookups,
-    ) -> Result<Driven<P::Row>, StoreError> {
+    ) -> Result<Driven<P::Row, P::Bound>, StoreError> {
         let ran_before = lookups.ran.len();
         let mut found: Vec<P::Row> = Vec::new();
         let mut queue: VecDeque<P::Section> = sections.into();
@@ -395,11 +398,11 @@ impl Snapshot {
         parts: &[&Filter],
         scale: usize,
         rows: usize,
-        mut round: Round<P::Row>,
+        mut round: Round<P::Bound>,
         found: &mut Vec<P::Row>,
         queue: &mut VecDeque<P::Section>,
         lookups: &mut Lookups,
-    ) -> Result<Settled<P::Row>, StoreError> {
+    ) -> Result<Settled<P::Bound>, StoreError> {
         loop {
             let Some(section) = queue.front().cloned() else {
                 return Ok(Settled::Walking(round));
