@@ -656,7 +656,10 @@ fn index_shape(declared: &[String], index: &str) -> (String, Option<String>) {
 /// Each field-pillar index holds only the rows its reads can match: a value
 /// seek never walks presence rows, a presence seek never walks value rows, and
 /// a field sort pages the marker rows alone. The predicate is what a seek on
-/// the index is allowed to skip, so dropping one widens every read of it.
+/// the index is allowed to skip, so dropping one widens every read of it. A
+/// value and a presence index carry the path in the answer's order after the
+/// key and the value or the container, so a page a part drives seeks its
+/// documents from where it resumes (NORN-390).
 #[test]
 fn a_field_index_holds_only_the_rows_its_reads_match() {
     let declared = ddl::statements();
@@ -669,8 +672,21 @@ fn a_field_index_holds_only_the_rows_its_reads_match() {
         "the index reader finds a predicate on an index that declares none"
     );
     for (index, columns, predicate) in [
-        ("document_fields_raw", "key, raw", "raw IS NOT NULL"),
-        ("document_fields_typed", "key, typed", "typed IS NOT NULL"),
+        (
+            "document_fields_raw",
+            "key, raw, path COLLATE NOCASE, path",
+            "raw IS NOT NULL",
+        ),
+        (
+            "document_fields_typed",
+            "key, typed, path COLLATE NOCASE, path",
+            "typed IS NOT NULL",
+        ),
+        (
+            "document_fields_folded",
+            "key, folded, path COLLATE NOCASE, path",
+            "folded IS NOT NULL",
+        ),
         (
             "document_fields_least_raw",
             "key, raw, path COLLATE NOCASE, path",
@@ -681,7 +697,11 @@ fn a_field_index_holds_only_the_rows_its_reads_match() {
             "key, typed, path COLLATE NOCASE, path",
             "least_typed = 1",
         ),
-        ("document_fields_presence", "key, container", "ordinal = 0"),
+        (
+            "document_fields_presence",
+            "key, container, path COLLATE NOCASE, path",
+            "ordinal = 0",
+        ),
     ] {
         assert_eq!(
             index_shape(&declared, index),

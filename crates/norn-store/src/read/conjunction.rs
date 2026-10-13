@@ -235,7 +235,11 @@ impl Snapshot {
     ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
         let filter = |shape: ReadFilter, values: Vec<Value>| {
-            Ok(Part::Filter(Filter::Bound { shape, values }))
+            Ok(Part::Filter(Filter::Bound {
+                shape,
+                values,
+                members: Vec::new(),
+            }))
         };
         // The order a key's values compare under, and a request's value as a
         // place in it: its typed sort key where the key carries a typed order,
@@ -323,13 +327,18 @@ impl Snapshot {
                         .map(|value| matched_value(key, value).map(FrontmatterValue::String))
                         .collect::<Result<Vec<FrontmatterValue>, PageRefusal>>()?,
                 ))?;
-                filter(
-                    ReadFilter::Member(matched(key)),
-                    [text(key), Value::Text(listed)]
+                let members = values
+                    .iter()
+                    .map(|value| matched_value(key, value).map(Value::Text))
+                    .collect::<Result<Vec<Value>, PageRefusal>>()?;
+                Ok(Part::Filter(Filter::Bound {
+                    shape: ReadFilter::Member(matched(key)),
+                    values: [text(key), Value::Text(listed)]
                         .into_iter()
                         .chain(reading_values(key))
                         .collect(),
-                )
+                    members,
+                }))
             }
             Predicate::Has { key, .. } => filter(ReadFilter::Present, vec![text(key)]),
             Predicate::Missing { key, .. } => filter(ReadFilter::Absent, vec![text(key)]),

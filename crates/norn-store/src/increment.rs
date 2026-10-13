@@ -712,6 +712,7 @@ fn upsert(
             .execute(params![
                 document,
                 ordinal as i64,
+                facts.path.as_str(),
                 tag.name,
                 fold_tag(&tag.name),
                 tag.source.as_str(),

@@ -414,17 +414,24 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 ///   read in path order off the change-feed index, which does not say a path
 ///   is one document's, so the links of one path, which the changeset wrote,
 ///   are sorted by ordinal.
-/// - **A statement a document part drives, until NORN-390.** The merged page
-///   and the document's tail (`ValidateStatement::MergedPage` and
-///   `ValidateStatement::DocumentTail`, and their rule forms) sort their
-///   `ORDER BY`, and the summary (`ValidateStatement::Summary` and its rule
-///   form) its `GROUP BY`, into a temporary b-tree when a part on a field or
-///   a tag drives the selection: the matched documents are reached by row id
-///   from the part's own seek, and what is sorted is what the part matched.
-///   That cost is the quadratic NORN-390 removes, and **its fix removes this
-///   exemption**; the exemption is therefore held to the statements that
-///   carry it, recognised by the select list their families open with, and a
-///   sort in any other statement that searches those indexes is found.
+/// - **One document's findings on a page a document part drives (NORN-390).**
+///   The merged page and a validate's kind or rule page a part keeping its
+///   documents in the answer's path order narrows read the part's documents
+///   in a co-routine in that order, from the page's place, and seek each
+///   one's findings at its path; what SQLite orders is the last two terms,
+///   position and id, among one document's findings, a run no longer than
+///   the document's selected findings. Admitted only where a source drives
+///   the statement (`CO-ROUTINE dv`), so a page that sorts what a part
+///   matched — the cost NORN-390 removed — is found.
+/// - **A summary a document part drives.** The summary
+///   (`ValidateStatement::Summary` and its rule form) sorts its `GROUP BY`
+///   into a temporary b-tree when a part on a field or a tag drives the
+///   selection: the matched documents are reached by row id from the part's
+///   own seek, and what is sorted is the groups of what the part matched. A
+///   first batch's count costs the selected set, a declared limit; the
+///   exemption is held to the statements that carry it, recognised by the
+///   select list their family opens with, and a sort in any other statement
+///   that searches those indexes is found.
 fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
     let searched_through = |table: &str, indexes: &[&str]| {
         plan.searches_of(table)
@@ -438,6 +445,7 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
         spelled.join(" ").starts_with(select_list)
     };
     let a_page = opens_with("SELECT f.id, f.kind, f.severity, f.path,");
+    let sourced = plan.rows().iter().any(|row| row.detail == "CO-ROUTINE dv");
     let a_summary = opens_with("SELECT f.kind, f.severity, COUNT(*)")
         || opens_with("SELECT fr.kind, fr.severity, COUNT(*)");
     match sort.detail.as_str() {
@@ -457,8 +465,8 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
         {
             Some("LinkHealthWrittenLinks")
         }
-        "USE TEMP B-TREE FOR ORDER BY" if driven && a_page => {
-            Some("a page or tail a document part drives")
+        "USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY" if sourced && a_page => {
+            Some("one document's findings on a page a document part drives")
         }
         "USE TEMP B-TREE FOR GROUP BY" if driven && a_summary => {
             Some("a summary a document part drives")

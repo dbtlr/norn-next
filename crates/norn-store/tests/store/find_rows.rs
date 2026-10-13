@@ -808,7 +808,9 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
                 statements: 3,
                 keys_read: 3,
                 page_full_scan_steps: 0,
-                page_sorts: 1,
+                // The path part's folded range hands the page its documents
+                // in the answer's path order, so nothing sorts.
+                page_sorts: 0,
                 page_vm_steps: 0,
                 documents_hydrated: 2,
                 nested_rows: nested(0, 0, 0),

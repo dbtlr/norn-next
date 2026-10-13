@@ -771,8 +771,12 @@ impl<'a> Request<'a> {
                 DOCUMENT_TAGS_SQL,
                 params![id],
                 |row| {
-                    let folded_name: String = row.get(5)?;
-                    Ok(stored_tag(row)?.map(|fact| StoredTag { fact, folded_name }))
+                    let (folded_name, path): (String, String) = (row.get(5)?, row.get(6)?);
+                    Ok(stored_tag(row)?.map(|fact| StoredTag {
+                        fact,
+                        folded_name,
+                        path,
+                    }))
                 },
                 "reading a document's tags",
             )?,
@@ -2086,7 +2090,7 @@ const DOCUMENT_BLOCKS_SQL: &str = "SELECT block_id, span_line, span_column, span
 /// The statement [`Request::stored_facts`] reads a document's tags with, each
 /// tag's fold after the columns [`stored_tag`] reads.
 const DOCUMENT_TAGS_SQL: &str =
-    "SELECT name, source, span_line, span_column, span_offset, folded_name
+    "SELECT name, source, span_line, span_column, span_offset, folded_name, path
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's field rows with.

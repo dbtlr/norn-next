@@ -858,15 +858,29 @@ reach one that does not, so an ascending first page, which reads the missing sec
 costs a walk proportional to the documents carrying the key where few or none miss it. A
 drain pays that walk at most twice, because a page reads one row past its bound and the next
 page resumes from the row it kept, and it is the price of ordering a document missing the
-sort field as `NULL` orders: first ascending, last descending. A page with a filter drives
-from the filter's seek and sorts the matched set: its cost is bounded by the match count,
-which is what a narrowing part narrows. Inequality and absence seek the documents a page
-must not hold, so a page they alone narrow seeks its order index as a page with no filter
-does and tests each row against them. Two bars hold this, one on the plans and one on the
+sort field as `NULL` orders: first ascending, last descending. A path page narrowed by a
+part whose documents stand in the answer's path order — an equality, a tag, a finding or a
+path part either way, and a membership naming at most sixteen values or a presence
+ascending — drives from the first such part's source: the part's index holds the path after
+its key and value, so the page seeks the part's documents from the place it resumes at and
+within every path part's range, sorts nothing, and costs the documents it reads, never the
+ones the part matched before its place or past its last row; every other part tests each
+document at its key. Those it reads include the ones another part then rejects, each read
+once over a drain; which part drives is the first in the request's order, not the rarest.
+A wider membership merges too many seeks to prepare for every page and drives no page from
+its source. A page any other filter that keeps what it seeks narrows — a range, a
+full-text match, a resolution or a links-to part, a membership or a presence descending,
+and any such part on a field sort's page — drives from the filter's seek and sorts the
+matched set: its cost is bounded by the match count. Inequality and absence seek the
+documents a page must not hold, so a page they alone narrow seeks its order index as a page
+with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
-handed it and sorts at most once per page statement. Each filter is one index seek, judged
+handed it and sorts at most once per page statement; a path page a filter's source drives
+seeks that filter's index from its place and sorts nothing, and its continuation, near the
+start of what the filter matched and near the end, costs the same while the documents the
+filter matches grow with the vault. Each filter is one index seek, judged
 on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, on
 `(key, typed)` where the key carries a typed order, or on `(key, folded)` where it is a tag
 key — the `tags` carrier, declared or not, or a key declared `tags` — whose value rows hold
@@ -959,8 +973,12 @@ carrying a plan bar with a negative control and held by a census to exactly one 
 kind's page, a seek of `(fingerprint, kind)` in `(path COLLATE NOCASE, path, position, id)` order past
 the page's position on all four — of `(fingerprint, kind, severity)` where a severity floor admits one
 severity — over the indexes that hold the path under `NOCASE` with a bytewise tie-break, that
-a path part's folded range bounds on every root, and that a document part keeping what it
-seeks drives instead from the documents it matched; and the summary, a covering seek of
+a path part's folded range bounds on every root, and that a document part keeping its
+documents in the answer's path order drives instead from its source — the part's documents
+sought from the page's place and each one's findings at its path, so a continuation costs
+the documents it reads from its place to its last finding however many the part matched,
+those holding no finding the page selects included, each read once per kind a drain pages — while any other document part keeping
+what it seeks drives from the documents it matched; and the summary, a covering seek of
 `(fingerprint, kind, severity)` per
 cell it admits grouped in the index's order, or, where a document part keeping what it seeks
 drives it, one covering seek per matched document and cell, its groups sorted; a rule's
@@ -974,7 +992,10 @@ reads their SQLite counters over two vault sizes: a validate narrowed by kind, s
 path part or a document part costs the same at both and steps through no full scan, on
 either root, and so does one selecting a rule together with any of those; a page of a range
 that matches every finding costs the same at both, by kind and by rule alike, and a page
-deep among many findings at one path costs what the page one page in costs. On a
+deep among many findings at one path costs what the page one page in costs; a continuation
+a document part keeping its documents in the answer's path order drives, near the start of
+what it matched and near the end, costs the same while the documents it matches grow with
+the vault. On a
 root that tells spellings apart a path part's folded range also reads the findings at paths
 spelling its prefix in another case, which its glob rejects. A
 payload bar holds that no statement a page or a summary runs, under every narrowing the drain
@@ -988,17 +1009,23 @@ validate's — one compilation, the same refusals, a rule composing with every o
 and the batch is one merged read: a compound statement with one arm per kind, each arm the
 seek a kind's page is (over the rule's own rows where a rule is selected), joined by `UNION
 ALL` and ordered together, which SQLite runs as a merge of the arms' own orders with no sort
-and no index added — save where a document part that keeps what it seeks drives each arm, as
-it drives a page's section, and the arm sorts what that part matched. A batch holds about
+and no index added for it. Where a document part keeping its documents in the answer's path order
+narrows the batch, the read is one arm instead: the part's documents from the batch's place,
+read once, each seeking every kind read at its path, so only one document's findings are
+ordered among themselves; any other document part keeping what it seeks drives each arm
+from the documents it matched, and the arm sorts those. A batch holds about
 its limit in findings and never splits a document's selected findings: where the limit falls
 inside a document, a second statement reads that document's remaining findings, pinning its
-path by the folded and the bytewise equality together so that it still seeks, and a third
+path by the folded and the bytewise equality together so that it still seeks and testing the
+document at its key against every document part, and a third
 probe of one finding tells whether documents remain. Two paths that differ only in case are
 two documents, compared bytewise. The cursor a batch mints names the last document it
 covered, under no fingerprint, only where more remain, and is its own row type, so a
 validate's cursor does not continue a repair nor a repair's a validate. Both reads carry a
 plan bar with a negative control, and a work bar over two vault sizes holds that a batch no
-document part drives costs the findings it reads and steps through no full scan or sort. A
+document part drives costs the findings it reads and steps through no full scan or sort, and
+that a continuation a document part keeping its documents in the answer's path order drives
+costs the same while the documents the part matches grow. A
 first batch also counts the selection (see Mutation, `repair`), so its cost follows the findings the selection
 admits; the counter lane holds a repair narrowed to a path flat across vault sizes. The
 host's `repair` verb pages through it, one batch per request.

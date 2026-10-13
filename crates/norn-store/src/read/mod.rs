@@ -53,8 +53,8 @@ use crate::validate::ValidateStatement;
 pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
-pub(crate) use filter::{Binder, Filter, PathPart};
-pub use filter::{READ_FILTERS, ReadFilter};
+pub(crate) use filter::{Binder, Filter, PathPart, Reach};
+pub use filter::{MERGED_SOURCE_VALUES, READ_FILTERS, ReadFilter};
 pub use finding::FindingLink;
 pub(crate) use finding::{
     FINDING_LINK_COLUMNS, FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base,

@@ -581,6 +581,11 @@ pub struct StoredTag {
     /// it. Derived at the write from the name, so it is not a fact a caller
     /// hands over.
     pub folded_name: String,
+    /// The path of the document the tag stands in, copied beside it so the
+    /// folded-name index holds a tag's documents in the answer's path order.
+    /// Written from the document at the write, so it is not a fact a caller
+    /// hands over either.
+    pub path: String,
 }
 
 /// A document's row and every fact row derived from it, in ordinal order.

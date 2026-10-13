@@ -1187,10 +1187,11 @@ const NULL: &str = "(none)";
 /// - **`derived_at`** on `documents` and every other timestamp — when a row was
 ///   written, never a fact about the vault.
 ///
-/// Every other column is rendered, `document_fields.path` included: the
-/// document's own path, copied onto every field row so a field sort can page
-/// by it without a join, and [`FieldRow`] renders it so a copy that drifted
-/// from the document it names is caught here rather than nowhere.
+/// Every other column is rendered, `document_fields.path` and
+/// `document_tags.path` included: the document's own path, copied onto every
+/// field and tag row so a page can seek them in path order without a join, and
+/// [`FieldRow`] and [`StoredTag`] render it so a copy that drifted from the
+/// document it names is caught here rather than nowhere.
 trait StoredColumns {
     fn columns(&self) -> Vec<(&'static str, String)>;
 }
@@ -1268,12 +1269,15 @@ impl StoredColumns for BlockFact {
     }
 }
 
-/// A tag row: the fact as written and the fold stored beside it.
+/// A tag row: the fact as written, the fold stored beside it, and `path`,
+/// the document's own path copied onto the row, rendered for the reason a
+/// field row's is.
 impl StoredColumns for StoredTag {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let mut columns = vec![
             ("name", quoted(&self.fact.name)),
             ("folded_name", quoted(&self.folded_name)),
+            ("path", quoted(&self.path)),
             ("source", quoted(self.fact.source.as_str())),
         ];
         columns.extend(span_columns(self.fact.span));

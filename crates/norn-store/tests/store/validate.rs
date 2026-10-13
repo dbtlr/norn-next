@@ -18,21 +18,24 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, document, driving_parts,
-    narrowable, path_names_no_document_for_target, path_names_no_document_in_class, reads_of,
-    unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, conjoined_parts, document,
+    drained_parts, driving_parts, matched_by_every_part, mixed_documents, narrowable,
+    path_names_no_document_for_target, path_names_no_document_in_class, reads_of, unread_block,
+    violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
-    ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
-    StoreError, StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan,
-    ValidateStatement, ValidateWork, Validated, Validation, induced_failure,
+    ContentModel, FindingFacts, IN_VALUES_CEILING, MAX_PAGE, MERGED_SOURCE_VALUES, PageRefusal,
+    ReadStatement, Snapshot, SnapshotReader, Store, StoreError, StoredPathOrder, TagFact,
+    TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated,
+    Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
     ContentHash, Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows,
-    Pattern, Predicate, ResolutionTarget, RuleSet, SchemaRule, Severity, Sort, SortKey,
-    Unsatisfied, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, VaultAddress, VaultName,
+    Pattern, Predicate, RepairParams, ResolutionTarget, RuleSet, SchemaRule, Severity, Sort,
+    SortKey, Unsatisfied, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, VaultAddress,
+    VaultName,
 };
 use sha2::{Digest, Sha256};
 
@@ -1378,6 +1381,71 @@ fn judge_driven(page: &QueryPlan) {
     );
 }
 
+/// Judge a page a document part drives from its source (NORN-390): the
+/// part's documents read in a co-routine, each search of it bounded below by
+/// the page's place in the answer's path order, and each document's findings
+/// — or rule rows, under `seeked` — reached by one seek at its path. Nothing is
+/// read end to end, and only one document's findings are ordered among
+/// themselves, never the page's.
+pub(crate) fn judge_ordered(page: &QueryPlan, seeked: &str) {
+    page.assert_no_full_scan();
+    let rows = page.rows();
+    let routine = rows
+        .iter()
+        .find(|row| row.detail == "CO-ROUTINE dv")
+        .unwrap_or_else(|| {
+            panic!(
+                "no source drives the page: {rows:?}\nemitted SQL: {}",
+                page.sql()
+            )
+        });
+    let sourced: Vec<&PlanRow> = rows
+        .iter()
+        .filter(|row| descends_from(rows, row, routine.id) && row.detail.starts_with("SEARCH "))
+        .collect();
+    assert!(
+        !sourced.is_empty()
+            && sourced.iter().all(|row| row
+                .constraint()
+                .is_some_and(|seek| seek.contains("(path,path)>(?,?)"))),
+        "a source does not seek its documents from the page's place: {sourced:?}\n\
+         emitted SQL: {}",
+        page.sql()
+    );
+    let reached = rows_of(page, seeked);
+    assert!(
+        !reached.rows().is_empty()
+            && reached
+                .rows()
+                .iter()
+                .all(|row| row.constraint().is_some_and(|seek| seek.contains("path=?"))),
+        "a driven page reached findings other than at a document's path: {rows:?}\n\
+         emitted SQL: {}",
+        page.sql()
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.detail != "USE TEMP B-TREE FOR ORDER BY"),
+        "a driven page sorted what its source read: {rows:?}\nemitted SQL: {}",
+        page.sql()
+    );
+}
+
+/// Whether `row` stands beneath the step `ancestor` in the plan's tree.
+fn descends_from(rows: &[PlanRow], row: &PlanRow, ancestor: i64) -> bool {
+    let mut parent = row.parent;
+    while parent != 0 {
+        if parent == ancestor {
+            return true;
+        }
+        parent = rows
+            .iter()
+            .find(|step| step.id == parent)
+            .map_or(0, |step| step.parent);
+    }
+    false
+}
+
 /// The index a page seeks a kind's findings through, in the answer's path
 /// order: the path folded, then bytewise.
 const KIND_INDEX: &str = "findings_fingerprint_kind_nocase";
@@ -1416,15 +1484,16 @@ const ROOTS: [StoredPathOrder; 2] = [
 /// either case. **A severity floor admitting one severity seeks
 /// `findings_fingerprint_kind_severity_nocase` at `(fingerprint, kind,
 /// severity)`** the same way, so a finding of another severity is never
-/// reached. **A document part that keeps what it seeks drives the section**
-/// from the documents it matched, each reaching its findings by one seek at
-/// its path.
+/// reached. **A document part that keeps its documents in the answer's path
+/// order drives the section from its source**, from the page's place, each
+/// document reaching its findings by one seek at its path; a summary is
+/// driven from the documents the part matched.
 ///
 /// Controls: a continuation's plan rebuilt without its position bound fails,
 /// and so does one whose seek stops at the path, short of the finding's
-/// position; a driven section rebuilt to seek its kind, or to walk the
-/// documents, fails; each index dropped, the sections it served read something
-/// else.
+/// position; a driven section rebuilt to seek its kind, to read its source
+/// from no place, or to sort what it read, fails; each index dropped, the
+/// sections it served read something else.
 #[test]
 fn a_kind_page_seeks_its_kind_from_the_pages_position() {
     for order in ROOTS {
@@ -1511,7 +1580,7 @@ fn judge_kind_pages(mut validating_store: Validating) {
         &validating().with_predicates([Predicate::tag("draft")]),
     );
     for page in &driven {
-        judge_driven(page);
+        judge_ordered(page, "f");
     }
     for params in [
         validating().with_predicates([Predicate::equal_to("status", "open")]),
@@ -1523,7 +1592,7 @@ fn judge_kind_pages(mut validating_store: Validating) {
             .with_predicates([Predicate::tag("draft"), Predicate::path("*.MD")]),
     ] {
         for page in pages(&validating_store, &params) {
-            judge_driven(&page);
+            judge_ordered(&page, "f");
         }
         let summary = plans_of(
             &validating_store.plans(&params.summarized()),
@@ -1571,18 +1640,21 @@ fn judge_kind_pages(mut validating_store: Validating) {
         }
     });
     failure_of("a driven section that seeks its kind", || {
-        judge_driven(&undriven)
+        judge_ordered(&undriven, "f")
     });
-    // Control: a driven section that walks the documents.
-    let walked = rewritten(&driven[0], |detail| {
-        if detail.starts_with("SEARCH dv ") {
-            "SCAN dv".to_string()
-        } else {
-            detail.to_string()
-        }
+    // Control: a driven section whose source reads from no place.
+    let unplaced = rewritten(&driven[0], |detail| {
+        detail.replace(" AND (path,path)>(?,?)", "")
     });
-    failure_of("a driven section that walks the documents", || {
-        judge_driven(&walked)
+    failure_of("a driven section whose source reads from no place", || {
+        judge_ordered(&unplaced, "f")
+    });
+    // Control: a driven section that sorts what its source read.
+    let sorted = rewritten(&driven[0], |detail| {
+        detail.replace("LAST 2 TERMS OF ORDER BY", "ORDER BY")
+    });
+    failure_of("a driven section that sorts what it read", || {
+        judge_ordered(&sorted, "f")
     });
 
     validating_store.drop_index(SEVERITY_INDEX);
@@ -1931,6 +2003,332 @@ fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
                     "a validate narrowed by a {shape:?} part stepped through a full scan under \
                      {order:?}: {at_large:?}"
                 );
+            }
+        }
+    }
+}
+
+impl Validating {
+    /// The fixture and `bulk` more documents under `bulk/`, each one
+    /// [`matched_by_every_part`] with an undeclared-tag warning standing over
+    /// it, and a closed-set breach at error citing `tasks`: so every part of
+    /// [`drained_parts`] matches the bulk, and the documents a part matches
+    /// grow with the vault.
+    fn with_matched_bulk_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
+        let mut validating_store = Self::under(label, order);
+        let declared = declared();
+        let at = |at: usize| format!("bulk/{at:04}.md");
+        let documents: Vec<_> = (0..bulk)
+            .map(|bulk| matched_by_every_part(&at(bulk), &declared))
+            .collect();
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &documents);
+        for bulk in 0..bulk {
+            for finding in [
+                undeclared(&at(bulk), "bulk"),
+                judged(
+                    FindingKind::NotOneOf,
+                    Severity::Error,
+                    &at(bulk),
+                    Some("status"),
+                    &["tasks"],
+                    Some("open"),
+                ),
+            ] {
+                request
+                    .record_finding(&finding)
+                    .expect("recording a bulk finding");
+            }
+        }
+        validating_store
+    }
+}
+
+/// What the page of `limit` findings `params` selects costs, continuing from
+/// the cursor that leaves `left` of them after it: reached by one page holding
+/// every finding before it.
+fn work_leaving(
+    validating_store: &Validating,
+    params: &ValidateParams,
+    limit: u32,
+    left: u64,
+) -> ValidateWork {
+    let selected: u64 = validating_store
+        .summary(params)
+        .iter()
+        .map(|tally| tally.count)
+        .sum();
+    let hop = u32::try_from(selected - left).expect("a hop fits a limit");
+    let (_, cursor) = validating_store.page(&params.clone().with_limit(hop));
+    let page = params
+        .clone()
+        .with_limit(limit)
+        .with_after(cursor.expect("the hop leaves findings after it"));
+    validating_store.validate(&page).work
+}
+
+/// **A continuation a document part drives costs its page, not the documents
+/// the part matched, on either root (NORN-390).** Over the fixture and 50,
+/// then 500, bulk documents every part of [`drained_parts`] matches, each with
+/// an undeclared-tag warning and a breach citing `tasks`, a page of five
+/// findings of each kind, and of the rule's, narrowed by each part, costs the
+/// same at both sizes and steps through no full scan: the second page, where
+/// almost every matched document stands after the cursor, and the page that
+/// leaves six findings after it, where almost every one stands before.
+///
+/// Control: the index an equality's source seeks dropped on the larger vault,
+/// a deep page reads what the part matched, and the bar fails.
+#[test]
+fn a_continuation_a_document_part_drives_costs_its_page_not_the_matched_set() {
+    for order in ROOTS {
+        let small = Validating::with_matched_bulk_under("validate-matched-small", 50, order);
+        let mut large = Validating::with_matched_bulk_under("validate-matched-large", 500, order);
+        for (shape, part) in drained_parts(FindingKind::UndeclaredTag) {
+            for selected in [
+                validating().with_kinds([FindingKind::UndeclaredTag]),
+                citing("tasks").with_kinds([FindingKind::NotOneOf]),
+            ] {
+                let params = selected.with_predicates(part.clone());
+                for (at, work) in [
+                    (
+                        "the second page",
+                        (
+                            paged_work(&small, &params, 5, 1),
+                            paged_work(&large, &params, 5, 1),
+                        ),
+                    ),
+                    (
+                        "a deep page",
+                        (
+                            work_leaving(&small, &params, 5, 6),
+                            work_leaving(&large, &params, 5, 6),
+                        ),
+                    ),
+                ] {
+                    let (at_small, at_large) = work;
+                    assert_eq!(
+                        at_small, at_large,
+                        "{at} of a validate a {shape:?} part drives grew with the documents it \
+                         matched under {order:?}: {params:?}"
+                    );
+                    assert_eq!(
+                        at_large.full_scan_steps, 0,
+                        "{at} of {params:?} stepped through a full scan under {order:?}"
+                    );
+                }
+            }
+        }
+
+        // Control: the index an equality's source seeks, dropped on the larger
+        // vault, a deep page reads what the part matched before its place.
+        large.drop_index("document_fields_raw");
+        let equality = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::equal_to("status", "open")]);
+        failure_of(
+            &format!("document_fields_raw dropped under {order:?}"),
+            || {
+                assert_eq!(
+                    work_leaving(&small, &equality, 5, 6),
+                    work_leaving(&large, &equality, 5, 6)
+                )
+            },
+        );
+    }
+}
+
+/// **A page a document part drives reads no document past a path part's
+/// range (NORN-390).** Over the fixture and 50, then 500, bulk documents every
+/// part matches, all under `bulk/`, a page narrowed by an equality and by
+/// `a*` — whose range ends before `bulk/` — costs the same at both sizes: the
+/// equality's source stops where the path part's range does.
+#[test]
+fn a_driven_page_stops_where_a_path_parts_range_does() {
+    for order in ROOTS {
+        let small = Validating::with_matched_bulk_under("validate-ranged-small", 50, order);
+        let large = Validating::with_matched_bulk_under("validate-ranged-large", 500, order);
+        let params = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::equal_to("status", "open"), Predicate::path("a*")]);
+        assert_eq!(
+            small.validate(&params).work,
+            large.validate(&params).work,
+            "a page beside a path part read past its range under {order:?}"
+        );
+    }
+}
+
+/// **A page and a batch a document part drives order a document's findings by
+/// their position, then their id (NORN-390).** Over the fixture, two more
+/// undeclared-tag warnings stand at `a.md`, the only document the tag `draft`
+/// stands on, recorded about its fortieth link and then about its
+/// thirty-ninth, so their ids run against their positions. A page of the kind
+/// and a repair batch narrowed by the tag answer `a.md`'s findings in the
+/// order the unnarrowed ones hold them, where every finding is sought off its
+/// kind's index in that order. The batch is what holds a driven merged page's
+/// order, every kind read in one arm; the page reads one kind, whose findings
+/// at one document its index hands back in that order already.
+#[test]
+fn a_driven_page_orders_a_documents_findings_by_position_then_id() {
+    for order in ROOTS {
+        let mut validating_store = Validating::under("validate-driven-position", order);
+        for (ordinal, tag) in [(40, "fortieth"), (39, "thirty-ninth")] {
+            let mut finding = undeclared("a.md", tag);
+            finding.ordinal = Some(ordinal);
+            validating_store.stand(&finding);
+        }
+        let at_a = |rows: Vec<FindingRow>| {
+            rows.into_iter()
+                .filter(|row| row.path.as_str() == "a.md")
+                .map(|row| (row.kind, row.target, row.id))
+                .collect::<Vec<_>>()
+        };
+        let tags = || validating().with_kinds([FindingKind::UndeclaredTag]);
+        let unnarrowed = at_a(validating_store.rows(&tags()));
+        assert_eq!(
+            unnarrowed
+                .iter()
+                .filter(|(_, target, _)| target.is_some())
+                .count(),
+            4,
+            "{unnarrowed:?}"
+        );
+        assert_eq!(
+            at_a(validating_store.rows(&tags().with_predicates([Predicate::tag("draft")]))),
+            unnarrowed,
+            "a page the tag drives under {order:?}"
+        );
+        let batched = |params: RepairParams| at_a(validating_store.batch(&params).rows);
+        assert_eq!(
+            batched(batch::selecting(
+                &validating().with_predicates([Predicate::tag("draft")])
+            )),
+            batched(batch::selecting(&validating())),
+            "a batch the tag drives under {order:?}"
+        );
+    }
+}
+
+/// **Two document parts together admit exactly the findings whose document
+/// both admit, whichever drives, on either root (NORN-390).** Over the
+/// fixture, six bulk documents every part matches and the [`mixed_documents`]
+/// the parts admit apart, each with an undeclared-tag warning — `twice.md`
+/// two — a page of every such finding and a repair batch of every finding,
+/// narrowed by every pair of [`conjoined_parts`], answer the first part's
+/// findings standing at a document the second admits, in their order.
+#[test]
+fn a_conjunction_answers_the_findings_both_its_parts_admit_whichever_drives() {
+    for order in ROOTS {
+        let mut validating_store =
+            Validating::with_matched_bulk_under("validate-conjoined", 6, order);
+        let (mixed, twice) = mixed_documents(&declared());
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &mixed);
+        for document in &mixed {
+            request
+                .record_finding(&undeclared(document.path.as_str(), "mixed"))
+                .expect("recording a mixed finding");
+        }
+        request
+            .record_finding(&undeclared(twice, "again"))
+            .expect("recording it twice");
+        let parts = conjoined_parts(FindingKind::UndeclaredTag);
+        let paged = |parts: &[Predicate]| {
+            let (rows, _) = validating_store.page(
+                &validating()
+                    .with_kinds([FindingKind::UndeclaredTag])
+                    .with_predicates(parts.to_vec())
+                    .with_limit(MAX_PAGE as u32),
+            );
+            rows.iter().map(named).collect::<Vec<_>>()
+        };
+        let batched = |parts: &[Predicate]| {
+            let batch = validating_store.batch(
+                &batch::selecting(&validating().with_predicates(parts.to_vec()))
+                    .with_limit(MAX_PAGE as u32),
+            );
+            batch.rows.iter().map(named).collect::<Vec<_>>()
+        };
+        for first in &parts {
+            for second in &parts {
+                if first == second {
+                    continue;
+                }
+                let pair = [first.clone(), second.clone()];
+                for read in [&paged as &dyn Fn(&[Predicate]) -> Vec<_>, &batched] {
+                    let admitted: Vec<String> = read(std::slice::from_ref(second))
+                        .into_iter()
+                        .map(|(_, path, _)| path)
+                        .collect();
+                    let both: Vec<_> = read(std::slice::from_ref(first))
+                        .into_iter()
+                        .filter(|(_, path, _)| admitted.contains(path))
+                        .collect();
+                    assert_eq!(read(&pair), both, "{pair:?} under {order:?}");
+                }
+            }
+        }
+    }
+}
+
+/// **A membership drives a page and a batch from its source up to
+/// [`MERGED_SOURCE_VALUES`] values, and answers what an equality does at any
+/// width (NORN-390).** Over the fixture and twelve bulk documents every part
+/// of [`drained_parts`] matches, a membership naming `open` among
+/// [`MERGED_SOURCE_VALUES`] values drives its kind page from its source, one
+/// seek per value, merged; one naming a value more, and one naming
+/// [`IN_VALUES_CEILING`], is driven another way. At every width the page and
+/// the batch answer what an equality on `open` answers.
+#[test]
+fn a_membership_merges_its_values_up_to_its_source_ceiling() {
+    let validating_store = Validating::with_matched_bulk_under(
+        "validate-membership-ceiling",
+        12,
+        StoredPathOrder::Sensitive,
+    );
+    let naming = |count: usize| {
+        let values: Vec<String> = std::iter::once("open".to_string())
+            .chain((1..count).map(|at| format!("value-{at:03}")))
+            .collect();
+        Predicate::in_any("status", values)
+    };
+    let equality = Predicate::equal_to("status", "open");
+    let narrowed = |part: &Predicate| validating().with_predicates([part.clone()]).with_limit(7);
+    let paged = |part: &Predicate| {
+        let (rows, _) = validating_store.page(&narrowed(part));
+        rows.iter().map(named).collect::<Vec<_>>()
+    };
+    let batched = |part: &Predicate| {
+        let batch = validating_store.batch(&batch::selecting(&narrowed(part)));
+        batch.rows.iter().map(named).collect::<Vec<_>>()
+    };
+    let sourced = |part: &Predicate| {
+        validating_store
+            .plans(&narrowed(part))
+            .iter()
+            .filter(|plan| plan.statement == ReadStatement::Validate(ValidateStatement::KindPage))
+            .map(|plan| emitted_plan(&plan.plan))
+            .collect::<Vec<QueryPlan>>()
+    };
+    assert!(!batched(&equality).is_empty());
+    for count in [
+        MERGED_SOURCE_VALUES,
+        MERGED_SOURCE_VALUES + 1,
+        IN_VALUES_CEILING,
+    ] {
+        let member = naming(count);
+        assert_eq!(paged(&member), paged(&equality), "{count} values");
+        assert_eq!(batched(&member), batched(&equality), "{count} values");
+        for page in sourced(&member) {
+            let driven_by_its_source = page.rows().iter().any(|row| row.detail == "CO-ROUTINE dv");
+            assert_eq!(
+                driven_by_its_source,
+                count <= MERGED_SOURCE_VALUES,
+                "a membership of {count} values: {:?}",
+                page.rows()
+            );
+            if driven_by_its_source {
+                judge_ordered(&page, "f");
             }
         }
     }
@@ -2499,9 +2897,10 @@ fn judge_rule_driven(page: &QueryPlan) {
 /// nothing sorts. A path part bounds the same seek by its glob's folded
 /// range; a severity floor admitting one severity seeks
 /// `finding_rules_fingerprint_rule_kind_severity_nocase` at `(fingerprint,
-/// rule, kind, severity)`; and a document part that keeps what it seeks
-/// drives the section from the documents it matched, each reaching the rule's
-/// rows by one seek at its path.
+/// rule, kind, severity)`; and a document part that keeps its documents in
+/// the answer's path order drives the section from its source, from the
+/// page's place, each document reaching the rule's rows by one seek at its
+/// path.
 ///
 /// Controls: a continuation rebuilt without its position bound fails; a
 /// driven section rebuilt to seek the rule's kind fails; each index dropped,
@@ -2545,7 +2944,7 @@ fn a_rule_page_seeks_the_rules_rows_from_the_pages_position() {
                 .with_predicates([Predicate::equal_to("status", "open")]),
         );
         for page in &driven {
-            judge_rule_driven(page);
+            judge_ordered(page, "fr");
         }
         for page in pages(
             &validating_store,
@@ -2553,7 +2952,7 @@ fn a_rule_page_seeks_the_rules_rows_from_the_pages_position() {
                 .clone()
                 .with_predicates([Predicate::tag("draft"), Predicate::path("*.md")]),
         ) {
-            judge_rule_driven(&page);
+            judge_ordered(&page, "fr");
         }
         // An excluding part alone drives nothing: the section seeks the rule's
         // kind and tests each finding's document by its path.
@@ -2583,7 +2982,7 @@ fn a_rule_page_seeks_the_rules_rows_from_the_pages_position() {
             }
         });
         failure_of("a driven rule section that seeks its kind", || {
-            judge_rule_driven(&undriven)
+            judge_ordered(&undriven, "fr")
         });
 
         validating_store.drop_index(RULE_SEVERITY_INDEX);
