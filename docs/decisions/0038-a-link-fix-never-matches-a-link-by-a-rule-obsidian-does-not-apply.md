@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0039-an-unquoted-frontmatter-wikilink-is-the-link-it-spells.md
 date: 2026-10-09
 ---
 
