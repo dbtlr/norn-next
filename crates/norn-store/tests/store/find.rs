@@ -2014,7 +2014,11 @@ fn with_edge_documents(seeded: &mut Seeded, count: usize) {
 /// sort narrowed by a tag sixteen documents carry is driven from what the tag
 /// matched, and by one seventeen carry walks its order. Of two parts within
 /// the ceiling, the first the request names drives, and the other is tested
-/// at each document's key.
+/// at each document's key. **What is counted is documents among the rows of
+/// the part's own index seek**: nine documents a range reaches twice each
+/// drive, a glob with no literal prefix, whose seek reaches every path, walks,
+/// and in a vault of 320 documents a tag twenty carry drives, the ceiling
+/// scaled by the vault past sixteen.
 #[test]
 fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
     let field_page = || {
@@ -2041,6 +2045,60 @@ fn a_part_drives_from_what_it_matched_exactly_within_the_ceiling() {
             "a tag {count} documents carry, against a ceiling of {ceiling}: {sql}"
         );
     }
+
+    // A part's documents are counted, not its rows: nine documents each
+    // holding `status: [open, open]` are eighteen rows of a range's seek.
+    let mut listed = Seeded::new("find-ceiling-listed");
+    let declared = declared();
+    let documents: Vec<_> = (0..9)
+        .map(|at| {
+            let at = format!("listed/{at}.md");
+            document(&at, &format!("hash-{at}"), "a body\n").with_frontmatter(
+                Some(map(vec![(
+                    "status",
+                    FrontmatterValue::Sequence(vec![string("open"), string("open")]),
+                )])),
+                &declared,
+            )
+        })
+        .collect();
+    write_documents(&mut listed.store.begin_request(), &documents);
+    let ranged = page_sql(
+        &listed,
+        &sorted(SortKey::field("status"), Direction::Ascending)
+            .with_predicates([Predicate::before("status", "p")])
+            .with_limit(1),
+    );
+    assert!(
+        ranged.contains("IN (SELECT fb.document"),
+        "nine documents reached twice each did not drive from what they matched: {ranged}"
+    );
+
+    // A glob with no literal prefix seeks every path, which its count reads
+    // as kept whatever the glob then rejects: the page walks.
+    let mut globbed = Seeded::new("find-ceiling-globbed");
+    with_edge_documents(&mut globbed, 20);
+    let glob = page_sql(
+        &globbed,
+        &sorted(SortKey::field("status"), Direction::Ascending)
+            .with_predicates([Predicate::path("*/0001.md")])
+            .with_limit(1),
+    );
+    assert!(
+        glob.contains("EXISTS (SELECT 1 FROM documents AS dg")
+            && !glob.contains("IN (SELECT dg.id"),
+        "a glob seeking every path drove from what it matched: {glob}"
+    );
+
+    // In a vault of 320 documents a page of one row's ceiling is the square
+    // root of two rows times them, 25: a tag twenty documents carry drives.
+    let mut wide = Seeded::with_bulk("find-ceiling-wide", 300);
+    with_edge_documents(&mut wide, 20);
+    let scaled = page_sql(&wide, &field_page());
+    assert!(
+        scaled.contains("IN (SELECT tg.document"),
+        "a tag within the vault's ceiling did not drive: {scaled}"
+    );
 
     let mut seeded = Seeded::new("find-ceiling-first");
     with_edge_documents(&mut seeded, 4);

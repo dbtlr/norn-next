@@ -2268,6 +2268,63 @@ fn a_drain_a_document_part_narrows_answers_what_one_page_does() {
     }
 }
 
+/// **A validate page and a repair batch drive from what a part matched exactly
+/// while it keeps no more documents than the ceiling (NORN-390).** In a vault
+/// too small to raise it, a page and a batch of one finding read two, so the
+/// ceiling is sixteen: narrowed by the word `rare`, which sixteen documents
+/// holding a finding carry, each is driven from what the match matched, and by
+/// seventeen each walks its kind's findings.
+#[test]
+fn a_page_and_a_batch_drive_from_what_a_part_matched_exactly_within_the_ceiling() {
+    let ceiling = 2 * norn_store::MATCHED_DRIVE_FACTOR;
+    for (count, driven) in [(ceiling, true), (ceiling + 1, false)] {
+        let mut validating_store = Validating::new(&format!("validate-ceiling-{count}"));
+        let documents: Vec<_> = (0..count)
+            .map(|at| {
+                document(
+                    &format!("rare/{at:02}.md"),
+                    &format!("hash-rare-{at}"),
+                    "a rare body\n",
+                )
+            })
+            .collect();
+        let mut request = validating_store.store.begin_request();
+        write_documents(&mut request, &documents);
+        for at in 0..count {
+            request
+                .record_finding(&undeclared(&format!("rare/{at:02}.md"), "rare"))
+                .expect("recording a rare finding");
+        }
+        let params = validating()
+            .with_kinds([FindingKind::UndeclaredTag])
+            .with_predicates([Predicate::matches("rare")])
+            .with_limit(1);
+        let drives = |plans: Vec<ValidatePlan>, statement: ValidateStatement| {
+            plans
+                .iter()
+                .filter(|plan| plan.statement == ReadStatement::Validate(statement))
+                .all(|plan| {
+                    plan.plan
+                        .sql
+                        .contains("IN (SELECT rowid FROM documents_fts")
+                })
+        };
+        assert_eq!(
+            drives(validating_store.plans(&params), ValidateStatement::KindPage),
+            driven,
+            "a page `rare` narrows, {count} documents against {ceiling}"
+        );
+        assert_eq!(
+            drives(
+                validating_store.batch_plans(&batch::selecting(&params).with_limit(1)),
+                ValidateStatement::MergedPage
+            ),
+            driven,
+            "a batch `rare` narrows, {count} documents against {ceiling}"
+        );
+    }
+}
+
 /// **A page a part drives from what it matched tests every other document
 /// part at each document's key (NORN-390).** Over the fixture, four documents
 /// the word `rare` stands in, each with an undeclared-tag warning, and 50,
