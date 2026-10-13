@@ -54,12 +54,13 @@
 //! one part at a time.
 //!
 //! **The record is held to what it claims to reach.** The shapes it narrows by
-//! are compared with the store's enumeration, the two memberships with the
-//! widest one a page merges from its source, and the drives each narrowing's
-//! record shows with every drive the census declares; and the statements it
-//! plans are compared with every statement the store began from the first
-//! repair to the last, so a statement begun outside a repair's own record is
-//! found as well.
+//! are compared with the store's enumeration, and the drives it arranges each
+//! under with the drives the batch read takes for the shape as the store
+//! classes it; the two memberships with the widest one a page merges from its
+//! source; the drive each narrowing's record shows with the one it was
+//! arranged to take; and the statements it plans with every statement the
+//! store began from the first repair to the last, so a statement begun
+//! outside a repair's own record is found as well.
 //!
 //! **What the census holds every statement to** is the scan bar the family
 //! bars share (`norn_testkit::explain`): no step reads a relation end to end,
@@ -631,7 +632,40 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
         "the census's memberships are not one each side of the widest merged from a source: \
          {narrow} and {wide} values"
     );
-    let declared: BTreeSet<Reach> = parts.iter().map(|part| part.reach).collect();
+    // Each shape is arranged under every drive the batch read takes for it,
+    // as the store classes the shape: one keeping its documents in path
+    // order drives from its source, a membership wider than a source merges
+    // takes every drive one keeping no path order does, and an excluding
+    // part, a path part — which bounds the arms' seeks and is no document
+    // part — and a resolution, which a repair does not apply, walk unasked.
+    let unordered = [
+        Reach::FirstCount,
+        Reach::RoundsThenMatched,
+        Reach::PastCeiling,
+        Reach::FilledInRound,
+    ];
+    let drives: BTreeSet<(usize, Reach)> = ReadFilter::all()
+        .into_iter()
+        .flat_map(|shape| {
+            let reaches = match shape {
+                ReadFilter::PathGlob(_) | ReadFilter::Resolves(_) => vec![Reach::Unasked],
+                _ if shape.excludes() => vec![Reach::Unasked],
+                ReadFilter::Member(_) => [Reach::Ordered].into_iter().chain(unordered).collect(),
+                _ if shape.is_path_ordered(false) => vec![Reach::Ordered],
+                _ => unordered.to_vec(),
+            };
+            reaches.into_iter().map(move |reach| (shape.slot(), reach))
+        })
+        .collect();
+    let arranged: BTreeSet<(usize, Reach)> = parts
+        .iter()
+        .map(|part| (part.shape.slot(), part.reach))
+        .collect();
+    assert_eq!(
+        arranged, drives,
+        "the census arranges each shape under other drives than the batch read takes for it"
+    );
+    let declared: BTreeSet<Reach> = drives.iter().map(|(_, reach)| *reach).collect();
     assert_eq!(
         declared,
         BTreeSet::from(Reach::ALL),
