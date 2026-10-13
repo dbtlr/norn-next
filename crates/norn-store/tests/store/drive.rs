@@ -16,7 +16,8 @@ use crate::common::{Scratch, document, unread_block, write_documents};
 use crate::find::{map, request, sorted, string};
 use norn_store::{
     ContentModel, FindStatement, FindingFacts, LinkFact, LinkFamily, ReadStatement,
-    RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder, Validation,
+    RepairSelection, Snapshot, SnapshotReader, Store, StoredPathOrder, ValidateStatement,
+    Validation,
 };
 use norn_wire::{
     ApplyMode, Cursor, Direction, FindParams, FindingKind, Predicate, RepairParams,
@@ -115,6 +116,12 @@ impl Spread {
     }
 
     fn matching(label: &str, size: usize, matched: impl Fn(usize) -> bool) -> Self {
+        Self::warned(label, size, 1, matched)
+    }
+
+    /// `size` documents, those `matched` names matched, each with `warnings`
+    /// warnings standing over it.
+    fn warned(label: &str, size: usize, warnings: usize, matched: impl Fn(usize) -> bool) -> Self {
         let scratch = Scratch::new(label);
         let mut store = scratch.open_under(StoredPathOrder::Sensitive);
         store
@@ -138,9 +145,11 @@ impl Spread {
         let mut request = store.begin_request();
         write_documents(&mut request, &documents);
         for at in 0..size {
-            request
-                .record_finding(&warning(&bulk(at)))
-                .expect("recording a warning");
+            for _ in 0..warnings {
+                request
+                    .record_finding(&warning(&bulk(at)))
+                    .expect("recording a warning");
+            }
         }
         let reader = Arc::new(
             store
@@ -578,5 +587,54 @@ fn the_row_a_window_ends_at_is_answered() {
             expected.reverse();
         }
         assert_eq!(drained.paths, expected, "{name}");
+    }
+}
+
+/// **A cut batch's more-remain read walks on from where its first read
+/// stopped (NORN-393).** Over 400 documents, each with three warnings, of
+/// which the first two of every sixteen are matched, a repair batch of two
+/// findings reads three, which its first window of twenty-four findings
+/// holds inside the first matched document, so the batch is cut there. The
+/// read of one finding past that document walks on to the end of the same
+/// window, where the second matched document stands: it asks no part what it
+/// keeps again and reads no window of its own, so the batch runs one count
+/// and one window, and says more remain.
+#[test]
+fn a_cut_batchs_more_remain_read_walks_on_from_its_first_read() {
+    let spread = Spread::warned("drive-cut-batch", 400, 3, |at| at % 16 < 2);
+    for (name, part) in spread_parts() {
+        let batch = repairing(&part).with_limit(2);
+        let selection = RepairSelection::from(&batch);
+        let read = spread
+            .snapshot()
+            .repair_batch(&selection, &declared())
+            .expect("a batch");
+        assert_eq!(
+            (read.rows.len(), read.next.is_some()),
+            (3, true),
+            "a batch by {name} covered other than the first matched document"
+        );
+        let plans = spread
+            .snapshot()
+            .repair_batch_plans(&selection, &declared())
+            .expect("the plans of a batch");
+        let ran = |statement: ReadStatement, narrowed: bool| {
+            plans
+                .iter()
+                .filter(|plan| plan.statement == statement && plan.filters.is_empty() != narrowed)
+                .count()
+        };
+        let merged = ReadStatement::Validate(ValidateStatement::MergedPage);
+        assert_eq!(
+            (
+                ran(ReadStatement::Find(FindStatement::PartCeiling), true),
+                ran(ReadStatement::Find(FindStatement::DocumentSpan), false),
+                ran(merged, false),
+                ran(merged, true),
+            ),
+            (1, 0, 1, 2),
+            "a batch by {name} asked or walked again past its cut document: \
+             (counts, spans, windows, walks)"
+        );
     }
 }
