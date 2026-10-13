@@ -874,8 +874,8 @@ or any part on a field sort's page — first asks its parts in the request's ord
 one keeps no more documents than the page reads, and the first that does drives the page
 from its seek, walking nothing; otherwise the page walks its own order and asks its parts
 what they keep in rounds, against a budget that doubles. A round walks at most the budget's
-documents of the page's order past where the last round stopped — first reading the document
-a walk that long ends at, then walking to it, every row at it included, and testing every
+rows of the page's order past where the last round stopped — first reading the row a walk
+that long ends at, then walking to it, every row at its path included, and testing every
 part at each document's key — and where that leaves the page short, asks its parts again
 whether one keeps at most the budget. **A window is counted in the page's own rows**, each
 read by the seek that walks them, so its cost follows the rows the walk passes and never the
