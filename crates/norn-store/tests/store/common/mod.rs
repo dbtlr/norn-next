@@ -329,6 +329,7 @@ pub fn narrowable() -> DocumentFacts {
         &ContentModel::none(),
     );
     facts.links.push(LinkFact {
+        field: None,
         family: LinkFamily::Wikilink,
         embed: false,
         protocol: None,
@@ -591,6 +592,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
     );
     facts.links = vec![
         LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: true,
             protocol: None,
@@ -600,6 +602,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             span: Some(span(1, 1, 0)),
         },
         LinkFact {
+            field: None,
             family: LinkFamily::Markdown,
             embed: false,
             protocol: Some("https".to_string()),

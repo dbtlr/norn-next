@@ -261,6 +261,7 @@ mod tests {
 
     fn wikilink(address: &str) -> FindingLink {
         FindingLink {
+            field: None,
             family: norn_store::LinkFamily::Wikilink,
             address: address.to_string(),
         }
@@ -268,6 +269,7 @@ mod tests {
 
     fn markdown(address: &str) -> FindingLink {
         FindingLink {
+            field: None,
             family: norn_store::LinkFamily::Markdown,
             address: address.to_string(),
         }

@@ -251,7 +251,8 @@ const MERGE_PATH: &str = "order_path";
 const MERGE_POSITION: &str = "order_position";
 const MERGE_ID: &str = "order_id";
 
-/// The link a merged read's arms add last ([`FINDING_LINK_COLUMNS`]). The
+/// The link a merged read's arms add last, including its frontmatter field
+/// ([`FINDING_LINK_COLUMNS`]). The
 /// finding reaches its link as every read of a finding's link does — its
 /// holder by path, then the holder's link by the finding's ordinal — through
 /// the unique `documents_path` and `links_document_ordinal` indexes, so each

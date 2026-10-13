@@ -2454,7 +2454,8 @@ under, so a key nothing is held under — most of what a mass delete names — c
 that one statement and no walk of its own.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, anchor,
-span — beside two readings of them computed at the write, and resolution runs at query time
+span and the top-level frontmatter field holding the link (`NULL` for a body link) — beside
+two readings of them computed at the write, and resolution runs at query time
 through this one grammar; resolved edges are never stored, and a materialized projection could
 only ever arrive as keyed, invalidated derived state. The two readings are what judging a link
 reads without resolving it: its address kind — addressed elsewhere, naming an attachment, or

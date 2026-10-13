@@ -799,6 +799,7 @@ fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
         before_holder: holder.clone(),
         after_holder: holder,
         link: norn_store::LinkFact {
+            field: None,
             family,
             embed: false,
             protocol: protocol.map(str::to_string),
@@ -1634,6 +1635,7 @@ impl WrittenLinks {
 /// else of it: how a link is probed under another spelling of its address.
 pub(crate) fn spelled(link: &norn_store::LinkFact, target: &str) -> norn_store::LinkFact {
     norn_store::LinkFact {
+        field: None,
         family: link.family,
         embed: false,
         protocol: link.protocol.clone(),

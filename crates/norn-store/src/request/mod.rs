@@ -2101,7 +2101,7 @@ fn stored_facts_document_sql() -> String {
 /// carry the same shape over their own tables.
 const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset, anchor_text, anchor_marked,
-                        address
+                        field, address
                  FROM links WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's link keys with:
@@ -2998,6 +2998,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         }
     };
     Ok(Ok(LinkFact {
+        field: row.get(12)?,
         family,
         embed: row.get(1)?,
         protocol: row.get(2)?,
@@ -3011,7 +3012,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
 /// A link row as [`Request::stored_facts`] reads it: the link, and the address
 /// kind stored beside it after the columns [`stored_link`] reads.
 pub(crate) fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
-    let written: String = row.get(12)?;
+    let written: String = row.get(13)?;
     let Some(address) = LinkAddressKind::ALL
         .into_iter()
         .find(|kind| kind.as_str() == written)

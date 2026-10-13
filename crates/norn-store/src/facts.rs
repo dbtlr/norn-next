@@ -133,6 +133,8 @@ impl TagSource {
 /// never handed over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkFact {
+    /// The top-level frontmatter field holding the link, and `None` for a body link.
+    pub field: Option<String>,
     pub family: LinkFamily,
     /// A wikilink embed (`![[…]]`). Never true for an inline Markdown link.
     pub embed: bool,

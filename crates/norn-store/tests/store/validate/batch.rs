@@ -444,35 +444,39 @@ fn a_batch_has_no_next_cursor_when_nothing_remains() {
     assert_eq!(batch.next, None);
 }
 
-/// **A batch hands back the family and address of the link each link finding
-/// is about, and none for any other finding.** The link is the one the
+/// **A batch hands back the family, address and field of the link each link
+/// finding is about, and none for any other finding.** The link is the one the
 /// finding's ordinal names in its holder; its address is spelled as the host
 /// spells a link's, the protocol prefix then the target and no anchor, empty
-/// for an anchor-only link. A finding about its document, and a link finding
-/// whose holder holds no link at its ordinal, have none.
+/// for an anchor-only link. The frontmatter field is carried for a frontmatter
+/// link and absent for a body link. A finding about its document, and a link
+/// finding whose holder holds no link at its ordinal, have none.
 #[test]
-fn a_batch_hands_back_the_family_and_address_of_each_link_findings_link() {
+fn a_batch_hands_back_the_family_address_and_field_of_each_link_findings_link() {
     use norn_store::{LinkAnchor, LinkFact, LinkFamily};
 
     let mut store = Validating::new("batch-links");
-    let link = |family, protocol: Option<&str>, target: &str, anchor| LinkFact {
-        family,
-        embed: false,
-        protocol: protocol.map(str::to_string),
-        target: target.to_string(),
-        title: None,
-        anchor,
-        span: None,
-    };
+    let link =
+        |family, protocol: Option<&str>, target: &str, anchor, field: Option<&str>| LinkFact {
+            field: field.map(str::to_string),
+            family,
+            embed: false,
+            protocol: protocol.map(str::to_string),
+            target: target.to_string(),
+            title: None,
+            anchor,
+            span: None,
+        };
     let mut holder = crate::common::document("holder.md", "hash-holder", "a body\n");
     holder.links = vec![
-        link(LinkFamily::Wikilink, None, "notes/a", None),
-        link(LinkFamily::Markdown, Some("vault"), "notes/b", None),
+        link(LinkFamily::Wikilink, None, "notes/a", None, Some("up")),
+        link(LinkFamily::Markdown, Some("vault"), "notes/b", None, None),
         link(
             LinkFamily::Wikilink,
             None,
             "",
             crate::common::heading_anchor("Part"),
+            None,
         ),
         link(
             LinkFamily::Wikilink,
@@ -481,6 +485,7 @@ fn a_batch_hands_back_the_family_and_address_of_each_link_findings_link() {
             Some(LinkAnchor::Block {
                 id: "blk".to_string(),
             }),
+            None,
         ),
     ];
     {
@@ -512,21 +517,25 @@ fn a_batch_hands_back_the_family_and_address_of_each_link_findings_link() {
             .unwrap_or_else(|| panic!("a finding of `{target}`"));
         batch.links.get(&row.id).cloned()
     };
-    let linked = |family, address: &str| {
+    let linked = |family, address: &str, field: Option<&str>| {
         Some(norn_store::FindingLink {
+            field: field.map(str::to_string),
             family,
             address: address.to_string(),
         })
     };
-    assert_eq!(held("notes/a"), linked(LinkFamily::Wikilink, "notes/a"));
+    assert_eq!(
+        held("notes/a"),
+        linked(LinkFamily::Wikilink, "notes/a", Some("up"))
+    );
     assert_eq!(
         held("vault://notes/b"),
-        linked(LinkFamily::Markdown, "vault://notes/b")
+        linked(LinkFamily::Markdown, "vault://notes/b", None)
     );
-    assert_eq!(held("#Part"), linked(LinkFamily::Wikilink, ""));
+    assert_eq!(held("#Part"), linked(LinkFamily::Wikilink, "", None));
     assert_eq!(
         held("notes/c#^blk"),
-        linked(LinkFamily::Wikilink, "notes/c")
+        linked(LinkFamily::Wikilink, "notes/c", None)
     );
     assert_eq!(
         held("the document"),

@@ -151,6 +151,7 @@ pub(crate) fn seed(store: &mut Store) {
         span: None,
     });
     tagged.links.push(LinkFact {
+        field: None,
         family: LinkFamily::Wikilink,
         embed: false,
         protocol: None,
@@ -1202,6 +1203,7 @@ fn judge_hydration(mut seeded: Seeded) {
     // none of them: what this bar judges is how the rows are read.
     full.links = (0..NESTED_ROW_CEILING)
         .map(|index| LinkFact {
+            field: None,
             family: LinkFamily::Markdown,
             embed: false,
             protocol: Some("https".to_string()),
@@ -2090,6 +2092,7 @@ fn a_part_ceiling_probe_reads_only_its_seek() {
     let vault = |label: &str, rejected: usize| {
         let mut seeded = Seeded::new(label);
         let link = |target: &str| LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: None,

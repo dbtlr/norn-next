@@ -228,6 +228,7 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
 /// A link written with `family` and `protocol` to `target`.
 fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
     LinkFact {
+        field: None,
         family,
         embed: false,
         protocol: protocol.map(str::to_string),
@@ -455,6 +456,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
     let mut facts = document("notes.md", "hash-1", "a body\n");
     facts.links = (0..8)
         .map(|index| LinkFact {
+            field: None,
             family: if index % 2 == 0 {
                 LinkFamily::Wikilink
             } else {

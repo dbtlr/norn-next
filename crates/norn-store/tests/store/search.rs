@@ -940,6 +940,7 @@ fn a_hit_carries_the_row_its_columns_name() {
 #[test]
 fn a_searchs_links_column_counts_the_candidates_its_links_carry() {
     let wikilink = |target: &str| LinkFact {
+        field: None,
         family: LinkFamily::Wikilink,
         embed: false,
         protocol: None,

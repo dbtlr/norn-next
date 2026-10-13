@@ -55,10 +55,10 @@ pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, 
 
 /// The link a merged read joins to a finding, under the lookup alias `lk`,
 /// named for the reader that takes them by name ([`linked_finding_base`]): the
-/// family, protocol and target of the link the finding is about, `NULL` for a
-/// finding about none.
-pub(crate) const FINDING_LINK_COLUMNS: &str =
-    "lk.family AS link_family, lk.protocol AS link_protocol, lk.target AS link_target";
+/// family, protocol, target and frontmatter field of the link the finding is
+/// about, `NULL` for a finding about none.
+pub(crate) const FINDING_LINK_COLUMNS: &str = "lk.family AS link_family, lk.protocol AS link_protocol, \
+     lk.target AS link_target, lk.field AS link_field";
 
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
@@ -91,7 +91,7 @@ pub(crate) struct FindingBase {
 }
 
 /// The link a link finding is about, as a repair batch hands it back: its
-/// syntax and its address.
+/// syntax, address and frontmatter field.
 ///
 /// The link is the one the finding's ordinal names in the finding's holder.
 /// Its address is spelled as a link's address is everywhere a plan names one:
@@ -100,6 +100,8 @@ pub(crate) struct FindingBase {
 /// whose holder no longer holds a link at its ordinal, have none.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FindingLink {
+    /// The top-level frontmatter field holding the link, and `None` for a body link.
+    pub field: Option<String>,
     /// The syntax the link is written in.
     pub family: LinkFamily,
     /// The link's address as written, protocol prefix included.
@@ -192,8 +194,8 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
 }
 
 /// A merged read's row: the finding as [`finding_base`] reads it, with the
-/// link it joined — the family, protocol and target [`FINDING_LINK_COLUMNS`]
-/// names, all three `NULL` for a finding about no link. They are read by
+/// link it joined — the family, protocol, target and frontmatter field
+/// [`FINDING_LINK_COLUMNS`] names, all `NULL` for a finding about no link. They are read by
 /// name, so the reader stays right however many columns precede them.
 ///
 /// A family this crate did not write is [`StoreError::Damaged`], as one read
@@ -215,7 +217,11 @@ pub(crate) fn linked_finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         Some(protocol) => format!("{protocol}://{target}"),
         None => target,
     };
-    base.link = Some(FindingLink { family, address });
+    base.link = Some(FindingLink {
+        family,
+        address,
+        field: row.get("link_field")?,
+    });
     Ok(Ok(base))
 }
 

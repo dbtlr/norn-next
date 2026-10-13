@@ -53,6 +53,7 @@ pub(crate) fn derived(at: &str, body: &str) -> DocumentFacts {
         .links()
         .into_iter()
         .map(|link| LinkFact {
+            field: None,
             family: match link.family {
                 norn_text::LinkFamily::Wikilink => LinkFamily::Wikilink,
                 norn_text::LinkFamily::Markdown => LinkFamily::Markdown,

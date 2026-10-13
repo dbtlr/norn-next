@@ -257,6 +257,7 @@ mod tests {
             Anchor::Block(id) => (!id.is_empty()).then(|| LinkAnchor::Block { id: id.clone() }),
         };
         LinkFact {
+            field: None,
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: None,
