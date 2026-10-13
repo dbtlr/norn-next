@@ -1,8 +1,10 @@
 //! A bare value made a link: the derived fix of a `field/type-mismatch` on a
 //! field declared `link` whose offending element is a bare value, such as
 //! `note` where `[[note]]` is meant. The same phase writes a list field's
-//! unquoted wikilink elements as their spelled links ([`derived`]), without
-//! requiring resolution, and composes a shape fix needing a bare-link answer.
+//! unquoted wikilink elements whose value is exactly `[["s"]]` as `"[[s]]"`
+//! ([`derived`]), without requiring resolution. A one-string list `["s"]`
+//! and every other nested element have no such fix. An exposed link type
+//! mismatch waits for this phase, whose answer or skip decides the shape fix.
 //!
 //! **A value qualifies only where `[[value]]` reads back as exactly one plain
 //! wikilink.** The element is a non-empty string — and so is every element of
@@ -89,11 +91,6 @@ pub(super) fn bare_address(value: &str) -> Option<&str> {
     (link_key(&written).as_deref() == Some(written.as_str())).then_some(value)
 }
 
-/// Whether the offending element qualifies for a bare-value link answer.
-pub(super) fn qualifies(offending: &Offending<'_>) -> bool {
-    offending.string && bare_address(offending.text).is_some()
-}
-
 /// What the document standing at `holder` makes of the offending element
 /// `offending` of a link field, its address resolved as `namings` answers.
 fn propose(
@@ -104,7 +101,7 @@ fn propose(
 ) -> Proposed {
     let row = offending.row;
     if shape == Some(Shape::List)
-        && let Some(member) = derived::unquoted_element(offending.value)
+        && let Some(member) = derived::unquoted_link(offending.value)
     {
         return Proposed::Replace(derived::replacement(member));
     }
@@ -220,7 +217,7 @@ impl Reckoned<'_> {
         for element in elements {
             let unquoted = (self.document.schema().field(field).and_then(|f| f.shape())
                 == Some(Shape::List))
-            .then(|| derived::unquoted_element(element))
+            .then(|| derived::unquoted_link(element))
             .flatten();
             let link = unquoted.or_else(|| {
                 let AuthoredValue::String(text) = element else {
@@ -591,6 +588,156 @@ mod tests {
             planned.skipped[0].candidates,
             Some(derived::candidate_of(&AuthoredValue::string("[[zz-b]]")))
         );
+    }
+
+    /// **Flow list elements spelling unquoted wikilinks are written as their
+    /// links in one field write**, with both address resolutions recorded.
+    #[test]
+    fn flow_unquoted_wikilink_elements_are_written_as_links_in_one_write() {
+        let element = |text| {
+            AuthoredValue::List(vec![AuthoredValue::List(vec![AuthoredValue::string(text)])])
+        };
+        let planned = planned(
+            LINKED,
+            &[
+                ("h.md", "---\nups: [[[a]], [[b]]]\n---\n"),
+                ("a.md", "# A\n"),
+                ("b.md", "# B\n"),
+            ],
+            &[
+                mismatch(
+                    1,
+                    "h.md",
+                    "ups",
+                    &crate::derivation::stored_spelling(&element("a")).expect("a spelling"),
+                ),
+                mismatch(
+                    2,
+                    "h.md",
+                    "ups",
+                    &crate::derivation::stored_spelling(&element("b")).expect("a spelling"),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            kinds(&planned),
+            vec![setting(
+                "h.md",
+                "ups",
+                AuthoredValue::List(vec![
+                    AuthoredValue::string("[[a]]"),
+                    AuthoredValue::string("[[b]]"),
+                ])
+            )]
+        );
+        assert_eq!(
+            planned.conditions,
+            vec![
+                resolving("h.md", "a", "a.md"),
+                resolving("h.md", "b", "b.md")
+            ]
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// **One-string list elements have no unquoted-wikilink fix**, leaving
+    /// each selected finding skipped without a write or a condition.
+    #[test]
+    fn single_bracket_elements_in_a_list_link_field_have_no_declared_fix() {
+        let element = |text| AuthoredValue::List(vec![AuthoredValue::string(text)]);
+        let planned = planned(
+            LINKED,
+            &[
+                ("h.md", "---\nups: [[a], [b]]\n---\n"),
+                ("a.md", "# A\n"),
+                ("b.md", "# B\n"),
+            ],
+            &[
+                mismatch(
+                    1,
+                    "h.md",
+                    "ups",
+                    &crate::derivation::stored_spelling(&element("a")).expect("a spelling"),
+                ),
+                mismatch(
+                    2,
+                    "h.md",
+                    "ups",
+                    &crate::derivation::stored_spelling(&element("b")).expect("a spelling"),
+                ),
+            ],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(
+            reasons(&planned),
+            vec![
+                (1, SkipReason::NoDeclaredFix),
+                (2, SkipReason::NoDeclaredFix)
+            ]
+        );
+    }
+
+    /// **A link wrap naming two documents carries the exposed element's
+    /// ambiguity**, keeping the shape finding's id and value.
+    #[test]
+    fn a_link_wrap_naming_two_documents_carries_ambiguous_link_with_its_documents() {
+        let planned = planned(
+            LINKED,
+            &[
+                ("h.md", "---\nups: b\n---\n"),
+                ("x/b.md", "# X\n"),
+                ("y/b.md", "# Y\n"),
+            ],
+            &[finding(1, FindingKind::ShapeMismatch, "h.md", "ups", "b")],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::AmbiguousLink)]);
+        assert_eq!(planned.skipped[0].value, Some(norn_store::value_head("b")));
+        let Some(SkippedCandidates::Documents { head, .. }) = &planned.skipped[0].candidates else {
+            panic!("document candidates: {:?}", planned.skipped);
+        };
+        let mut paths: Vec<_> = head
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["x/b.md", "y/b.md"]);
+    }
+
+    /// **A link wrap naming no document carries the exposed element's
+    /// no-declared-fix skip**, including its resolution note.
+    #[test]
+    fn a_link_wrap_naming_no_document_carries_no_declared_fix_with_its_note() {
+        let planned = planned(
+            LINKED,
+            &[("h.md", "---\nups: ghost\n---\n")],
+            &[finding(
+                1,
+                FindingKind::ShapeMismatch,
+                "h.md",
+                "ups",
+                "ghost",
+            )],
+        );
+
+        assert!(planned.operations.is_empty());
+        assert!(planned.conditions.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+        assert_eq!(
+            planned.skipped[0].value,
+            Some(norn_store::value_head("ghost"))
+        );
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some("`[[ghost]]` would resolve to no document")
+        );
+        assert!(planned.skipped[0].candidates.is_none());
     }
 
     /// **A nested list holding several strings spells no single wikilink.**

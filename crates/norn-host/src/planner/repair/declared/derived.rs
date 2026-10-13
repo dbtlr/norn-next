@@ -18,12 +18,16 @@
 //!   to that item. A list of any other length under single has no derived
 //!   fix. Where the plain reshape is refused, the element fixes it exposes
 //!   compose with it as one addition, at their weakest confidence and with
-//!   their notes; a bare-value link answer waits for the settled routes.
-//! - **Unquoted wikilinks** on link fields are written as the link they
-//!   spell. A one-string list element spells `[[string]]` only where the
-//!   text layer reads exactly one wikilink spanning that text. A whole value
-//!   holding that one element becomes a link string unless the field is
-//!   declared a list, whose elements are replaced in one field write.
+//!   their notes. An exposed element's skipped proposal is the shape
+//!   finding's skip, with its reason and decision data; any exposed link
+//!   type mismatch waits for the settled routes to decide it.
+//! - **Unquoted wikilinks** on link fields answer exactly `[["s"]]`, YAML's
+//!   reading of `[[s]]`, where the text layer reads one whole wikilink.
+//!   Obsidian's frontmatter link is a quoted string: a non-list field's whole
+//!   value of that shape becomes `"[[s]]"`, as does each element of that
+//!   shape on a list field, in one write. A one-string list `["s"]`, such as
+//!   the element of `ups: [[s]]`, and every other nested shape have no
+//!   unquoted-wikilink fix.
 //!   Resolution does not decide this answer; the written link's resolution
 //!   is recorded as every repair-written link's is.
 //! - **Boolean case** answers a `field/type-mismatch` on a `boolean` field: a
@@ -83,13 +87,16 @@ pub(super) fn candidate_of(value: &AuthoredValue) -> SkippedCandidates {
     value_candidates(std::iter::once(ValueCandidate::new(head(value))))
 }
 
-/// The link a one-string nested element spells, where the text layer reads
-/// exactly one wikilink spanning the whole spelling.
-pub(super) fn unquoted_element(value: &AuthoredValue) -> Option<AuthoredValue> {
+/// The wikilink spelled by exactly `[["s"]]`, YAML's reading of `[[s]]`,
+/// where the text layer reads one wikilink spanning that whole spelling.
+pub(super) fn unquoted_link(value: &AuthoredValue) -> Option<AuthoredValue> {
     let AuthoredValue::List(items) = value else {
         return None;
     };
-    let [AuthoredValue::String(text)] = items.as_slice() else {
+    let [AuthoredValue::List(inner)] = items.as_slice() else {
+        return None;
+    };
+    let [AuthoredValue::String(text)] = inner.as_slice() else {
         return None;
     };
     let written = format!("[[{text}]]");
@@ -98,7 +105,7 @@ pub(super) fn unquoted_element(value: &AuthoredValue) -> Option<AuthoredValue> {
         .then_some(AuthoredValue::string(written))
 }
 
-/// The whole unquoted wikilink of a link field not declared a list.
+/// The link spelled by a non-list link field's whole value `[["s"]]`.
 pub(super) fn unquoted_field(
     schema: &VaultSchema,
     field: &str,
@@ -109,13 +116,7 @@ pub(super) fn unquoted_field(
     {
         return None;
     }
-    let AuthoredValue::List(items) = value else {
-        return None;
-    };
-    let [only] = items.as_slice() else {
-        return None;
-    };
-    unquoted_element(only)
+    unquoted_link(value)
 }
 
 /// A derived value written as one addition, judged before its threshold is read.
@@ -244,6 +245,7 @@ pub(super) fn reshape(
     };
     match elements::after_reshape(document, &exposed, row, field, &reshaped, links) {
         elements::Reshaped::Unanswered => Err(refused),
+        elements::Reshaped::Skipped(skip) => Err(skip),
         elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
         elements::Reshaped::Replaced(replacement) => {
             fix_value(document, state, row, finding, field, replacement, vetoed)

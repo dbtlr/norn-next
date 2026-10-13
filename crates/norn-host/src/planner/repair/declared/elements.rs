@@ -13,11 +13,15 @@
 //! What each element is replaced by is a kind's own ([`closed_set`](super::closed_set)
 //! and [`derived`](super::derived)): they answer a [`Proposed`], and this
 //! module composes, judges and writes it as one. A nested list element is
-//! matched by the finding's structured spelling, so an unquoted wikilink
-//! can be replaced by its link string. A refused shape fix uses the same
+//! matched by the finding's structured spelling, so an element exactly
+//! `[["s"]]`, read from `[[s]]`, can become the link string `"[[s]]"`;
+//! a one-string list `["s"]` has no unquoted-link fix. A refused shape fix uses the same
 //! proposals for the elements its reshape exposes, with no intermediate
 //! addition admitted: the combined value is judged once from the state the
 //! shape fix composes onto, at the weakest confidence and with every note.
+//! An exposed element's skipped proposal keeps its reason and decision data,
+//! keyed to the shape finding's id and value. A link type mismatch defers
+//! that decision to the link phase; every other skip is the first in holds order.
 
 use norn_config::schema::VaultSchema;
 use norn_wire::{
@@ -25,7 +29,7 @@ use norn_wire::{
     SkippedFinding,
 };
 
-use super::{Document, Fix, Fixing, State, bare_link, cited, closed_set, derived, field_of, skip};
+use super::{Document, Fix, Fixing, State, cited, closed_set, derived, field_of, skip};
 use crate::applier::Held;
 use crate::derivation::stored_spelling;
 use crate::planner::edit::edited;
@@ -312,6 +316,7 @@ fn named_element<'v>(
 /// What the element fixes exposed by a reshape can answer together.
 pub(super) enum Reshaped {
     Unanswered,
+    Skipped(Box<SkippedFinding>),
     NeedsLinks,
     Replaced(Replacement),
 }
@@ -331,7 +336,6 @@ pub(super) fn after_reshape(
     let mut level = Confidence::Derived;
     let mut notes = Vec::new();
     let mut folds = derived::FoldCache::default();
-    let mut needs_links = false;
     let mut any = false;
     for held in state.holds.iter().filter(|held| {
         held.field.as_deref() == Some(field)
@@ -346,8 +350,10 @@ pub(super) fn after_reshape(
         let Some(element) = named_element(&working, document.schema(), field, text) else {
             return Reshaped::Unanswered;
         };
+        let mut element_row = row.clone();
+        element_row.kind = held.kind;
         let offending = Offending {
-            row,
+            row: &element_row,
             held,
             text,
             value: element,
@@ -364,17 +370,19 @@ pub(super) fn after_reshape(
             {
                 match links.as_mut() {
                     Some(propose) => propose(&offending),
-                    None if bare_link::qualifies(&offending) => {
-                        needs_links = true;
-                        continue;
-                    }
-                    None => return Reshaped::Unanswered,
+                    None => return Reshaped::NeedsLinks,
                 }
             }
-            _ => return Reshaped::Unanswered,
+            _ => {
+                return Reshaped::Skipped(Box::new(
+                    derived::excluded(&element_row, document.schema())
+                        .unwrap_or_else(|| crate::planner::repair::skipped(&element_row)),
+                ));
+            }
         };
-        let Proposed::Replace(replacement) = proposal else {
-            return Reshaped::Unanswered;
+        let replacement = match proposal {
+            Proposed::Replace(replacement) => replacement,
+            Proposed::Skipped(skip) => return Reshaped::Skipped(skip),
         };
         let Some(replaced) = replaced(
             &working,
@@ -391,9 +399,7 @@ pub(super) fn after_reshape(
         notes.extend(replacement.notes);
         any = true;
     }
-    if needs_links {
-        Reshaped::NeedsLinks
-    } else if any {
+    if any {
         Reshaped::Replaced(Replacement {
             candidates: derived::candidate_of(&working),
             member: working,

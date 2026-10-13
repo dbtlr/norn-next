@@ -3655,13 +3655,51 @@ fn probe_p01_an_unquoted_wikilink_in_a_single_link_field_is_written_as_the_link_
     );
 }
 
-/// **An unquoted wikilink in a list link field is written as its link element.**
+/// **A one-string list on a list link field stays a finding with no declared fix.**
 #[test]
-fn probe_p02_an_unquoted_wikilink_in_a_list_link_field_is_written_as_the_link_element() {
-    probe_repaired(
+fn probe_p02_a_one_string_list_in_a_list_link_field_stays_skipped_with_no_declared_fix() {
+    let (_sandbox, vault, host) = a_vault_under(
         "host-repair-p02",
         "version: 1\nfields:\n  ups: {type: link, shape: list}\n",
-        b"---\nups: [[zz-b]]\n---\n",
+        &[
+            ("zz-holder.md", b"---\nups: [[zz-b]]\n---\n"),
+            ("zz-b.md", b"# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_of(
+        &host,
+        &vault,
+        "zz-holder.md",
+        FindingKind::TypeMismatch,
+        "ups",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty());
+    assert!(plan.conditions.is_empty());
+    assert_eq!(skipped_ids(&plan), vec![mismatch]);
+    assert_eq!(
+        provenance(&plan).skipped[0].reason,
+        SkipReason::NoDeclaredFix
+    );
+    assert_eq!(
+        standing(&host, &vault, |request| request)
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![mismatch]
+    );
+}
+
+/// **An unquoted wikilink in a block list is written as its link element.**
+#[test]
+fn an_unquoted_wikilink_in_a_block_list_is_written_as_the_link_element() {
+    probe_repaired(
+        "host-repair-unquoted-block-list",
+        "version: 1\nfields:\n  ups: {type: link, shape: list}\n",
+        b"---\nups:\n  - [[zz-b]]\n---\n",
         "ups",
         FindingKind::TypeMismatch,
         AuthoredValue::List(vec![AuthoredValue::string("[[zz-b]]")]),

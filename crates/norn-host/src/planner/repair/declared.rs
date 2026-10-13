@@ -35,7 +35,8 @@
 //! boolean but for its case is written as the boolean, and one on a link
 //! field whose bare value resolves to one document is written as that link
 //! ([`bare_link`]). An unquoted wikilink on a link field is written as the
-//! link it spells, as a string or element by element on a declared list.
+//! link it spells: exactly `[["s"]]` as a non-list field's whole value or
+//! a declared list's element becomes the string `"[[s]]"`.
 //! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
 //! ([`closed_set`]). A bare-value link fix is the exception to finding order:
@@ -43,8 +44,10 @@
 //! last, after the routes of the batch are settled ([`Decided::emit`]). A
 //! refused wrap or unwrap composes with the element fixes it exposes, judged
 //! as one addition at the weakest level of the shape and element fixes,
-//! carrying the element notes. One needing a bare-value link answer waits
-//! for that phase; an admitted plain link reshape stays in finding order.
+//! carrying the element notes. An exposed element whose proposal skips
+//! gives the shape finding its reason and decision data. An exposed link
+//! type mismatch waits for the link phase; an admitted plain link reshape
+//! stays in finding order.
 //! A type mismatch on a `date`, `number` or `boolean` field no derived fix
 //! answers is an excluded class. Every link any fix writes is recorded with
 //! what it resolves to once the plan has landed ([`Decided::emit`]).
@@ -3545,6 +3548,39 @@ mod tests {
         );
     }
 
+    /// **A closed-set wrap whose value folds to two members carries the
+    /// element's tie**, with both candidates and the shape finding's value.
+    #[test]
+    fn a_closed_set_wrap_folding_to_two_members_carries_a_tie_with_its_candidates() {
+        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [Todo, TODO, done]}\n";
+        let planned = Vault::of(schema, &[("a.md", "---\nstatus: todo\n---\n")]).plan(&[judging(
+            1,
+            SHAPE_MISMATCH,
+            "a.md",
+            "status",
+            &AuthoredValue::string("todo"),
+        )]);
+
+        assert!(planned.operations.is_empty());
+        let candidates = SkippedCandidates::values(
+            ValueCandidateHead::new(
+                ["TODO", "Todo"]
+                    .into_iter()
+                    .map(|member| ValueCandidate::new(norn_store::value_head(member))),
+                2,
+            )
+            .expect("a head"),
+        );
+        assert_eq!(
+            planned.skipped,
+            vec![
+                SkippedFinding::new(1, SkipReason::Tie)
+                    .with_value(norn_store::value_head("todo"))
+                    .with_candidates(candidates)
+            ]
+        );
+    }
+
     /// **A combined value refused by the judge is carried as the candidate.**
     #[test]
     fn a_combined_wrap_the_judge_refuses_carries_the_combined_candidate() {
@@ -3729,11 +3765,10 @@ mod tests {
         );
     }
 
-    /// **A wrap the judge refuses skips as one the judge would refuse, with
-    /// the value it would have written**: `abc` is no number, and the
-    /// one-item list holding it brings a type mismatch out.
+    /// **A wrap exposing a number type violation carries the excluded class
+    /// and its note**: `abc` is no number, so fixing it would coerce a number.
     #[test]
-    fn a_wrap_bringing_out_a_type_violation_skips_as_judge_would_refuse() {
+    fn a_wrap_bringing_out_a_number_type_violation_skips_as_an_excluded_class() {
         let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")]);
 
         let planned = vault.plan(&[judging(
@@ -3748,15 +3783,21 @@ mod tests {
         let [skipped] = planned.skipped.as_slice() else {
             panic!("one skip: {:?}", planned.skipped);
         };
-        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
+        assert_eq!(skipped.reason, SkipReason::ExcludedClass);
+        assert!(
+            skipped
+                .note
+                .as_deref()
+                .expect("an excluded-class note")
+                .contains("number coercion")
+        );
         assert_eq!(skipped.value, Some(head(&AuthoredValue::string("abc"))));
     }
 
-    /// **A wrap bringing a value outside a closed set out skips as one the
-    /// judge would refuse**, and an unwrap does as well: `bogus` is outside
-    /// the set once it is an element.
+    /// **A wrap and an unwrap exposing a value outside a closed set carry
+    /// its no-declared-fix skip**: `bogus` has no synonym or fold in either set.
     #[test]
-    fn a_wrap_and_an_unwrap_bringing_out_a_one_of_violation_skip_as_judge_would_refuse() {
+    fn a_wrap_and_an_unwrap_bringing_out_a_one_of_violation_skip_as_no_declared_fix() {
         let schema = "version: 1\nfields:\n  tags_of: {type: text, shape: list}\n  status: {type: text, shape: single}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      tags_of: {values: [red, blue]}\n      status: {values: [todo, done]}\n";
         let vault = Vault::of(
             schema,
@@ -3779,10 +3820,12 @@ mod tests {
 
         assert!(planned.operations.is_empty());
         assert_eq!(
-            reasons(&planned),
+            planned.skipped,
             vec![
-                (1, SkipReason::JudgeWouldRefuse),
-                (2, SkipReason::JudgeWouldRefuse)
+                SkippedFinding::new(1, SkipReason::NoDeclaredFix)
+                    .with_value(head(&list(&["bogus"]))),
+                SkippedFinding::new(2, SkipReason::NoDeclaredFix)
+                    .with_value(head(&AuthoredValue::string("bogus"))),
             ]
         );
     }
@@ -4361,10 +4404,10 @@ mod tests {
         assert!(note.contains("`done`"), "{note}");
     }
 
-    /// **A below-threshold wrap the judge refuses skips as one the judge
-    /// would refuse**, not as below the threshold.
+    /// **A below-threshold wrap exposing a number type violation carries
+    /// the excluded-class skip**, including its number-coercion note.
     #[test]
-    fn a_below_threshold_wrap_the_judge_refuses_skips_as_judge_would_refuse() {
+    fn a_below_threshold_wrap_exposing_a_number_type_violation_skips_as_an_excluded_class() {
         let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")])
             .at(Confidence::Declared);
 
@@ -4376,7 +4419,8 @@ mod tests {
             &AuthoredValue::string("abc"),
         )]);
 
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::ExcludedClass)]);
+        assert!(note_of(&planned, 1).contains("number coercion"));
     }
 
     /// **A below-threshold fix the lowered composition refuses skips with
@@ -4443,16 +4487,12 @@ mod tests {
         );
     }
 
-    /// **A below-threshold re-shape the judge refuses where the document
-    /// stands skips with the judge's reason**, as a below-threshold fold does,
-    /// even where lowering the threshold would drop its finding: at a
-    /// `declared` threshold wrapping `priority: 3` as `[3]` brings in the
-    /// `others` rule's closed set over `priority`, which `[3]` is outside, so
-    /// it is refused where it stands, though the lowered composition, folding
-    /// `kind` to `task` first, leaves `others` unselected and drops the
-    /// finding.
+    /// **A below-threshold reshape exposing a closed-set value with no fix
+    /// keeps that element's skip**, even where lowering the threshold drops
+    /// its finding: `priority: [3]` is outside the `others` rule's set, while
+    /// folding `kind` to `task` leaves that rule unselected.
     #[test]
-    fn a_below_threshold_reshape_the_judge_refuses_where_it_stands_skips_with_its_reason() {
+    fn a_below_threshold_reshape_with_no_element_fix_keeps_the_elements_skip() {
         let schema = "version: 1\nfields:\n  priority: {type: number, shape: list}\nrules:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [task]}\n  others:\n    match: {frontmatter: {kind: Task}}\n    one_of:\n      priority: {values: [9]}\n";
         let docs = [("a.md", "---\nkind: Task\npriority: 3\n---\n")];
         let rows = [
@@ -4475,7 +4515,7 @@ mod tests {
             reasons(&planned),
             vec![
                 (1, SkipReason::BelowThreshold),
-                (2, SkipReason::JudgeWouldRefuse)
+                (2, SkipReason::NoDeclaredFix)
             ]
         );
     }
