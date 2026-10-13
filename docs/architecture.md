@@ -2878,12 +2878,18 @@ load), and the fold keeps whether a text holds one, so a value that folds equal 
 holds none. A list's boolean or
 closed-set elements are fixed one by one into the same single `set_frontmatter` of the whole
 list as its synonyms are. Every derived fix is composed and judged on the composed state as a
-declared one is, so a wrap that brings out a type or closed-set violation is
-`judge_would_refuse` and one that brings in required fields is `brings_in_required_fields`.
-A fix is composed in one step: a wrap or unwrap that exposes an element violation — a
-boolean list holding the scalar string `"TRUE"`, whose one-item list has an element of the
-wrong type — is `judge_would_refuse`, and the element's own fix is not composed with it, a
-declared limit: a two-step fix is not made.
+declared one is, so a wrap that brings in required fields is `brings_in_required_fields`.
+A plain wrap or unwrap the judge admits stands alone. Otherwise it composes with the field's
+own element fixes for the violations the reshape exposes — boolean case, a closed-set
+synonym or fold, or a bare value made a link — as one `set_frontmatter`, judged once from
+the state the shape fix composes onto. The combined change cites the shape finding at the
+weaker confidence of the shape and every element fix, carrying the element fixes' notes.
+A combined value the judge refuses is `judge_would_refuse` with that value as its candidate;
+one below the threshold is `below_threshold` with the combined operation as `proposed`.
+Where an exposed element has no answer or its fix skips, the shape fix is
+`judge_would_refuse` with the plain reshape as its candidate. A shape fix needing a bare-link
+answer composes in the link phase with its respell veto, after the batch's routes settle;
+a plain link wrap or unwrap the judge admits keeps its place in finding order.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
 pooled for a finding and the strongest level present decides. A derived fix the threshold
@@ -2922,8 +2928,17 @@ index probe the applier makes again of an address resolution, so what the planne
 is by construction what the applier computes. One document: the link is written, a derived
 fix. Several documents: `ambiguous_link` with the head of the candidates; none:
 `no_declared_fix`, the note saying the link would resolve to no document.
+**An unquoted frontmatter wikilink on a field declared `link` is written as the link it
+spells.** A list holding exactly one string spells `[[string]]` where the text layer reads
+exactly one wikilink spanning that whole text. A field not declared a list whose whole
+value holds that one list is set to the link string, answering its type or shape mismatch;
+a field declared a list replaces each such element in the one write of the field, leaving
+its other elements alone. Any other nested shape has no derived fix, and this fix answers
+no field of another type. The fix is derived whether the link resolves to one document,
+several or none, and records that resolution as every written link's is.
 **A fix that writes a link value records what the link resolves to.** For every wikilink a
-fix's `set_frontmatter` writes — a bare value made a link, and as well a wrap, an unwrap, a
+fix's `set_frontmatter` writes — a bare value made a link, an unquoted wikilink written as
+its link string, and as well a wrap, an unwrap, a
 default or a rename whose value is, or whose elements are, a wikilink (a closed set holds
 none, so no fold or synonym writes one) —
 the plan records an address resolution condition: the holder at its after-state path, the
@@ -2933,8 +2948,9 @@ rides the resolved plan in preview and apply alike and is checked at the after-s
 target deleted, or a competitor of the same stem created, between preview and apply refuses
 the plan, and a refused plan's fresh plan carries the condition as recorded. No fix of this
 layer replaces a link address: a closed set never holds a wikilink, so no fold or synonym
-replaces one; a rename moves a value without changing it; and a wrap, an unwrap or a bare
-value made a link writes an address without replacing one. Every link the batch's fixes write is resolved in one
+replaces one; a rename moves a value without changing it; and a wrap, an unwrap, a bare
+value made a link or an unquoted wikilink written as its link string writes an address without
+replacing one. Every link the batch's fixes write is resolved in one
 judgment of the link index over the settled routes, and the heads of those naming several
 in one more, so the cost follows the links written and the routes, never their product,
 and a batch writing no link reads nothing for it.
@@ -3584,7 +3600,8 @@ a fix writes a value holding, saying that from the link's holder the address res
 recorded at the plan's after-state; an address a fix replaces is recorded the same way by
 the move-following and similarity fixes of a later layer, and no fix of today replaces
 one: a closed set never holds a wikilink, a rename moves a value without changing it, and a
-wrap, an unwrap or a bare value made a link writes an address without replacing one. It is not an entry of the change set: the applier
+wrap, an unwrap, a bare value made a link or an unquoted wikilink written as its link string
+writes an address without replacing one. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
 judgment of the link index holding one probe per address resolution the plan carries,
