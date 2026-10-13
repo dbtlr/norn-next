@@ -14,42 +14,44 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
-    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
-    AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
-    CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection, CollectionPage,
-    CollectionSelector, Column, ComparedBy, Confidence, ConflictingDefault, ContainerKind,
-    ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
-    CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
-    EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
-    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
-    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
-    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
-    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RepairParams,
+    Addressing, AdvisoriesOmitted, Advisory, AdvisoryShape, AdvisoryValueType, AmbiguousEnd,
+    Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams,
+    ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, Backlinks,
+    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation,
+    CitedFinding, Collection, CollectionPage, CollectionSelector, Column, ComparedBy, Confidence,
+    ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams,
+    Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams,
+    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath,
+    DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict, IllegalContentHash,
+    IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams, InitReport,
+    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily,
+    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal, ModelIdentity, MoveParams,
+    MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung,
+    NonFiniteScore, NotReady, Operation, OperationId, OperationKind, OperationsTag, Page,
+    PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend,
+    Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams,
+    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
+    ReloadParams, ReloadReport, ReloadStage, RepairAdvisories, RepairAdvisory, RepairParams,
     RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget,
     ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams,
     RollUp, RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix,
-    RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaRule,
-    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity,
-    SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
-    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES,
-    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, ValueHead, ValueMap,
-    Variables, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
-    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
-    is_refused_character, is_refused_segment, leaf_stem,
+    RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaHygiene,
+    SchemaRule, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams,
+    Severity, ShapeUse, SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, SpellingUse, StatusParams, StatusReport, TagRow, TagSource, TagStance,
+    Tally, TargetResult, TotalBelowHead, Transition, TrustState, TypeUse, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueCandidate,
+    ValueCandidateHead, ValueHead, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
+    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character, is_refused_segment,
+    leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -9832,11 +9834,13 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
                 skipped,
                 remaining,
                 cursor,
+                advisories,
             }) = provenance
             {
                 read.push(format!(
-                    "planned from generation {finding_generation}, {remaining:?} remaining, continuing {}",
-                    cursor.is_some()
+                    "planned from generation {finding_generation}, {remaining:?} remaining, continuing {}, advisories {}",
+                    cursor.is_some(),
+                    advisories.is_some()
                 ));
                 for Citation {
                     operation,
@@ -11550,7 +11554,7 @@ fn a_confidence_threshold_admits_its_own_level_and_every_stronger_one() {
 }
 
 /// Every reason a repair leaves a finding alone is a closed snake_case string,
-/// and a reason nobody minted refuses the read; the 5C reasons are not here.
+/// and a reason nobody minted refuses the read.
 #[test]
 fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
     let reasons = [
@@ -11574,12 +11578,19 @@ fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
         (SkipReason::JudgeWouldRefuse, "judge_would_refuse"),
         (SkipReason::DestinationTaken, "destination_taken"),
         (SkipReason::RespellsAJudgedLink, "respells_a_judged_link"),
+        (SkipReason::TooCommon, "too_common"),
+        (SkipReason::TooShort, "too_short"),
+        (SkipReason::NoRecordedHash, "no_recorded_hash"),
+        (SkipReason::NoHolder, "no_holder"),
+        (SkipReason::SeveralHolders, "several_holders"),
+        (SkipReason::SeveralTombstones, "several_tombstones"),
+        (SkipReason::LinkNotRewritable, "link_not_rewritable"),
     ];
     for (reason, text) in reasons {
         assert_eq!(wire(&reason), format!("\"{text}\""));
         round_trip(&reason);
     }
-    for foreign in ["too_common", "too_short", "move_following", "Tie", ""] {
+    for foreign in ["move_following", "Tie", "TooCommon", ""] {
         assert!(
             serde_json::from_str::<SkipReason>(&format!("\"{foreign}\"")).is_err(),
             "`{foreign}` read as a skip reason"
@@ -11673,6 +11684,305 @@ fn a_provenance_leaves_out_the_remaining_count_and_cursor_it_does_not_carry() {
         let read: Provenance = serde_json::from_str(json).expect("a provenance reads back");
         assert_eq!(&wire(&read), json);
     }
+}
+
+/// A sample of `count` documents out of `total`, as the advisories carry one.
+fn a_sample(count: usize, total: u64) -> DocumentPathHead {
+    DocumentPathHead::new(
+        (0..count).map(|index| path(&format!("notes/n{index}.md"))),
+        total,
+    )
+    .expect("a sample no larger than its total")
+}
+
+/// One advisory of every kind and every hygiene case, each with the bytes it
+/// is contracted to write.
+fn every_repair_advisory() -> Vec<(RepairAdvisory, &'static str)> {
+    vec![
+        (
+            RepairAdvisory::mixed_types(
+                "priority",
+                vec![
+                    TypeUse::new(AdvisoryValueType::String, 7),
+                    TypeUse::new(AdvisoryValueType::Integer, 3),
+                ],
+                a_sample(2, 10),
+            ),
+            r#"{"kind":"mixed_types","key":"priority","types":[{"type":"string","documents":7},{"type":"integer","documents":3}],"sample":{"paths":["notes/n0.md","notes/n1.md"],"total":10}}"#,
+        ),
+        (
+            RepairAdvisory::mixed_shapes(
+                "tags",
+                vec![
+                    ShapeUse::new(AdvisoryShape::Scalar, 4),
+                    ShapeUse::new(AdvisoryShape::Sequence, 9),
+                    ShapeUse::new(AdvisoryShape::Map, 1),
+                ],
+                a_sample(1, 1),
+            ),
+            r#"{"kind":"mixed_shapes","key":"tags","shapes":[{"shape":"scalar","documents":4},{"shape":"sequence","documents":9},{"shape":"map","documents":1}],"sample":{"paths":["notes/n0.md"],"total":1}}"#,
+        ),
+        (
+            RepairAdvisory::undeclared_uniform(
+                "owner",
+                AdvisoryValueType::Boolean,
+                12,
+                a_sample(5, 12),
+                "owner:\n  type: boolean\n",
+            ),
+            r#"{"kind":"undeclared_uniform","key":"owner","type":"boolean","documents":12,"sample":{"paths":["notes/n0.md","notes/n1.md","notes/n2.md","notes/n3.md","notes/n4.md"],"total":12},"yaml":"owner:\n  type: boolean\n"}"#,
+        ),
+        (
+            RepairAdvisory::near_duplicate_fields(
+                vec![SpellingUse::new("Due", 2), SpellingUse::new("due", 30)],
+                a_sample(0, 0),
+                "rename: {Due: due}\n",
+            ),
+            r#"{"kind":"near_duplicate_fields","spellings":[{"key":"Due","documents":2},{"key":"due","documents":30}],"sample":{"paths":[],"total":0},"yaml":"rename: {Due: due}\n"}"#,
+        ),
+        (
+            RepairAdvisory::schema_hygiene(SchemaHygiene::rule_matches_nothing("stale-rule")),
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"rule_matches_nothing","rule":"stale-rule"}}"#,
+        ),
+        (
+            RepairAdvisory::schema_hygiene(SchemaHygiene::unused_one_of_value(
+                "status", "status", "someday",
+            )),
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"unused_one_of_value","rule":"status","field":"status","value":"someday"}}"#,
+        ),
+        (
+            RepairAdvisory::schema_hygiene(SchemaHygiene::empty_combination(
+                ["alpha".to_string(), "beta".to_string()],
+                HygieneConflict::DisjointPlacement,
+            )),
+            r#"{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["alpha","beta"],"conflict":"disjoint_placement"}}"#,
+        ),
+    ]
+}
+
+/// **Every advisory kind and hygiene case writes the contracted bytes and
+/// reads back**, and the vocabularies they spell are closed strings.
+#[test]
+fn every_repair_advisory_round_trips_with_its_contracted_bytes() {
+    for (advisory, bytes) in every_repair_advisory() {
+        assert_eq!(wire(&advisory), bytes);
+        round_trip(&advisory);
+    }
+    for (value_type, text) in [
+        (AdvisoryValueType::String, "string"),
+        (AdvisoryValueType::Integer, "integer"),
+        (AdvisoryValueType::Real, "real"),
+        (AdvisoryValueType::Boolean, "boolean"),
+        (AdvisoryValueType::Null, "null"),
+        (AdvisoryValueType::Map, "map"),
+    ] {
+        assert_eq!(wire(&value_type), format!("\"{text}\""));
+        round_trip(&value_type);
+    }
+    for (shape, text) in [
+        (AdvisoryShape::Scalar, "scalar"),
+        (AdvisoryShape::Sequence, "sequence"),
+        (AdvisoryShape::Map, "map"),
+    ] {
+        assert_eq!(wire(&shape), format!("\"{text}\""));
+        round_trip(&shape);
+    }
+    for (conflict, text) in [
+        (
+            HygieneConflict::RequiredAndForbidden,
+            "required_and_forbidden",
+        ),
+        (HygieneConflict::EmptyOneOf, "empty_one_of"),
+        (HygieneConflict::DisjointPlacement, "disjoint_placement"),
+    ] {
+        assert_eq!(wire(&conflict), format!("\"{text}\""));
+        round_trip(&conflict);
+    }
+    for foreign in ["sequence", "date", "Null", ""] {
+        assert!(
+            serde_json::from_str::<AdvisoryValueType>(&format!("\"{foreign}\"")).is_err(),
+            "`{foreign}` read as a value type"
+        );
+    }
+    for foreign in ["string", "Map", ""] {
+        assert!(
+            serde_json::from_str::<AdvisoryShape>(&format!("\"{foreign}\"")).is_err(),
+            "`{foreign}` read as a shape"
+        );
+    }
+}
+
+/// **The three advisory states are the bytes contracted, and a provenance
+/// carries each**: absent on a continuation batch, `omitted` on a narrowed
+/// first batch, `computed` with its items and total on an unnarrowed one.
+#[test]
+fn a_provenance_carries_its_advisories_in_one_of_three_states() {
+    let bare = Provenance::new(3, Vec::new());
+    assert_eq!(
+        wire(&bare),
+        r#"{"finding_generation":3,"citations":[],"skipped":[]}"#,
+        "a continuation batch carries no advisories"
+    );
+    round_trip(&bare);
+
+    let narrowed = bare
+        .clone()
+        .with_advisories(RepairAdvisories::omitted_narrowed());
+    assert_eq!(
+        wire(&narrowed),
+        r#"{"finding_generation":3,"citations":[],"skipped":[],"advisories":{"omitted":"narrowed"}}"#
+    );
+    round_trip(&narrowed);
+
+    let items: Vec<RepairAdvisory> = every_repair_advisory()
+        .into_iter()
+        .map(|(advisory, _)| advisory)
+        .collect();
+    let computed = bare.clone().with_advisories(
+        RepairAdvisories::computed(items.clone(), items.len() as u64).expect("a whole list"),
+    );
+    round_trip(&computed);
+    let json = serde_json::to_value(&computed).expect("provenance as JSON");
+    assert_eq!(json["advisories"]["computed"]["total"], items.len());
+    assert_eq!(
+        json["advisories"]["computed"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(items.len())
+    );
+
+    // A truncated list is implicit: fewer items than the total.
+    let truncated = RepairAdvisories::computed(items[..2].to_vec(), 40).expect("a head");
+    let RepairAdvisories::Computed(list) = &truncated else {
+        panic!("not computed: {truncated:?}");
+    };
+    assert_eq!((list.items().len(), list.total()), (2, 40));
+    assert!(list.is_truncated());
+    round_trip(&bare.with_advisories(truncated));
+    assert_eq!(
+        RepairAdvisories::omitted(AdvisoriesOmitted::Narrowed),
+        RepairAdvisories::omitted_narrowed()
+    );
+    assert_eq!(
+        wire(&RepairAdvisories::computed(Vec::new(), 0).expect("an empty list")),
+        r#"{"computed":{"items":[],"total":0}}"#
+    );
+}
+
+/// **An advisory the reader does not know refuses the read**: an unknown
+/// kind, an unknown hygiene case, an unknown key at every depth, an unknown
+/// state and an unknown omission reason.
+#[test]
+fn a_provenance_refuses_an_advisory_it_does_not_know() {
+    let items: Vec<RepairAdvisory> = every_repair_advisory()
+        .into_iter()
+        .map(|(advisory, _)| advisory)
+        .collect();
+    let provenance = Provenance::new(3, Vec::new()).with_advisories(
+        RepairAdvisories::computed(items.clone(), items.len() as u64).expect("a whole list"),
+    );
+    let json = serde_json::to_value(&provenance).expect("provenance as JSON");
+    for pointer in [
+        "/advisories/computed",
+        "/advisories/computed/items/0",
+        "/advisories/computed/items/0/types/0",
+        "/advisories/computed/items/0/sample",
+        "/advisories/computed/items/1/shapes/0",
+        "/advisories/computed/items/2",
+        "/advisories/computed/items/2/sample",
+        "/advisories/computed/items/3/spellings/0",
+        "/advisories/computed/items/4",
+        "/advisories/computed/items/4/hygiene",
+        "/advisories/computed/items/5/hygiene",
+        "/advisories/computed/items/6/hygiene",
+    ] {
+        assert!(
+            serde_json::from_str::<Provenance>(&with_surprise(&json, pointer)).is_err(),
+            "provenance carrying an unknown field at `{pointer}` read back"
+        );
+    }
+
+    let advisories = |state: &str| {
+        format!(r#"{{"finding_generation":3,"citations":[],"skipped":[],"advisories":{state}}}"#)
+    };
+    assert!(serde_json::from_str::<Provenance>(&advisories(r#"{"omitted":"narrowed"}"#)).is_ok());
+    for refused in [
+        r#"{"omitted":"unnarrowed"}"#,
+        r#"{"omitted":"narrowed","computed":{"items":[],"total":0}}"#,
+        r#"{"pending":"narrowed"}"#,
+        r#"{"computed":{"items":[],"total":0,"surprise":true}}"#,
+        r#"{"computed":{"items":[{"kind":"mixed_colors","key":"a"}],"total":1}}"#,
+        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"rule_is_loud","rule":"r"}}],"total":1}}"#,
+        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a"],"conflict":"empty_one_of"}}],"total":1}}"#,
+        r#"{"computed":{"items":[{"kind":"schema_hygiene","hygiene":{"case":"empty_combination","rules":["a","b"],"conflict":"unfair"}}],"total":1}}"#,
+        r#""narrowed""#,
+        "{}",
+    ] {
+        assert!(
+            serde_json::from_str::<Provenance>(&advisories(refused)).is_err(),
+            "advisories {refused} read back"
+        );
+    }
+}
+
+/// **A bound or a total that does not hold refuses the read**: a sample over
+/// five, a sample total below its paths, and a computed total below its items.
+#[test]
+fn an_advisory_refuses_a_sample_or_a_total_that_does_not_hold() {
+    let sample = |count: usize, total: u64| {
+        let paths: Vec<String> = (0..count)
+            .map(|index| format!("notes/n{index}.md"))
+            .collect();
+        serde_json::json!({ "paths": paths, "total": total })
+    };
+    let advisory = |sample: serde_json::Value| {
+        serde_json::json!({
+            "kind": "mixed_types",
+            "key": "priority",
+            "types": [{ "type": "string", "documents": 1 }],
+            "sample": sample,
+        })
+        .to_string()
+    };
+    for count in 0..=CANDIDATE_HEAD {
+        assert!(
+            serde_json::from_str::<RepairAdvisory>(&advisory(sample(count, count as u64 + 3)))
+                .is_ok(),
+            "a sample of {count} was refused"
+        );
+    }
+    let over = serde_json::from_str::<RepairAdvisory>(&advisory(sample(CANDIDATE_HEAD + 1, 20)))
+        .expect_err("a sample over the bound")
+        .to_string();
+    assert!(over.contains("at most 5"), "{over}");
+    assert!(serde_json::from_str::<RepairAdvisory>(&advisory(sample(3, 2))).is_err());
+
+    // The constructor truncates to the bound and refuses a total below it.
+    let truncated = a_sample(9, 9);
+    assert_eq!(truncated.paths().len(), CANDIDATE_HEAD);
+    assert!(truncated.is_truncated());
+    assert!(DocumentPathHead::new([path("notes/a.md"), path("notes/b.md")], 1).is_err());
+
+    // A computed total below its items.
+    let items: Vec<_> = every_repair_advisory()
+        .into_iter()
+        .map(|(advisory, _)| serde_json::to_value(advisory).expect("an advisory as JSON"))
+        .collect();
+    let computed = |total: u64| {
+        serde_json::json!({ "computed": { "items": items, "total": total } }).to_string()
+    };
+    let state = |json: &str| serde_json::from_str::<RepairAdvisories>(json);
+    assert!(state(&computed(items.len() as u64)).is_ok());
+    assert!(state(&computed(items.len() as u64 + 90)).is_ok());
+    assert!(state(&computed(items.len() as u64 - 1)).is_err());
+    let refusal = RepairAdvisories::computed(
+        every_repair_advisory()
+            .into_iter()
+            .map(|(advisory, _)| advisory),
+        2,
+    )
+    .expect_err("a total below its items");
+    assert_eq!((refusal.head(), refusal.total()), (items.len(), 2));
 }
 
 /// An address resolution is the pinned bytes the planner will write.

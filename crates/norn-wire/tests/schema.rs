@@ -11,34 +11,36 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
-    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
-    AuthoredPlan, AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead,
-    ChangesetOutcome, Citation, CitedFinding, Collection, CollectionPage, CollectionSelector,
-    Column, ComparedBy, Confidence, ContainerKind, ContentHash, ControlFileFailure, CountParams,
-    CountReport, Cursor, CursorKey, DeleteParams, DescribeParams, DescribeReport, Direction,
-    Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow,
-    Drift, EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
-    ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath,
-    FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope, Fingerprints,
-    FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
-    LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity, MoveParams, Moved, NameSet,
-    NewParams, NotReady, Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    RepairParams, RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead,
-    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams,
-    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueCandidate,
-    ValueCandidateHead, ValueHead, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName,
-    VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase,
-    WatcherLossCause, WriteTarget,
+    Addressing, AdvisoriesOmitted, Advisory, AdvisoryShape, AdvisoryValueType, AmbiguousEnd,
+    Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams,
+    ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, BlockRow,
+    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories,
+    Confidence, ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor,
+    CursorKey, DeleteParams, DescribeParams, DescribeReport, Direction, Directory,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentPathHead,
+    DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
+    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, HygieneConflict, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId,
+    OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
+    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, RepairAdvisories, RepairAdvisory, RepairParams,
+    RequestBound, RequestPart, RequestScope, RequiredField, RequiredFieldHead, ResolutionTarget,
+    ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp,
+    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaHygiene,
+    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity,
+    ShapeUse, SidecarRevision, SkipReason, SkippedCandidates, SkippedFinding, Snapshot, Sort,
+    SortKey, Span, SpellingUse, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, Transition, TrustState, TypeUse, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES,
+    ValidateParams, ValidateReport, ValueCandidate, ValueCandidateHead, ValueHead, ValueMap,
+    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
+    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -267,6 +269,18 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<CitedFinding>(),
         schema_of::<Citation>(),
         schema_of::<SkippedFinding>(),
+        schema_of::<DocumentPathHead>(),
+        schema_of::<AdvisoryValueType>(),
+        schema_of::<AdvisoryShape>(),
+        schema_of::<HygieneConflict>(),
+        schema_of::<TypeUse>(),
+        schema_of::<ShapeUse>(),
+        schema_of::<SpellingUse>(),
+        schema_of::<SchemaHygiene>(),
+        schema_of::<RepairAdvisory>(),
+        schema_of::<AdvisoriesOmitted>(),
+        schema_of::<ComputedAdvisories>(),
+        schema_of::<RepairAdvisories>(),
         schema_of::<Provenance>(),
         schema_of::<AuthoredPlan>(),
         schema_of::<ResolvedPlan>(),
@@ -3341,6 +3355,7 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
                 "skipped",
                 "remaining",
                 "cursor",
+                "advisories",
             ],
         ),
         (
@@ -4202,8 +4217,8 @@ fn a_new_request_schema_admits_exactly_its_three_forms() {
 // ── Layer 5B repair ──────────────────────────────────────────────────────
 
 /// The confidence levels and the skip reasons are closed flat-string
-/// vocabularies, and the reasons are the thirteen 5B emits: the 5C reasons are
-/// not advertised.
+/// vocabularies, and the reasons are the fourteen 5B emits and the seven 5C
+/// adds.
 #[test]
 fn the_repair_vocabularies_are_closed_strings() {
     let constants = |schema: &Value| -> Vec<String> {
@@ -4238,6 +4253,13 @@ fn the_repair_vocabularies_are_closed_strings() {
         "judge_would_refuse",
         "destination_taken",
         "respells_a_judged_link",
+        "too_common",
+        "too_short",
+        "no_recorded_hash",
+        "no_holder",
+        "several_holders",
+        "several_tombstones",
+        "link_not_rewritable",
     ];
     expected.sort_unstable();
     assert_eq!(reasons, expected);
@@ -4404,4 +4426,98 @@ fn a_provenance_advertises_the_heads_it_embeds_as_closed() {
     ] {
         assert!(!refuses_unknown_keys(&open), "{open} is closed");
     }
+}
+
+/// **The repair advisories advertise the shapes they are read through**: a
+/// provenance leaves them optional, the state is one of an `omitted` reason or
+/// a `computed` list, every advisory kind is closed and tagged `kind`, and a
+/// sample advertises the ceiling it is read through.
+#[test]
+fn the_repair_advisories_advertise_the_shapes_they_are_read_through() {
+    let provenance = schema_of::<Provenance>();
+    assert!(
+        !required_names(&provenance).contains("advisories"),
+        "a continuation batch carries none"
+    );
+    assert!(
+        provenance["properties"]["advisories"]
+            .to_string()
+            .contains("RepairAdvisories"),
+        "{provenance}"
+    );
+
+    let state = schema_of::<RepairAdvisories>();
+    let members: BTreeSet<&str> = branches(&state)
+        .iter()
+        .flat_map(|branch| property_names(branch))
+        .collect();
+    assert_eq!(members, ["omitted", "computed"].into_iter().collect());
+    for branch in branches(&state) {
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+    }
+
+    let computed = schema_of::<ComputedAdvisories>();
+    assert_eq!(
+        property_names(&computed),
+        ["items", "total"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(&computed),
+        ["items", "total"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(&computed), "{computed} admits any key");
+
+    let advisory = schema_of::<RepairAdvisory>();
+    assert_eq!(
+        sorted(tag_constants(&advisory, "kind")),
+        sorted([
+            "mixed_types",
+            "mixed_shapes",
+            "undeclared_uniform",
+            "near_duplicate_fields",
+            "schema_hygiene"
+        ])
+    );
+    for branch in branches(&advisory) {
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+    }
+    let yamls: Vec<&str> = branches(&advisory)
+        .iter()
+        .filter(|branch| property_names(branch).contains("yaml"))
+        .filter_map(|branch| tag_constant(branch, "kind"))
+        .collect();
+    assert_eq!(
+        sorted(yamls),
+        sorted(["undeclared_uniform", "near_duplicate_fields"])
+    );
+    assert!(
+        branches(&advisory)
+            .iter()
+            .all(|branch| !property_names(branch).contains("operation")),
+        "an advisory names no operation"
+    );
+
+    let sample = schema_of::<DocumentPathHead>();
+    assert_eq!(
+        property_names(&sample),
+        ["paths", "total"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(&sample), "{sample} admits any key");
+    assert_eq!(
+        sample["properties"]["paths"]["maxItems"].as_u64(),
+        Some(CANDIDATE_HEAD as u64)
+    );
+
+    let hygiene = schema_of::<SchemaHygiene>();
+    assert_eq!(
+        sorted(tag_constants(&hygiene, "case")),
+        sorted([
+            "rule_matches_nothing",
+            "unused_one_of_value",
+            "empty_combination"
+        ])
+    );
+    let combination = branch(&hygiene, "case", "empty_combination");
+    assert_eq!(combination["properties"]["rules"]["minItems"], 2);
+    assert_eq!(combination["properties"]["rules"]["maxItems"], 2);
 }

@@ -94,6 +94,7 @@ use crate::finding_row::{
     CandidateHead, RequiredFieldHead, ValueCandidateHead, ValueHead, plan_candidate_head,
     plan_candidate_head_schema, plan_optional_value_head, plan_optional_value_head_schema,
 };
+use crate::plan::advisory::RepairAdvisories;
 use crate::plan::hash::ContentHash;
 use crate::plan::operation::{Operation, OperationId, OperationKind, written};
 use crate::plan::outcome::PlanFault;
@@ -498,6 +499,34 @@ pub enum SkipReason {
     /// finding — so the respelling could change what the holder is judged
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
+    /// A similarity suggestion needs more of a broken link's rarest trigrams
+    /// than the postings cap admits, so the stem is too common to suggest
+    /// from. The entry's value is the query stem, and its note names the
+    /// trigram past the cap.
+    TooCommon,
+    /// The broken link's stem is below the shortest admitted similarity
+    /// query, three characters. The note gives the shortest admitted query.
+    TooShort,
+    /// Move-following found exactly one tombstone for the broken link, and
+    /// it recorded no content hash to follow. The note names the tombstone's
+    /// path.
+    NoRecordedHash,
+    /// No live document holds the content hash the tombstone recorded. The
+    /// note names the tombstone's path.
+    NoHolder,
+    /// At least two live documents hold the tombstone's content hash. The
+    /// read stops at two, so no exact total exists: the note names the two
+    /// paths and says "at least two", and the entry carries no candidate
+    /// head.
+    SeveralHolders,
+    /// At least two tombstones match the broken link. The read stops at two,
+    /// so the note names the two paths and says "at least two", and the entry
+    /// carries no candidate head.
+    SeveralTombstones,
+    /// A link fix has one answer, but the link cannot be written to it: no
+    /// spelling reads back to the destination uniquely from the holder, or
+    /// the text layer refuses the edit. The note carries that reason.
+    LinkNotRewritable,
 }
 
 /// The candidates a skipped finding had to choose between: documents, or
@@ -744,6 +773,12 @@ pub struct Provenance {
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Box<Cursor>>,
+    /// What the repair noticed about the vault's fields and schema, in one of
+    /// two states: `omitted` when a path or document predicate narrowed the
+    /// repair, and `computed` with its items and total otherwise. Present on
+    /// the first batch only, and absent from every continuation batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisories: Option<RepairAdvisories>,
 }
 
 impl Provenance {
@@ -756,6 +791,7 @@ impl Provenance {
             skipped,
             remaining: None,
             cursor: None,
+            advisories: None,
         }
     }
 
@@ -771,6 +807,13 @@ impl Provenance {
     #[must_use]
     pub const fn with_remaining(mut self, remaining: u64) -> Self {
         self.remaining = Some(remaining);
+        self
+    }
+
+    /// The provenance of a first batch, carrying `advisories`.
+    #[must_use]
+    pub fn with_advisories(mut self, advisories: RepairAdvisories) -> Self {
+        self.advisories = Some(advisories);
         self
     }
 

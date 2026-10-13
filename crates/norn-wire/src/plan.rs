@@ -28,6 +28,7 @@
 //! unknown key, where an answer drops one; the crate's conventions give the
 //! reason.
 
+pub(crate) mod advisory;
 pub(crate) mod backlinks;
 pub(crate) mod document;
 pub(crate) mod forecast;

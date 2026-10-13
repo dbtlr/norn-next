@@ -614,11 +614,16 @@ pub use error::{
 };
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{
-    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, RequiredField,
-    RequiredFieldHead, VALUE_HEAD_BYTES, ValueCandidate, ValueCandidateHead, ValueHead,
+    CANDIDATE_HEAD, Candidate, CandidateHead, DocumentPathHead, FindingRow, Hint, IllegalValueHead,
+    RequiredField, RequiredFieldHead, VALUE_HEAD_BYTES, ValueCandidate, ValueCandidateHead,
+    ValueHead,
 };
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::advisory::{
+    AdvisoriesOmitted, AdvisoryShape, AdvisoryValueType, ComputedAdvisories, HygieneConflict,
+    RepairAdvisories, RepairAdvisory, SchemaHygiene, ShapeUse, SpellingUse, TypeUse,
+};
 pub use plan::backlinks::Backlinks;
 pub use plan::document::{
     AuthoredPlan, Citation, CitedFinding, Confidence, FileState, LinkKey, OperationsTag,
