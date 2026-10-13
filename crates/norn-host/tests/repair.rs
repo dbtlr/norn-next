@@ -723,39 +723,66 @@ fn an_apply_drains_the_selection_along_its_cursors_covering_every_finding_once()
     assert_eq!(seen, by_id.keys().copied().collect::<Vec<_>>());
 }
 
-/// **A block that changes nothing about what applies, shown on a plan that
-/// writes.** The resolved plan of a status edit lands the same bytes and the
-/// same target outcomes with no provenance, with the block a repair attached,
-/// and with it altered: skipped findings emptied, cursor and count taken off,
-/// a finding generation that never stood.
+/// **A block that changes nothing about what applies, shown on a real repair
+/// plan.** A repair under [`DEFAULTING`] writes two cited operations and skips
+/// a finding. Every part of its block is then altered: the generation, a
+/// citation (an operation the plan does not hold, a finding that never stood,
+/// another confidence, a value and notes), a skipped finding carrying every
+/// kind of decision data (a proposed delete included), the count and the
+/// cursor. The altered plan applies with the operations, transitions,
+/// changeset, targets and written bytes the unaltered plan does.
 #[test]
-fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
-    const EDITED: &str = "edited.md";
-    let documents: Vec<(&str, &[u8])> = DOCUMENTS
-        .iter()
-        .copied()
-        .chain([(
-            EDITED,
-            &b"---\ntype: task\nstatus: todo\n---\n# Edited\n"[..],
-        )])
-        .collect();
-    let edit = |vault: &attach::Vault, host: &attach::ServingHost| {
-        previewed(host.set(SetParams::new(
-            address(vault),
-            ApplyMode::Preview,
-            WriteTarget::path(
-                norn_wire::DocumentPath::new(format!("{FOLDER}{EDITED}")).expect("a document path"),
-            ),
-            vec![FieldChange::set("status", AuthoredValue::string("done"))],
-        )))
-    };
-    let landing = |label: &str, block: &dyn Fn(&ResolvedPlan) -> Option<Provenance>| {
-        let (_sandbox, vault, host) = a_vault_holding(label, &documents);
+fn a_cited_repair_plan_applies_the_same_whatever_every_part_of_its_block_says() {
+    let docs: [(&str, &[u8]); 2] = [
+        ("a.md", b"---\ntype: task\n---\nSee [[nowhere-a]].\n"),
+        ("b.md", b"---\ntype: task\n---\n# B\n"),
+    ];
+    let landing = |label: &str, alter: bool| {
+        let (_sandbox, vault, host) = a_vault_under(label, DEFAULTING, &docs);
         let _lease = attach::attach_and_wait(&host, vault.name());
-        let mut plan = edit(&vault, &host);
-        assert_eq!(plan.operations.len(), 1, "the edit is an operation");
-        let repair = previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)));
-        plan.provenance = block(&repair);
+        let mut plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+        let original = provenance(&plan).clone();
+        assert_eq!(plan.operations.len(), 2, "{:?}", plan.operations);
+        assert_eq!(original.citations.len(), 2, "the plan cites: {original:?}");
+        assert!(!original.skipped.is_empty(), "the plan skips: {original:?}");
+        assert!(original.cursor.is_none());
+        if alter {
+            let cursor = provenance(&previewed(
+                host.repair(repairing(&vault, ApplyMode::Preview).with_limit(1)),
+            ))
+            .cursor
+            .clone()
+            .expect("a cursor");
+            let altered = norn_store::value_head("altered");
+            plan.provenance = Some(
+                Provenance::new(
+                    original.finding_generation.wrapping_add(1_000_000),
+                    vec![
+                        SkippedFinding::new(u64::MAX, SkipReason::Tie)
+                            .with_value(altered.clone())
+                            .with_candidates(candidates(&[("x", "nobody"), ("y", "nobody")]))
+                            .with_required_fields(
+                                RequiredFieldHead::new([RequiredField::new("ghost")], 1)
+                                    .expect("a head"),
+                            )
+                            .with_proposed(Operation::new(OperationKind::delete_document(at(
+                                "b.md",
+                            ))))
+                            .with_note("altered"),
+                    ],
+                )
+                .with_citations(vec![Citation::new(
+                    OperationId::new("repair-99").expect("an id"),
+                    vec![
+                        CitedFinding::new(u64::MAX, Confidence::Suggested)
+                            .with_value(altered)
+                            .with_notes(vec!["altered".into()]),
+                    ],
+                )])
+                .with_remaining(12345)
+                .continued_by(*cursor),
+            );
+        }
         let applied = host
             .apply(ApplyParams::new(
                 ApplyMode::Apply,
@@ -774,29 +801,24 @@ fn a_plan_with_operations_applies_the_same_whatever_its_provenance_says() {
         else {
             panic!("an apply answered {applied:?}");
         };
-        // The plan's root is the fixture's own, so it is the one thing that
-        // differs between three equivalent vaults.
-        let written = std::fs::read(vault.path().join(FOLDER).join(EDITED)).expect("read");
+        // The plan's root is the fixture's own, so only the parts that
+        // would differ with the block are compared, not the whole plan.
         (
             plan.operations,
             plan.transitions,
             changeset,
             targets,
-            written,
+            written(&vault, "a.md"),
+            written(&vault, "b.md"),
         )
     };
 
-    let none = landing("host-repair-block-none", &|_| None);
-    let original = landing("host-repair-block-original", &|repair| {
-        repair.provenance.clone()
-    });
-    let altered = landing("host-repair-block-altered", &|_| {
-        Some(Provenance::new(u64::MAX, Vec::new()))
-    });
+    let unaltered = landing("host-repair-block-unaltered", false);
+    let altered = landing("host-repair-block-altered", true);
 
-    assert!(String::from_utf8_lossy(&none.4).contains("status: done"));
-    assert_eq!(original, none);
-    assert_eq!(altered, none);
+    assert!(unaltered.4.contains("status: todo"), "{}", unaltered.4);
+    assert!(unaltered.5.contains("status: todo"), "{}", unaltered.5);
+    assert_eq!(altered, unaltered);
 }
 
 /// The documents a previewed repair of the vault's ambiguous links skipped
