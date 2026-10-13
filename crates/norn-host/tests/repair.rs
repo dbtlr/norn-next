@@ -1842,12 +1842,13 @@ fn without_the_route_date(path: &DocumentPath, folders: &mut Vec<String>) -> Doc
 /// `plan` with only what the clock fills set apart: the date folder in a
 /// route's paths (a move's destination, a write's target, the transitions
 /// landing there, the citation notes naming a destination), the value of a `created` or `day` default, and the
-/// after-state of every document a clock default fills, whose bytes hold the
-/// instant or the day (a day sits in the bytes too, and differs between two
-/// readings that straddle local midnight).
+/// after-state of every document a clock default fills with an instant, whose
+/// bytes hold it. The after-state of a document a default fills with a day
+/// alone is masked only for `across_days`, as two readings that straddle local
+/// midnight differ in it and two on one day do not.
 /// Each masked value is checked to be a well-formed clock reading. Everything
 /// else, the rest of each destination path included, stays as planned.
-fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
+fn with_the_clock_masked(plan: &ResolvedPlan, across_days: bool) -> (ResolvedPlan, ClockFilled) {
     let mut masked = plan.clone();
     let mut filled = ClockFilled {
         instants: Vec::new(),
@@ -1893,11 +1894,14 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
         let was = transition.path.as_str().to_string();
         transition.path = without_the_route_date(&transition.path, &mut Vec::new());
         if clock_filled.contains(&was) {
+            let with_an_instant = stamped.contains(&was);
             filled
                 .filled_after
-                .push((stamped.contains(&was), transition.after.clone()));
-            transition.after =
-                norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+                .push((with_an_instant, transition.after.clone()));
+            if with_an_instant || across_days {
+                transition.after =
+                    norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([0; 32]));
+            }
         }
     }
     // A citation's note names a route's destination, date folder included.
@@ -1916,14 +1920,37 @@ fn with_the_clock_masked(plan: &ResolvedPlan) -> (ResolvedPlan, ClockFilled) {
     (masked, filled)
 }
 
+/// Both plans with only what the clock fills masked, the hash of a day-only
+/// document masked only where the two plans' days differ: each plan's masked
+/// form with what it held, the first plan's then the second's.
+fn masked_alike(
+    first: &ResolvedPlan,
+    second: &ResolvedPlan,
+) -> ((ResolvedPlan, ClockFilled), (ResolvedPlan, ClockFilled)) {
+    let day_of = |plan| with_the_clock_masked(plan, true).1.days[0].clone();
+    let across_days = day_of(first) != day_of(second);
+    (
+        with_the_clock_masked(first, across_days),
+        with_the_clock_masked(second, across_days),
+    )
+}
+
+/// `plan` as the clock would have filled it on `then`'s day instead of `now`'s,
+/// every date it holds (folders, `day` values, the day of each instant)
+/// respelled.
+fn read_on_another_day(plan: &ResolvedPlan, now: &str, then: &str) -> ResolvedPlan {
+    let text = serde_json::to_string(plan).expect("a plan serializes");
+    serde_json::from_str(&text.replace(now, then)).expect("a plan deserializes")
+}
+
 /// **An apply plans what its preview did, apart from what the clock fills.**
 /// Three routes and five clock defaults across three tasks, beside a review
 /// whose default reads no clock: a second apart, the preview and the apply
 /// read the clock at different instants, so the `created` instants differ.
 /// With only what the clock fills masked (each default's value, the date
-/// folder of each route's paths, and the after-state of the three documents a
-/// clock default fills, two with an instant and one with a day alone, whose
-/// hash then holds a date that differs if the two readings straddle local
+/// folder of each route's paths, and the after-state of the two documents a
+/// clock default fills with an instant, and of the one it fills with a day
+/// alone only if the two readings' days differ, as they do across local
 /// midnight), each checked to be a well-formed reading, and the
 /// rest of every destination path left as planned, the two plans are equal in
 /// operations, transitions, conditions and provenance (citations, skipped
@@ -1957,8 +1984,8 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
     };
     assert_eq!(changeset, ChangesetOutcome::Committed);
 
-    let (preview_masked, preview_filled) = with_the_clock_masked(&preview);
-    let (apply_masked, apply_filled) = with_the_clock_masked(&apply);
+    let ((preview_masked, preview_filled), (apply_masked, apply_filled)) =
+        masked_alike(&preview, &apply);
     for (plan, filled) in [(&preview, &preview_filled), (&apply, &apply_filled)] {
         assert_eq!(
             (
@@ -1984,10 +2011,9 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         preview_filled.instants, apply_filled.instants,
         "the two readings of the clock are one instant"
     );
-    // Every document a clock default fills has its hash masked: `a.md` and
-    // `c.md` hold an instant, so their hashes differ between the plans, and
-    // `b.md` holds a day alone, which two readings share unless they straddle
-    // local midnight, so its hash is masked and not compared.
+    // `a.md` and `c.md` hold an instant, so their hashes differ between the
+    // plans and are masked. `b.md` holds a day alone, which two readings share
+    // unless they straddle local midnight, so its hash is masked only then.
     let instants_of = |filled: &ClockFilled| -> Vec<norn_wire::FileState> {
         filled
             .filled_after
@@ -2016,22 +2042,38 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
             .all(|(then, now)| *then != now),
         "a stamped document's hash is its instant's"
     );
-    // The day alone differing, as it does across local midnight, passes the
-    // mask: a day-only document's hash standing in for the other reading's.
-    let mut straddling = apply.clone();
-    let day_only = straddling
-        .transitions
-        .iter_mut()
-        .find(|transition| {
-            transition.path.as_str().starts_with(ROUTE_ROOT)
-                && transition.path.as_str().ends_with("/b.md")
-        })
-        .expect("the day-only document's transition");
-    day_only.after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32]));
+    // A day-only document's hash is the day's: with the two readings on one
+    // day, a hash that differs is a difference, not the clock's.
+    let set_day_only_hash = |plan: &mut ResolvedPlan, hash: [u8; 32]| {
+        plan.transitions
+            .iter_mut()
+            .find(|transition| {
+                transition.path.as_str().starts_with(ROUTE_ROOT)
+                    && transition.path.as_str().ends_with("/b.md")
+            })
+            .expect("the day-only document's transition")
+            .after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256(hash));
+    };
+    let mut other = apply.clone();
+    set_day_only_hash(&mut other, [7; 32]);
+    let (apply_alike, other_alike) = masked_alike(&apply, &other);
+    assert_ne!(
+        other_alike.0, apply_alike.0,
+        "a day-only document's hash passed the mask on one day"
+    );
+    // The readings on different days, as across local midnight, differ in the
+    // day-only hash, which then passes the mask, and in nothing else.
+    let day = apply_filled.days[0].clone();
+    let mut straddling = read_on_another_day(&apply, &day, "2099-01-01");
+    set_day_only_hash(&mut straddling, [7; 32]);
+    let (preview_alike, straddling_alike) = masked_alike(&preview, &straddling);
     assert_eq!(
-        with_the_clock_masked(&straddling).0,
-        preview_masked,
-        "a day-only document's hash passed the mask"
+        straddling_alike.1.days[0], "2099-01-01",
+        "the plan reads another day"
+    );
+    assert_eq!(
+        straddling_alike.0, preview_alike.0,
+        "a day-only document's hash was not masked across days"
     );
     // A difference that is not the clock's is not masked: the apply landing
     // a document under another name, or in a subfolder, is a difference.
@@ -2042,7 +2084,7 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         };
         *to = DocumentPath::new(altered.replace("DATE", "2026-01-01")).expect("a path");
         assert_ne!(
-            with_the_clock_masked(&other).0,
+            masked_alike(&preview, &other).1.0,
             preview_masked,
             "{altered} passed the mask"
         );
@@ -2057,7 +2099,7 @@ fn an_apply_plans_what_its_preview_did_apart_from_the_values_the_clock_fills() {
         .expect("the review's transition");
     review.after = norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32]));
     assert_ne!(
-        with_the_clock_masked(&other).0,
+        masked_alike(&preview, &other).1.0,
         preview_masked,
         "an unfilled document's hash passed the mask"
     );
@@ -3234,10 +3276,7 @@ fn a_repair_preview_answers_what_a_preview_of_its_plan_through_apply_answers() {
                 "h.md",
                 b"---\nsee: \"[[zz-repair/loose/a]]\"\n---\nUp [[zz-repair/loose/a]]\n",
             ),
-            (
-                "g.md",
-                b"---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\n",
-            ),
+            ("g.md", b"---\nsee: [\"[[zz-repair/loose/a]]\"]\n---\n"),
         ],
     );
     let _lease = attach::attach_and_wait(&host, vault.name());
