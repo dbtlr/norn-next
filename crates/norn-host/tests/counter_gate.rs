@@ -5906,13 +5906,14 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
             .len(),
         2
     );
-    assert!(
+    assert_eq!(
         snapshot
             .tombstone_at_path(
                 &DocumentPath::new("moved-deaths/0000/moved-target.md").expect("an exact path")
             )
             .expect("exact death")
-            .is_some()
+            .len(),
+        1
     );
     assert_eq!(
         snapshot

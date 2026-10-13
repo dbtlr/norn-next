@@ -69,7 +69,9 @@
 //! `suffix_key` and `folded_suffix_key` are stored anyway, because a statement
 //! seeks them: move-following reads the deaths a broken wikilink's suffix
 //! names ([`crate::Snapshot::tombstones_by_suffix`]), probing the one key the
-//! root decides as a document suffix probe does. Both are computed with `path`
+//! root decides as a document suffix probe does. The folded key is also sought
+//! by the exact-path read on a root that folds ASCII case, with folded path
+//! equality keeping the read at the exact place. Both are computed with `path`
 //! by [`crate::DocumentPath`] in the write that records the death, so they
 //! cannot disagree with it, and a re-death of the same path writes the same
 //! keys. `tombstones_suffix_key` and `tombstones_folded_suffix_key` are partial,

@@ -84,7 +84,7 @@ fn the_moved_bars_cover_every_statement() {
             MovedStatement::TombstonesBySuffix => {
                 "tombstone_suffix_plans_seek_only_the_roots_partial_index"
             }
-            MovedStatement::TombstoneAtPath => "exact_tombstone_plans_seek_the_unique_path_index",
+            MovedStatement::TombstoneAtPath => "exact_tombstone_plans_seek_the_roots_path_index",
             MovedStatement::LiveHolders => "live_holder_plans_seek_the_hash_index_without_sorting",
         };
         assert!(!bar.is_empty());
@@ -117,8 +117,9 @@ fn tombstone_suffix_reads_use_the_roots_raw_or_folded_key() {
     }
 }
 
-/// Where three deaths share the probed key, the two named are the first in
-/// path order, whichever order one increment recorded them in.
+/// Deaths sharing a key come in path order. Across two reductions they come
+/// range by range, each in key-then-path order, so the named pair never depends
+/// on row ids or the order one increment recorded the deaths in.
 #[test]
 fn deaths_sharing_a_key_are_named_in_path_order() {
     for (order, spellings, named) in [
@@ -153,6 +154,37 @@ fn deaths_sharing_a_key_are_named_in_path_order() {
             assert_eq!(
                 found,
                 named.map(path).to_vec(),
+                "{order:?}, reversed {reversed}"
+            );
+        }
+    }
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        for reversed in [false, true] {
+            let scratch = Scratch::new("moved-two-reduction-ties");
+            let mut store = scratch.open_under(order);
+            let mut entries = [
+                ("z/a.b.md", Provenance::PlanDelete),
+                ("y/a.b.md", Provenance::PlanDelete),
+                ("x/a.md", Provenance::PlanDelete),
+                ("w/a.b.md", Provenance::PlanDelete),
+                ("v/a.md", Provenance::PlanDelete),
+            ];
+            if reversed {
+                entries.reverse();
+            }
+            deaths(&mut store, &entries);
+            let found: Vec<_> = snapshot(&store)
+                .tombstones_by_suffix("a.b")
+                .expect("two-reduction deaths")
+                .into_iter()
+                .map(|death| death.path)
+                .collect();
+            assert_eq!(
+                found,
+                vec![path("v/a.md"), path("x/a.md")],
                 "{order:?}, reversed {reversed}"
             );
         }
@@ -196,19 +228,130 @@ fn tombstone_at_path_returns_one_or_none() {
     let read = snapshot(&store);
     let found = read
         .tombstone_at_path(&path("Old/Target.md"))
-        .expect("one death")
-        .expect("present");
+        .expect("one death");
+    assert_eq!(found.len(), 1);
+    let found = &found[0];
     assert_eq!(found.path, path("Old/Target.md"));
     assert_eq!(found.provenance, Provenance::HealPrune);
     assert_eq!(found.last_content_hash, None);
     assert_eq!(
         read.tombstone_at_path(&path("absent.md")).expect("absent"),
-        None
+        Vec::new()
     );
     assert_eq!(
         read.tombstone_at_path(&path("old/target.md"))
             .expect("other spelling"),
-        None
+        Vec::new()
+    );
+}
+
+/// A folding root reads deaths at the folded place and names them in path order.
+#[test]
+fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
+    let scratch = Scratch::new("moved-folded-exact");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    deaths(&mut store, &[("Old/Target.md", Provenance::PlanDelete)]);
+    let read = snapshot(&store);
+    for spelling in ["old/target.md", "OLD/TARGET.MD"] {
+        let found = read
+            .tombstone_at_path(&path(spelling))
+            .expect("folded death");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, path("Old/Target.md"));
+    }
+    assert!(
+        read.tombstone_at_path(&path("absent.md"))
+            .expect("absent")
+            .is_empty()
+    );
+    drop(read);
+    for reversed in [false, true] {
+        let scratch = Scratch::new("moved-folded-exact-ties");
+        let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+        deaths(&mut store, &[("x/TARGET.md", Provenance::Quarantine)]);
+        let mut entries = [
+            ("x/Target.md", Provenance::PlanDelete),
+            ("x/target.md", Provenance::WatcherRemoval),
+        ];
+        if reversed {
+            entries.reverse();
+        }
+        deaths(&mut store, &entries);
+        let found: Vec<_> = snapshot(&store)
+            .tombstone_at_path(&path("x/TARGET.MD"))
+            .expect("folded deaths")
+            .into_iter()
+            .map(|death| death.path)
+            .collect();
+        assert_eq!(
+            found,
+            vec![path("x/Target.md"), path("x/target.md")],
+            "reversed {reversed}"
+        );
+    }
+}
+
+/// A case-variant Markdown link can follow the same moved bytes as a wikilink.
+#[test]
+fn a_case_variant_markdown_link_finds_its_death_on_a_folding_root() {
+    use crate::health::{body_of, derived};
+    use norn_wire::FindingKind;
+
+    let scratch = Scratch::new("moved-folding-markdown");
+    let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+    let target = derived("notes/a.md", "moved bytes\n");
+    let hash = target.content_hash.clone();
+    write_documents(
+        &mut store.begin_request(),
+        &[
+            target,
+            derived("src/h.md", &body_of(&["[x](../Notes/A.md)", "[[Notes/A]]"])),
+        ],
+    );
+    let judged = |store: &mut Store| -> Vec<Option<FindingKind>> {
+        let findings = store
+            .begin_request()
+            .judge_link_health(&[path("src/h.md")], &ContentModel::none())
+            .expect("judging links");
+        let mut kinds = vec![None, None];
+        for finding in findings {
+            kinds[finding.ordinal.expect("a link finding") as usize] = Some(finding.kind);
+        }
+        kinds
+    };
+    assert_eq!(
+        judged(&mut store),
+        vec![None, None],
+        "both links resolve live"
+    );
+    deaths(&mut store, &[("notes/a.md", Provenance::WatcherRemoval)]);
+    write_documents(
+        &mut store.begin_request(),
+        &[document("archive/a.md", &hash, "moved bytes\n")],
+    );
+    assert_eq!(
+        judged(&mut store),
+        vec![Some(FindingKind::Broken), Some(FindingKind::Broken)],
+        "both links break"
+    );
+    let read = snapshot(&store);
+    let by_suffix = read.tombstones_by_suffix("Notes/A").expect("suffix death");
+    assert_eq!(by_suffix.len(), 1);
+    let exact = read
+        .tombstone_at_path(&path("Notes/A.md"))
+        .expect("exact death");
+    assert_eq!(exact, by_suffix);
+    assert_eq!(exact[0].path, path("notes/a.md"));
+    assert_eq!(exact[0].last_content_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(
+        read.live_holders(
+            exact[0]
+                .last_content_hash
+                .as_deref()
+                .expect("recorded hash")
+        )
+        .expect("holders"),
+        vec![path("archive/a.md")]
     );
 }
 
@@ -231,11 +374,10 @@ fn a_redeath_keeps_the_recorded_hash_and_suffix_keys() {
         let suffix = read.tombstones_by_suffix("Target").expect("suffix death");
         let exact = read
             .tombstone_at_path(&path("Old/Target.md"))
-            .expect("exact death")
-            .expect("present");
-        assert_eq!(suffix, vec![exact.clone()]);
-        assert_eq!(exact.last_content_hash.as_deref(), Some("first-hash"));
-        assert_eq!(exact.provenance, Provenance::HealPrune);
+            .expect("exact death");
+        assert_eq!(suffix, exact);
+        assert_eq!(exact[0].last_content_hash.as_deref(), Some("first-hash"));
+        assert_eq!(exact[0].provenance, Provenance::HealPrune);
     }
 }
 
@@ -263,7 +405,7 @@ fn quarantine_is_unseen_by_suffix_and_exact_path_even_after_redeath() {
     assert_eq!(
         read.tombstone_at_path(&path("kept/target.md"))
             .expect("quarantine"),
-        None
+        Vec::new()
     );
     drop(read);
     deaths(&mut store, &[("old/target.md", Provenance::Quarantine)]);
@@ -276,7 +418,7 @@ fn quarantine_is_unseen_by_suffix_and_exact_path_even_after_redeath() {
     assert_eq!(
         read.tombstone_at_path(&path("old/target.md"))
             .expect("reclassified"),
-        None
+        Vec::new()
     );
 }
 
@@ -361,17 +503,25 @@ fn tombstone_suffix_plans_seek_only_the_roots_partial_index() {
     }
 }
 
-/// The exact-path statement seeks the unique index with no scan or sort.
+/// The exact-path statement seeks the root's index with no scan or sort.
 #[test]
-fn exact_tombstone_plans_seek_the_unique_path_index() {
-    let scratch = Scratch::new("moved-exact-plans");
-    let mut store = scratch.open();
-    deaths(&mut store, &[("old/target.md", Provenance::PlanDelete)]);
-    let plans = snapshot(&store)
-        .tombstone_at_path_plans(&path("old/target.md"))
-        .expect("path plans");
-    let plan = plan_of(&plans, norn_store::MovedStatement::TombstoneAtPath);
-    judge_seek(&plan, "tombstones", "tombstones_path");
+fn exact_tombstone_plans_seek_the_roots_path_index() {
+    for (order, index) in [
+        (StoredPathOrder::Sensitive, "tombstones_path"),
+        (
+            StoredPathOrder::AsciiCaseInsensitive,
+            "tombstones_folded_suffix_key",
+        ),
+    ] {
+        let scratch = Scratch::new("moved-exact-plans");
+        let mut store = scratch.open_under(order);
+        deaths(&mut store, &[("old/target.md", Provenance::PlanDelete)]);
+        let plans = snapshot(&store)
+            .tombstone_at_path_plans(&path("old/target.md"))
+            .expect("path plans");
+        let plan = plan_of(&plans, norn_store::MovedStatement::TombstoneAtPath);
+        judge_seek(&plan, "tombstones", index);
+    }
 }
 
 /// Hash holders are bounded to two and returned in path order, independent of row ids.

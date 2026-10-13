@@ -86,7 +86,8 @@
 //!   [`Snapshot::similar_stems_plans`] explains what it ran.
 //! - [`Snapshot::tombstones_by_suffix`] — recorded deaths a wikilink suffix
 //!   names, bounded to two for Layer 5C move-following;
-//!   [`Snapshot::tombstone_at_path`] reads a death by exact path, and
+//!   [`Snapshot::tombstone_at_path`] reads deaths at an exact path under the
+//!   root's case behaviour, bounded to two at a folded place, and
 //!   [`Snapshot::live_holders`] reads at most two live documents holding a
 //!   content hash. Their `*_plans` methods explain what ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.

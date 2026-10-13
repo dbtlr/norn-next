@@ -13,11 +13,15 @@
 //!   document suffix probe does. The ambiguity-ignore set is not applied: it
 //!   narrows which live documents a link resolves to, not which deaths it can
 //!   follow.
+//! - The exact-path read uses the root's case behaviour: bytewise on a root
+//!   that tells spellings apart, or an equality seek of the folded suffix key
+//!   with a folded path equality on a root that folds ASCII case. Several
+//!   deaths at one folded place remain several deaths, bounded to two.
 //! - **A quarantine death is never read.** Its file is still on disk, so it
 //!   never moved, and following its last good hash would point a link at a
 //!   copy. The suffix indexes hold no quarantine row, so the limit counts only
 //!   deaths whose file is gone.
-//! - Both bounded reads walk an index that runs on to `path`, so which two
+//! - These reads walk an index that runs on to `path`, so which two
 //!   deaths or holders a caller names does not depend on row ids.
 //!
 //! Each shape is named by [`MovedStatement`] and runs through
@@ -45,7 +49,7 @@ use crate::store::Snapshot;
 pub enum MovedStatement {
     /// Recorded deaths in the suffix ranges the root's key opens.
     TombstonesBySuffix,
-    /// One recorded death at its exact stored path.
+    /// Recorded deaths at an exact place under the root's case behaviour.
     TombstoneAtPath,
     /// Live documents holding a content hash, in path order.
     LiveHolders,
@@ -117,13 +121,14 @@ impl Snapshot {
         self.explained(record, |statement, _, plan| MovedPlan { statement, plan })
     }
 
-    /// The death at an exact stored path, or none where no death stands there.
+    /// At most two deaths at an exact place, in bytewise path order.
     /// Quarantine is excluded because the file remains on disk.
-    /// Equality is bytewise, including on a root that folds ASCII case.
+    /// A root that tells spellings apart compares paths bytewise; a root
+    /// that folds ASCII case reads deaths at the folded place.
     pub fn tombstone_at_path(
         &self,
         path: &DocumentPath,
-    ) -> Result<Option<MovedTombstone>, StoreError> {
+    ) -> Result<Vec<MovedTombstone>, StoreError> {
         self.read_tombstone_at_path(path, &mut Vec::new())
     }
 
@@ -175,26 +180,36 @@ impl Snapshot {
         .collect()
     }
 
-    /// Read the unique path once, recording the statement that ran.
+    /// Read the exact place under the root's case behaviour, recording the
+    /// statement that ran. The folded seek names at most two deaths in path order.
     fn read_tombstone_at_path(
         &self,
         path: &DocumentPath,
         record: &mut Vec<Ran>,
-    ) -> Result<Option<MovedTombstone>, StoreError> {
-        let ran = Ran::new(
-            MovedStatement::TombstoneAtPath,
-            (
+    ) -> Result<Vec<MovedTombstone>, StoreError> {
+        let query = match SuffixKey::under(self.path_order()) {
+            SuffixKey::Raw => (
                 "SELECT path, last_content_hash, provenance FROM tombstones \
                  WHERE path = ?1 AND provenance <> 'quarantine'"
                     .to_string(),
                 vec![Value::Text(path.as_str().to_string())],
             ),
-        );
+            SuffixKey::Folded => (
+                "SELECT path, last_content_hash, provenance FROM tombstones \
+                 WHERE folded_suffix_key = ?1 AND path = ?2 COLLATE NOCASE \
+                 AND provenance <> 'quarantine' ORDER BY path LIMIT 2"
+                    .to_string(),
+                vec![
+                    Value::Text(path.folded_suffix_key().to_string()),
+                    Value::Text(path.as_str().to_string()),
+                ],
+            ),
+        };
+        let ran = Ran::new(MovedStatement::TombstoneAtPath, query);
         self.run_statement(record, ran, moved_tombstone)
             .map_err(|problem| error::sql("reading a tombstone at a path", problem))?
             .into_iter()
-            .next()
-            .transpose()
+            .collect()
     }
 
     /// Read the suffix ranges once, recording the statement that ran.
