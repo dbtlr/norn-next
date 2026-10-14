@@ -9,8 +9,11 @@ fn score_note(tag: &str) -> String {
     format!("declared tag `{tag}` is one edit away by optimal string alignment under the tag fold")
 }
 
-/// The ruled whole-name tag measure, shared by the read gate and the fix.
-pub(super) fn one_edit(from: &str, tag: &str) -> bool {
+/// Count a literal candidate compared by the read gate or fix under the ruled measure.
+pub(super) fn one_edit(repairing: &super::Repairing<'_>, from: &str, tag: &str) -> bool {
+    let mut work = repairing.work.get();
+    work.declared_tags += 1;
+    repairing.work.set(work);
     let from: Vec<_> = norn_wire::fold_tag(from).chars().collect();
     let candidate: Vec<_> = norn_wire::fold_tag(tag).chars().collect();
     from.len() >= 3
@@ -32,10 +35,7 @@ fn propose(
         .expect("an undeclared tag names its tag");
     let mut winners = Vec::new();
     for tag in document.schema().tags().declared() {
-        let mut work = document.repairing.work.get();
-        work.declared_tags += 1;
-        document.repairing.work.set(work);
-        if one_edit(from, tag) {
+        if one_edit(document.repairing, from, tag) {
             winners.push(tag.to_string());
         }
     }

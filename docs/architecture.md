@@ -2881,15 +2881,16 @@ list as its synonyms are. Every derived fix is composed and judged on the compos
 declared one is, so a wrap that brings in required fields is `brings_in_required_fields`.
 A plain wrap or unwrap the judge admits stands alone. **A wrap or unwrap the judge refuses
 follows one composition table.** The composed value is always built with the field's own
-element fixes for the violations the reshape exposes — boolean case, a closed-set synonym or
-fold, or a bare value made a link — and judged afresh as one `set_frontmatter` from the state
-the shape fix composes onto, whatever refused the plain reshape. A composed value the judge
-admits is the fix: it cites the shape finding at the weaker confidence of the shape and every
-element fix, carrying the element fixes' notes, and one below the threshold is
-`below_threshold` with the combined operation as `proposed`. A composed value the judge
-refuses, or one that cannot be built because an exposed element has no answer or its fix
-skips, reports the first reason that applies: `brings_in_required_fields` where the change
-brings in required fields, naming those its own value brings in; then `judge_would_refuse`
+element fixes for the violations the reshape exposes — boolean case, a closed-set synonym,
+fold or closest member, or a bare value made a link — and judged afresh as one
+`set_frontmatter` from the state the shape fix composes onto, whatever refused the plain
+reshape. A composed value the judge admits is the fix: it cites the shape finding at the
+weaker confidence of the shape and every element fix, carrying the element fixes' notes,
+and one below the threshold is `below_threshold` with the combined operation as `proposed`.
+A composed value the judge refuses, or one that cannot be built because an exposed element
+has no answer or its fix skips, reports the first reason that applies:
+`brings_in_required_fields` where the change brings in required fields, naming those its
+own value brings in; then `judge_would_refuse`
 where it introduces any violation beyond its exposed elements' findings, a refused composed
 value carried as the candidate; then the exposed element's own skip with its reason and
 decision data — `ambiguous_link` with its documents, `no_declared_fix` with its note where it
@@ -2902,13 +2903,15 @@ composes in the link phase with its respell veto, after the batch's routes settl
 link wrap or unwrap the judge admits keeps its place in finding order.
 **Three deterministic families propose at `suggested` confidence.** A missing heading
 anchor on a link resolving to one document takes the unique best heading at Jaccard score
-at least 0.50 over padded trigrams, comparing the written anchor and heading text under
-the shared NFC and lowercase fold; duplicate best texts tie. Its indexed headings are
-read by one document range seek, without its body, and `rewrite_anchor` writes heading
-text for a wikilink or the stored slug for a Markdown link, an anchor-only link naming
-its own holder included. The operation carries an author `content_hash` condition on the
-target with the snapshot's recorded hash, so changing that heading refuses apply and the
-fresh plan keeps the evidence on the unresolved operation. Block references and headings
+at least 0.50 over padded trigrams, comparing the anchor as the link reads it and heading
+text under the shared NFC and lowercase fold; duplicate best texts tie. A Markdown
+anchor is scored percent-decoded and rewritten by its exact written fragment. Indexed
+headings are read by one document range seek, without its body, and `rewrite_anchor`
+writes heading text for a wikilink or the stored slug for a Markdown link, an anchor-only
+link naming its own holder included. The operation carries an author `content_hash`
+condition on the target with the snapshot's recorded hash, so changing that heading refuses
+apply and the fresh plan keeps the evidence on the unresolved operation.
+Block references and headings
 whose syntax's written form is empty or starts with `^` have no such suggestion. A target
 whose body the batch changes with `rewrite_tag`, its holder included, is not scored from
 its snapshot headings; a below-threshold tag proposal excludes it too. Each holder matches
@@ -2932,11 +2935,12 @@ compared, declared tags compared and heading rows returned; these follow their c
 not the size of the vault. It also counts whole-document suggestion compositions. A
 holder's anchor proposals compose in one name batch, and its tag proposals in another,
 each matching the original document with one parse, one read-back proof and one ordinary
-judgment. Scan refusals belong to their respelling. A refused proof or judgment splits the
-set in halves, each half composed onto the state accepted predecessors left, until each
-refused fix takes its own reason. With no refusals the whole-document passes are constant;
-for k refused fixes of N they grow as k log N. Every tag fix is checked to no longer hold
-its own finding after the composed judgment.
+judgment. Scan refusals belong to their respelling. A refused proof or judgment searches
+halves over the same starting state for individually refused fixes, each taking its own
+reason. The survivors compose again as one batch over that state, so names never chain.
+A refused set with no individual refusal is refused whole with the set's reason. With no
+refusals the whole-document passes are constant. Every tag fix is checked to no longer
+hold its own finding after the composed judgment.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
 pooled for a finding and the strongest level present decides. A derived or suggested fix the threshold
@@ -3391,7 +3395,9 @@ whole name equals `from` under the tag fold to exactly `to`, preserving each mar
 spelling convention; matching none leaves it unresolved, and both kinds prove their edits
 by reading the document back. All acted name operations of one holder compose in one
 batch per kind, after its document-local operations and before address cascades. A shared
-proof refusal is searched by halving, with each operation's own position and detail kept.
+proof refusal is searched by halving over the same starting bytes, with each operation's
+own position and detail kept. Survivors compose again as one batch over those bytes; a
+refused set with no individual refusal is refused whole.
 A plan also carries document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,

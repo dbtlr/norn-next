@@ -237,7 +237,7 @@ pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
                 .schema()
                 .tags()
                 .declared()
-                .any(|tag| tags::one_edit(from, tag))
+                .any(|tag| tags::one_edit(repairing, from, tag))
         }),
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
@@ -782,7 +782,7 @@ impl<'d> Reckoned<'d> {
                 FindingKind::ShapeMismatch => {
                     match derived::reshape(composing, &state, row, finding, field, None, &|_| None)
                     {
-                        Ok(derived::Reshaping::Fixed(fix)) => Ok(fix),
+                        Ok(derived::Reshaping::Fixed(fix)) => Ok(*fix),
                         Ok(derived::Reshaping::NeedsLinks) => {
                             link_shapes.push(at);
                             continue;
@@ -3691,6 +3691,47 @@ mod tests {
         );
         assert_eq!(planned.citations, vec![citing_derived(1, &[(1, "3")])]);
         assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+    }
+
+    /// A wrap and its exposed closest-member fix share one write at the weaker level.
+    #[test]
+    fn a_wrap_composes_with_its_closest_member_at_suggested_and_proposes_it_below_threshold() {
+        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [done]}\n";
+        for threshold in [Confidence::Suggested, Confidence::DEFAULT_THRESHOLD] {
+            let vault = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: dnoe\n---\n")])
+                .at(threshold);
+            let planned = vault.plan(&[judging(
+                1,
+                SHAPE_MISMATCH,
+                "a.md",
+                "status",
+                &AuthoredValue::string("dnoe"),
+            )]);
+
+            if threshold == Confidence::Suggested {
+                assert_eq!(
+                    planned.operations,
+                    vec![set_to(1, "a.md", "status", list(&["done"]))]
+                );
+                assert_eq!(
+                    planned.citations,
+                    vec![Citation::new(
+                        OperationId::new("repair-1").unwrap(),
+                        vec![CitedFinding::new(1, Confidence::Suggested)
+                            .with_value(norn_store::value_head("dnoe"))
+                            .with_notes(vec!["closest member `done` is 1 edit away by optimal string alignment, at most 1 for its 4 characters".to_string()])],
+                    )]
+                );
+                assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+            } else {
+                assert!(planned.operations.is_empty());
+                assert_eq!(reasons(&planned), vec![(1, SkipReason::BelowThreshold)]);
+                assert_eq!(
+                    planned.skipped[0].proposed,
+                    Some(proposing("a.md", "status", list(&["done"])))
+                );
+            }
+        }
     }
 
     /// **A field declared single holding a one-item list is set to that

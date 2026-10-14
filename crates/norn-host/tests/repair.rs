@@ -5412,6 +5412,74 @@ fn a_vault_with_a_missing_anchor(label: &str) -> (Sandbox, attach::Vault, attach
     )
 }
 
+/// Tag comparisons count even when the read gate finds no possible fix.
+#[test]
+fn an_unfixable_undeclared_tag_counts_each_declared_tag_the_read_gate_compares() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-unfixable-tag-reading",
+        "version: 1\ntags:\n  declared: [alpha, bravo, delta]\n  undeclared: report\n",
+        &[("a.md", b"#zzzzzz\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = host.read_evidence();
+
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        host.read_evidence()
+            .since(before)
+            .repair_suggestions
+            .declared_tags,
+        3
+    );
+}
+
+/// A Markdown suggestion scores the decoded anchor and rewrites its written fragment.
+#[test]
+fn a_percent_encoded_markdown_anchor_gets_its_closest_heading_fix_and_resolves() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "repair-percent-encoded-anchor",
+        "version: 1\n",
+        &[
+            ("zz-holder.md", b"[x](zz-target.md#Importnt%20Heading)\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_anchor(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "zz-target.md",
+            "Importnt%20Heading",
+            "important-heading",
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Suggested
+    );
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[x](zz-target.md#important-heading)\n"
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
 /// A changed target heading invalidates the snapshot evidence of an anchor fix.
 #[test]
 fn a_previewed_anchor_suggestion_refuses_apply_when_the_target_heading_changes() {

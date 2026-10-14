@@ -5948,6 +5948,7 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
 
 /// Preview the three suggestions on one holder with M members, D literal
 /// tags and H indexed headings, retaining only their logical candidate work.
+/// The field finding admits the holder before the read gate compares any tags.
 fn suggestion_reading(profile: &norn_fixtures::Profile, sizes: [usize; 3]) -> CounterSnapshot {
     let [members, tags, headings] = sizes;
     let sandbox = Sandbox::new(
@@ -6152,13 +6153,14 @@ fn missing_anchor_batches_keep_holder_compositions_and_heading_reads_flat() {
     }
 }
 
-/// More undeclared tags spend one holder composition and D comparisons per finding.
+/// More undeclared tags spend one holder composition and D comparisons per finding,
+/// beside the read gate's one comparison finding the first eligible tag.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn undeclared_tag_batches_keep_holder_compositions_flat() {
     for count in [2, 4, 8] {
         let work = name_batch_reading(count, true);
         assert_eq!(work.compositions, 1);
-        assert_eq!(work.declared_tags, count as u64);
+        assert_eq!(work.declared_tags, count as u64 + 1);
     }
 }

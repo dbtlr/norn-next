@@ -182,7 +182,7 @@ impl Link {
 
     /// The heading fragment's written bytes inside the token, excluding `#`.
     /// A decoded or escaped destination with no literal stem has no such span.
-    pub(crate) fn heading_anchor_range(&self) -> Option<Range<usize>> {
+    pub fn heading_anchor_range(&self) -> Option<Range<usize>> {
         self.anchor.as_ref()?;
         let stem = self.stem_range.as_ref()?;
         let start = stem.end + 1;

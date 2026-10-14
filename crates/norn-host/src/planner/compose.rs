@@ -175,8 +175,9 @@ pub(crate) struct Unresolvable {
 /// what it already holds, acts, and its document may land found.
 /// **Name rewrites precede address cascades.** All acted anchor operations
 /// of one holder share one parse and proof, and so do its tag operations.
-/// A refused proof is searched by halving the set onto the state accepted
-/// predecessors left, recording each refused operation's position and detail.
+/// A refused proof is searched by halving over the same starting bytes. Individually
+/// refused operations keep their position and detail; survivors compose again as one
+/// batch over those bytes. A set with no individual refusal is refused whole.
 pub(crate) fn compose<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -1218,6 +1219,37 @@ mod tests {
         assert_eq!(composition.unresolvable.len(), 1);
         assert_eq!(composition.unresolvable[0].position, 0);
         assert_eq!(after_text(&composition, "h.md").as_deref(), Some("plain"));
+    }
+
+    /// Isolating a refused name operation keeps every survivor on the original bytes.
+    #[test]
+    fn halving_a_refused_anchor_batch_does_not_chain_its_survivors() {
+        let vault = MemoryVault::with(&[("h.md", "[[t#old]] [[t#new]] [[t#bad]]")]);
+        let operations: Vec<_> = [("old", "new"), ("new", "done"), ("bad", "new|alias")]
+            .into_iter()
+            .map(|(from, to)| {
+                Operation::new(OperationKind::rewrite_anchor(
+                    path("h.md"),
+                    norn_wire::LinkFamily::Wikilink,
+                    "t",
+                    from,
+                    to,
+                ))
+            })
+            .collect();
+        let composition = compose(&operations, &in_order(&operations), &vault).expect("a view");
+        assert_eq!(
+            after_text(&composition, "h.md").as_deref(),
+            Some("[[t#new]] [[t#done]] [[t#bad]]")
+        );
+        assert_eq!(
+            composition
+                .unresolvable
+                .iter()
+                .map(|refused| refused.position)
+                .collect::<Vec<_>>(),
+            [2]
+        );
     }
 
     /// The tag rewrite edits the document where the plan leaves it.

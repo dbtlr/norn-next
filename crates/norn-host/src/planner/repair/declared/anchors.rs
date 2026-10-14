@@ -59,9 +59,13 @@ pub(super) fn fixes<R: Reading>(
         }) else {
             continue;
         };
-        let Some(from) = link.anchor.as_deref() else {
+        let Some(anchor) = link.anchor.as_deref() else {
             continue;
         };
+        let from = link
+            .heading_anchor_range()
+            .map(|range| &link.raw[range])
+            .unwrap_or(anchor);
         let address = match &link.protocol {
             Some(protocol) => format!("{protocol}://{}", link.target),
             None => link.target.clone(),
@@ -99,7 +103,7 @@ pub(super) fn fixes<R: Reading>(
         let Some((held, trigrams)) = &headings[target] else {
             continue;
         };
-        let query = similarity::trigrams(from);
+        let query = similarity::trigrams(link.anchor.as_deref().expect("a grouped heading anchor"));
         let mut best = similarity::CUTOFF;
         let mut winners = Vec::new();
         for (heading, trigrams) in held.headings.iter().zip(trigrams) {

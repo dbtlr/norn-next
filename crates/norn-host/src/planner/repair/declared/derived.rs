@@ -174,7 +174,7 @@ pub(super) fn replacement(member: AuthoredValue) -> Replacement {
 
 /// What a shape fix reaches now, or leaves for the settled routes to answer.
 pub(super) enum Reshaping {
-    Fixed(Fix),
+    Fixed(Box<Fix>),
     NeedsLinks,
 }
 
@@ -211,7 +211,7 @@ pub(super) fn reshape(
             replacement(link),
             vetoed,
         )
-        .map(Reshaping::Fixed);
+        .map(|fix| Reshaping::Fixed(Box::new(fix)));
     }
     let Some(reshaped) = reshaped(shape, &value) else {
         return Err(Box::new(crate::planner::repair::skipped(row)));
@@ -245,12 +245,12 @@ pub(super) fn reshape(
                 ));
             }
             document.within_threshold(Confidence::Derived, row, &set)?;
-            return Ok(Reshaping::Fixed(Fix {
+            return Ok(Reshaping::Fixed(Box::new(Fix {
                 removed_field: None,
                 operations: vec![set],
                 cited: vec![cited(row, Confidence::Derived, Vec::new())],
                 state: composed,
-            }));
+            })));
         }
         Err(skip) => skip,
     };
@@ -270,7 +270,7 @@ pub(super) fn reshape(
         elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
         elements::Reshaped::Replaced(replacement) => {
             fix_value(document, state, row, finding, field, replacement, vetoed)
-                .map(Reshaping::Fixed)
+                .map(|fix| Reshaping::Fixed(Box::new(fix)))
         }
     }
 }

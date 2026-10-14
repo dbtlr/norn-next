@@ -264,10 +264,11 @@ pub(crate) fn rewritten_names(
     Ok((Arc::from(result.text.into_bytes()), outcomes))
 }
 
-/// Compose a nonempty set once, splitting refused sets in halves and giving
-/// each half the state its accepted predecessors left. Scan refusals remain
-/// input-aligned; only a shared proof or judgment refusal invokes the search.
-pub(crate) fn compose_set<S, F, E>(
+/// Compose a nonempty set over its starting state, never chaining its members.
+/// A shared refusal searches halves over that same state for individual refusals;
+/// the survivors compose again as one batch. If no member is refused individually,
+/// every member takes the set's refusal. Scan refusals remain input-aligned.
+pub(crate) fn compose_set<S, F: Clone, E: Clone>(
     state: &mut S,
     fixes: &[F],
     attempt: &mut impl FnMut(&S, &[F]) -> Result<(S, Vec<Result<(), E>>), E>,
@@ -277,14 +278,48 @@ pub(crate) fn compose_set<S, F, E>(
             *state = next;
             outcomes
         }
-        Err(reason) if fixes.len() == 1 => vec![Err(reason)],
-        Err(_) => {
-            let (left, right) = fixes.split_at(fixes.len() / 2);
-            let mut outcomes = compose_set(state, left, attempt);
-            outcomes.extend(compose_set(state, right, attempt));
+        Err(reason) => {
+            let mut outcomes = individual_refusals(state, fixes, reason.clone(), attempt);
+            if outcomes.iter().all(Result::is_ok) {
+                return fixes.iter().map(|_| Err(reason.clone())).collect();
+            }
+            let survivors: Vec<_> = fixes
+                .iter()
+                .zip(&outcomes)
+                .filter_map(|(fix, outcome)| outcome.is_ok().then_some(fix.clone()))
+                .collect();
+            if !survivors.is_empty() {
+                for (outcome, retried) in outcomes
+                    .iter_mut()
+                    .filter(|outcome| outcome.is_ok())
+                    .zip(compose_set(state, &survivors, attempt))
+                {
+                    *outcome = retried;
+                }
+            }
             outcomes
         }
     }
+}
+
+/// Search a refused set without carrying any trial's bytes into another trial.
+fn individual_refusals<S, F, E>(
+    state: &S,
+    fixes: &[F],
+    reason: E,
+    attempt: &mut impl FnMut(&S, &[F]) -> Result<(S, Vec<Result<(), E>>), E>,
+) -> Vec<Result<(), E>> {
+    if fixes.len() == 1 {
+        return vec![Err(reason)];
+    }
+    let (left, right) = fixes.split_at(fixes.len() / 2);
+    [left, right]
+        .into_iter()
+        .flat_map(|half| match attempt(state, half) {
+            Ok((_, outcomes)) => outcomes,
+            Err(reason) => individual_refusals(state, half, reason, attempt),
+        })
+        .collect()
 }
 
 /// Word the text layer's refusal without exposing its enum spelling.

@@ -8,6 +8,7 @@ use norn_wire::{
 };
 
 /// One operation and the selected findings its original name group answers.
+#[derive(Clone)]
 pub(super) struct NameFix {
     /// The name operation, written where its holder ends.
     pub operation: OperationKind,
