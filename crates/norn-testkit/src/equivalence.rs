@@ -123,9 +123,9 @@ pub struct StoreProjection {
     /// Every rule set the store holds, by the fingerprint it is held under and
     /// its names, in that order.
     rule_sets: Vec<StoredRuleSet>,
-    /// Every quarantined place's hash — the bytes its content finding was
+    /// Every content-quarantined place's hash — the bytes its content finding was
     /// judged over — in path order.
-    quarantines: Vec<(DocumentPath, String)>,
+    content_quarantines: Vec<(DocumentPath, String)>,
 }
 
 /// One document row and everything derived from it.
@@ -341,7 +341,7 @@ impl StoreProjection {
             trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
-            quarantines: Vec::new(),
+            content_quarantines: Vec::new(),
         };
         let mut request = store.begin_request();
 
@@ -470,10 +470,10 @@ impl StoreProjection {
 
         let mut place = None;
         loop {
-            let page = request.quarantined_hashes_after(place.as_ref(), PAGE)?;
+            let page = request.content_quarantine_hashes_after(place.as_ref(), PAGE)?;
             let Some((last, _)) = page.last() else { break };
             place = Some(last.clone());
-            projection.quarantines.extend(page);
+            projection.content_quarantines.extend(page);
         }
 
         projection.vault_schema = request.vault_schema_pin()?.map(|pin| ProjectedSchema {
@@ -514,9 +514,9 @@ impl StoreProjection {
         &self.rule_sets
     }
 
-    /// Every quarantined place's hash, in path order.
-    pub fn quarantines(&self) -> &[(DocumentPath, String)] {
-        &self.quarantines
+    /// Every content-quarantined place's hash, in path order.
+    pub fn content_quarantines(&self) -> &[(DocumentPath, String)] {
+        &self.content_quarantines
     }
 
     /// The document stored at `path`, and nothing where no row stands there.
@@ -766,9 +766,9 @@ impl StoreProjection {
         // A quarantined place's hash is the bytes its content finding was
         // judged over, so two stores that judged the same bytes there hold the
         // same one.
-        for (place, hash) in &self.quarantines {
+        for (place, hash) in &self.content_quarantines {
             entries.push((
-                format!("quarantine[{}].content_hash", place.as_str()),
+                format!("content quarantine[{}].content_hash", place.as_str()),
                 quoted(hash),
             ));
         }
@@ -1538,7 +1538,7 @@ mod tests {
             trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
-            quarantines: Vec::new(),
+            content_quarantines: Vec::new(),
         }
     }
 

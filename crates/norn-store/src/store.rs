@@ -1090,7 +1090,7 @@ impl Store {
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Nine checks, because a store has nine kinds of consistency to lose:
+    /// Ten checks, because a store has ten kinds of consistency to lose:
     /// the pages themselves, the foreign keys that carry cascade deletion, the
     /// full-text index against the column it is an index of, the frontmatter
     /// projection against being JSON at all, the closed vocabularies against
@@ -1099,8 +1099,9 @@ impl Store {
     /// (`verify_rule_sets`: each set's spelling, the fingerprint it
     /// is held under, its names against its citers' rule rows, and a set no
     /// finding cites), the document and tombstone pillars against each
-    /// other, and each document's sub-fingerprints against the columns they
-    /// are hashes of. The third is what an external-content FTS5
+    /// other, each content-quarantined place's hash against the finding it
+    /// stands beside, and each document's sub-fingerprints against the
+    /// columns they are hashes of. The third is what an external-content FTS5
     /// table can lose without anything else noticing, which is exactly why the
     /// index is maintained by triggers — and it is asked at **rank 1**, which
     /// checks the index against `documents.body` rather than only against
@@ -1116,12 +1117,12 @@ impl Store {
     /// selects it by. The eighth is the disjointness the
     /// `tombstones_clear_on_derive` trigger maintains — nothing structural
     /// holds it, so it is checked at rest rather than trusted, the same
-    /// ruling the vocabularies get. The tenth is the same ruling over the
-    /// trigger `quarantines_end_with_their_finding`: a quarantined place's
-    /// hash stands only beside a content finding at that place, where no
-    /// document row stands.
+    /// ruling the vocabularies get. The ninth is the same ruling over the
+    /// trigger `content_quarantines_end_with_their_finding`: a
+    /// content-quarantined place's hash stands only beside a content finding
+    /// at that place, where no document row stands.
     ///
-    /// The ninth is a **recompute at rest**, for the reason the stored suffix
+    /// The tenth is a **recompute at rest**, for the reason the stored suffix
     /// key gets one: a sub-fingerprint is a derived column, and every read that
     /// would notice one drifting from the column it hashes is a read that has
     /// already trusted it. A change-feed consumer triages on these values and
@@ -1292,13 +1293,13 @@ impl Store {
             .connection()
             .query_row(
                 &format!(
-                    "SELECT count(*) FROM quarantines
-                     WHERE EXISTS (SELECT 1 FROM documents WHERE documents.path = quarantines.path)
+                    "SELECT count(*) FROM content_quarantines
+                     WHERE EXISTS (SELECT 1 FROM documents WHERE documents.path = content_quarantines.path)
                         OR NOT EXISTS (
                             SELECT 1 FROM findings
-                            WHERE findings.path = quarantines.path AND findings.kind = '{}'
+                            WHERE findings.path = content_quarantines.path AND findings.kind = '{}'
                         )",
-                    norn_wire::FindingKind::BodyBytesNotUtf8.as_str()
+                    crate::increment::CONTENT_FINDING_KIND.as_str()
                 ),
                 [],
                 |row| row.get(0),

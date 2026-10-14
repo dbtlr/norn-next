@@ -1992,9 +1992,10 @@ fn heal_documents(
 ///
 /// This is the one merge. The vault heal and every scoped subtree heal differ
 /// in what they walk and in which rows they page, and in nothing else: a walked
-/// file the store has no row for is derived, a row the walk no longer reaches is
-/// pruned, one whose content hash moved is re-derived, and a spelling the
-/// grammar refuses is quarantined wherever it appears.
+/// file the store has no row for is derived unless its bytes are the ones the
+/// content finding standing there was judged over, a row the walk no longer
+/// reaches is pruned, one whose content hash moved is re-derived, and a
+/// spelling the grammar refuses is quarantined wherever it appears.
 ///
 /// The walk arrives as an iterator of facts rather than as a [`norn_fs::Walk`],
 /// because enumeration and open are two observations of a tree other writers are
@@ -2115,7 +2116,8 @@ where
 ///
 /// A heal is otherwise hash-authoritative: a path a row stands at is read again
 /// only when its bytes moved. That reaches a **place-scoped** finding whatever
-/// happened to it, because no row stands where one sits — but a
+/// happened to it, because the hash a place with no row is compared by ends
+/// with the finding standing there — but a
 /// **document-scoped** finding sits beside a row, so a heal that only compared
 /// hashes would never restore one that left the table. The other taker of one,
 /// a vault-schema re-pin, is converged by [`Declaration::judged`], which reads
@@ -2394,7 +2396,7 @@ fn scoped_increment(
                     .stored_document(&document_path)
                     .map_err(store_effect)?;
                 let stale = match standing.as_ref() {
-                    None => !pending.unchanged_quarantine(path, observed.bytes(), &hash)?,
+                    None => !pending.unchanged_content_quarantine(path, observed.bytes(), &hash)?,
                     Some(row) => {
                         row.content_hash != hash
                             || !pending.declared.judged(row.generation)
@@ -3760,10 +3762,10 @@ impl<'s> Pending<'s> {
     /// Derive a document the store holds no row for: its facts where the bytes
     /// yield them, and a finding where they do not — unless they are the bytes
     /// the finding standing there was judged over
-    /// ([`Pending::unchanged_quarantine`]).
+    /// ([`Pending::unchanged_content_quarantine`]).
     fn derive(&mut self, spelling: &str, bytes: &[u8], hash: String) -> Result<(), JobFailure> {
         let path = Path::new(spelling);
-        if !self.unchanged_quarantine(path, bytes, &hash)? {
+        if !self.unchanged_content_quarantine(path, bytes, &hash)? {
             self.rederive(path, spelling, bytes, hash, None);
         }
         Ok(())
@@ -3807,7 +3809,7 @@ impl<'s> Pending<'s> {
             // A content finding is a judgment of these bytes, so it carries
             // their hash.
             let bytes_hash =
-                (finding.cause.kind() == FindingKind::BodyBytesNotUtf8).then(|| judged.clone());
+                (finding.cause.kind() == norn_store::CONTENT_FINDING_KIND).then(|| judged.clone());
             self.file(finding, bytes_hash);
         }
     }
@@ -3827,7 +3829,7 @@ impl<'s> Pending<'s> {
     /// Only bytes that do not decode are ever judged into a content finding,
     /// so bytes that do are answered here without reading the store: a heal
     /// over a vault nothing quarantines asks it nothing.
-    fn unchanged_quarantine(
+    fn unchanged_content_quarantine(
         &mut self,
         path: &Path,
         bytes: &[u8],
@@ -3836,11 +3838,16 @@ impl<'s> Pending<'s> {
         if decodes(bytes) {
             return Ok(false);
         }
-        let subject = DocumentPath::rendered(path);
+        // A content finding is filed only at a path the document grammar
+        // admits, since a refused spelling is quarantined before its bytes
+        // are read; a spelling it refuses has no content finding to compare.
+        let Ok(subject) = document_path(path) else {
+            return Ok(false);
+        };
         let standing = self
             .store
             .begin_request()
-            .quarantined_hash(&subject)
+            .content_quarantine_hash(&subject)
             .map_err(store_effect)?;
         let unchanged = standing.as_deref() == Some(hash);
         if unchanged {
@@ -3869,7 +3876,12 @@ impl<'s> Pending<'s> {
     /// a place this job read a document at, and a walk that took it for
     /// unaccounted would delete a true statement about the spelling standing
     /// there. A document-scoped finding accounts for nothing this way — the row
-    /// its act wrote at the same subject is what a walk reads it by.
+    /// its act wrote at the same subject is what a walk reads it by. The one
+    /// other account of a place is a reading that found its standing content
+    /// finding still true ([`Pending::unchanged_content_quarantine`]).
+    ///
+    /// `bytes_hash` is the hash of the bytes a content finding was judged
+    /// over, recorded beside it, and `None` for every other finding.
     fn file(&mut self, planned: PlannedFinding, bytes_hash: Option<String>) {
         let PlannedFinding {
             subject,
@@ -13154,7 +13166,7 @@ mod tests {
     /// the finding standing there is not filed again and the store takes no
     /// generation, exactly as for a document whose row hash matches.
     #[test]
-    fn a_reading_of_an_unchanged_quarantined_place_writes_nothing() {
+    fn a_reading_of_an_unchanged_content_quarantined_place_writes_nothing() {
         let f = Fixture::new("quarantine-unchanged");
         fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
         fs::write(f.vault().join("ok.md"), "ok").unwrap();
@@ -13208,7 +13220,7 @@ mod tests {
             attachment
                 .store
                 .begin_request()
-                .quarantined_hash(&DocumentPath::new("bad.md").unwrap())
+                .content_quarantine_hash(&DocumentPath::new("bad.md").unwrap())
                 .unwrap(),
             Some(norn_fs::ContentHash::of(CHANGED).to_string())
         );

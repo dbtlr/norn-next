@@ -2479,17 +2479,26 @@ fn a_content_finding_records_the_hash_of_the_bytes_it_was_judged_over() {
     let scratch = Scratch::new("quarantined-hash-recorded");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    assert_eq!(request.quarantined_hash(&path("q.md")).unwrap(), None);
+    assert_eq!(
+        request.content_quarantine_hash(&path("q.md")).unwrap(),
+        None
+    );
 
     applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
     assert_eq!(
-        request.quarantined_hash(&path("q.md")).unwrap().as_deref(),
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
         Some("hash-1")
     );
 
     applied(&mut request, vec![], &[quarantined("q.md", "hash-2")]);
     assert_eq!(
-        request.quarantined_hash(&path("q.md")).unwrap().as_deref(),
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
         Some("hash-2")
     );
     assert_eq!(request.stored_findings(&path("q.md")).unwrap().len(), 1);
@@ -2502,7 +2511,7 @@ type Ending = fn(&mut Request<'_>);
 /// act ends the finding: the place emptied, a document derived there, or a
 /// discard of the content side such as a walk's prune.
 #[test]
-fn a_quarantined_hash_ends_with_its_content_finding() {
+fn a_content_quarantine_hash_ends_with_its_content_finding() {
     let ends: [(&str, Ending); 3] = [
         ("vacated", |request| {
             applied(request, vec![Change::Vacated { path: path("q.md") }], &[]);
@@ -2526,7 +2535,7 @@ fn a_quarantined_hash_ends_with_its_content_finding() {
         applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
         act(&mut request);
         assert_eq!(
-            request.quarantined_hash(&path("q.md")).unwrap(),
+            request.content_quarantine_hash(&path("q.md")).unwrap(),
             None,
             "the hash outlived its finding where the place was {end}"
         );

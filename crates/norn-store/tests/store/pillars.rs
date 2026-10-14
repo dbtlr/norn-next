@@ -495,7 +495,7 @@ fn a_tombstone_at_a_live_path_is_damage() {
 /// is damage the verification has to see: it would tell a reading the place
 /// is unchanged where nothing says what the place is.
 #[test]
-fn a_quarantined_hash_without_its_content_finding_is_damage() {
+fn a_content_quarantine_hash_without_its_content_finding_is_damage() {
     for (arranged, at, with_finding) in [
         ("alone", "q.md", false),
         ("beside a row", "docs/norn/glossary.md", true),
@@ -515,7 +515,9 @@ fn a_quarantined_hash_without_its_content_finding_is_damage() {
         store.verify_integrity().expect("a store just written to");
         induced_failure::execute_out_of_band(
             &mut store,
-            &format!("INSERT INTO quarantines (path, content_hash) VALUES ('{at}', 'hash-1')"),
+            &format!(
+                "INSERT INTO content_quarantines (path, content_hash) VALUES ('{at}', 'hash-1')"
+            ),
         )
         .expect("writing a hash nothing writes");
         let error = store.verify_integrity().unwrap_err();
@@ -1028,7 +1030,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::IndexedTrigramPage => "stem_statements_seek_without_scans_or_sorts",
         ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
-        | ExplainedStatement::QuarantinedHashPage
+        | ExplainedStatement::ContentQuarantineHashPage
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTermPage
         | ExplainedStatement::StoredRuleSetPage => {
@@ -1049,7 +1051,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::StoredFindings(_)
         | ExplainedStatement::VaultSchemaPin
         | ExplainedStatement::WriteGeneration
-        | ExplainedStatement::QuarantinedHash(_) => {
+        | ExplainedStatement::ContentQuarantineHash(_) => {
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
         }
         ExplainedStatement::PathDiscard(_) => "the_path_discard_seeks_finding_paths_path_key",
@@ -1087,7 +1089,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
 const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::StoredFindingPage,
     ExplainedStatement::StoredTombstonePage,
-    ExplainedStatement::QuarantinedHashPage,
+    ExplainedStatement::ContentQuarantineHashPage,
     ExplainedStatement::StoredSuffixKeyPage,
     ExplainedStatement::IndexedTermPage,
     ExplainedStatement::StoredRuleSetPage,
@@ -1585,13 +1587,13 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     );
     tombstones.assert_searches("tombstones");
     tombstones.assert_searches_through("tombstones", Access::Index("tombstones_path"));
-    let quarantines = plan(
+    let content_quarantines = plan(
         request
-            .emitted_plan(ExplainedStatement::QuarantinedHashPage)
+            .emitted_plan(ExplainedStatement::ContentQuarantineHashPage)
             .expect("a query plan"),
     );
-    quarantines.assert_searches("quarantines");
-    quarantines.assert_searches_through("quarantines", Access::PrimaryKey);
+    content_quarantines.assert_searches("content_quarantines");
+    content_quarantines.assert_searches_through("content_quarantines", Access::PrimaryKey);
     let suffix_keys = plan(
         request
             .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
@@ -1730,8 +1732,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         ExplainedStatement::StoredTombstone(_) => seek("tombstones", "tombstones_path", "(path=?)"),
         // The place's hash is keyed by the place, which is the table's
         // `WITHOUT ROWID` primary key.
-        ExplainedStatement::QuarantinedHash(_) => Some(PointReadBar {
-            table: "quarantines",
+        ExplainedStatement::ContentQuarantineHash(_) => Some(PointReadBar {
+            table: "content_quarantines",
             access: Access::PrimaryKey,
             constraint: "(path=?)",
             sorts: false,
@@ -1762,7 +1764,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::StoredDocumentPage(..)
         | ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
-        | ExplainedStatement::QuarantinedHashPage
+        | ExplainedStatement::ContentQuarantineHashPage
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTrigramPage
         | ExplainedStatement::IndexedTermPage
@@ -4379,7 +4381,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         // The finding's key is read off the row just written, by its id.
         InsertFindingRule => &[("findings", Access::RowId, "(rowid=?)")],
         // The end a deleted content finding's trigger runs, by the place.
-        EndQuarantine => &[("quarantines", Access::PrimaryKey, "(path=?)")],
+        EndContentQuarantine => &[("content_quarantines", Access::PrimaryKey, "(path=?)")],
         NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
         UpsertDocument
         | InsertLink
@@ -4395,7 +4397,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertFindingClass
         | InsertFindingPath
         | InsertRuleSet
-        | RecordQuarantine
+        | RecordContentQuarantine
         | PutMeta => &[],
     };
     WriteBar { seeks }

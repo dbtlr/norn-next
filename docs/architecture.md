@@ -697,21 +697,22 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, forty-four named statements carry a plan bar through it:
+the read builders below name, forty-seven named statements carry a plan bar through it:
 suffix candidates, findings in a class, the path- and subject-scoped findings
 discards — the path discard an equality seek of the path-key index, and the subject discard
 in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values and the clear
 it runs over the folds of the keys a schema declares `tags` or `link`, the page
 a walk reads its scope's unaccounted finding subjects through, the ordered document page a
-heal merges its walk against, the five enumerations a caller drains a whole pillar through —
-the findings table, the tombstones, every row's stored suffix keys, raw and folded, beside
+heal merges its walk against, the six enumerations a caller drains a whole pillar through —
+the findings table, the tombstones, the content-quarantined places' hashes, every row's stored suffix keys, raw and folded, beside
 the path that has to produce them, the vocabulary the full-text index holds, and the rule
 sets the findings cite — and the two drains a lane-2 consumer
 ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)) reads change through:
-the live document rows, and the recorded deaths — and the twelve keyed point reads: the
+the live document rows, and the recorded deaths — and the thirteen keyed point reads: the
 document row a path stands at, the row a facts snapshot opens on and the six fact reads
 keyed by the row id it found, the death recorded for a path, the findings recorded about
-one, the pinned vault-schema projection, and the store's last committed write generation —
+one, the hash a content-quarantined place's finding was judged over, the pinned vault-schema
+projection, and the store's last committed write generation —
 and the four chunked reads every findings read collects each finding's candidate head,
 class memberships, path keys and cited rules through, a chunk of finding ids at a time — and the twelve
 statements the link-health judgment runs, eleven of them inside every changeset's
@@ -732,7 +733,8 @@ chunk as a seek of each finding and of its rule set by row id. The forty-first n
 the write path: a registry of the statements the write path prepares — the increment's
 document upsert, fact discards and inserts, document delete, tombstone record and row probe,
 the findings writes, the probe and insert of a rule set, a finding's rule citation, the
-collection of a rule set no finding cites any longer, the write generation's increment, the
+collection of a rule set no finding cites any longer, the record of a content-quarantined
+place's hash and its end, the write generation's increment, the
 pinned-scalar upsert and the discard a schema pin runs over findings stamped under another
 fingerprint — which is the one place those statements' text is spelled, so a bar over one is a plan of the SQL the increment executes, and the census
 a bar walks is declared with the enum, so a variant cannot be left out of it. The registry holds
@@ -741,27 +743,31 @@ the write statements no other explained statement names; the increment's remaini
 explained through their own variants, and the increment prepares its findings discards from a
 closed set rather than from text. Each is barred to scan no table, and each keyed one (the fact
 discards, the document delete and probe, the rule-set probe, the citation's read of its
-finding's key by row id, the rule-set collection, the generation increment, the stale-finding
+finding's key by row id, the rule-set collection, the end of a content-quarantined place's
+hash, the generation increment, the stale-finding
 discard as two open ranges over the fingerprint) to seek its table by the constraint it binds,
 with a negative control for each half. The first-level foreign-key actions a plan reports are searches
 of the child tables and sit under the no-scan bar, so a cascade that falls to reading a child
 table end to end fails it; their seeks are not asserted positively. Most inserts report no
 search, so for them the bar is the universal one and cannot fail. A plan does not report
-trigger work or a cascade below the first level, so neither is covered. The verification reads
+trigger work or a cascade below the first level, so neither is covered, save the two trigger
+bodies the registry spells — the rule-set collection and the end of a content-quarantined
+place's hash — whose bars are plans of what those triggers run. The verification reads
 that scan by design (the integrity check and the derived-rows digest) are not write-path
 statements and carry no bar.
 
 A point read is barred harder than a page, because a search is not a point read on its
-own: a range over the same index reports the same step, so each of the twelve is judged on
+own: a range over the same index reports the same step, so each of the thirteen is judged on
 the **equality constraint** its seek carries as well as on the index it runs through. Four
-assertions hold all twelve: it never reads its table end to end, it searches that table, and
+assertions hold all thirteen: it never reads its table end to end, it searches that table, and
 the step that searches it runs through the named access and carries the equality
-constraint. Nine name a declared index. The pinned-schema read, the write-generation read
-and the field-row read each seek the primary key of a `WITHOUT ROWID` table, which SQLite
+constraint. Nine name a declared index. The pinned-schema read, the write-generation read,
+the field-row read and the content-quarantine hash read each seek the primary key of a
+`WITHOUT ROWID` table, which SQLite
 reports with no index name, and the bar names that access as the primary key. A fifth
-assertion, that it builds no temporary B-tree, holds the other eleven and not the findings
+assertion, that it builds no temporary B-tree, holds the other twelve and not the findings
 read, because the findings read states an order — generation, then row key — that no index
-over that table holds; the other eleven state an order their own index already gives them.
+over that table holds; the other twelve state an order their own index already gives them.
 
 The typed-value clear is stated over the typed index's own partial predicate, so that index
 holds exactly the rows the clear touches, and the bar is that the clear reads that index and

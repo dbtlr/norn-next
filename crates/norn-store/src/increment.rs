@@ -142,7 +142,7 @@ pub struct DerivedFinding<'a> {
     ///
     /// It is recorded beside the finding, so a later reading of the same bytes
     /// at a place no row stands at knows the place unchanged
-    /// ([`crate::Request::quarantined_hash`]), and it ends with the finding.
+    /// ([`crate::Request::content_quarantine_hash`]), and it ends with the finding.
     /// A hash on any other kind is refused
     /// ([`crate::StoreError::NotAContentFinding`]): nothing would end it.
     pub bytes_hash: Option<String>,
@@ -381,7 +381,7 @@ pub(crate) fn apply(
         }
         request::write_finding(&transaction, facts)?;
         if let Some(hash) = bytes_hash {
-            request::record_quarantine(&transaction, facts, hash)?;
+            request::record_content_quarantine(&transaction, facts, hash)?;
         }
     }
 
@@ -992,8 +992,13 @@ fn discard_the_subject(
 /// left, and no finding about the path's spelling ([`Change::Vacated`]). It is
 /// the subject discard narrowed by kind, so it is the statement
 /// [`crate::ExplainedStatement::SubjectDiscard`] reads back for this scope.
-const VACATED_DISCARD: DiscardScope<'static> =
-    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]);
+const VACATED_DISCARD: DiscardScope<'static> = DiscardScope::Kinds(&[CONTENT_FINDING_KIND]);
+
+/// The kind of a **content finding**: the finding a place's own bytes produce
+/// where they do not decode as a document. It is what a vacated place's
+/// discard takes, and the one kind a quarantined place's bytes hash stands
+/// beside ([`DerivedFinding::bytes_hash`]).
+pub const CONTENT_FINDING_KIND: FindingKind = FindingKind::BodyBytesNotUtf8;
 
 /// End the content findings at a place the changeset empties, and report how
 /// many went.

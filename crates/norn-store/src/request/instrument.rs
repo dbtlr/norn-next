@@ -36,12 +36,12 @@ use crate::resolve::AmbiguityIgnore;
 use crate::write_path::WriteStatement;
 
 use super::{
-    DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
-    DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
-    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, INDEXED_TRIGRAM_PAGE_SQL, MAX_PAGE,
-    PATH_DISCARD_SQL, PathKey, QUARANTINE_PAGE_SQL, QUARANTINED_HASH_SQL, Request, RuleSetCursor,
-    STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
-    SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
+    CONTENT_QUARANTINE_HASH_SQL, CONTENT_QUARANTINE_PAGE_SQL, DOCUMENT_BLOCKS_SQL,
+    DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL, DOCUMENT_LINKS_SQL,
+    DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK, FeedCursor, FindingCursor,
+    INDEXED_TERM_PAGE_SQL, INDEXED_TRIGRAM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
+    RuleSetCursor, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder,
+    SubjectScope, SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
     document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
     finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
     finding_page_sql, finding_paths_sql, finding_rules_sql, finding_subject_parameters,
@@ -153,8 +153,10 @@ impl<'a> Request<'a> {
             ExplainedStatement::DocumentTags => DOCUMENT_TAGS_SQL.to_string(),
             ExplainedStatement::DocumentFields => DOCUMENT_FIELDS_SQL.to_string(),
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
-            ExplainedStatement::QuarantinedHash(_) => QUARANTINED_HASH_SQL.to_string(),
-            ExplainedStatement::QuarantinedHashPage => QUARANTINE_PAGE_SQL.to_string(),
+            ExplainedStatement::ContentQuarantineHash(_) => CONTENT_QUARANTINE_HASH_SQL.to_string(),
+            ExplainedStatement::ContentQuarantineHashPage => {
+                CONTENT_QUARANTINE_PAGE_SQL.to_string()
+            }
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
             ExplainedStatement::VaultSchemaPin | ExplainedStatement::WriteGeneration => {
                 norn_db::meta::META_READ_SQL.to_string()
@@ -239,7 +241,7 @@ impl<'a> Request<'a> {
             ),
             ExplainedStatement::StoredTombstonePage
             | ExplainedStatement::StoredSuffixKeyPage
-            | ExplainedStatement::QuarantinedHashPage => database.emitted_plan(
+            | ExplainedStatement::ContentQuarantineHashPage => database.emitted_plan(
                 &sql,
                 params_from_iter(text_page_parameters(
                     Some(EXPLAINED_PAGE_CURSOR_LEAF),
@@ -278,7 +280,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredDocument(path)
             | ExplainedStatement::StoredFactsDocument(path)
             | ExplainedStatement::StoredTombstone(path)
-            | ExplainedStatement::QuarantinedHash(path)
+            | ExplainedStatement::ContentQuarantineHash(path)
             | ExplainedStatement::StoredFindings(path) => {
                 database.emitted_plan(&sql, params![path.as_str()])
             }
@@ -551,12 +553,12 @@ pub enum ExplainedStatement<'a> {
     DocumentFields,
     /// [`Request::stored_tombstone`], the death recorded for one path.
     StoredTombstone(&'a DocumentPath),
-    /// [`Request::quarantined_hash`], the bytes the content finding at one
+    /// [`Request::content_quarantine_hash`], the bytes the content finding at one
     /// place was judged over.
-    QuarantinedHash(&'a DocumentPath),
-    /// [`Request::quarantined_hashes_after`], the page a caller drains every
+    ContentQuarantineHash(&'a DocumentPath),
+    /// [`Request::content_quarantine_hashes_after`], the page a caller drains every
     /// quarantined place's hash through.
-    QuarantinedHashPage,
+    ContentQuarantineHashPage,
     /// [`Request::stored_findings`], every finding recorded about one path.
     StoredFindings(&'a DocumentPath),
     /// The pinned-scalar read [`Request::vault_schema_pin`] runs once per key
@@ -751,8 +753,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingRules(ids),
             Self::FoldedValueDiscard,
             Self::IndexedTrigramPage,
-            Self::QuarantinedHash(subject),
-            Self::QuarantinedHashPage,
+            Self::ContentQuarantineHash(subject),
+            Self::ContentQuarantineHashPage,
         ]
     }
 
@@ -810,8 +812,8 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingRules(_) => 42,
             Self::FoldedValueDiscard => 43,
             Self::IndexedTrigramPage => 44,
-            Self::QuarantinedHash(_) => 45,
-            Self::QuarantinedHashPage => 46,
+            Self::ContentQuarantineHash(_) => 45,
+            Self::ContentQuarantineHashPage => 46,
         };
         assert!(
             slot < STATEMENTS,
@@ -840,7 +842,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::StoredFindings(subject),
             Self::VaultSchemaPin,
             Self::WriteGeneration,
-            Self::QuarantinedHash(subject),
+            Self::ContentQuarantineHash(subject),
         ]
     }
 
@@ -867,7 +869,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::StoredFindings(_)
             | Self::VaultSchemaPin
             | Self::WriteGeneration
-            | Self::QuarantinedHash(_) => true,
+            | Self::ContentQuarantineHash(_) => true,
             Self::SuffixCandidates(_)
             | Self::FindingsInClass(_)
             | Self::SubjectDiscard(..)
@@ -877,7 +879,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::StoredDocumentPage(..)
             | Self::StoredFindingPage
             | Self::StoredTombstonePage
-            | Self::QuarantinedHashPage
+            | Self::ContentQuarantineHashPage
             | Self::StoredSuffixKeyPage
             | Self::IndexedTrigramPage
             | Self::IndexedTermPage

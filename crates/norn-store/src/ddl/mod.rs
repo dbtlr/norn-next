@@ -36,7 +36,10 @@
 //! `findings` is that set today, with the rule sets its findings cite and the
 //! rows a validate selecting by rule seeks: whether vault state violates a rule
 //! is a question the vault schema asks, so a finding derived under one schema
-//! says nothing under another.
+//! says nothing under another. `content_quarantines` goes with them without a
+//! key of its own: a hash stands only beside the content finding about its
+//! place and is ended with it, so the discard a schema edit runs over findings
+//! takes it too.
 //!
 //! **The field pillar is a parse fact with one schema-dependent column.** Its
 //! rows record what a document's frontmatter says, and its `typed` column
@@ -62,6 +65,7 @@
 //! class-scoped maintenance. The `findings` area in this tree states the whole of
 //! it beside its own statements.
 
+pub(crate) mod content_quarantines;
 pub(crate) mod documents;
 pub(crate) mod facts;
 pub(crate) mod fields;
@@ -69,7 +73,6 @@ pub(crate) mod findings;
 pub(crate) mod fts;
 pub(crate) mod meta;
 pub(crate) mod migrations;
-pub(crate) mod quarantines;
 pub(crate) mod stems;
 pub(crate) mod tombstones;
 
@@ -101,7 +104,7 @@ const AREAS: &[fn() -> Vec<String>] = &[
     fts::statements,
     stems::statements,
     findings::statements,
-    quarantines::statements,
+    content_quarantines::statements,
     migrations::statements,
 ];
 

@@ -800,10 +800,13 @@ impl<'a> Request<'a> {
     /// A place no document row stands at has no row hash to compare, and this
     /// is its counterpart: a reading of the same bytes there concludes what
     /// the standing finding already says.
-    pub fn quarantined_hash(&self, path: &DocumentPath) -> Result<Option<String>, StoreError> {
+    pub fn content_quarantine_hash(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<String>, StoreError> {
         Self::read_one(
             self.store.connection(),
-            QUARANTINED_HASH_SQL,
+            CONTENT_QUARANTINE_HASH_SQL,
             params![path.as_str()],
             |row| row.get(0).map(Ok),
             "reading a quarantined place's hash",
@@ -812,12 +815,12 @@ impl<'a> Request<'a> {
 
     /// The next bounded page of quarantined places' hashes, in path order.
     ///
-    /// [`Request::quarantined_hash`] answers about one place, which is the
+    /// [`Request::content_quarantine_hash`] answers about one place, which is the
     /// question a reading of its bytes asks. This answers what the table
     /// holds, which is the question a comparison of two stores asks.
     ///
     /// `after` is exclusive, and the order is bytewise over the key.
-    pub fn quarantined_hashes_after(
+    pub fn content_quarantine_hashes_after(
         &self,
         after: Option<&DocumentPath>,
         limit: usize,
@@ -830,7 +833,7 @@ impl<'a> Request<'a> {
             });
         }
         self.read_all(
-            QUARANTINE_PAGE_SQL,
+            CONTENT_QUARANTINE_PAGE_SQL,
             params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
             |row| {
                 let path: String = row.get(0)?;
@@ -1901,28 +1904,6 @@ pub(crate) fn check_finding_paths(
 /// its hash, which is taken here over the whole value being written. Rule
 /// judgment in derivation files the findings that cite rules and judge
 /// values; every other producer's carry neither.
-/// Record `hash` as the bytes the content finding `finding` was judged over,
-/// in place of the hash its place held.
-///
-/// Refused for any other kind ([`StoreError::NotAContentFinding`]): only a
-/// content finding's deletion ends a place's hash.
-pub(crate) fn record_quarantine(
-    transaction: &rusqlite::Transaction<'_>,
-    finding: &FindingFacts,
-    hash: &str,
-) -> Result<(), StoreError> {
-    if finding.kind != FindingKind::BodyBytesNotUtf8 {
-        return Err(StoreError::NotAContentFinding {
-            kind: finding.kind.as_str(),
-        });
-    }
-    transaction
-        .prepare_cached(WriteStatement::RecordQuarantine.sql())
-        .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
-        .map_err(|error| error::sql("recording a quarantined place's hash", error))?;
-    Ok(())
-}
-
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -2012,6 +1993,28 @@ pub(crate) fn write_finding(
                 .map_err(|error| error::sql("writing a rule a finding cites", error))?;
         }
     }
+    Ok(())
+}
+
+/// Record `hash` as the bytes the content finding `finding` was judged over,
+/// in place of the hash its place held.
+///
+/// Refused for any other kind ([`StoreError::NotAContentFinding`]): only a
+/// content finding's deletion ends a place's hash.
+pub(crate) fn record_content_quarantine(
+    transaction: &rusqlite::Transaction<'_>,
+    finding: &FindingFacts,
+    hash: &str,
+) -> Result<(), StoreError> {
+    if finding.kind != increment::CONTENT_FINDING_KIND {
+        return Err(StoreError::NotAContentFinding {
+            kind: finding.kind.as_str(),
+        });
+    }
+    transaction
+        .prepare_cached(WriteStatement::RecordContentQuarantine.sql())
+        .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
+        .map_err(|error| error::sql("recording a quarantined place's hash", error))?;
     Ok(())
 }
 
@@ -2233,14 +2236,15 @@ pub(crate) fn folded_value_discard_sql() -> String {
     )
 }
 
-/// The statement [`Request::quarantined_hash`] emits: one seek of the
+/// The statement [`Request::content_quarantine_hash`] emits: one seek of the
 /// primary key.
-pub(crate) const QUARANTINED_HASH_SQL: &str =
-    "SELECT content_hash FROM quarantines WHERE path = ?1";
+pub(crate) const CONTENT_QUARANTINE_HASH_SQL: &str =
+    "SELECT content_hash FROM content_quarantines WHERE path = ?1";
 
-/// The statement [`Request::quarantined_hashes_after`] emits: a walk of the
+/// The statement [`Request::content_quarantine_hashes_after`] emits: a walk of the
 /// primary key from the cursor.
-pub(crate) const QUARANTINE_PAGE_SQL: &str = "SELECT path, content_hash FROM quarantines
+pub(crate) const CONTENT_QUARANTINE_PAGE_SQL: &str =
+    "SELECT path, content_hash FROM content_quarantines
              WHERE path > COALESCE(?1, '')
              ORDER BY path
              LIMIT ?2";

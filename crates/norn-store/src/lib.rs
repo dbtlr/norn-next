@@ -189,7 +189,9 @@ pub use held_frontmatter::{
     HeldFrontmatterStatement,
 };
 pub use held_links::{HELD_LINKS_STATEMENTS, HeldLinks, HeldLinksPlan, HeldLinksStatement};
-pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
+pub use increment::{
+    CONTENT_FINDING_KIND, Change, DerivedFinding, IncrementOutcome, IncrementProvenance,
+};
 pub use json::{
     FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json, frontmatter_of_projection,
 };
