@@ -787,11 +787,8 @@ pub struct Provenance {
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Box<Cursor>>,
-    // Dormant carrier: Layer 5C's advisory computation (NORN-402) fills this
-    // slot, on the first batch of a repair. `Host::repair` never sets it
-    // today, so it is absent on every batch; NORN-396 lands the vocabulary
-    // first. The note lives here rather than in the doc comment schemars
-    // lifts.
+    // Host::repair fills the slot on an unnarrowed first batch, carries
+    // omitted: narrowed on a narrowed one, and leaves it absent on continuations.
     /// The repair advisories: what the repair noticed about the vault's
     /// fields and schema. The slot is in one of three states: absent, where
     /// the batch carries none, as every continuation batch does; `omitted`,

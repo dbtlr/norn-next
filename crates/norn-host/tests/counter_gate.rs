@@ -4034,8 +4034,8 @@ impl Gated {
 /// ceiling is the declared limit it stays under. Measured over `ambiguous`
 /// with 200 planted documents, 30 then 200 of them gate documents of three
 /// findings, so 510 more selected findings: the rule's selection grew 5,100
-/// steps (10.0 per finding: 3,731 against 8,831) and the unnarrowed one 5,100
-/// (10.0: 11,208 against 16,308), with headroom both ways.
+/// steps (10.0 per finding: 3,739 against 8,839) and the unnarrowed one 5,100
+/// (10.0: 11,221 against 16,321), with headroom both ways.
 const COUNT_STEPS_PER_FINDING: std::ops::RangeInclusive<u64> = 6..=14;
 
 /// What a first batch costs beyond that per-finding share, in VM steps: its
@@ -4070,6 +4070,7 @@ fn selected_findings(provenance: &norn_wire::Provenance) -> u64 {
 struct CountReading {
     selected: u64,
     first: CounterSnapshot,
+    advisories: norn_host::RepairAdvisoryCost,
     continuation: CounterSnapshot,
 }
 
@@ -4078,7 +4079,9 @@ struct CountReading {
 fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) -> CountReading {
     let mut params = gated.params().with_limit(limit);
     params.rule = narrowing.map(str::to_string);
+    let before = gated.host.read_evidence();
     let (first, provenance) = gated.repair(params.clone());
+    let advisories = gated.host.read_evidence().since(before).repair_advisories;
     let cursor = provenance
         .cursor
         .clone()
@@ -4087,6 +4090,7 @@ fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) ->
     CountReading {
         selected: selected_findings(&provenance),
         first,
+        advisories,
         continuation,
     }
 }
@@ -4107,13 +4111,14 @@ fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) ->
 ///   [`FIRST_BATCH_STEPS_BASE`].
 /// - **The vault, under one selected set**: 30 gate documents over
 ///   `ambiguous` and over `realistic` (2000 documents). The gate rule's first
-///   batch read, count included, reads the same on its batch counters at both sizes
-///   (3,731 steps over 90 findings at both). A rule narrows findings, so this
+///   batch read, count included, reads the same on every counter after the
+///   advisory account is subtracted at both sizes
+///   (3,739 steps over 90 findings at both). A rule narrows findings, so this
 ///   first batch also computes vault-wide advisories. Their cost is priced separately by
 ///   [`repair_advisory_cost_varies_each_declared_parameter_alone`]. Its control is the unnarrowed
 ///   first batch, whose selection takes in the larger tree's findings and
-///   whose count grows with them (11,208 steps over 809 findings, then
-///   15,042 over 1,343).
+///   whose count grows with them (11,221 steps over 809 findings, then
+///   15,050 over 1,343).
 ///
 /// The count is seen by the batch read's `validate_statements`, one more
 /// than a continuation's. A continuation of the same selection at the same
@@ -4217,28 +4222,26 @@ fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_
             by_rule.selected, small.name, by_rule_larger.selected, large.name
         ));
     }
-    let batch_read = |counters: &CounterSnapshot| {
+    // Retain every counter and remove only the advisory work attributed to the hold.
+    let batch_read = |counters: &CounterSnapshot, advisories: norn_host::RepairAdvisoryCost| {
         counters
             .names()
-            .filter(|name| {
-                matches!(
-                    *name,
-                    "repair_batches"
-                        | "validate_statements"
-                        | "validate_rows_read"
-                        | "validate_full_scan_steps"
-                        | "validate_sorts"
-                        | "validate_vm_steps"
-                )
+            .map(|name| {
+                let advisory = match name {
+                    "statements_executed" => advisories.statements,
+                    "vm_steps" => advisories.vm_steps,
+                    "full_scan_steps" => advisories.full_scan_steps,
+                    _ => 0,
+                };
+                (name, counters.get(name) - advisory)
             })
-            .map(|name| (name, counters.get(name)))
             .collect::<CounterSnapshot>()
     };
     for (batch, at_small, at_large) in [
         (
             "first batch",
-            batch_read(&by_rule.first),
-            batch_read(&by_rule_larger.first),
+            batch_read(&by_rule.first, by_rule.advisories),
+            batch_read(&by_rule_larger.first, by_rule_larger.advisories),
         ),
         (
             "continuation",
@@ -5957,28 +5960,50 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
     counters
 }
 
-/// Each advisory parameter moves its own logical work and an affine number of SQLite steps.
+/// Each advisory parameter moves its own logical work, including the spelling merge
+/// whose per-row SQLite work grows with its width.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn repair_advisory_cost_varies_each_declared_parameter_alone() {
-    for parameter in ["rules", "documents", "selector", "keys", "values"] {
-        let readings = [2_u64, 4, 8].map(|size| read_advisory_parameter(parameter, size));
+    for parameter in [
+        "rules",
+        "documents",
+        "selector",
+        "keys",
+        "values",
+        "spellings",
+        "spelling_documents",
+    ] {
+        let sizes: &[u64] = if parameter == "spellings" {
+            &[2, 4, 8, 16]
+        } else {
+            &[2, 4, 8]
+        };
+        let readings: Vec<_> = sizes
+            .iter()
+            .map(|&size| read_advisory_parameter(parameter, size))
+            .collect();
         let expected_steps = match parameter {
-            "rules" => [53, 95, 179],
-            "documents" => [76, 122, 214],
-            "selector" => [118, 196, 352],
-            "keys" => [160, 310, 610],
-            "values" => [100, 110, 130],
+            "rules" => vec![53, 95, 179],
+            "documents" => vec![286, 416, 676],
+            "selector" => vec![118, 196, 352],
+            "keys" => vec![160, 310, 610],
+            "values" => vec![100, 110, 130],
+            "spellings" => vec![389, 827, 1759, 3767],
+            "spelling_documents" => vec![389, 565, 917],
             _ => unreachable!("the declared parameters"),
         };
-        for ((size, reading), steps) in [2_u64, 4, 8].into_iter().zip(readings).zip(expected_steps)
+        for ((&size, &(reading, documents)), steps) in
+            sizes.iter().zip(&readings).zip(expected_steps)
         {
             let expected = match parameter {
                 "rules" => [1, 0, 0, size, 0, size * (size - 1) / 2, size + 1, 0, 0, 0],
-                "documents" => [1, 0, 0, 1, 4, 0, 2, 0, 0, 0],
-                "selector" => [1, 0, 0, 1, size * 3, 0, size + 2, 0, 0, 0],
+                "documents" => [1, 2, 2 * size, 1, 4, 0, 8, 2 + 4 * size, 0, 0],
+                "selector" => [1, 0, 0, 1, size * 2 + 1, 0, size + 2, 0, 0, 0],
                 "keys" => [1, size, 0, 0, 0, 0, size * 3 + 1, size * 2, 0, 0],
                 "values" => [1, 1, size, 0, 0, 0, 4, size + 2, 0, 0],
+                "spellings" => [1, size, 2 * size, 0, 0, 0, 3 * size + 2, 7 * size, 0, 0],
+                "spelling_documents" => [1, 2, 2 * size, 0, 0, 0, 8, 2 + 6 * size, 0, 0],
                 _ => unreachable!("the declared parameters"),
             };
             assert_eq!(
@@ -6001,10 +6026,13 @@ fn repair_advisory_cost_varies_each_declared_parameter_alone() {
                 reading.vm_steps, steps,
                 "{parameter} at {size}: the pinned SQLite work"
             );
-            let documents = if parameter == "documents" {
-                size
-            } else if matches!(parameter, "keys" | "values") {
-                1
+            let spelling_width = match parameter {
+                "spellings" => size,
+                "spelling_documents" => 2,
+                _ => 0,
+            };
+            let spelling_merge = if spelling_width > 0 {
+                documents * (3 * spelling_width).next_power_of_two().ilog2() as u64
             } else {
                 0
             };
@@ -6013,7 +6041,8 @@ fn repair_advisory_cost_varies_each_declared_parameter_alone() {
                 + documents * reading.keys
                 + reading.rules
                 + reading.selector_parts * (reading.value_rows + documents + 1)
-                + reading.rule_pairs;
+                + reading.rule_pairs
+                + spelling_merge;
             assert!(
                 reading.vm_steps
                     <= baselines::REPAIR_ADVISORY_VM_BASE
@@ -6025,21 +6054,26 @@ fn repair_advisory_cost_varies_each_declared_parameter_alone() {
                 &[("cost", format!("{reading:?}"))],
             );
         }
-        let steps = readings.map(|reading| reading.vm_steps);
+        let steps: Vec<_> = readings
+            .iter()
+            .map(|(reading, _)| reading.vm_steps)
+            .collect();
         assert!(
             steps[1] > steps[0],
             "{parameter} did not move its SQLite work: {steps:?}"
         );
-        assert_eq!(
-            steps[2] - steps[1],
-            2 * (steps[1] - steps[0]),
-            "{parameter} did not move its SQLite work in proportion: {steps:?}"
-        );
+        if parameter != "spellings" {
+            assert_eq!(
+                steps[2] - steps[1],
+                2 * (steps[1] - steps[0]),
+                "{parameter} did not move its SQLite work in proportion: {steps:?}"
+            );
+        }
     }
 }
 
 /// One unnarrowed repair over a fixture varying exactly one declared parameter.
-fn read_advisory_parameter(parameter: &str, size: u64) -> norn_host::RepairAdvisoryCost {
+fn read_advisory_parameter(parameter: &str, size: u64) -> (norn_host::RepairAdvisoryCost, u64) {
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         &format!("advisory-{parameter}-{size}"),
@@ -6071,7 +6105,10 @@ fn read_advisory_parameter(parameter: &str, size: u64) -> norn_host::RepairAdvis
                 "rules:\n  excluded:\n    match: {path: '**'}\n    exclude: {path: ['**']}\n",
             );
             for at in 0..size {
-                documents.push((format!("doc{at}.md"), "# A document\n".to_string()));
+                documents.push((
+                    format!("doc{at}.md"),
+                    "---\nkey0: a\nkey1: b\n---\n".to_string(),
+                ));
             }
         }
         "selector" => {
@@ -6098,8 +6135,26 @@ fn read_advisory_parameter(parameter: &str, size: u64) -> norn_host::RepairAdvis
                 format!("---\nvalues: [{values}]\n---\n"),
             ));
         }
+        "spellings" | "spelling_documents" => {
+            let spellings = if parameter == "spellings" { size } else { 2 };
+            let per_spelling = if parameter == "spelling_documents" {
+                size
+            } else {
+                2
+            };
+            for spelling in 0..spellings {
+                let key = format!("zz{}n", "_".repeat(spelling as usize + 1));
+                for at in 0..per_spelling {
+                    documents.push((
+                        format!("spelling{spelling}-doc{at}.md"),
+                        format!("---\n{key}: x\n---\n"),
+                    ));
+                }
+            }
+        }
         _ => unreachable!("the declared parameters"),
     }
+    let document_count = documents.len() as u64;
     std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the schema");
     for (name, text) in documents {
         std::fs::write(vault.path().join(name), text).expect("write a document");
@@ -6114,5 +6169,8 @@ fn read_advisory_parameter(parameter: &str, size: u64) -> norn_host::RepairAdvis
     .expect("repair starts")
     .wait()
     .expect("repair previews");
-    host.read_evidence().since(earlier).repair_advisories
+    (
+        host.read_evidence().since(earlier).repair_advisories,
+        document_count,
+    )
 }

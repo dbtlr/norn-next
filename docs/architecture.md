@@ -3105,12 +3105,17 @@ alternate spelling through its own selectorless `forbidden`/`rename_to` rule.
 **The pass has a declared cost on the host's `repair_advisories` read account.**
 With R rules, N documents, selector complexity S, K distinct keys and V value rows,
 field reads cost K distinct-key seeks and per-key tallies over at most N K presence
-rows and V value rows. Each rule and declared closed-set member runs a LIMIT 1 find,
-costing its driving seek and the documents its other parts reach and reject. S
+rows and V value rows. Each rule and declared closed-set member runs a LIMIT 1 find;
+a member whose declared reading finds no use also seeks unreadable synonyms by
+exact written text, keeping the declared container. Each find costs its driving seek
+and the documents its other parts reach and reject. S
 includes selector values, glob characters and member/synonym checks; memberships
 and filters can revisit value rows, so the read limit is
-K + V + N K + R + S (V + N + 1). Rule pairs cost R² over the schema with no vault
-read. The counter lane varies each parameter separately and pins the measured work;
+K + V + N K + R + S (V + N + 1), plus P log₂(3G) for each reported
+near-duplicate group of G spellings whose merge reads P presence rows. Rule pairs
+cost R² over the schema with no document read. Memory grows with K: one spelling
+entry per distinct key, at most 64 items / 32 KiB in each kind's collector, and no
+document payload. The counter lane varies each parameter separately and pins the measured work;
 narrowed repairs still pay selection only (ruling on NORN-402, 2026-10-13).
 
 A cursor that is no repair's is refused as a

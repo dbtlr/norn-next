@@ -480,12 +480,9 @@ bounded_head!(
     total_doc: "How many fields the repair would bring in, which is what makes the fields a head.",
 );
 
-// Layer 5C's repair advisories carry it: each names a bounded sample of the
-// documents it concerns beside the exact count. The advisory computation
-// (NORN-402) fills it, and nothing in the current call graph runs that, so
-// the type is a dormant carrier until then; NORN-396 lands the wire
-// vocabulary first. The note lives here rather than in the doc comment
-// schemars lifts into the published schema.
+// Host::repair fills these samples on an unnarrowed first batch. A narrowed
+// first batch carries omitted: narrowed instead, and continuations carry
+// no advisory slot. Each sample accompanies its exact document count.
 bounded_head!(
     DocumentPathHead of DocumentPath, paths,
     what: "document path",
