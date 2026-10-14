@@ -3538,12 +3538,13 @@ it unresolved. It authors no address, so move cascades still respell that addres
 A `rewrite_tag` respells every body token and frontmatter tags entry whose
 whole name equals `from` under the tag fold to exactly `to`, preserving each marker's
 spelling convention; matching none leaves it unresolved, and both kinds prove their edits
-by reading the document back. A frontmatter tags entry with no literal place of its own, a
-flow-list item (`tags: [a, b]`) or an escaped or folded scalar, is respelled by rewriting
-the tags field whole in its own flow or block spelling, as a `set_frontmatter` of a flat
-list over a flat list is; block-list items with a literal place and body tags are edited
-in place. All acted name operations of one holder compose in one
-batch per kind, after its document-local operations and before address cascades. A shared
+by reading the document back. A frontmatter tags entry with no literal place of its own is
+respelled by rewriting the tags field whole in its own flow or block spelling, as a
+`set_frontmatter` of a flat list over a flat list is, wherever the rewritten field reads
+back, as it does for a flow-list item (`tags: [a, b]`) or an escaped scalar that ends the
+field. A folded scalar, and an escaped block-list item followed by another entry, refuse
+and write nothing. Block-list items with a literal place and body tags are edited in
+place. All acted name operations of one holder compose in one batch per kind, after its document-local operations and before address cascades. A shared
 proof refusal is searched by halving over the same starting bytes, with each operation's
 own position and detail kept. Survivors compose again as one batch over those bytes; a
 refused set with no individual refusal is refused whole.

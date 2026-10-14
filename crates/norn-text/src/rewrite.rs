@@ -292,7 +292,9 @@ impl Document<'_> {
     /// The caller supplies the derivation fold. Each occurrence keeps its marker;
     /// scan refusals belong to one respelling, and targets never chain.
     /// An entry without a literal place is respelled by rewriting the tags field
-    /// in its own spelling.
+    /// in its own spelling where that field reads back, as it does for a flow-list
+    /// item. A folded scalar, and an escaped block-list item followed by another
+    /// entry, are refused.
     ///
     /// # Errors
     /// The shared proof refuses the batch if its edited facts or frontmatter differ.
