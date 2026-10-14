@@ -2136,7 +2136,7 @@ const DOCUMENT_TAGS_SQL: &str =
 /// the document it names would be caught nowhere else.
 const DOCUMENT_FIELDS_SQL: &str =
     "SELECT key, ordinal, path, container, raw, typed, least_raw, least_typed,
-                        offset_stated, folded
+                        offset_stated, folded, value_type
                  FROM document_fields WHERE document = ?1 ORDER BY key, ordinal";
 
 /// The statement [`Request::pin_vault_schema`] clears the typed field values
@@ -3066,8 +3066,13 @@ fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
             path,
         }));
     }
+    let written: String = row.get(10)?;
+    let Some(value_type) = crate::fields::FieldValueType::parse(&written) else {
+        return Ok(Err(unreadable("document_fields.value_type", &written)));
+    };
     Ok(Ok(FieldRow::Value {
         key,
+        value_type,
         ordinal,
         raw: row.get(4)?,
         typed: row.get(5)?,

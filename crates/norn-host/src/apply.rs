@@ -1069,7 +1069,9 @@ where
     /// The plan carries its [`Provenance`]: the findings it left alone, the
     /// findings each operation fixes, the generation it read, the cursor that
     /// continues the batch, and, on a first batch, how many selected findings
-    /// remain after it.
+    /// remain after it and the vault's repair advisories: computed where no
+    /// path or document predicate narrows the repair, and omitted as narrowed
+    /// where one does. A continuation carries no advisories.
     ///
     /// **The plan is judged by the applier's own check on the same hold**,
     /// and held to what its planning claims of every finding (`guarded`):
@@ -1136,9 +1138,10 @@ where
             }
             // The batch's `moved` is not carried: a repair cursor names a
             // path and the batch reads the state that stands now, so
-            // nothing in it is the caller's to act on. Its advisories are
-            // dropped as a `where` target's are (`PlanSnapshot::matching`
-            // reads only the find's rows).
+            // nothing in it is the caller's to act on. Its read advisories
+            // (mixed-offset comparisons, not repair advisories) are dropped as
+            // a `where` target's are (`PlanSnapshot::matching` reads only the
+            // find's rows).
             // One view of the vault serves the fixes and the planning
             // they resolve through, so a document a fix is made to is read
             // once and composed from the bytes its fix was judged on; and
@@ -1168,6 +1171,25 @@ where
             }
             if let Some(next) = batch.next {
                 provenance = provenance.continued_by(next);
+            }
+            if params.after.is_none() {
+                let advisories = if params.predicates.is_empty() {
+                    let (advisories, cost) = snapshot
+                        .reading(|held| {
+                            crate::repair_advisories::computed(
+                                held,
+                                ground.declared.schema(),
+                                snapshot.declared,
+                            )
+                        })
+                        .map_err(refused)?
+                        .map_err(|refusal| refused(page_refusal(refusal)))?;
+                    self.count_repair_advisories(cost);
+                    advisories
+                } else {
+                    norn_wire::RepairAdvisories::omitted_narrowed()
+                };
+                provenance = provenance.with_advisories(advisories);
             }
             let plan = repaired.plan.with_provenance(provenance);
             let previewed = guarded(

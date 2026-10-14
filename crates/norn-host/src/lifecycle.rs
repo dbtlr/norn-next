@@ -5840,6 +5840,11 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.count_repair_batch(cost);
     }
 
+    /// Record the advisory pass on one repair's read hold.
+    pub(crate) fn count_repair_advisories(&self, cost: crate::evidence::RepairAdvisoryCost) {
+        self.shared.reads.count_repair_advisories(cost);
+    }
+
     /// Record what one planning hold ran on its snapshot, in the read account
     /// the hold is counted in.
     pub(crate) fn count_planning_hold(&self, cost: crate::evidence::PlanningHoldCost) {

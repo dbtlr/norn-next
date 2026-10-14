@@ -11800,6 +11800,7 @@ fn every_repair_advisory_round_trips_with_its_contracted_bytes() {
         (AdvisoryValueType::Boolean, "boolean"),
         (AdvisoryValueType::Null, "null"),
         (AdvisoryValueType::Map, "map"),
+        (AdvisoryValueType::Sequence, "sequence"),
     ] {
         assert_eq!(wire(&value_type), format!("\"{text}\""));
         round_trip(&value_type);
@@ -11835,7 +11836,7 @@ fn every_repair_advisory_round_trips_with_its_contracted_bytes() {
             "{refused} read as a conflict"
         );
     }
-    for foreign in ["sequence", "date", "Null", ""] {
+    for foreign in ["date", "Null", ""] {
         assert!(
             serde_json::from_str::<AdvisoryValueType>(&format!("\"{foreign}\"")).is_err(),
             "`{foreign}` read as a value type"

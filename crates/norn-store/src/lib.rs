@@ -146,6 +146,7 @@ mod link;
 mod moved;
 mod path;
 mod read;
+mod repair_advisory;
 mod request;
 mod resolve;
 mod rule_set;
@@ -169,8 +170,8 @@ pub use facts::{
 pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{
-    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, LinkKey, OffsetSpelling,
-    TAG_CARRIER, TypedOrder,
+    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, FieldValueType, LinkKey,
+    OffsetSpelling, TAG_CARRIER, TypedOrder,
 };
 pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
@@ -226,3 +227,8 @@ pub use validate::{
     ValidateWork, Validated, Validation,
 };
 pub use write_path::{WRITE_STATEMENTS, WriteStatement};
+
+pub use repair_advisory::{
+    REPAIR_ADVISORY_STATEMENTS, RepairAdvisoryPlan, RepairAdvisoryStatement, RepairFieldTally,
+    RepairKeyRead, RepairSpellingTally,
+};

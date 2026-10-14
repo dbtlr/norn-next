@@ -67,6 +67,129 @@ fn text(value: &str) -> AuthoredValue {
     AuthoredValue::string(value)
 }
 
+#[test]
+fn a_declaration_is_admitted_only_when_rule_values_and_selector_classes_still_read() {
+    let cases = [
+        (
+            "selector value",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  existing: { match: { frontmatter: { zz_count: word } } }\n",
+            false,
+        ),
+        (
+            "closed-set member",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  existing: { one_of: { zz_count: { values: [word] } } }\n",
+            false,
+        ),
+        (
+            "synonym target",
+            "tags",
+            FieldType::Boolean,
+            Some(Shape::Single),
+            "  existing: { one_of: { tags: { values: ['true'], synonyms: { yes: '#true' } } } }\n",
+            false,
+        ),
+        (
+            "default element",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  existing: { required: { zz_count: { default: word } } }\n",
+            false,
+        ),
+        (
+            "default shape",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  existing: { required: { zz_count: { default: [1] } } }\n",
+            false,
+        ),
+        (
+            "selector class",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  required: { match: { frontmatter: { zz_count: '1' } }, required: { other: null } }\n  forbidden: { match: { frontmatter: { zz_count: '1.0' } }, forbidden: { other: null } }\n",
+            false,
+        ),
+        (
+            "readable rule statements",
+            "zz_count",
+            FieldType::Number,
+            Some(Shape::Single),
+            "  existing: { match: { frontmatter: { zz_count: 42 } }, one_of: { zz_count: { values: [42], synonyms: { forty_two: 42 } } }, required: { zz_count: { default: 42 } } }\n",
+            true,
+        ),
+    ];
+    for (name, key, kind, shape, rules, admitted) in cases {
+        let existing = format!("version: 1\nrules:\n{rules}");
+        let schema = VaultSchema::parse(existing.as_bytes()).expect("the original schema reads");
+        assert_eq!(
+            schema.admits_declaration(key, kind, shape),
+            admitted,
+            "{name}"
+        );
+        let declared = format!(
+            "version: 1\nfields:\n  {key}: {{ type: {}, shape: single }}\nrules:\n{rules}",
+            kind.as_str()
+        );
+        let read = VaultSchema::parse(declared.as_bytes());
+        assert_eq!(read.is_ok(), admitted, "{name}: {read:?}");
+        if let Err(error) = read {
+            let source_matches = matches!(
+                (name, error),
+                (
+                    "selector value",
+                    VaultSchemaError::Rule {
+                        problem: RuleProblem::SelectorValue { .. },
+                        ..
+                    }
+                ) | (
+                    "closed-set member",
+                    VaultSchemaError::Rule {
+                        problem: RuleProblem::Member {
+                            problem: ElementProblem::NotType(_),
+                            ..
+                        },
+                        ..
+                    }
+                ) | (
+                    "synonym target",
+                    VaultSchemaError::Rule {
+                        problem: RuleProblem::SynonymTarget {
+                            problem: ElementProblem::NotType(_),
+                            ..
+                        },
+                        ..
+                    }
+                ) | (
+                    "default element",
+                    VaultSchemaError::Rule {
+                        problem: RuleProblem::Default {
+                            problem: ElementProblem::NotType(_),
+                            ..
+                        },
+                        ..
+                    }
+                ) | (
+                    "default shape",
+                    VaultSchemaError::Rule {
+                        problem: RuleProblem::DefaultShape { .. },
+                        ..
+                    }
+                ) | ("selector class", VaultSchemaError::RulesConflict { .. })
+            );
+            assert!(source_matches, "the declared schema refuses the {name}");
+        }
+    }
+}
+
 // ---- the grammar ----
 
 #[test]

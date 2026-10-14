@@ -15,10 +15,10 @@
 //! - **One presence row** carrying the container the key's value sits in —
 //!   a scalar, a sequence or a map — and no value. An empty sequence and an
 //!   empty map are present, and the container tells them apart.
-//! - **One value row per scalar**, and one per scalar element of a sequence in
-//!   element order. A map yields no value rows: its entries are read off the
-//!   canonical projection, not queried. A sequence element that is itself a
-//!   sequence or a map yields no value row either.
+//! - **One value row per scalar**, and one per element of a sequence in element
+//!   order. Sequence and map elements carry their type with no comparable
+//!   value. A top-level map yields no value rows: its entries are read off the
+//!   canonical projection, not queried.
 //!
 //! A repeated key keeps its last value, as the canonical projection does.
 //!
@@ -30,6 +30,10 @@
 //! unquoted text, and a quoted spelling here would be an equality that never
 //! matches. A null, and a float JSON cannot spell, is a scalar whose raw text is
 //! SQL `NULL`: the key is still present, and no equality matches it.
+//!
+//! Beside the raw text each value row records its parsed type, so a
+//! repair advisory can count types without reading a frontmatter projection.
+//! The type is a parse fact, independent of the schema's typed ordering.
 //!
 //! # The typed value, and the least-value markers
 //!
@@ -126,6 +130,54 @@ impl FieldContainer {
     }
 }
 
+/// The parsed type a value row carries, independent of schema typing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldValueType {
+    /// Text.
+    String,
+    /// A whole number.
+    Integer,
+    /// A floating-point number.
+    Real,
+    /// A boolean.
+    Boolean,
+    /// A null.
+    Null,
+    /// A mapping of values by key.
+    Map,
+    /// A list of values.
+    Sequence,
+}
+
+impl FieldValueType {
+    /// The type as the column holds it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Real => "real",
+            Self::Boolean => "boolean",
+            Self::Null => "null",
+            Self::Map => "map",
+            Self::Sequence => "sequence",
+        }
+    }
+
+    /// The type a column value names, or nothing.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "string" => Some(Self::String),
+            "integer" => Some(Self::Integer),
+            "real" => Some(Self::Real),
+            "boolean" => Some(Self::Boolean),
+            "null" => Some(Self::Null),
+            "map" => Some(Self::Map),
+            "sequence" => Some(Self::Sequence),
+            _ => None,
+        }
+    }
+}
+
 /// One row of a document's field pillar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldRow {
@@ -140,15 +192,17 @@ pub enum FieldRow {
         /// the row belongs to, never of the key or the value.
         path: String,
     },
-    /// One scalar the document carries under `key`.
+    /// One value the document carries under `key`.
     Value {
         key: String,
-        /// Where the scalar stands among the key's values, from one, in
+        /// Where the value stands among the key's values, from one, in
         /// element order.
         ordinal: u32,
-        /// The canonical text, or `None` for a null and a float JSON cannot
-        /// spell.
+        /// The canonical text, or `None` for a container, a null and a float
+        /// JSON cannot spell.
         raw: Option<String>,
+        /// The value's type in the parsed frontmatter value.
+        value_type: FieldValueType,
         /// The declared type's sort key, or `None` where the key carries no
         /// typed order or the raw text does not read as the declared type.
         typed: Option<String>,
@@ -233,19 +287,17 @@ impl FieldRows {
             let (container, scalars) = match value {
                 FrontmatterValue::Sequence(items) => (
                     FieldContainer::Sequence,
-                    items.iter().filter_map(scalar_text).collect(),
+                    items.iter().map(value_row).collect(),
                 ),
                 FrontmatterValue::Map(_) => (FieldContainer::Map, Vec::new()),
-                scalar => (
-                    FieldContainer::Scalar,
-                    scalar_text(scalar).into_iter().collect(),
-                ),
+                scalar => (FieldContainer::Scalar, vec![value_row(scalar)]),
             };
             rows.push(FieldRow::Presence {
                 key: key.to_string(),
                 container,
                 path: path.as_str().to_string(),
             });
+            let (value_types, scalars): (Vec<_>, Vec<_>) = scalars.into_iter().unzip();
             let order = declared.typed_order(key);
             let (typed, offsets): (Vec<Option<String>>, Vec<Option<OffsetSpelling>>) = scalars
                 .iter()
@@ -257,14 +309,19 @@ impl FieldRows {
                 .unzip();
             let least_raw = least(&scalars);
             let least_typed = least(&typed);
-            for (index, ((raw, typed), offset)) in
-                scalars.into_iter().zip(typed).zip(offsets).enumerate()
+            for (index, (((raw, typed), offset), value_type)) in scalars
+                .into_iter()
+                .zip(typed)
+                .zip(offsets)
+                .zip(value_types)
+                .enumerate()
             {
                 let folded = raw.as_deref().and_then(|raw| declared.fold(key, raw));
                 rows.push(FieldRow::Value {
                     key: key.to_string(),
                     ordinal: index as u32 + 1,
                     raw,
+                    value_type,
                     typed,
                     offset,
                     folded,
@@ -293,18 +350,16 @@ impl FieldRows {
     }
 }
 
-/// A scalar's raw text, or nothing where the value is a container.
-///
-/// The outer `Option` says whether the value is a scalar at all; the inner one
-/// is the raw text, which a null and a non-finite float do not have.
-fn scalar_text(value: &FrontmatterValue) -> Option<Option<String>> {
+/// A value's parsed type and comparable text, which containers and nulls lack.
+fn value_row(value: &FrontmatterValue) -> (FieldValueType, Option<String>) {
     match value {
-        FrontmatterValue::Null => Some(None),
-        FrontmatterValue::Bool(flag) => Some(Some(flag.to_string())),
-        FrontmatterValue::Int(number) => Some(Some(number.to_string())),
-        FrontmatterValue::Float(number) => Some(float_text(*number)),
-        FrontmatterValue::String(text) => Some(Some(text.clone())),
-        FrontmatterValue::Sequence(_) | FrontmatterValue::Map(_) => None,
+        FrontmatterValue::Null => (FieldValueType::Null, None),
+        FrontmatterValue::Bool(flag) => (FieldValueType::Boolean, Some(flag.to_string())),
+        FrontmatterValue::Int(number) => (FieldValueType::Integer, Some(number.to_string())),
+        FrontmatterValue::Float(number) => (FieldValueType::Real, float_text(*number)),
+        FrontmatterValue::String(text) => (FieldValueType::String, Some(text.clone())),
+        FrontmatterValue::Sequence(_) => (FieldValueType::Sequence, None),
+        FrontmatterValue::Map(_) => (FieldValueType::Map, None),
     }
 }
 
@@ -932,16 +987,12 @@ mod tests {
             ));
         }
         for (stored, authored) in pairs {
-            assert_eq!(
-                scalar_text(&stored),
-                Some(authored.scalar_text()),
-                "{stored:?}"
-            );
+            assert_eq!(value_row(&stored).1, authored.scalar_text(), "{stored:?}");
         }
         assert_eq!(
-            scalar_text(&FrontmatterValue::Float(1.0)),
-            Some(Some("1.0".to_string()))
+            value_row(&FrontmatterValue::Float(1.0)).1,
+            Some("1.0".to_string())
         );
-        assert_eq!(scalar_text(&FrontmatterValue::Float(f64::NAN)), Some(None));
+        assert_eq!(value_row(&FrontmatterValue::Float(f64::NAN)).1, None);
     }
 }

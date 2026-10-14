@@ -355,6 +355,10 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
             }
+            "REPAIR_ADVISORY_VM_BASE" => always_authored(baselines::REPAIR_ADVISORY_VM_BASE),
+            "REPAIR_ADVISORY_VM_PER_INPUT" => {
+                always_authored(baselines::REPAIR_ADVISORY_VM_PER_INPUT)
+            }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"

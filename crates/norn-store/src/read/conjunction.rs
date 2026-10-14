@@ -69,7 +69,7 @@ pub(crate) enum ResolvesPart {
 }
 
 /// A compiled part of the conjunction.
-enum Part {
+pub(crate) enum Part {
     Filter(Filter),
     /// A part that cannot be applied as asked, so no document satisfies it:
     /// reported, and every section is empty.
@@ -227,11 +227,22 @@ impl Snapshot {
     /// wildcard probes whether it names a bare directory, and only a match
     /// part probes whether the full-text engine parses its query: the other
     /// parts bind nothing the snapshot has to be asked for.
-    fn compile_predicate(
+    pub(crate) fn compile_predicate(
         &self,
         predicate: &Predicate,
         declared: &ContentModel,
         lookups: &mut Lookups,
+    ) -> Result<Part, PageRefusal> {
+        self.compile_predicate_reading(predicate, declared, lookups, false)
+    }
+
+    /// Compile a part with its declared reading or an exact written membership.
+    pub(crate) fn compile_predicate_reading(
+        &self,
+        predicate: &Predicate,
+        declared: &ContentModel,
+        lookups: &mut Lookups,
+        written: bool,
     ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
         let filter = |shape: ReadFilter, values: Vec<Value>| {
@@ -263,7 +274,9 @@ impl Snapshot {
         // written; and only the values standing in the container a declared
         // shape holds.
         let matched = |key: &str| FieldMatch {
-            column: if declared.folds(key) {
+            column: if written {
+                MatchedColumn::Raw
+            } else if declared.folds(key) {
                 MatchedColumn::Folded
             } else if declared.typed_order(key).is_some() {
                 MatchedColumn::Typed
@@ -287,6 +300,7 @@ impl Snapshot {
                         value: value.clone(),
                     })
             }
+            MatchedColumn::Raw if written => Ok(value.clone()),
             MatchedColumn::Raw | MatchedColumn::Typed => compared(key, value),
         };
         // The values a reading binds after the key and the compared value:
@@ -551,7 +565,7 @@ fn date_comparison(predicate: &Predicate, declared: &ContentModel) -> Option<Dat
 }
 
 /// The key a predicate names, where it names one.
-fn predicate_key(predicate: &Predicate) -> Option<&str> {
+pub(crate) fn predicate_key(predicate: &Predicate) -> Option<&str> {
     match predicate {
         Predicate::Eq { key, .. }
         | Predicate::NotEq { key, .. }

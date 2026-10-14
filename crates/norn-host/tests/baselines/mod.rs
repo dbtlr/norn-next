@@ -520,7 +520,9 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 /// than the smaller in either pair: a growth of **0 bytes**, the pair's
 /// saturating difference. The readings above predate the repair subjects and
 /// the schema, so they are the earlier workload's; the 4 KiB allowance was
-/// not changed.
+/// not changed. The repair request has a path predicate, so its advisory slot
+/// is omitted and the allowance covers its bounded selection; the unnarrowed
+/// advisory pass separately declares memory proportional to distinct keys.
 ///
 /// The allowance is **4 KiB**, the figure
 /// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at, by the same rule:
@@ -1806,3 +1808,24 @@ pub fn assert_the_profile_the_bars_were_authored_on() {
 /// What is authored per crate is the numbers above, which is what a reviewer
 /// reads as one diff.
 pub use norn_testkit::readings::{mebibytes, milliseconds, multiple, per_mille, record};
+
+/// Allow the final distinct-key seek's eleven steps with five steps of headroom.
+pub const REPAIR_ADVISORY_VM_BASE: u64 = 16;
+
+/// Bound the indexed reads by the pass's declared input units.
+/// The units are K + V + N*K + R + S*(V + N + 1) + R*(R - 1)/2,
+/// plus P*ceil(log2(3*G)) for each reported spelling group of G keys whose
+/// merge reads P presence rows.
+/// S counts selector values, glob characters and closed-set member/synonym checks.
+/// Find's driving seek and document tests may revisit value rows for different
+/// members or filters; rule pairs read the schema alone. The largest measured
+/// share is below 38 steps per unit; 48 leaves headroom over that share.
+/// Measured on Linux x86_64, 2026-10-14, after reusing find's page drive and
+/// taking samples from tally streams, at sizes 2, 4 and 8: rules [53, 95, 179],
+/// documents holding two fixed scalar keys [286, 416, 676], selector complexity
+/// [118, 196, 352], keys [160, 310, 610], values [100, 110, 130] and documents
+/// per spelling at width two [389, 565, 917]. Spelling widths 2, 4, 8 and 16,
+/// each holding two documents per spelling, read [389, 827, 1759, 3767]: the
+/// merge's per-row work grows with its width. The lane pins each reading and
+/// the affine slopes of the parameters other than the spelling width.
+pub const REPAIR_ADVISORY_VM_PER_INPUT: u64 = 48;

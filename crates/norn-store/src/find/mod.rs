@@ -207,16 +207,18 @@ use norn_db::EmittedPlan;
 use norn_wire::RuleSet;
 use norn_wire::{
     AnswerAdvisory, Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport,
-    Moved, Page, PagedRows, RequestPart, Sort, SortKey, Unsatisfied,
+    Moved, Page, PagedRows, Pattern, Predicate, RequestPart, Sort, SortKey, Unsatisfied,
 };
 
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
     Compared, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups, PageRefusal, Paged,
-    Ran, ReadFilter, ReadStatement, Report, ResolvesPart, Settled, page_limit,
+    Part, PathPart, Ran, ReadFilter, ReadStatement, Report, ResolvesPart, Settled, page_limit,
+    predicate_key,
 };
 use crate::store::Snapshot;
+use crate::validate::ValidateWork;
 
 pub use hydrate::{BODY_ROW_CEILING, FindWork, NESTED_ROW_CEILING, NestedRows};
 pub(crate) use hydrate::{
@@ -527,6 +529,152 @@ impl Snapshot {
             &mut Lookups::default(),
         )
         .map(|paged| paged.found)
+    }
+
+    /// Whether a schema selector reaches a document, stopping at its first match.
+    /// This uses find's comparisons and tests excluding globs at each reached document's key.
+    pub fn first_match(
+        &self,
+        predicates: &[Predicate],
+        exclude: &[Pattern],
+        declared: &ContentModel,
+    ) -> Result<(bool, ValidateWork), PageRefusal> {
+        self.run_first_match(predicates, exclude, declared, false, &mut Vec::new())
+    }
+
+    /// Seek exact written member text through find while retaining the declared container.
+    pub fn first_match_written(
+        &self,
+        key: &str,
+        values: &[String],
+        declared: &ContentModel,
+    ) -> Result<(bool, ValidateWork), PageRefusal> {
+        self.run_first_match(
+            &[Predicate::in_any(key, values.iter().cloned())],
+            &[],
+            declared,
+            true,
+            &mut Vec::new(),
+        )
+    }
+
+    /// Explain the exact written-member statements the first-match drive ran.
+    pub fn first_match_written_plans(
+        &self,
+        key: &str,
+        values: &[String],
+        declared: &ContentModel,
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
+        self.first_match_reading_plans(
+            &[Predicate::in_any(key, values.iter().cloned())],
+            &[],
+            declared,
+            true,
+        )
+    }
+
+    /// The statements a selector's first-match read ran, explained with their bound values.
+    pub fn first_match_plans(
+        &self,
+        predicates: &[Predicate],
+        exclude: &[Pattern],
+        declared: &ContentModel,
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
+        self.first_match_reading_plans(predicates, exclude, declared, false)
+    }
+
+    fn first_match_reading_plans(
+        &self,
+        predicates: &[Predicate],
+        exclude: &[Pattern],
+        declared: &ContentModel,
+        written: bool,
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
+        let mut record = Vec::new();
+        self.run_first_match(predicates, exclude, declared, written, &mut record)?;
+        let mut stepped = record
+            .iter()
+            .map(|ran| ran.stepped.vm_steps)
+            .collect::<Vec<_>>()
+            .into_iter();
+        Ok(self.explained(record, |statement, filters, plan| FindPlan {
+            statement,
+            filters,
+            plan,
+            vm_steps: stepped.next().unwrap_or_default(),
+        })?)
+    }
+
+    /// Read one kept document through the same compiler and page drive as a find.
+    fn run_first_match(
+        &self,
+        predicates: &[Predicate],
+        exclude: &[Pattern],
+        declared: &ContentModel,
+        written: bool,
+        record: &mut Vec<Ran>,
+    ) -> Result<(bool, ValidateWork), PageRefusal> {
+        let mut lookups = Lookups::default();
+        let mut compiled = Compiled {
+            order: PageOrder::Path(PageDirection::Ascending),
+            filters: Vec::new(),
+            reports: Vec::new(),
+            matches_nothing: false,
+            comparisons: Vec::new(),
+        };
+        for predicate in predicates {
+            if let Some(key) = predicate_key(predicate)
+                && !self.is_known(key, declared, &mut lookups)?
+            {
+                compiled.matches_nothing = true;
+                break;
+            }
+            match self.compile_predicate_reading(predicate, declared, &mut lookups, written)? {
+                Part::Filter(filter) => compiled.filters.push(filter),
+                Part::MatchesNothing(_) => {
+                    compiled.matches_nothing = true;
+                    break;
+                }
+            }
+        }
+        compiled
+            .filters
+            .extend(exclude.iter().cloned().map(|pattern| {
+                Filter::ExcludedPath(PathPart {
+                    pattern,
+                    order: self.path_order(),
+                })
+            }));
+        let sections = if compiled.matches_nothing {
+            Vec::new()
+        } else {
+            sections(compiled.order, None)
+        };
+        let parts: Vec<&Filter> = compiled.filters.iter().collect();
+        let driven = self.drive_page(
+            &FindPages {
+                compiled: &compiled,
+            },
+            &parts,
+            Some(false),
+            1,
+            sections,
+            1,
+            Settled::Unasked,
+            &mut lookups,
+        )?;
+        let mut work = ValidateWork {
+            statements: lookups.ran.len() as u64,
+            rows_read: driven.rows.len() as u64,
+            ..ValidateWork::default()
+        };
+        for ran in &lookups.ran {
+            work.full_scan_steps += ran.stepped.full_scan_steps;
+            work.sorts += ran.stepped.sorts;
+            work.vm_steps += ran.stepped.vm_steps;
+        }
+        record.extend(lookups.ran);
+        Ok((!driven.rows.is_empty(), work))
     }
 
     /// Every statement [`Snapshot::find`] runs for `params`, in the order it
