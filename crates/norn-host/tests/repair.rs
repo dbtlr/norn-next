@@ -6847,3 +6847,98 @@ fn a_broken_link_with_a_no_holder_tombstone_stays_broken_without_a_suggestion() 
     );
     assert_eq!(written(&vault, "zz-holder.md"), "See [[abcdefghix]].\n");
 }
+
+/// **An apply plans exactly what its preview planned with every 5C fix present.**
+#[test]
+fn an_apply_plans_what_its_preview_did_with_every_5c_fix_present() {
+    let (_sandbox, vault, host, _lease) = a_vault_with_every_5c_fix("repair-5c-agreement");
+    let request = |mode| repairing_beneath(&vault, mode).with_threshold(Confidence::Suggested);
+    let preview = previewed(host.repair(request(ApplyMode::Preview)));
+    let ApplyReport::Applied { plan, .. } = planned(host.repair(request(ApplyMode::Apply))) else {
+        panic!("the repair applies");
+    };
+    assert_eq!(plan.operations, preview.operations);
+    assert_eq!(plan.transitions, preview.transitions);
+    assert_eq!(plan.conditions, preview.conditions);
+    assert_eq!(plan.provenance, preview.provenance);
+    let held = at("zz-holder.md");
+    let expected = [
+        OperationKind::rewrite_link(held.clone(), norn_wire::LinkFamily::Wikilink, "old", "new"),
+        OperationKind::rewrite_link(
+            held.clone(),
+            norn_wire::LinkFamily::Wikilink,
+            "abcdefghix",
+            "abcdefghij",
+        ),
+        OperationKind::rewrite_anchor(
+            held.clone(),
+            norn_wire::LinkFamily::Wikilink,
+            "zz-target",
+            "Important Headinh",
+            "Important Heading",
+        ),
+        OperationKind::set_frontmatter(
+            WriteTarget::path(held.clone()),
+            "status",
+            AuthoredValue::string("todo"),
+        ),
+        OperationKind::rewrite_tag(held, "darft", "draft"),
+    ];
+    let actual = kinds(&plan);
+    assert_eq!(actual.len(), expected.len(), "{actual:?}");
+    for kind in expected {
+        assert!(actual.contains(&kind), "missing {kind:?}: {actual:?}");
+    }
+}
+
+/// **A resolved 5C preview lands through apply with the same bytes as an apply-mode repair.**
+#[test]
+fn a_5c_previews_plan_lands_through_apply() {
+    let (_first_box, first, first_host, first_lease) =
+        a_vault_with_every_5c_fix("repair-5c-direct");
+    let direct =
+        planned(first_host.repair(
+            repairing_beneath(&first, ApplyMode::Apply).with_threshold(Confidence::Suggested),
+        ));
+    assert!(matches!(direct, ApplyReport::Applied { .. }), "{direct:?}");
+    drop(first_lease);
+    drop(first_host);
+    let (_second_box, second, second_host, _second_lease) =
+        a_vault_with_every_5c_fix("repair-5c-resolved");
+    let preview = previewed(second_host.repair(
+        repairing_beneath(&second, ApplyMode::Preview).with_threshold(Confidence::Suggested),
+    ));
+    let sent = planned(second_host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(preview),
+    )));
+    assert!(matches!(sent, ApplyReport::Applied { .. }), "{sent:?}");
+    assert_eq!(
+        std::fs::read(second.path().join(FOLDER).join("zz-holder.md")).expect("resolved holder"),
+        std::fs::read(first.path().join(FOLDER).join("zz-holder.md")).expect("direct holder"),
+    );
+}
+
+/// One holder under one schema needs move-following and all four 5C suggestions.
+fn a_vault_with_every_5c_fix(
+    label: &str,
+) -> (
+    Sandbox,
+    attach::Vault,
+    attach::ServingHost,
+    norn_host::DemandLease<norn_host::ProductionEntryOps>,
+) {
+    let (sandbox, vault, host) = a_vault_under(
+        label,
+        "version: 1\ntags: {declared: [draft], undeclared: report}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [todo, done]}\n",
+        &[
+            ("old.md", b"# Unique followed document\n"),
+            ("abcdefghij.md", b"# Similar target\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+            ("zz-holder.md", b"---\ntype: task\nstatus: todx\n---\n[[old]] [[abcdefghix]] [[zz-target#Important Headinh]] #darft\n"),
+        ],
+    );
+    let lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    (sandbox, vault, host, lease)
+}
