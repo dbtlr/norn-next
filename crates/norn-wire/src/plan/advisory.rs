@@ -48,6 +48,8 @@ pub enum AdvisoryValueType {
     Null,
     /// A mapping of values by key.
     Map,
+    /// A list of values.
+    Sequence,
 }
 
 /// The way two schema rules conflict when combined, as a schema-hygiene

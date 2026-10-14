@@ -1,5 +1,5 @@
 //! The field pillar — one row per key a document's frontmatter carries, and one
-//! per scalar value under it.
+//! per value under it.
 //!
 //! What the rows are, and how they are derived, is [`crate::FieldRows`]'s to
 //! state. This area is the table they are written to.
@@ -92,7 +92,7 @@
 //! that wants the document id reads it off the index.
 //!
 //! - `document_fields_value_type` holds value rows by `(key, value_type,
-//!   document)`: repair advisories seek one key's parsed scalar types in this
+//!   document)`: repair advisories seek one key's parsed types in this
 //!   order and count each document once per type, without reading frontmatter
 //!   or retaining the key's value rows. The type is a parse fact maintained
 //!   inside the document's changeset and never cleared by a schema pin.
@@ -146,7 +146,7 @@ pub(crate) fn statements() -> Vec<String> {
     path        TEXT    NOT NULL,
     container   TEXT    CHECK (container IN ({containers})),
     raw         TEXT,
-    value_type  TEXT CHECK (value_type IN ('string', 'integer', 'real', 'boolean', 'null')),
+    value_type  TEXT CHECK (value_type IN ('string', 'integer', 'real', 'boolean', 'null', 'map', 'sequence')),
     typed       TEXT,
     least_raw   INTEGER NOT NULL DEFAULT 0 CHECK (least_raw IN (0, 1)),
     least_typed INTEGER NOT NULL DEFAULT 0 CHECK (least_typed IN (0, 1)),

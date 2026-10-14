@@ -280,16 +280,16 @@ fn stored_fields(request: &mut norn_store::Request<'_>, at: &str) -> FieldRows {
         .fields
 }
 
-/// **Every key carries a presence row, and every scalar a value row.** The
+/// **Every key carries a presence row, and every element a value row.** The
 /// container a key's value sits in is recorded on its presence row, so an empty
 /// sequence and an empty map are present and told apart; a scalar, and each
-/// scalar element of a sequence in element order, is one value row carrying its
-/// canonical text unquoted. A map yields no value rows, and neither does a
-/// sequence or a map nested inside a sequence. A null and a float JSON cannot
-/// spell are scalars with no raw text — present, and matched by no value. A
+/// element of a sequence in element order, is one value row carrying its type
+/// and its canonical scalar text unquoted. A top-level map yields no value
+/// rows. A nested container, a null and a float JSON cannot spell have no raw
+/// text — present, and matched by no value. A
 /// repeated key keeps its last value.
 #[test]
-fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
+fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_element() {
     let value = map(vec![
         ("title", string("first")),
         ("count", FrontmatterValue::Int(42)),
@@ -332,11 +332,13 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
             raw(at, "tags", 1, Some("b"), false, FieldValueType::String),
             "b",
         ),
+        raw(at, "tags", 2, None, false, FieldValueType::Sequence),
         folded(
-            raw(at, "tags", 2, Some("a"), true, FieldValueType::String),
+            raw(at, "tags", 3, Some("a"), true, FieldValueType::String),
             "a",
         ),
-        raw(at, "tags", 3, None, false, FieldValueType::Null),
+        raw(at, "tags", 4, None, false, FieldValueType::Map),
+        raw(at, "tags", 5, None, false, FieldValueType::Null),
         presence(at, "title", FieldContainer::Scalar),
         raw(at, "title", 1, Some("second"), true, FieldValueType::String),
     ];
@@ -355,7 +357,7 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         derived,
         "the rows at rest are not the rows the frontmatter derives"
     );
-    assert_eq!(request.counters().get("field_rows_written"), Some(19));
+    assert_eq!(request.counters().get("field_rows_written"), Some(21));
 
     // Only a map derives rows: a scalar or a sequence at the top has no keys.
     for top in [

@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(14),
-    "76520470f0db2ae34d14578aed03460ffe1178b88f2f48623cfb70470d7607e5",
+    "e5f86bfacb1979d32d56546da84b0dfa0dbda76b056119ea139abb3e3a682f51",
 );
 
 /// The vault schema the main corpus is derived under: a field of every

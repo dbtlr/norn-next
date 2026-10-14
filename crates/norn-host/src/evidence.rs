@@ -1889,7 +1889,7 @@ pub struct RepairAdvisoryCost {
     pub passes: u64,
     /// Distinct field keys tallied.
     pub keys: u64,
-    /// Scalar value rows tallied.
+    /// Value rows tallied.
     pub value_rows: u64,
     /// Schema rules checked.
     pub rules: u64,

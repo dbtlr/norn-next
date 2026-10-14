@@ -1,6 +1,6 @@
 //! Repair-time field tallies are streamed through searches of one key at a time.
 //!
-//! Presence rows supply containers and maps; value rows supply parsed scalar
+//! Presence rows supply containers and maps; value rows supply parsed element
 //! types. These reads derive no stored advisory and hold no document payload.
 
 use norn_db::EmittedPlan;
@@ -88,7 +88,7 @@ pub struct RepairFieldTally {
     pub shapes: Vec<ShapeUse>,
     /// The distinct documents carrying the key.
     pub documents: u64,
-    /// The scalar value rows the key carries.
+    /// The value rows the key carries.
     pub value_rows: u64,
     /// The first five paths carrying the key, with its exact document total.
     pub sample: DocumentPathHead,
@@ -218,7 +218,11 @@ impl Snapshot {
         .map_err(|problem| error::sql("tallying repair advisory containers", problem))?;
         if counts[2] > 0 {
             let at = types.partition_point(|(kind, _)| kind.as_str() < "map");
-            types.insert(at, ("map".to_string(), counts[2]));
+            if let Some((_, count)) = types.get_mut(at).filter(|(kind, _)| kind == "map") {
+                *count += counts[2];
+            } else {
+                types.insert(at, ("map".to_string(), counts[2]));
+            }
         }
         let types = types
             .into_iter()
@@ -348,6 +352,7 @@ fn advisory_type(kind: &str) -> AdvisoryValueType {
         "boolean" => AdvisoryValueType::Boolean,
         "null" => AdvisoryValueType::Null,
         "map" => AdvisoryValueType::Map,
+        "sequence" => AdvisoryValueType::Sequence,
         _ => unreachable!("the checked field columns carry a known type"),
     }
 }
