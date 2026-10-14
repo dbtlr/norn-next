@@ -143,12 +143,13 @@ use norn_store::{
 use norn_testkit::heap;
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Column, CountParams,
-    CountReport, DeleteParams, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
-    ErrorEnvelope, FieldChange, FindParams, FindReport, GetParams, GetReport, GroupKey, LinkFamily,
-    LinkHealth, MoveParams, MoveSubject, PlanDocument, Predicate, RepairParams, ResolutionTarget,
-    ResolvedPlan, SearchParams, SearchReport, SetParams, TargetResult, ValidateParams,
-    ValidateReport, VaultAddress, WriteTarget,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Column, Confidence,
+    CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport, DocumentPath,
+    DocumentRow, ErrorEnvelope, FieldChange, FindParams, FindReport, GetParams, GetReport,
+    GroupKey, LinkFamily, LinkHealth, MoveParams, MoveSubject, OperationKind, PlanDocument,
+    Predicate, RepairAdvisories, RepairParams, ResolutionTarget, ResolvedPlan, SearchParams,
+    SearchReport, SetParams, TargetResult, ValidateParams, ValidateReport, VaultAddress,
+    WriteTarget,
 };
 
 /// Every allocation this binary makes goes through the counting allocator, so
@@ -682,14 +683,18 @@ const PLAN_MOVED_HUB_STEM: &str = "memory-plan-moved-hub";
 /// plans a cascade of as many rewrites, fixed at both per-PR scales.
 const PLAN_HUB_IN_LINKS: usize = 20;
 
-/// The vault schema the planning child is attached under. Its two rules read
-/// the repair workload's documents alone, by the `memory_plan_kind` they
-/// carry, which no generated document does: one repairs a document's
+/// The vault schema the planning child is attached under. Its rules read the
+/// repair workload's documents alone, by the `memory_plan_kind` they carry,
+/// which no generated document does: one repairs a document's
 /// `memory_plan_state` by a synonym and its missing `memory_plan_owner` by a
-/// default, the other routes a misplaced document into `memory-plan-repair/routed/`.
-/// No rule reads the set, hub or delete subjects, so the schema leaves those
-/// plans as they were.
+/// default, one answers a `memory_plan_choice` outside its `one_of` by its
+/// closest member, and one routes a misplaced document into
+/// `0-memory-plan-repair/routed/`. The declared `regression` tag makes every
+/// undeclared tag a finding, the generated documents' too, which sort after
+/// the workload and so stand outside the repair's batch. No rule reads the
+/// set, hub or delete subjects, so the schema leaves those plans as they were.
 const PLAN_SCHEMA: &str = "version: 1
+tags: { declared: [regression], undeclared: report }
 rules:
   memory-plan-fields:
     match: { frontmatter: { memory_plan_kind: fixable } }
@@ -697,25 +702,31 @@ rules:
       memory_plan_state: { values: [open, closed], synonyms: { complete: closed } }
     required:
       memory_plan_owner: { default: me }
+  memory-plan-near:
+    match: { frontmatter: { memory_plan_kind: near } }
+    one_of:
+      memory_plan_choice: { values: [azure, teal] }
   memory-plan-route:
     match: { frontmatter: { memory_plan_kind: routed } }
-    allowed_paths: { paths: ['memory-plan-repair/routed/**'], route: 'memory-plan-repair/routed/' }
+    allowed_paths: { paths: ['0-memory-plan-repair/routed/**'], route: '0-memory-plan-repair/routed/' }
 ";
 
 /// The repair workload, fixed at both per-PR scales so only the vault's size
 /// varies: [`REPAIR_FIELD_DOCS`] documents, each breaching the synonym rule
 /// and the default rule (two findings each), one misplaced document the route
 /// moves, linked by its path from [`REPAIR_ROUTE_IN_LINKS`] documents (a move
-/// keeps a bare stem valid, so only a path link is rewritten), and a batch
-/// limit that takes all of it.
+/// keeps a bare stem valid, so only a path link is rewritten). One more holder
+/// needs move-following, similarity, closest-heading, one_of and tag fixes;
+/// three targets supply its evidence. The unnarrowed first batch takes all
+/// planted findings and computes advisories.
 const REPAIR_FIELD_DOCS: usize = 5;
 const REPAIR_ROUTE_IN_LINKS: usize = 20;
-const REPAIR_LIMIT: u32 = 2 * REPAIR_FIELD_DOCS as u32 + 1;
+const REPAIR_LIMIT: u32 = 2 * REPAIR_FIELD_DOCS as u32 + 1 + 5;
 
 /// The stem of the document the repair's route moves, and the folder its
-/// in-links stand under.
+/// in-links stand under, before every generated path.
 const REPAIR_ROUTED_STEM: &str = "memory-plan-repair-routed";
-const REPAIR_LINKS_DIR: &str = "memory-plan-repair-links";
+const REPAIR_LINKS_DIR: &str = "0-memory-plan-repair/links";
 
 /// The document the plan mix deletes, which no link names.
 const PLAN_DELETED: &str = "memory-plan-delete/memory-plan-lonely.md";
@@ -791,8 +802,8 @@ const PLAN_WRITES: [(&str, usize); 3] = [
 
 /// What the repair write of the planning child writes, as its apply answers
 /// its targets: each field document, the routed document's two places, and
-/// each in-link's rewrite.
-const REPAIR_WRITE: (&str, usize) = ("repair", REPAIR_FIELD_DOCS + 2 + REPAIR_ROUTE_IN_LINKS);
+/// each in-link's rewrite, and the holder carrying every 5C fix.
+const REPAIR_WRITE: (&str, usize) = ("repair", REPAIR_FIELD_DOCS + 2 + REPAIR_ROUTE_IN_LINKS + 1);
 
 /// Every write the planning child lands: the plan mix's and the repair's.
 const PLAN_AND_REPAIR_WRITES: [(&str, usize); 4] =
@@ -801,9 +812,15 @@ const PLAN_AND_REPAIR_WRITES: [(&str, usize); 4] =
 /// The heap stretches the planning child measures.
 const PLAN_STRETCHES: [&str; 4] = ["previews", "mix", "repair-previews", "repair-apply"];
 
-/// How many documents [`plant_plan_subjects`] plants.
-const PLAN_PLANTED: usize =
-    PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1 + REPAIR_FIELD_DOCS + 1 + REPAIR_ROUTE_IN_LINKS;
+/// How many documents the planning workload plants, including the four 5C subjects.
+const PLAN_PLANTED: usize = PLAN_SET_MATCHES
+    + 1
+    + PLAN_HUB_IN_LINKS
+    + 1
+    + REPAIR_FIELD_DOCS
+    + 1
+    + REPAIR_ROUTE_IN_LINKS
+    + 4;
 
 /// What each planned write of the size child writes, as the apply answers its
 /// targets: each moved or relinked document's two places.
@@ -844,8 +861,8 @@ struct PlanChild {
 }
 
 /// The planning child: the mix's three writes, and the plan ceiling's
-/// subject. Every planted subject stands once the plans land, save the one
-/// the mix deletes.
+/// subject, including all 5C fixes and computed advisories. The out-of-band
+/// move preserves the live count; only the mix's deletion removes a subject.
 const PLANNING: PlanChild = PlanChild {
     case: PLAN_HARNESS_CASE,
     plant: plant_plan_subjects,
@@ -877,7 +894,7 @@ fn plant(vault: &attach::Vault, at: &str, content: &[u8]) {
 /// attaches it: [`PLAN_SET_MATCHES`] documents carrying [`PLAN_SET_FIELD`],
 /// the hub with [`PLAN_HUB_IN_LINKS`] documents linking it by its bare stem,
 /// the document the mix deletes, [`PLAN_SCHEMA`], and the repair workload's
-/// documents.
+/// documents, including its five-fix holder and three targets.
 fn plant_plan_subjects(vault: &attach::Vault) {
     let plant = |at: &str, content: &[u8]| plant(vault, at, content);
     for at in 0..PLAN_SET_MATCHES {
@@ -898,20 +915,33 @@ fn plant_plan_subjects(vault: &attach::Vault) {
         .expect("writing the planning child's schema");
     for at in 0..REPAIR_FIELD_DOCS {
         plant(
-            &format!("memory-plan-repair/fields/{at:04}.md"),
+            &format!("0-memory-plan-repair/fields/{at:04}.md"),
             b"---\nmemory_plan_kind: fixable\nmemory_plan_state: complete\n---\na repairable document\n",
         );
     }
     plant(
-        &format!("memory-plan-repair/loose/{REPAIR_ROUTED_STEM}.md"),
+        &format!("0-memory-plan-repair/loose/{REPAIR_ROUTED_STEM}.md"),
         b"---\nmemory_plan_kind: routed\n---\na misplaced document\n",
     );
     for at in 0..REPAIR_ROUTE_IN_LINKS {
         plant(
             &format!("{REPAIR_LINKS_DIR}/{at:04}.md"),
-            format!("See [[memory-plan-repair/loose/{REPAIR_ROUTED_STEM}]].\n").as_bytes(),
+            format!("See [[0-memory-plan-repair/loose/{REPAIR_ROUTED_STEM}]].\n").as_bytes(),
         );
     }
+    plant(
+        "0-memory-plan-repair/old-move.md",
+        b"# Unique memory followed document\n",
+    );
+    plant(
+        "0-memory-plan-repair/qzxvbnjkpl.md",
+        b"# Rare similarity target\n",
+    );
+    plant(
+        "0-memory-plan-repair/heading-target.md",
+        b"# Important Heading\n",
+    );
+    plant("0-memory-plan-repair/zz-holder.md", b"---\nmemory_plan_kind: near\nmemory_plan_choice: azur\n---\n#regressiom [[old-move]] [[qzxvbnjkpx]] [[heading-target#Important Headinh]]\n");
 }
 
 /// Plant the size child's subjects into `vault`'s tree, before anything
@@ -1118,8 +1148,10 @@ fn the_plan_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_th
 /// The planning child plants one repair workload at both profiles: five
 /// documents each breaching a synonym rule and a default rule, one misplaced
 /// document a route moves with [`REPAIR_ROUTE_IN_LINKS`] in-links its cascade
-/// rewrites, a batch limit that takes all of it, and nothing else in the
-/// selection. It previews `Host::repair` over that under its own mark on a
+/// rewrites, and one holder carrying move-following, similarity, closest-heading,
+/// closest one_of and tag fixes. The unnarrowed request computes advisories;
+/// its fixed limit takes the planted findings before every generated path.
+/// It previews `Host::repair` over that under its own mark on a
 /// settled heap, before any apply, so only the vault's size varies and the
 /// preview is held at the plan previews' resolution.
 #[test]
@@ -1144,7 +1176,8 @@ fn the_repair_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profil
 ///
 /// The same workload as
 /// [`the_repair_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`],
-/// applied through `Host::repair` in apply mode after every other write has
+/// including every 5C family and computed advisories, applied through
+/// `Host::repair` in apply mode after every other write has
 /// landed and the heap has settled. The watcher's echo of its publications is
 /// inside the window, so it is held at the plan mix's allowance, which is
 /// authored over that echo's excursion.
@@ -1515,6 +1548,35 @@ fn plan_and_report(root: &Path) {
     let _lease = attach::attach_and_wait(&host, vault.name());
     let address = || VaultAddress::name(vault.name().clone());
     let document = |at: &str| DocumentPath::new(at).expect("a document path");
+    std::fs::rename(
+        vault.path().join("0-memory-plan-repair/old-move.md"),
+        vault.path().join("0-memory-plan-repair/moved-live.md"),
+    )
+    .expect("move outside norn");
+    norn_testkit::wait::wait_until(
+        "the memory repair move is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let snapshot = store.begin_request();
+            let dead = snapshot
+                .stored_tombstone(
+                    &StorePath::new("0-memory-plan-repair/old-move.md").expect("path"),
+                )
+                .expect("death");
+            let live = snapshot
+                .stored_document(
+                    &StorePath::new("0-memory-plan-repair/moved-live.md").expect("path"),
+                )
+                .expect("live document");
+            if dead.is_some() && live.is_some() {
+                norn_testkit::wait::Observed::Met(())
+            } else {
+                norn_testkit::wait::Observed::pending(format!("{dead:?} {live:?}"))
+            }
+        },
+    )
+    .expect("the move settles");
     let mut lines = Vec::with_capacity(PLAN_WRITES.len());
     let mut landed = |write: &str, plan: ResolvedPlan| {
         let targets = applied_plan(write, &host, plan);
@@ -1523,8 +1585,8 @@ fn plan_and_report(root: &Path) {
 
     let repair_request = |mode| {
         RepairParams::new(address(), mode)
-            .with_predicates([Predicate::path("memory-plan-repair/**")])
             .with_limit(REPAIR_LIMIT)
+            .with_threshold(Confidence::Suggested)
     };
     settle_heap();
     let repair_mark = heap::Mark::set();
@@ -1538,9 +1600,72 @@ fn plan_and_report(root: &Path) {
         .sum();
     assert_eq!(
         (repair_fixes, rewrites),
-        (2 * REPAIR_FIELD_DOCS + 1, REPAIR_ROUTE_IN_LINKS),
-        "the repair planned other than two fixes per field document and the route's move with a \
-         rewrite per in-link"
+        (2 * REPAIR_FIELD_DOCS + 1 + 5, REPAIR_ROUTE_IN_LINKS),
+        "the repair planned other than the field fixes, route cascade and five 5C fixes"
+    );
+    let held = document("0-memory-plan-repair/zz-holder.md");
+    for kind in [
+        OperationKind::rewrite_link(held.clone(), LinkFamily::Wikilink, "old-move", "moved-live"),
+        OperationKind::rewrite_link(
+            held.clone(),
+            LinkFamily::Wikilink,
+            "qzxvbnjkpx",
+            "qzxvbnjkpl",
+        ),
+        OperationKind::rewrite_anchor(
+            held.clone(),
+            LinkFamily::Wikilink,
+            "heading-target",
+            "Important Headinh",
+            "Important Heading",
+        ),
+        OperationKind::set_frontmatter(
+            WriteTarget::path(held.clone()),
+            "memory_plan_choice",
+            AuthoredValue::string("azure"),
+        ),
+        OperationKind::rewrite_tag(held, "regressiom", "regression"),
+    ] {
+        assert!(
+            repaired
+                .operations
+                .iter()
+                .any(|operation| operation.kind == kind),
+            "missing {kind:?}"
+        );
+    }
+    for operation in &repaired.operations {
+        let paths: Vec<&DocumentPath> = match &operation.kind {
+            OperationKind::SetFrontmatter { target, .. } => {
+                vec![target.as_path().expect("a planted path")]
+            }
+            OperationKind::MoveDocument { from, to } => vec![from, to],
+            OperationKind::RewriteLink { path, .. }
+            | OperationKind::RewriteAnchor { path, .. }
+            | OperationKind::RewriteTag { path, .. } => vec![path],
+            other => panic!("unexpected repair operation: {other:?}"),
+        };
+        assert!(
+            paths
+                .iter()
+                .all(|path| path.as_str().starts_with("0-memory-plan-repair/"))
+        );
+        assert!(
+            operation
+                .cascade
+                .iter()
+                .all(|rewrite| rewrite.path.as_str().starts_with("0-memory-plan-repair/"))
+        );
+    }
+    let provenance = repaired.provenance.as_ref().expect("repair provenance");
+    assert!(matches!(
+        provenance.advisories,
+        Some(RepairAdvisories::Computed(_))
+    ));
+    assert!(
+        provenance.skipped.is_empty(),
+        "every planted finding has a fix: {:?}",
+        provenance.skipped
     );
     drop(repaired);
 
