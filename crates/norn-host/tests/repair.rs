@@ -5795,7 +5795,7 @@ fn a_follow_no_spelling_or_edit_can_write_skips_as_link_not_rewritable() {
             "unplaced",
             "---\nsee: [\"[[old]]\"]\n---\n",
             "new.md",
-            "Unplaced",
+            "skipped_unplaced",
         ),
         (
             "no-spelling",
@@ -5973,5 +5973,176 @@ fn a_followed_link_whose_field_a_forbidden_removal_deletes_is_dropped_not_rewrit
     assert_eq!(
         written(&vault, "zz-holder.md"),
         "---\ntype: task\n---\n# Holder\n",
+    );
+}
+
+/// **A follow bringing in a required field names that field and its default.**
+#[test]
+fn a_follow_bringing_in_a_required_field_names_its_default() {
+    let schema = "version: 1\nfields:\n  see: {type: link}\nrules:\n  linked:\n    match: {frontmatter: {see: '[[new]]'}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-required",
+        schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"---\nsee: '[[old]]'\n---\n# Holder\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, SkipReason::BringsInRequiredFields);
+    assert_eq!(
+        skipped[0].required_fields,
+        Some(
+            RequiredFieldHead::new(
+                [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+                1,
+            )
+            .expect("a head")
+        ),
+    );
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nsee: '[[old]]'\n---\n# Holder\n"
+    );
+}
+
+/// **A follow cannot activate a rule reading a link a settled route respells.**
+/// The follow skips with the bare-link veto's note, and the route still applies.
+#[test]
+fn a_follow_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
+    let schema = SELECTED_BY_LINK.replace("[[zz-projects]]", "[[new]]");
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-respelled",
+        &schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            ("loose/x.md", b"---\ntype: task\n---\n# X\n"),
+            (
+                "zz-holder.md",
+                b"---\nup: '[[old]]'\nparent: '[[zz-repair/loose/x]]'\n---\n# H\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/x.md"),
+            at("tasks-all/x.md")
+        )]
+    );
+    assert!(stands(&vault, "tasks-all/x.md"));
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{plan:?}");
+    assert_eq!(skipped[0].reason, SkipReason::JudgeWouldRefuse);
+    assert_eq!(
+        skipped[0].note.as_deref(),
+        Some(
+            "the link brings `zz-repair/zz-holder.md` under a rule reading `parent` by value, whose link the move of `zz-repair/loose/x.md` to `zz-repair/tasks-all/x.md` would respell"
+        )
+    );
+    let holder = written(&vault, "zz-holder.md");
+    assert!(holder.contains("up: '[[old]]'"), "{holder}");
+    assert!(holder.contains("[[tasks-all/x]]"), "{holder}");
+}
+
+/// **A follow that exceeds its field's length limit skips as the judge refuses.**
+#[test]
+fn a_follow_exceeding_its_fields_length_limit_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    max_length: {see: 7}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-length",
+        schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            (
+                "zz-holder.md",
+                b"---\ntype: task\nsee: '[[old]]'\n---\n# H\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "much-longer.md");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, SkipReason::JudgeWouldRefuse);
+}
+
+/// **A routed holder's follow guards the replaced address where it was read.**
+/// Recreating that target refuses apply, before the holder is moved or rewritten.
+#[test]
+fn recreating_the_old_target_refuses_a_follow_from_a_routed_holder() {
+    let before = b"---\ntype: task\n---\nSee [x](old.md).\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-routed-recreated",
+        TASKED,
+        &[("old.md", b"# Followed\n"), ("zz-holder.md", before)],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 2, "{plan:?}");
+    std::fs::write(vault.path().join(FOLDER).join("old.md"), b"# Recreated\n")
+        .expect("recreate old target");
+    wait_for_stored_path(&vault, "old.md", false);
+
+    let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let replaced = norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "old.md",
+        ),
+        norn_wire::Resolves::none(),
+    );
+    assert!(fails(&checks, &replaced), "{checks:?}");
+    assert_eq!(written(&vault, "zz-holder.md").as_bytes(), before);
+    assert!(!stands(&vault, "tasks/zz-holder.md"));
+}
+
+/// **Both root reductions of a vault link contribute their tombstones.**
+/// A live copy of the first death cannot turn the two deaths into one follow.
+#[test]
+fn a_vault_link_matching_both_root_reductions_skips_as_several_tombstones() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-vault-two-reductions",
+        "version: 1\n",
+        &[
+            ("old.md", b"# First\n"),
+            ("old.md.md", b"# Second\n"),
+            ("zz-holder.md", b"See [[vault://zz-repair/old.md]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for path in ["old.md", "old.md.md"] {
+        std::fs::remove_file(vault.path().join(FOLDER).join(path)).expect("remove outside norn");
+        wait_for_stored_path(&vault, path, true);
+    }
+    std::fs::write(vault.path().join(FOLDER).join("copy.md"), b"# First\n").expect("copy bytes");
+    wait_for_stored_path(&vault, "copy.md", false);
+    wait_for_broken(&host, &vault);
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_follow_skip(
+        &plan,
+        SkipReason::SeveralTombstones,
+        &["zz-repair/old.md", "zz-repair/old.md.md"],
     );
 }

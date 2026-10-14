@@ -2991,9 +2991,11 @@ over the settled routes. No candidate reaching the destination uniquely, or a te
 The operation carries the followed document's recorded hash as an author condition, lifted
 to a plan condition where the plan does not write that document. Both the written and the
 replaced address carry an `address_resolution` condition, recorded by the same batched
-`resolved_addresses` probe the applier repeats. The written address names the followed
-document; the replaced address records its after-state resolution, normally none. Changing
-the followed bytes or recreating the old target between preview and apply refuses the plan.
+`resolved_addresses` probe the applier repeats. The written address is keyed where the
+holder lands and names the followed document. The replaced address is keyed where the
+finding read it and records its after-state resolution, normally none, even when a route
+moves the holder away. Changing the followed bytes or recreating the old target between
+preview and apply refuses the plan.
 A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
 where the hash changed.
 

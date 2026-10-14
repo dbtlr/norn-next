@@ -21,7 +21,8 @@
 //! **A follow is spelled over the batch's settled routes and composed last.**
 //! All candidates and replaced addresses share the applier's resolution
 //! probe. The fix records the written address resolving to the followed
-//! document and the replaced address's after-state resolution, and carries
+//! document from where the holder lands, and the replaced address's
+//! after-state resolution from where the finding read it, and carries
 //! the tombstone's hash as an author condition on that document. A spelling
 //! that never reaches it uniquely, or a text-layer refusal, skips as
 //! `link_not_rewritable`, with that reason in its note.
@@ -56,7 +57,9 @@ pub(super) struct Follow {
 /// keyed by finding id; no entry where no tombstone was found.
 pub(super) type Follows = BTreeMap<u64, Result<Follow, SkippedFinding>>;
 /// The candidate addresses prepared for the batch's one resolution probe,
-/// keyed by the holder at its after-state, syntax and replaced address.
+/// keyed by the holder where it lands, syntax and old address. Candidate
+/// probes use that landed holder; the replaced address's probe uses the
+/// holder where the finding read it.
 pub(super) type Asked = BTreeMap<EntryKey, Vec<LinkKey>>;
 
 /// The follows and skips of the selected broken findings `rows`, reading
@@ -141,8 +144,9 @@ pub(super) fn read<R: Reading>(
 }
 
 /// Add to `probes` every candidate spelling of `follow` and its replaced
-/// address, from where `holder` stands after its route, and record the
-/// candidates in `asked`. One holder, syntax and old address is prepared
+/// address, and record the candidates in `asked`. Candidates are probed
+/// from where `holder` lands; the replaced address from where the finding
+/// read it ([`Follow::link`]). One holder, syntax and old address is prepared
 /// once, however many selected findings name it.
 pub(super) fn ask(
     follow: &Follow,
@@ -150,12 +154,12 @@ pub(super) fn ask(
     asked: &mut Asked,
     probes: &mut Vec<LinkKey>,
 ) {
-    let old = LinkKey::new(holder.clone(), follow.link.syntax, &follow.link.address);
-    let key = entry_key(&old);
+    let landed = LinkKey::new(holder.clone(), follow.link.syntax, &follow.link.address);
+    let key = entry_key(&landed);
     if asked.contains_key(&key) {
         return;
     }
-    let probe = probe_of(&old).expect("a followed link has a stored syntax");
+    let probe = probe_of(&landed).expect("a followed link has a stored syntax");
     let candidates: Vec<_> = crate::planner::link_spelling::candidate_spellings(
         &probe.after_holder,
         &probe.link,
@@ -165,12 +169,12 @@ pub(super) fn ask(
     .map(|candidate| {
         LinkKey::new(
             holder.clone(),
-            old.syntax,
+            landed.syntax,
             address(&spelled(&probe.link, &candidate)),
         )
     })
     .collect();
-    probes.push(old);
+    probes.push(follow.link.clone());
     probes.extend(candidates.iter().cloned());
     asked.insert(key, candidates);
 }

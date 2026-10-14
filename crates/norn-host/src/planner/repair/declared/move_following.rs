@@ -1,18 +1,24 @@
 //! Move-following composition: one derived rewrite per holder, syntax and
 //! old address, after the holder's ordinary fixes and bare-link fixes, at
-//! the place the batch's settled routes leave it.
+//! the place the batch's settled routes leave it. The written address is
+//! conditioned there; the replaced address where the finding read it.
 //!
 //! **Each addition is judged on the bytes the earlier fixes left.** No link
 //! of the old address remaining makes no fix, leaving the finding for
 //! `held_links` to settle. No spelling reaching the followed document
 //! uniquely, or a text-layer refusal, is `link_not_rewritable` with its
-//! reason; an addition the judge refuses is `judge_would_refuse`. An admitted
-//! rewrite below the threshold is `below_threshold` with its operation.
+//! reason. An addition bringing in missing required fields is
+//! `brings_in_required_fields` with their defaults; any other refusal is
+//! `judge_would_refuse`, including selecting a rule reading by value a link
+//! a settled route may respell. An admitted rewrite below the threshold is
+//! `below_threshold` with its operation.
 
 use std::collections::BTreeMap;
 
-use super::{Composed, Document, Made, Reckoned, State, cited, skip, verdict};
-use crate::planner::links::{EntryKey, address, entry_key, wire_family};
+use super::{
+    Composed, Document, Made, Reckoned, Respellable, State, cited, respells, skip, verdict,
+};
+use crate::planner::links::{EntryKey, address, entry_key, skip_advisory, wire_family};
 use crate::planner::repair::broken_links::{Asked, Follow, Follows};
 use norn_wire::{
     AuthorCondition, Confidence, LinkKey, LinkRewrite, Operation, OperationKind, PlanCondition,
@@ -33,6 +39,7 @@ impl Reckoned<'_> {
         follows: &Follows,
         asked: &Asked,
         resolutions: &BTreeMap<EntryKey, Resolves>,
+        respellable: Option<&Respellable>,
     ) {
         for (at, row) in self.rows.iter().enumerate() {
             if let Some(Err(skipped)) = follows.get(&row.id) {
@@ -75,11 +82,7 @@ impl Reckoned<'_> {
                 }
                 continue;
             };
-            let old = LinkKey::new(
-                composed.state.at.clone(),
-                follow.link.syntax,
-                &follow.link.address,
-            );
+            let old = follow.link.clone();
             let new = LinkKey::new(composed.state.at.clone(), follow.link.syntax, &to);
             let rewrite = LinkRewrite::new(
                 composed.state.at.clone(),
@@ -93,9 +96,8 @@ impl Reckoned<'_> {
                 Err(reason) => {
                     for (at, _) in &group {
                         composed.decided[*at] = Some(
-                            skip(&self.rows[*at], SkipReason::LinkNotRewritable).with_note(
-                                format!("the text layer refuses the rewrite: {reason:?}"),
-                            ),
+                            skip(&self.rows[*at], SkipReason::LinkNotRewritable)
+                                .with_note(format!("the text layer refuses the rewrite: {reason}")),
                         );
                     }
                     continue;
@@ -108,12 +110,11 @@ impl Reckoned<'_> {
                 continue;
             }
             if let Some(skipped) = rewritten.skipped.first() {
+                let reason = skip_advisory(old.clone(), skipped.reason).as_str();
                 for (at, _) in &group {
                     composed.decided[*at] = Some(
-                        skip(&self.rows[*at], SkipReason::LinkNotRewritable).with_note(format!(
-                            "the text layer refuses the rewrite: {:?}",
-                            skipped.reason
-                        )),
+                        skip(&self.rows[*at], SkipReason::LinkNotRewritable)
+                            .with_note(format!("the text layer refuses the rewrite: {reason}")),
                     );
                 }
                 continue;
@@ -126,10 +127,30 @@ impl Reckoned<'_> {
                 composing.repairing.declared,
                 composing.repairing.case,
             );
+            let state = State::of(composed.state.at.clone(), rewritten.bytes, result.standing);
             if !result.introduced.is_empty() {
                 for (at, _) in &group {
-                    composed.decided[*at] =
-                        Some(skip(&self.rows[*at], SkipReason::JudgeWouldRefuse));
+                    composed.decided[*at] = composing.introduced_skip(
+                        &self.rows[*at],
+                        &state,
+                        &result.introduced,
+                        None,
+                    );
+                }
+                continue;
+            }
+            if let Some((field, (from, to))) = respellable.and_then(|links| {
+                respells::reads_a_respellable_link(&state, links, composing.repairing)
+            }) {
+                let note = format!(
+                    "the link brings `{}` under a rule reading `{field}` by value, whose link the \
+                     move of `{from}` to `{to}` would respell",
+                    state.at
+                );
+                for (at, _) in &group {
+                    composed.decided[*at] = Some(
+                        skip(&self.rows[*at], SkipReason::JudgeWouldRefuse).with_note(note.clone()),
+                    );
                 }
                 continue;
             }
@@ -170,7 +191,7 @@ impl Reckoned<'_> {
                     .collect(),
                 conditions,
             });
-            composed.state = State::of(composed.state.at.clone(), rewritten.bytes, result.standing);
+            composed.state = state;
         }
     }
 }

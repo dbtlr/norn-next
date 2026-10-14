@@ -477,6 +477,7 @@ impl Decided<'_> {
             follows,
             asked,
             resolutions,
+            respellable,
         );
         let claims = reckoned.settle(&mut composed);
         reckoned.propose_lowered(
@@ -824,7 +825,14 @@ impl<'d> Reckoned<'d> {
         let (from, made) = composed.began.clone();
         let mut lowered = self.compose(&lowered_document, from, made);
         self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
-        self.follow_fixes(&lowered_document, &mut lowered, follows, asked, resolutions);
+        self.follow_fixes(
+            &lowered_document,
+            &mut lowered,
+            follows,
+            asked,
+            resolutions,
+            respellable,
+        );
         self.settle(&mut lowered);
         for (at, decision) in composed.decided.iter_mut().enumerate() {
             if !below(decision) {
@@ -1215,6 +1223,44 @@ impl Document<'_> {
         )
     }
 
+    /// The skip of an addition introducing `introduced` on `state`: missing
+    /// required fields first, with their defaults and any disagreement noted,
+    /// otherwise a refusal carrying `candidates` where the fix has them.
+    fn introduced_skip(
+        &self,
+        row: &FindingRow,
+        state: &State,
+        introduced: &[SchemaViolation],
+        candidates: Option<&SkippedCandidates>,
+    ) -> Option<SkippedFinding> {
+        let brought = brought_in(introduced);
+        if !brought.is_empty() {
+            let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
+            let skipped =
+                skip(row, SkipReason::BringsInRequiredFields).with_required_fields(fields);
+            return Some(if differing.is_empty() {
+                skipped
+            } else {
+                skipped.with_note(format!(
+                    "the rules requiring {} declare differing defaults, so no default is named",
+                    differing
+                        .iter()
+                        .map(|field| format!("`{field}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            });
+        }
+        if !introduced.is_empty() {
+            let skipped = skip(row, SkipReason::JudgeWouldRefuse);
+            return Some(match candidates {
+                Some(candidates) => skipped.with_candidates(candidates.clone()),
+                None => skipped,
+            });
+        }
+        None
+    }
+
     /// The state the document holding `composed` at `at` is, judged there by
     /// the applier's one judge ([`verdict`]) against its before-state and
     /// against `from`, the state it was composed from; or the skip of the
@@ -1269,28 +1315,8 @@ impl Document<'_> {
             finding,
             candidates,
         } = fixing;
-        let brought = brought_in(introduced);
-        if !brought.is_empty() {
-            let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
-            let skipped =
-                skip(row, SkipReason::BringsInRequiredFields).with_required_fields(fields);
-            return Err(Box::new(if differing.is_empty() {
-                skipped
-            } else {
-                skipped.with_note(format!(
-                    "the rules requiring {} declare differing defaults, so no default is named",
-                    differing
-                        .iter()
-                        .map(|field| format!("`{field}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }));
-        }
-        if !introduced.is_empty() {
-            return Err(Box::new(
-                skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
-            ));
+        if let Some(skipped) = self.introduced_skip(row, &state, introduced, Some(candidates)) {
+            return Err(Box::new(skipped));
         }
         // A fix is cited only for a finding the result no longer holds.
         if state.holding(finding).is_some() {

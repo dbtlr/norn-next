@@ -1,18 +1,14 @@
-//! **A link is respelled in its own style, and only to a spelling that reads
-//! back.** The new address is the shortest spelling of the link's
-//! destination — the file the moved document lands at, the delete's target,
-//! or the wikilink rewrite's `new` — the link's syntax and protocol can
-//! write: for a bare wikilink
-//! the shortest suffix of the destination that names it alone with every
-//! target of the plan at its after-state — at least two segments where the
-//! link was written path-qualified, so it stays so — written with the
-//! document extension exactly where the link was; for a `vault://` wikilink
-//! the destination's root path, in that same style; and for a Markdown link the
-//! destination's path from the holder's folder, or from the root where the
-//! link was written from the root, in the link's own percent-escaping. Each
-//! candidate is probed through the same door, from the holder where it stands
-//! after the plan, and the first that resolves to exactly the destination is
-//! written.
+//! **A link keeps its authored style and takes the first unique spelling.**
+//! The destination is where a moved document lands, a delete's target, a
+//! wikilink rewrite's `new`, or the document a move-following fix follows.
+//! This module orders candidate spellings and picks the first the caller's
+//! resolution answer reaches uniquely. Wikilinks keep their suffix or root
+//! style and extension; Markdown links keep their relative or rooted style
+//! and percent-escaping ([`candidate_spellings`]).
+//!
+//! **The callers probe the candidates.** The cascade and repair ask the
+//! link index over the plan's after-state, repair through the applier's
+//! `resolved_addresses` probe, and supply those answers here.
 
 use super::links::wire_family;
 use norn_store::{DocumentPath, LinkFact};

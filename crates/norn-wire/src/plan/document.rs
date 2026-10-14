@@ -225,13 +225,15 @@ impl Transition {
 /// One link, as a plan names it: the document holding it, its syntax and its
 /// address — what decides which documents it resolves to.
 ///
-/// **A key names a link as it stands at the plan's after-state.** A link a
-/// cascade rewrites is keyed by its new address, not the one it is written
-/// with before the plan. A link the after-state no longer holds — an old
+/// **A change-set key names a link as it stands at the plan's after-state.**
+/// A link a cascade rewrites is keyed by its new address, not the one it is
+/// written with before the plan. A link the after-state no longer holds — an old
 /// address a rewrite replaced, a link in a removed document — is no entry of
 /// the change set: its disappearance is the plan's own transition, guarded by
 /// that file's hashes. A key can still name such an address, as an address
-/// resolution about an address a repair replaces does.
+/// resolution about an address a repair replaces does. A follow's replaced
+/// address is keyed at the holder where the finding read it, even when the
+/// plan moves the holder away.
 ///
 /// On the wire a key is one object:
 /// `{"holder":"notes/c.md","syntax":"wikilink","address":"vault://notes/a"}`.

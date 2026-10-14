@@ -238,6 +238,22 @@ pub enum LinkAdvisory {
 }
 
 impl LinkAdvisory {
+    /// The advisory as the string the wire writes under `advisory`.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            LinkAdvisory::SkippedAmbiguous { .. } => "skipped_ambiguous",
+            LinkAdvisory::SkippedUnrepresentable { .. } => "skipped_unrepresentable",
+            LinkAdvisory::SkippedWouldCorruptFrontmatter { .. } => {
+                "skipped_would_corrupt_frontmatter"
+            }
+            LinkAdvisory::SkippedNotRewritable { .. } => "skipped_not_rewritable",
+            LinkAdvisory::SkippedUnplaced { .. } => "skipped_unplaced",
+            LinkAdvisory::LeftBroken { .. } => "left_broken",
+            LinkAdvisory::MadeAmbiguous { .. } => "made_ambiguous",
+            LinkAdvisory::Retargeted { .. } => "retargeted",
+        }
+    }
+
     /// The link the advisory is about, whatever it says of it.
     pub const fn link(&self) -> &LinkKey {
         match self {
