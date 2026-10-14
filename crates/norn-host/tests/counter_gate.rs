@@ -6154,7 +6154,8 @@ fn missing_anchor_batches_keep_holder_compositions_and_heading_reads_flat() {
 }
 
 /// More undeclared tags spend one holder composition and D comparisons per finding,
-/// beside the read gate's one comparison finding the first eligible tag.
+/// beside the read gate's: at most D per finding, stopping at the first finding with
+/// a fix. Here that is one, since the only declared tag is one edit from the first.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn undeclared_tag_batches_keep_holder_compositions_flat() {
