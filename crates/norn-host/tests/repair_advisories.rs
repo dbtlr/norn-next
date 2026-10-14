@@ -164,6 +164,71 @@ fn list_containers_count_as_types_without_a_uniform_scalar_declaration() {
 }
 
 #[test]
+fn uniform_declarations_are_reported_only_when_the_existing_rules_admit_them() {
+    for (label, rules, total) in [
+        (
+            "selector",
+            "rules:\n  existing:\n    match: {frontmatter: {zz_count: word}}\n",
+            1,
+        ),
+        (
+            "member",
+            "rules:\n  existing:\n    one_of: {zz_count: {values: [word]}}\n",
+            1,
+        ),
+        (
+            "shape",
+            "rules:\n  existing:\n    required: {zz_count: {default: [1]}}\n",
+            0,
+        ),
+    ] {
+        let (_sandbox, vault, host) = a_vault_under(
+            &format!("advisory-declaration-refused-{label}"),
+            &format!("version: 1\n{rules}"),
+            &[("a.md", "---\nzz_count: 42\n---\n")],
+        );
+        let found = advisories(&host, &vault);
+        assert!(
+            !found["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .any(|item| { item["kind"] == "undeclared_uniform" && item["key"] == "zz_count" }),
+            "the {label} rule refuses the declaration"
+        );
+        assert_eq!(found["total"], total);
+    }
+    let rules = "rules:\n  existing:\n    match: {frontmatter: {zz_count: 42}}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-declaration-admitted",
+        &format!("version: 1\n{rules}"),
+        &[("a.md", "---\nzz_count: 42\n---\n")],
+    );
+    let found = advisories(&host, &vault);
+    assert_eq!(found["total"], 1);
+    let declaration = item(&found, "undeclared_uniform", "zz_count");
+    assert_eq!(
+        declaration["yaml"],
+        "fields:\n  ? \"zz_count\"\n  : {type: number, shape: single}\n"
+    );
+    let schema = format!(
+        "version: 1\n{}{rules}",
+        declaration["yaml"].as_str().expect("yaml")
+    );
+    norn_config::schema::VaultSchema::parse(schema.as_bytes())
+        .expect("the declaration loads beside the rule");
+    reload(&host, &vault, &schema);
+    let next = advisories(&host, &vault);
+    assert!(
+        !next["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["kind"] == "undeclared_uniform" && item["key"] == "zz_count")
+    );
+}
+
+#[test]
 fn undeclared_uniform_fields_render_a_declaration_that_removes_the_advisory() {
     let key = "zz: \"owner\"\u{7f}\u{85}\u{fffe}";
     let (_sandbox, vault, host) = a_vault_under(

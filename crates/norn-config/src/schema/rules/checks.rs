@@ -112,7 +112,7 @@ use super::super::{FieldType, Shape, VaultSchema, VaultSchemaError};
 use super::combined::{CombinedConstraint, RulesConflict};
 use super::judge::Element;
 use super::placement::{self, PLACEMENT_CEILING};
-use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem};
+use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem, equality_key};
 
 /// Every judgment schema read makes of its rules once each is read.
 ///
@@ -431,6 +431,60 @@ fn check_unavoidable(schema: &VaultSchema) -> Result<(), VaultSchemaError> {
 }
 
 impl VaultSchema {
+    /// Whether declaring an undeclared key preserves the rule values' type and default shapes.
+    ///
+    /// The judgment reads the rules once and reads no documents. It conservatively refuses
+    /// selector values that become equal while their current readings differ: merging selector
+    /// classes can expose a combined conflict, although a schema without that conflict may load.
+    pub fn admits_declaration(&self, key: &str, kind: FieldType, shape: Option<Shape>) -> bool {
+        let mut selector_keys = BTreeMap::new();
+        for rule in self.rules.values() {
+            if let Some(values) = rule.selector.frontmatter.get(key) {
+                for written in &values.written {
+                    let Some(compared) = equality_key(key, kind, written) else {
+                        return false;
+                    };
+                    let current = self
+                        .equality_key(key, written)
+                        .expect("a loaded selector value has an equality key");
+                    if let Some(previous) = selector_keys.insert(compared, current.clone())
+                        && previous != current
+                    {
+                        return false;
+                    }
+                }
+            }
+            if let Some(set) = rule.one_of.get(key)
+                && set
+                    .values
+                    .iter()
+                    .chain(set.synonyms.iter().map(|(_, target)| target))
+                    .any(|raw| equality_key(key, kind, raw).is_none())
+            {
+                return false;
+            }
+            if let Some(Some(default)) = rule.required.get(key) {
+                let is_list = matches!(default.value, DefaultValue::List(_));
+                if matches!(shape, Some(Shape::Single)) && is_list
+                    || matches!(shape, Some(Shape::List)) && !is_list
+                {
+                    return false;
+                }
+                let elements: &[DefaultValue] = match &default.value {
+                    DefaultValue::List(items) => items,
+                    value => std::slice::from_ref(value),
+                };
+                if elements.iter().any(|element| {
+                    untemplated_text(element)
+                        .is_some_and(|raw| equality_key(key, kind, &raw).is_none())
+                }) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Whether two rules may select one document together under their declared field shapes.
     pub fn may_co_select(&self, left: &Rule, right: &Rule) -> bool {
         may_co_select(self, left, right)

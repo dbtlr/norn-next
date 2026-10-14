@@ -3116,7 +3116,13 @@ and empty combinations. The longest prefix fitting 64 items and 32 KiB of serial
 JSON items is kept, YAML included, with `total` exact and samples bounded to five
 paths. YAML declares uniform fields by `fields` type and shape, and renames each
 alternate spelling it may move through its own selectorless `forbidden`/`rename_to`
-rule. A spelling the config names for use is never renamed away or forbidden by that
+rule. An undeclared uniform key is reported only where its declaration loads beside
+the current schema. The schema-only judgment runs once per key named by a selector,
+`required` or `one_of` statement:
+selector values, closed-set members or synonym targets that do not read as the
+observed type, required defaults that do not read as that type or shape, or two
+selector values whose distinct readings become equal leave it unreported.
+A spelling the config names for use is never renamed away or forbidden by that
 YAML: a declared field, a key a rule's selector, `required`, `one_of` or `max_length`
 reads, a `rename_to` target, a `frontmatter_defaults` key of a `creatable` rule, and
 the tag carrier `tags`. A spelling a rule forbids is never the target and does not

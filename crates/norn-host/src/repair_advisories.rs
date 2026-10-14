@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use norn_config::schema::{ForbiddenFix, Rule, RulesConflict, VaultSchema};
+use norn_config::schema::{FieldType, ForbiddenFix, Rule, RulesConflict, Shape, VaultSchema};
 use norn_store::{ContentModel, PageRefusal, RepairFieldTally, Snapshot};
 use norn_wire::{
     AdvisoryValueType, ContainerKind, HygieneConflict, Predicate, RepairAdvisories, RepairAdvisory,
@@ -64,8 +64,9 @@ pub(crate) fn computed(
         passes: 1,
         ..RepairAdvisoryCost::default()
     };
-    let fields = field_kinds(snapshot, schema, &mut cost)?;
-    let duplicates = near_duplicates(snapshot, schema, fields.spellings, &mut cost)?;
+    let rule_keys = rule_read_keys(schema);
+    let fields = field_kinds(snapshot, schema, &rule_keys, &mut cost)?;
+    let duplicates = near_duplicates(snapshot, schema, &rule_keys, fields.spellings, &mut cost)?;
     let (unmatched, unused) = rule_hygiene(snapshot, schema, declared, &mut cost)?;
     let combinations = empty_combinations(snapshot, schema, &mut cost);
     Ok((
@@ -86,6 +87,7 @@ pub(crate) fn computed(
 fn field_kinds(
     snapshot: &Snapshot,
     schema: &VaultSchema,
+    rule_keys: &RuleSpellings<'_>,
     cost: &mut RepairAdvisoryCost,
 ) -> Result<FieldKinds, PageRefusal> {
     let mut fields = FieldKinds::default();
@@ -100,7 +102,7 @@ fn field_kinds(
         cost.absorb(tally.work);
         cost.keys += 1;
         cost.value_rows += tally.value_rows;
-        observe_field(&key, tally, schema, &mut fields);
+        observe_field(&key, tally, schema, rule_keys, &mut fields);
         after = Some(key);
     }
     Ok(fields)
@@ -111,9 +113,10 @@ fn observe_field(
     key: &str,
     tally: RepairFieldTally,
     schema: &VaultSchema,
+    rule_keys: &RuleSpellings<'_>,
     fields: &mut FieldKinds,
 ) {
-    if let Some(item) = uniform_declaration(key, &tally, schema) {
+    if let Some(item) = uniform_declaration(key, &tally, schema, rule_keys) {
         fields.uniform.add(item);
     }
     if tally.types.len() > 1 {
@@ -142,6 +145,7 @@ fn uniform_declaration(
     key: &str,
     tally: &RepairFieldTally,
     schema: &VaultSchema,
+    rule_keys: &RuleSpellings<'_>,
 ) -> Option<RepairAdvisory> {
     if schema.field(key).is_some() || tally.types.len() != 1 {
         return None;
@@ -150,13 +154,17 @@ fn uniform_declaration(
     let declaration = declaration(kind)?;
     let shape = if tally.shapes.len() == 1 {
         match tally.shapes[0].shape {
-            ContainerKind::Scalar => ", shape: single",
-            ContainerKind::Sequence => ", shape: list",
-            _ => "",
+            ContainerKind::Scalar => Some(Shape::Single),
+            ContainerKind::Sequence => Some(Shape::List),
+            _ => None,
         }
     } else {
-        ""
+        None
     };
+    if rule_keys.statements.contains(key) && !schema.admits_declaration(key, declaration, shape) {
+        return None;
+    }
+    let shape = shape.map_or_else(String::new, |shape| format!(", shape: {shape}"));
     let yaml = format!(
         "fields:\n  ? {}\n  : {{type: {declaration}{shape}}}\n",
         quoted(key)
@@ -174,6 +182,7 @@ fn uniform_declaration(
 fn near_duplicates(
     snapshot: &Snapshot,
     schema: &VaultSchema,
+    rule_keys: &RuleSpellings<'_>,
     spellings: BTreeMap<String, Vec<SpellingUse>>,
     cost: &mut RepairAdvisoryCost,
 ) -> Result<Collected, PageRefusal> {
@@ -182,7 +191,6 @@ fn near_duplicates(
         .filter(|group| group.len() > 1)
         .collect();
     groups.sort_by(|left, right| left[0].key.cmp(&right[0].key));
-    let rule_keys = rule_read_keys(schema);
     let mut duplicates = Collected::default();
     let mut next_rule = 1;
     for group in groups {
@@ -193,7 +201,7 @@ fn near_duplicates(
         let keys: Vec<_> = group.iter().map(|spelling| spelling.key.clone()).collect();
         let tally = snapshot.repair_spelling_tally(&keys)?;
         cost.absorb(tally.work);
-        let yaml = rename_rules(&group, schema, &rule_keys, &mut next_rule);
+        let yaml = rename_rules(&group, schema, rule_keys, &mut next_rule);
         duplicates.add(RepairAdvisory::near_duplicate_fields(
             group,
             tally.sample,
@@ -214,6 +222,8 @@ fn near_duplicates(
 /// the rename is then the only fix repair has for it.
 #[derive(Default)]
 struct RuleSpellings<'s> {
+    /// Keys whose selectors, defaults or closed sets depend on a declaration.
+    statements: BTreeSet<&'s str>,
     /// Rule keys, rename targets, creation-default keys and the tag carrier.
     named: BTreeSet<String>,
     /// Keys some rule forbids, whatever its fix.
@@ -226,6 +236,10 @@ struct RuleSpellings<'s> {
 fn rule_read_keys(schema: &VaultSchema) -> RuleSpellings<'_> {
     let mut keys = RuleSpellings::default();
     for rule in schema.rules() {
+        keys.statements
+            .extend(rule.selector().frontmatter().map(|(key, _)| key));
+        keys.statements.extend(rule.required().map(|(key, _)| key));
+        keys.statements.extend(rule.one_of().map(|(key, _)| key));
         keys.named.extend(
             rule.selector()
                 .frontmatter()
@@ -512,11 +526,11 @@ fn quoted(value: &str) -> String {
     yaml
 }
 
-fn declaration(kind: AdvisoryValueType) -> Option<&'static str> {
+fn declaration(kind: AdvisoryValueType) -> Option<FieldType> {
     match kind {
-        AdvisoryValueType::String => Some("text"),
-        AdvisoryValueType::Integer | AdvisoryValueType::Real => Some("number"),
-        AdvisoryValueType::Boolean => Some("boolean"),
+        AdvisoryValueType::String => Some(FieldType::Text),
+        AdvisoryValueType::Integer | AdvisoryValueType::Real => Some(FieldType::Number),
+        AdvisoryValueType::Boolean => Some(FieldType::Boolean),
         _ => None,
     }
 }
