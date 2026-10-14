@@ -681,6 +681,7 @@ fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
         &[DerivedFinding {
             facts: filed,
             replaces: None,
+            bytes_hash: None,
         }],
         &norn_store::ContentModel::none(),
     );

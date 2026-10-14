@@ -477,7 +477,7 @@ batches a case is judging.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset and the findings its act derived, in one transaction, so no tear lands between a row and what is wrong with it: a tombstone where a quarantined path had a row, and the derived row where a document read without its frontmatter, commit with the finding beside them or not at all. Link-health re-decision rides that same transaction ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)): the store re-decides every link the changeset reaches after its entries are written, so a tear anywhere inside the re-decision rolls back with the rest of the changeset and leaves the findings that stood before it. **The state a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. What a tear leaves is recovered by that content-hash comparison; two further signals in the rows' own state cover what a committed quarantine or a schema re-pin's discard leaves, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document standing bare. A tear before commit rolls the changeset back to the committed state that preceded it: a path the lost act would have created keeps no row and no finding, and a document it would have updated or killed keeps its previous row and findings. Until the next heal over those paths the store trails the vault's files across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0023](decisions/0023-a-walk-refusal-that-stands-is-a-reading.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. All three tears are injected: inside one changeset, at a chunk boundary, and the instant a flush's act commits. The last is stated over both finding scopes — a tombstone where a quarantined path had a row, and a degraded row — and over a rule finding beside the row whose edit breached a schema rule, and asserts that each finding committed beside its row, and that the next heal, with no edit to either file, commits no changeset and upserts no document, leaving the degraded row's content hash and generation where they stood. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset and the findings its act derived, in one transaction, so no tear lands between a row and what is wrong with it: a tombstone where a quarantined path had a row, and the derived row where a document read without its frontmatter, commit with the finding beside them or not at all. Link-health re-decision rides that same transaction ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)): the store re-decides every link the changeset reaches after its entries are written, so a tear anywhere inside the re-decision rolls back with the rest of the changeset and leaves the findings that stood before it. **The state a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. What a tear leaves is recovered by that content-hash comparison; two further signals in the rows' own state cover what a committed quarantine or a schema re-pin's discard leaves, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unless the content finding standing there was judged over the bytes it now holds — the hash that says so commits in the finding's own transaction and is ended with it, a re-pin's discard included — so every quarantined path a tear or a re-pin left unjudged is read again; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document standing bare. A tear before commit rolls the changeset back to the committed state that preceded it: a path the lost act would have created keeps no row and no finding, and a document it would have updated or killed keeps its previous row and findings. Until the next heal over those paths the store trails the vault's files across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0023](decisions/0023-a-walk-refusal-that-stands-is-a-reading.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. All three tears are injected: inside one changeset, at a chunk boundary, and the instant a flush's act commits. The last is stated over both finding scopes — a tombstone where a quarantined path had a row, and a degraded row — and over a rule finding beside the row whose edit breached a schema rule, and asserts that each finding committed beside its row, and that the next heal, with no edit to either file, commits no changeset and upserts no document, leaving the degraded row's content hash and generation where they stood. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. The row is stated over the **derived store's own writes**, which is where a rung meets a full disk; a disk that fills under the write kernel is the same condition with a different required outcome — while staging, or in publication before the rename or the unlink, refuse and leave the target alone; after it, report the target landed with its folder sync not durable, never as a write that did not happen — and is reached in `norn-fs`'s lockdown suite rather than here. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. A document the heal cannot open is refused rather than quarantined for the same reason — nothing was read, so nothing is known about what the document holds. **A revoked directory is also a directory watch coverage is installed over**, so on a backend that adds a watch per directory the install meets the denial before the heal walks, and trust is withdrawn as a lost watcher rather than as a refused heal. Either door leaves the entry untrusted naming the path, every committed row standing, and nothing pruned, so the row holds whichever the platform takes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
@@ -580,7 +580,10 @@ finding and never its row.
 The store holds only representable truth, so a document that stops decoding **loses its store
 row**, and the finding is where its absence is stated. The row's death is recorded with the
 quarantine provenance, which says the derived row died and the file did not; a prune or a removal
-would say the path left the vault. A quarantined path is filed under the path the vault spells it,
+would say the path left the vault. **A body quarantine is judged once per bytes**: the hash of the
+bytes its finding was judged over is recorded beside the finding and ended with it, so a reading of
+those same bytes — a heal, or a watcher's late or repeated report — concludes what already stands
+and writes nothing, as a matching row hash does. A quarantined path is filed under the path the vault spells it,
 and under a rendering of that spelling where the grammar admits no such path. **A rendering names
 a place, never an identity**: no document is *derived* under one, though the vault may genuinely
 hold a document whose own name is that place. That collision is one key holding one row, and the
@@ -694,21 +697,23 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, forty-four named statements carry a plan bar through it:
+the read builders below name, forty-seven named statements carry a plan bar through it:
 suffix candidates, findings in a class, the path- and subject-scoped findings
 discards — the path discard an equality seek of the path-key index, and the subject discard
 in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values and the clear
 it runs over the folds of the keys a schema declares `tags` or `link`, the page
 a walk reads its scope's unaccounted finding subjects through, the ordered document page a
-heal merges its walk against, the five enumerations a caller drains a whole pillar through —
-the findings table, the tombstones, every row's stored suffix keys, raw and folded, beside
+heal merges its walk against, the seven enumerations a caller drains a whole pillar through —
+the findings table, the tombstones, the content-quarantined places' hashes, the stem trigram
+index, every row's stored suffix keys, raw and folded, beside
 the path that has to produce them, the vocabulary the full-text index holds, and the rule
 sets the findings cite — and the two drains a lane-2 consumer
 ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)) reads change through:
-the live document rows, and the recorded deaths — and the twelve keyed point reads: the
+the live document rows, and the recorded deaths — and the thirteen keyed point reads: the
 document row a path stands at, the row a facts snapshot opens on and the six fact reads
 keyed by the row id it found, the death recorded for a path, the findings recorded about
-one, the pinned vault-schema projection, and the store's last committed write generation —
+one, the hash a content-quarantined place's finding was judged over, the pinned vault-schema
+projection, and the store's last committed write generation —
 and the four chunked reads every findings read collects each finding's candidate head,
 class memberships, path keys and cited rules through, a chunk of finding ids at a time — and the twelve
 statements the link-health judgment runs, eleven of them inside every changeset's
@@ -729,7 +734,8 @@ chunk as a seek of each finding and of its rule set by row id. The forty-first n
 the write path: a registry of the statements the write path prepares — the increment's
 document upsert, fact discards and inserts, document delete, tombstone record and row probe,
 the findings writes, the probe and insert of a rule set, a finding's rule citation, the
-collection of a rule set no finding cites any longer, the write generation's increment, the
+collection of a rule set no finding cites any longer, the record of a content-quarantined
+place's hash and its end, the write generation's increment, the
 pinned-scalar upsert and the discard a schema pin runs over findings stamped under another
 fingerprint — which is the one place those statements' text is spelled, so a bar over one is a plan of the SQL the increment executes, and the census
 a bar walks is declared with the enum, so a variant cannot be left out of it. The registry holds
@@ -738,27 +744,32 @@ the write statements no other explained statement names; the increment's remaini
 explained through their own variants, and the increment prepares its findings discards from a
 closed set rather than from text. Each is barred to scan no table, and each keyed one (the fact
 discards, the document delete and probe, the rule-set probe, the citation's read of its
-finding's key by row id, the rule-set collection, the generation increment, the stale-finding
+finding's key by row id, the rule-set collection, the record of a content-quarantined place's
+hash, which probes for a document row at its place, and its end, the generation increment,
+the stale-finding
 discard as two open ranges over the fingerprint) to seek its table by the constraint it binds,
 with a negative control for each half. The first-level foreign-key actions a plan reports are searches
 of the child tables and sit under the no-scan bar, so a cascade that falls to reading a child
 table end to end fails it; their seeks are not asserted positively. Most inserts report no
 search, so for them the bar is the universal one and cannot fail. A plan does not report
-trigger work or a cascade below the first level, so neither is covered. The verification reads
+trigger work or a cascade below the first level, so neither is covered, save the two trigger
+bodies the registry spells — the rule-set collection and the end of a content-quarantined
+place's hash — whose bars are plans of what those triggers run. The verification reads
 that scan by design (the integrity check and the derived-rows digest) are not write-path
 statements and carry no bar.
 
 A point read is barred harder than a page, because a search is not a point read on its
-own: a range over the same index reports the same step, so each of the twelve is judged on
+own: a range over the same index reports the same step, so each of the thirteen is judged on
 the **equality constraint** its seek carries as well as on the index it runs through. Four
-assertions hold all twelve: it never reads its table end to end, it searches that table, and
+assertions hold all thirteen: it never reads its table end to end, it searches that table, and
 the step that searches it runs through the named access and carries the equality
-constraint. Nine name a declared index. The pinned-schema read, the write-generation read
-and the field-row read each seek the primary key of a `WITHOUT ROWID` table, which SQLite
+constraint. Nine name a declared index. The pinned-schema read, the write-generation read,
+the field-row read and the content-quarantine hash read each seek the primary key of a
+`WITHOUT ROWID` table, which SQLite
 reports with no index name, and the bar names that access as the primary key. A fifth
-assertion, that it builds no temporary B-tree, holds the other eleven and not the findings
+assertion, that it builds no temporary B-tree, holds the other twelve and not the findings
 read, because the findings read states an order — generation, then row key — that no index
-over that table holds; the other eleven state an order their own index already gives them.
+over that table holds; the other twelve state an order their own index already gives them.
 
 The typed-value clear is stated over the typed index's own partial predicate, so that index
 holds exactly the rows the clear touches, and the bar is that the clear reads that index and

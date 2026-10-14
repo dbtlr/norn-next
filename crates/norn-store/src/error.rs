@@ -112,6 +112,14 @@ pub enum StoreError {
     /// the findings about a place that holds no document, and doing so beside a
     /// row would leave a state no build from zero holds.
     VacatedPlaceHoldsRow,
+    /// A finding of another kind than a content finding carried the hash of
+    /// the bytes it was judged over. Refused rather than recorded: a hash
+    /// ends with the content finding about its place, and one beside any other
+    /// finding would outlive what it describes.
+    NotAContentFinding {
+        /// The kind the finding was.
+        kind: &'static str,
+    },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -168,6 +176,11 @@ impl fmt::Display for StoreError {
                 "a place a document row stands at cannot be vacated: its findings describe that document, \
                  and a death is how one is ended"
             ),
+            StoreError::NotAContentFinding { kind } => write!(
+                f,
+                "a `{kind}` finding carries no bytes hash: only a content finding is about the bytes \
+                 a place holds"
+            ),
             StoreError::Entry {
                 index,
                 path,
@@ -203,7 +216,8 @@ impl StoreError {
             | StoreError::UnpinnedDeclaration { .. }
             | StoreError::KeySpace { .. }
             | StoreError::StoreJudged { .. }
-            | StoreError::VacatedPlaceHoldsRow => None,
+            | StoreError::VacatedPlaceHoldsRow
+            | StoreError::NotAContentFinding { .. } => None,
         }
     }
 }

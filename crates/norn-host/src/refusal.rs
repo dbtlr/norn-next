@@ -601,7 +601,8 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
             | StoreError::UnpinnedDeclaration { .. }
             | StoreError::KeySpace { .. }
             | StoreError::StoreJudged { .. }
-            | StoreError::VacatedPlaceHoldsRow),
+            | StoreError::VacatedPlaceHoldsRow
+            | StoreError::NotAContentFinding { .. }),
         ) => {
             let told = store_refusal_told(&error);
             return match error.damage() {
@@ -662,7 +663,8 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
         StoreError::UnpinnedDeclaration { .. }
         | StoreError::KeySpace { .. }
         | StoreError::StoreJudged { .. }
-        | StoreError::VacatedPlaceHoldsRow => error.to_string(),
+        | StoreError::VacatedPlaceHoldsRow
+        | StoreError::NotAContentFinding { .. } => error.to_string(),
         StoreError::Entry { index, problem, .. } => {
             format!("changeset entry {index}: {}", store_refusal_told(problem))
         }
@@ -1700,6 +1702,7 @@ mod page_refusal_tests {
                 | StoreError::KeySpace { .. }
                 | StoreError::StoreJudged { .. }
                 | StoreError::VacatedPlaceHoldsRow
+                | StoreError::NotAContentFinding { .. }
                 | StoreError::Entry { .. },
             ) => Shape::Store,
         }

@@ -794,6 +794,56 @@ impl<'a> Request<'a> {
         // is the same outcome as a `COMMIT` without a statement that says so.
     }
 
+    /// The hash of the bytes the content finding standing at `path` was
+    /// judged over, where one was recorded with it.
+    ///
+    /// A place no document row stands at has no row hash to compare, and this
+    /// is its counterpart: a reading of the same bytes there concludes what
+    /// the standing finding already says.
+    pub fn content_quarantine_hash(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<String>, StoreError> {
+        Self::read_one(
+            self.store.connection(),
+            CONTENT_QUARANTINE_HASH_SQL,
+            params![path.as_str()],
+            |row| row.get(0).map(Ok),
+            "reading a quarantined place's hash",
+        )
+    }
+
+    /// The next bounded page of quarantined places' hashes, in path order.
+    ///
+    /// [`Request::content_quarantine_hash`] answers about one place, which is the
+    /// question a reading of its bytes asks. This answers what the table
+    /// holds, which is the question a comparison of two stores asks.
+    ///
+    /// `after` is exclusive, and the order is bytewise over the key.
+    pub fn content_quarantine_hashes_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a quarantined-hash page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            CONTENT_QUARANTINE_PAGE_SQL,
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            |row| {
+                let path: String = row.get(0)?;
+                let hash: String = row.get(1)?;
+                Ok(DocumentPath::new(&path).map(|path| (path, hash)))
+            },
+            "reading the quarantined-hash page",
+        )
+    }
+
     /// The death recorded for one path, if any.
     pub fn stored_tombstone(
         &self,
@@ -1946,6 +1996,36 @@ pub(crate) fn write_finding(
     Ok(())
 }
 
+/// Refuse a bytes hash on any finding but a content finding
+/// ([`StoreError::NotAContentFinding`]): only a content finding's deletion
+/// ends a place's hash.
+pub(crate) fn check_content_finding(finding: &FindingFacts) -> Result<(), StoreError> {
+    if finding.kind == increment::CONTENT_FINDING_KIND {
+        Ok(())
+    } else {
+        Err(StoreError::NotAContentFinding {
+            kind: finding.kind.as_str(),
+        })
+    }
+}
+
+/// Record `hash` as the bytes the content finding `finding` was judged over,
+/// in place of the hash its place held, where no document row stands there.
+///
+/// The finding is a content finding: the changeset checked it before its
+/// transaction ([`check_content_finding`]).
+pub(crate) fn record_content_quarantine(
+    transaction: &rusqlite::Transaction<'_>,
+    finding: &FindingFacts,
+    hash: &str,
+) -> Result<(), StoreError> {
+    transaction
+        .prepare_cached(WriteStatement::RecordContentQuarantine.sql())
+        .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
+        .map_err(|error| error::sql("recording a quarantined place's hash", error))?;
+    Ok(())
+}
+
 /// The identity of the rule set of `fingerprint` holding exactly `rules`,
 /// made where none stands, and `None` for no rule.
 ///
@@ -2163,6 +2243,19 @@ pub(crate) fn folded_value_discard_sql() -> String {
         crate::TAG_CARRIER
     )
 }
+
+/// The statement [`Request::content_quarantine_hash`] emits: one seek of the
+/// primary key.
+pub(crate) const CONTENT_QUARANTINE_HASH_SQL: &str =
+    "SELECT content_hash FROM content_quarantines WHERE path = ?1";
+
+/// The statement [`Request::content_quarantine_hashes_after`] emits: a walk of the
+/// primary key from the cursor.
+pub(crate) const CONTENT_QUARANTINE_PAGE_SQL: &str =
+    "SELECT path, content_hash FROM content_quarantines
+             WHERE path > COALESCE(?1, '')
+             ORDER BY path
+             LIMIT ?2";
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///
