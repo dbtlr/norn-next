@@ -64,6 +64,16 @@ fn a_tag_rewrite_respells_body_and_frontmatter_matches_and_keeps_other_tags() {
     );
 }
 
+/// An unplaced flow entry is respelled with its field's flow spelling kept.
+#[test]
+fn a_tag_rewrite_respells_a_flow_list_entry_in_its_flow_spelling() {
+    let rewritten = Document::parse("---\ntags: [Work, other]\n---\n#work\n")
+        .rewrite_tags(&[TagRewrite::new("work", "Place")], str::to_lowercase)
+        .expect("a proven edit");
+    assert_eq!(rewritten.rewritten, [Ok(2)]);
+    assert_eq!(rewritten.text, "---\ntags: [Place, other]\n---\n#Place\n");
+}
+
 /// A plain scalar that reads as a boolean cannot carry the requested tag.
 #[test]
 fn a_tag_rewrite_that_cannot_read_back_is_refused_with_its_reason() {

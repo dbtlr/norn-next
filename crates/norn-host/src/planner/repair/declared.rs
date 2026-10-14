@@ -4963,6 +4963,25 @@ mod tests {
         assert!(planned.skipped.is_empty());
     }
 
+    /// A near declared tag in a flow list and body shares one suggested write.
+    #[test]
+    fn a_near_declared_tag_in_a_flow_list_is_written_and_cited_at_suggested() {
+        let schema = "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n";
+        let planned = Vault::of(schema, &[("a.md", "---\ntags: [darft]\n---\n#darft\n")])
+            .at(Confidence::Suggested)
+            .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", "darft")]);
+        assert_eq!(planned.operations.len(), 1, "{:?}", planned.skipped);
+        assert_eq!(
+            planned.operations[0].kind,
+            OperationKind::rewrite_tag(DocumentPath::new("a.md").unwrap(), "darft", "draft")
+        );
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Suggested
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
     /// Both the undeclared and declared names must have at least three folded characters.
     #[test]
     fn tags_below_three_folded_characters_take_no_part_in_suggestions() {

@@ -291,6 +291,8 @@ impl Document<'_> {
     /// Respell original whole tag names in one scan and one read-back proof.
     /// The caller supplies the derivation fold. Each occurrence keeps its marker;
     /// scan refusals belong to one respelling, and targets never chain.
+    /// An entry without a literal place is respelled by rewriting the tags field
+    /// in its own spelling.
     ///
     /// # Errors
     /// The shared proof refuses the batch if its edited facts or frontmatter differ.
@@ -331,6 +333,8 @@ impl Document<'_> {
             }
         }
         let mut edits = Vec::new();
+        let mut frontmatter_rewrites = Vec::new();
+        let mut rewrite_field = false;
         for text in self
             .field_texts()
             .into_iter()
@@ -345,20 +349,23 @@ impl Document<'_> {
             let Some((rule, to)) = name_target(indices, &targets, &mut written) else {
                 continue;
             };
-            let Some(range) = text.range else {
-                refuse_names(indices, &mut written, RewriteSkip::Unplaced);
+            frontmatter_rewrites.extend_from_slice(indices);
+            let start = text.range.and_then(|range| {
+                literal_text_offset(&self.source()[range.clone()], text.text)
+                    .map(|offset| range.start + offset + usize::from(text.text.starts_with('#')))
+            });
+            let Some(start) = start else {
+                rewrite_field = true;
                 continue;
             };
-            let Some(offset) = literal_text_offset(&self.source()[range.clone()], text.text) else {
-                refuse_names(indices, &mut written, RewriteSkip::Unplaced);
-                continue;
-            };
-            let start = range.start + offset + usize::from(text.text.starts_with('#'));
             edits.push((
                 rule,
                 start..start + text.text.trim_start_matches('#').len(),
                 to,
             ));
+        }
+        if rewrite_field {
+            edits.clear();
         }
         for tag in self.tags() {
             let Some(indices) = rules.get(&fold(&tag.name)) else {
@@ -370,14 +377,7 @@ impl Document<'_> {
             let start = tag.span.expect("body tags are placed").byte_offset + 1;
             edits.push((rule, start..start + tag.name.len(), to));
         }
-        let mut edits: Vec<_> = edits
-            .into_iter()
-            .filter(|(rule, _, _)| written[*rule].is_ok())
-            .map(|(_, range, to)| (range, to))
-            .collect();
-        edits.sort_by_key(|(range, _)| range.start);
-        let text = splice_all(self.source(), &edits);
-        let after = Document::parse(&text);
+        let mut field_edit = None;
         let mut expected_frontmatter = self.frontmatter().cloned();
         if let Some(Value::Map(map)) = &mut expected_frontmatter
             && let Some(value) = map.get(crate::TAGS_FIELD)
@@ -399,12 +399,35 @@ impl Document<'_> {
                 }
                 other => other.clone(),
             };
-            let value = match value {
+            let mut replacement = match value {
                 Value::Sequence(items) => Value::Sequence(items.iter().map(rewrite).collect()),
                 value => rewrite(value),
             };
-            map.insert(crate::TAGS_FIELD, value);
+            if rewrite_field {
+                match self.existing_field_edit(
+                    self.field(crate::TAGS_FIELD).expect("a matched tags field"),
+                    &replacement,
+                ) {
+                    Ok(edit) => field_edit = Some(edit),
+                    Err(_) => {
+                        refuse_names(&frontmatter_rewrites, &mut written, RewriteSkip::Unplaced);
+                        replacement = value.clone();
+                    }
+                }
+            }
+            map.insert(crate::TAGS_FIELD, replacement);
         }
+        let mut edits: Vec<_> = edits
+            .into_iter()
+            .filter(|(rule, _, _)| written[*rule].is_ok())
+            .map(|(_, range, to)| (range, to))
+            .collect();
+        if let Some((range, replacement)) = &field_edit {
+            edits.push((range.clone(), replacement.as_str()));
+        }
+        edits.sort_by_key(|(range, _)| range.start);
+        let text = splice_all(self.source(), &edits);
+        let after = Document::parse(&text);
         if after.frontmatter() != expected_frontmatter.as_ref() {
             return Err(RewriteSkip::WouldCorruptFrontmatter);
         }
