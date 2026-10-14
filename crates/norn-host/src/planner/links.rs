@@ -1585,7 +1585,7 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
     rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,
-    /// Heading fragments the plan writes without changing their address.
+    /// Heading fragments the plan writes, read by their syntax to match the forecast's facts.
     anchors: BTreeSet<(NormalizedPath, &'static str, String, String)>,
 }
 
@@ -1607,12 +1607,17 @@ impl WrittenLinks {
                 to,
                 ..
             } = &operation.kind
-                && let (Ok(file), Some(syntax)) = (
+                && let (Ok(file), Some(family)) = (
                     normalizer.normalize(Path::new(path.as_str())),
                     family_name(*syntax),
                 )
             {
-                anchors.insert((file, syntax, address.clone(), to.clone()));
+                let anchor = if *syntax == LinkFamily::Markdown {
+                    norn_text::decode_markdown_fragment(to)
+                } else {
+                    to.clone()
+                };
+                anchors.insert((file, family, address.clone(), anchor));
             }
             let authored = match &operation.kind {
                 OperationKind::RewriteLink {
@@ -2034,6 +2039,32 @@ mod tests {
 
     fn path(text: &str) -> DocumentPath {
         DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// An encoded Markdown rewrite is recognized by the anchor the store derives.
+    #[test]
+    fn a_written_markdown_anchor_is_held_by_its_percent_decoded_replacement() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let holder = normalizer
+            .normalize(std::path::Path::new("h.md"))
+            .expect("a document identity");
+        let operation = Operation::new(OperationKind::rewrite_anchor(
+            path("h.md"),
+            LinkFamily::Markdown,
+            "t.md",
+            "a%20b",
+            "c%20d",
+        ));
+        let written = super::WrittenLinks::of([&operation], &normalizer);
+        let links = crate::derivation::document_links(b"[x](t.md#c%20d)");
+        let [link] = links.as_slice() else {
+            panic!("one written link");
+        };
+        assert!(matches!(
+            &link.anchor,
+            Some(norn_store::LinkAnchor::Heading { written, .. }) if written == "c d"
+        ));
+        assert!(written.holds_anchor(&holder, link));
     }
 
     /// **Whether a cascade follows a place an ambiguous link could name is

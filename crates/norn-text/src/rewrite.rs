@@ -1106,7 +1106,7 @@ impl Reading {
 
     /// What this reading becomes under `respelling`: every fact where its
     /// bytes moved to, each respelled link's target or anchor reading its own
-    /// `to`, and each heading or
+    /// `to` as its family reads that spelling, and each heading or
     /// link title holding a respelled wikilink with that link's token
     /// respelled ([`Respelling::carried`]). `None` where such a text does not
     /// hold the wikilink as written, so what it should read as is unknown.
@@ -1133,7 +1133,10 @@ impl Reading {
                         .to_string(),
                     anchor: respelling
                         .anchor_of(link.family, at.start)
-                        .map(str::to_string)
+                        .map(|to| match link.family {
+                            LinkFamily::Markdown => crate::link::decoded(to),
+                            LinkFamily::Wikilink => to.to_string(),
+                        })
                         .or_else(|| link.anchor.clone()),
                     title,
                     at: Some(moved(at)),

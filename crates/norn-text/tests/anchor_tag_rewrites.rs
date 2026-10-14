@@ -21,6 +21,21 @@ fn an_anchor_rewrite_respells_every_matching_link_and_keeps_the_rest() {
     );
 }
 
+/// Encoded Markdown fragments keep their written spelling while proving their decoded anchor.
+#[test]
+fn a_markdown_anchor_rewrite_reads_back_a_percent_encoded_replacement() {
+    let rewritten = Document::parse("[x](t.md#a%20b)")
+        .rewrite_anchors(&[AnchorRewrite::new(
+            LinkFamily::Markdown,
+            "t.md",
+            "a%20b",
+            "c%20d",
+        )])
+        .expect("a proven edit");
+    assert_eq!(rewritten.rewritten, [Ok(1)]);
+    assert_eq!(rewritten.text, "[x](t.md#c%20d)");
+}
+
 /// An anchor whose bytes become link syntax cannot be proven by reading back.
 #[test]
 fn an_anchor_rewrite_that_cannot_read_back_is_refused_with_its_reason() {

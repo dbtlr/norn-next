@@ -386,7 +386,7 @@ pub(crate) fn markdown_link(
 /// with its own copy of this loop: the store depends on no text layer, and a
 /// segment that decodes to no UTF-8 names no document there rather than
 /// standing as written.
-fn decoded(fragment: &str) -> String {
+pub fn decoded(fragment: &str) -> String {
     let bytes = fragment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
