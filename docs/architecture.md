@@ -3132,8 +3132,7 @@ tombstones match; the last two read to two and stop, so the note names the two p
 with one answer that cannot be written to it, because no spelling reads back to the
 destination uniquely from the holder or the text layer refuses the edit, its note carrying the
 reason. A suggestion's score is note text, never a field. The move-following fix
-(NORN-399) and the similarity suggestion (NORN-400) will produce the other reasons; the
-closest-heading suggestion produces `link_not_rewritable`. Any other
+(NORN-399) and the similarity suggestion (NORN-400) will produce the other reasons. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a

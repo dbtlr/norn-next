@@ -504,7 +504,6 @@ pub enum SkipReason {
     // `several_tombstones`, the similarity suggestion (NORN-400) emits
     // `too_common` and `too_short`, and each link fix — those two and the
     // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
-    // The closest-heading suggestion (NORN-401) emits `link_not_rewritable`.
     // The other six remain dormant carriers until NORN-399 and NORN-400 land:
     // repair's current call graph does not yet reach their producers. The
     // notes live here rather than in the doc comments schemars lifts.
