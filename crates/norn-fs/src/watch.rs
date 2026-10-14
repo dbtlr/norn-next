@@ -33,9 +33,7 @@ use faults::{Boundary, HealWindow, WatchFaults};
 pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
 /// The longest a continuous event stream may postpone delivery.
 pub const MAX_BATCH_AGE: Duration = Duration::from_millis(500);
-/// The longest an own-write outcome stays eligible for suppression. A file's
-/// is spent by the first batch that names it; a made folder's answers every
-/// batch until this expires, judged against what was published beneath it.
+/// How long an unobserved own-write outcome remains eligible for suppression.
 pub const OWN_WRITE_TTL: Duration = Duration::from_secs(5);
 /// The authored bound on distinct dirty roots retained before widening to a rescan.
 ///
@@ -660,12 +658,11 @@ impl Subscription {
                 return Err(error);
             }
             let root = state.root.clone();
-            let normalizer = state.normalizer.clone();
             let ledger = state.ledger.clone();
             let work = state
                 .pending
                 .take()
-                .map(|pending| (root, normalizer, ledger, pending.into_batch()));
+                .map(|pending| (root, ledger, pending.into_batch()));
             (closed_before, work)
         };
         let _ = self
@@ -674,8 +671,8 @@ impl Subscription {
             .expect("subscription wake sender present")
             .try_send(());
         let mut batch = closed_before.unwrap_or_default();
-        if let Some((root, normalizer, ledger, accumulated)) = work {
-            batch.merge(suppress(&root, &normalizer, &ledger, accumulated));
+        if let Some((root, ledger, accumulated)) = work {
+            batch.merge(suppress(&root, &ledger, accumulated));
         }
         Ok(batch)
     }
@@ -849,12 +846,6 @@ impl OwnWrites {
     /// spellings are one ledger key, so an event reported under either is
     /// matched, and on one that does not a respell is never published.
     ///
-    /// **Each folder a create made is recorded too**, by the identity it holds
-    /// when the publication is recorded: the watcher reports a made folder as
-    /// well as the file, and a folder no longer a directory by then records
-    /// nothing. What a made folder's report covers is judged when the report
-    /// arrives.
-    ///
     /// `path` may be vault-relative or absolute beneath the watched vault root.
     /// An absolute path outside that root is refused as [`PathError::Absolute`].
     pub fn published(&self, path: &Path, published: &Published) -> Result<(), PathError> {
@@ -864,12 +855,6 @@ impl OwnWrites {
             AfterState::Absent => Expected::Absent,
         };
         self.record(path, expected);
-        for folder in &published.made_folders {
-            let normalized = self.normalizer.normalize(folder)?;
-            if let Some(identity) = folder_identity(&self.root.join(folder)) {
-                self.record(normalized, Expected::Folder(identity));
-            }
-        }
         Ok(())
     }
 
@@ -878,13 +863,9 @@ impl OwnWrites {
             return;
         };
         let mut ledger = ledger.lock().expect("own-write ledger poisoned");
-        if ledger.entries.len()
-            + ledger.spent_beneath_made.len()
-            + usize::from(!ledger.entries.contains_key(&path))
-            >= OWN_WRITE_CAP
+        if ledger.entries.len() + usize::from(!ledger.entries.contains_key(&path)) >= OWN_WRITE_CAP
         {
             ledger.entries.clear();
-            ledger.spent_beneath_made.clear();
             return;
         }
         ledger.entries.insert(
@@ -1481,10 +1462,6 @@ fn schema_location(
 #[derive(Default)]
 struct Ledger {
     entries: BTreeMap<NormalizedPath, LedgerEntry>,
-    /// File entries beneath a made folder that a batch naming their own path
-    /// already spent. They answer no report of that path again; they are what
-    /// a later report of the folder above them is judged against.
-    spent_beneath_made: BTreeMap<NormalizedPath, LedgerEntry>,
 }
 struct LedgerEntry {
     expected: Expected,
@@ -1494,8 +1471,6 @@ struct LedgerEntry {
 enum Expected {
     Present(PostState),
     Absent,
-    /// A folder a create made, by the identity it was made with.
-    Folder(Identity),
 }
 
 struct Pending {
@@ -1931,12 +1906,11 @@ fn run_coalescer(
                 Err(error)
             } else {
                 let root = locked.root.clone();
-                let normalizer = locked.normalizer.clone();
                 let ledger = locked.ledger.clone();
                 let taken = locked
                     .pending
                     .take()
-                    .map(|pending| (root, normalizer, ledger, pending.into_batch()));
+                    .map(|pending| (root, ledger, pending.into_batch()));
                 locked.closing = taken.is_some();
                 Ok(taken)
             }
@@ -1946,13 +1920,13 @@ fn run_coalescer(
                 let _ = output.send(Err(error));
                 return;
             }
-            Ok(Some((root, normalizer, ledger, batch))) => {
+            Ok(Some((root, ledger, batch))) => {
                 // Filesystem observation for suppression is deliberately
                 // outside both watcher locks. A large own-written file must not
                 // block the backend callback from recording newer events, and
                 // one slow hash must not prevent write outcomes from entering
                 // the ledger.
-                let batch = suppress(&root, &normalizer, &ledger, batch);
+                let batch = suppress(&root, &ledger, batch);
                 if !hand_over(&state, &handoff, &output, batch) {
                     return;
                 }
@@ -2044,81 +2018,29 @@ fn hand_over(
 /// the batch no longer carries, and a covering root dropped after it had
 /// subsumed a descendant would take that descendant's fact with it — a fact no
 /// ledger entry was ever about.
-///
-/// A file's entry answers the first batch that names it, so the next change
-/// at that path is judged as foreign. A made folder's entry answers every
-/// batch until it expires: the folder is reported as more than one event — its
-/// creation, then the attributes the system stamps on it — and a batch can
-/// close between them. A spent file entry beneath a made folder is kept
-/// apart, as what a later report of that folder is judged against, and
-/// answers no report of its own path again.
-///
-/// **A made folder's report stands for everything beneath it**, so it is
-/// dropped only while everything beneath it is an own write
-/// ([`own_beneath`]): a backend that watches a new folder only once it learns
-/// of it — inotify adds the watch as it reads the folder's creation — reports
-/// nothing written inside before then, and the folder's report is the one
-/// signal of such a write. What the ledger holds beneath the folder is read
-/// before this batch spends any file entry, so a folder named beside the file
-/// published into it is judged against that file's entry.
-fn suppress(
-    root: &Path,
-    normalizer: &PathNormalizer,
-    ledger: &Arc<Mutex<Ledger>>,
-    mut batch: Batch,
-) -> Batch {
+fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch {
     let now = Instant::now();
-    let candidates: BTreeMap<NormalizedPath, (Expected, Beneath)> = {
+    let candidates: BTreeMap<_, _> = {
         let mut ledger = ledger.lock().expect("own-write ledger poisoned");
         ledger
             .entries
             .retain(|_, entry| now.duration_since(entry.recorded) <= OWN_WRITE_TTL);
-        ledger
-            .spent_beneath_made
-            .retain(|_, entry| now.duration_since(entry.recorded) <= OWN_WRITE_TTL);
-        let candidates: BTreeMap<_, _> = batch
+        batch
             .vault_roots
             .iter()
             .filter_map(|path| {
-                let expected = ledger.entries.get(path)?.expected;
-                let beneath = match expected {
-                    // A standing entry outranks a spent one at the same path.
-                    Expected::Folder(_) => ledger
-                        .spent_beneath_made
-                        .iter()
-                        .chain(&ledger.entries)
-                        .filter(|(at, _)| *at != path && at.starts_with(path))
-                        .map(|(at, entry)| (at.clone(), entry.expected))
-                        .collect(),
-                    Expected::Present(_) | Expected::Absent => Beneath::new(),
-                };
-                Some((path.clone(), (expected, beneath)))
+                ledger
+                    .entries
+                    .remove(path)
+                    .map(|entry| (path.clone(), entry.expected))
             })
-            .collect();
-        for (path, (expected, _)) in &candidates {
-            if matches!(expected, Expected::Folder(_)) {
-                continue;
-            }
-            let beneath_a_made_folder = ledger.entries.iter().any(|(at, entry)| {
-                matches!(entry.expected, Expected::Folder(_)) && at != path && path.starts_with(at)
-            });
-            if let Some(spent) = ledger.entries.remove(path)
-                && beneath_a_made_folder
-            {
-                ledger.spent_beneath_made.insert(path.clone(), spent);
-            }
-        }
-        candidates
+            .collect()
     };
     batch.vault_roots.retain(|path| {
-        let Some((expected, beneath)) = candidates.get(path) else {
+        let Some(expected) = candidates.get(path) else {
             return true;
         };
-        let at = root.join(path.as_path());
-        let own = matches_expected(&at, expected)
-            && (!matches!(expected, Expected::Folder(_))
-                || own_beneath(&at, path.as_path(), normalizer, beneath));
-        !own
+        !matches_expected(&root.join(path.as_path()), expected)
     });
     batch
         .retired
@@ -2127,48 +2049,9 @@ fn suppress(
     batch
 }
 
-/// What the ledger holds beneath a made folder, by path.
-type Beneath = BTreeMap<NormalizedPath, Expected>;
-
-/// Whether every entry beneath the folder at `folder` — spelled `relative`
-/// from the vault root — is an own write: a file still holding exactly what
-/// was published there, or a folder made with the identity it still has,
-/// itself holding nothing else. A name the ledger holds nothing for, a link,
-/// and a listing that cannot be read all answer no.
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault listing.
-fn own_beneath(
-    folder: &Path,
-    relative: &Path,
-    normalizer: &PathNormalizer,
-    beneath: &Beneath,
-) -> bool {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return false;
-    };
-    entries.into_iter().all(|entry| {
-        let Ok(entry) = entry else {
-            return false;
-        };
-        let spelled = relative.join(entry.file_name());
-        let Ok(key) = normalizer.normalize(&spelled) else {
-            return false;
-        };
-        let at = entry.path();
-        match beneath.get(&key) {
-            Some(expected @ Expected::Present(_)) => matches_expected(&at, expected),
-            Some(expected @ Expected::Folder(_)) => {
-                matches_expected(&at, expected) && own_beneath(&at, &spelled, normalizer, beneath)
-            }
-            Some(Expected::Absent) | None => false,
-        }
-    })
-}
-
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and stat.
 fn matches_expected(path: &Path, expected: &Expected) -> bool {
     match expected {
-        // The folder itself; what it holds is judged by `own_beneath`.
-        Expected::Folder(identity) => folder_identity(path) == Some(*identity),
         Expected::Absent => match std::fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Ok(_) | Err(_) => false,
@@ -2194,16 +2077,6 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
                 .is_ok_and(|(hash, len)| hash == expected.content_hash && len == expected.len)
         }
     }
-}
-
-/// The identity of the directory at `path`, where a directory stands there
-/// rather than a link to one.
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
-fn folder_identity(path: &Path) -> Option<Identity> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    metadata
-        .is_dir()
-        .then(|| crate::identity::identity_of(&metadata))
 }
 
 #[cfg(test)]
@@ -2284,16 +2157,15 @@ mod tests {
     /// survive reads what a consumer is handed and not what the accumulation
     /// was holding part-way through.
     fn settled(state: &Arc<Mutex<State>>) -> Batch {
-        let (root, normalizer, ledger, pending) = {
+        let (root, ledger, pending) = {
             let mut locked = state.lock().expect("watch state poisoned");
             (
                 locked.root.clone(),
-                locked.normalizer.clone(),
                 locked.ledger.clone(),
                 locked.pending.take().expect("a pending batch"),
             )
         };
-        suppress(&root, &normalizer, &ledger, pending.into_batch())
+        suppress(&root, &ledger, pending.into_batch())
     }
 
     /// Every kind that names only a watched directory entry, and one of each
@@ -5481,12 +5353,7 @@ mod tests {
         recorder
             .published(&path, &published(AfterState::Present(observed(&path))))
             .unwrap();
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["other.md"]),
-        );
+        let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["other.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
         assert!(
             ledger
@@ -5495,288 +5362,6 @@ mod tests {
                 .entries
                 .contains_key(&recorder.normalize(&path).unwrap())
         );
-    }
-
-    /// A create that landed at `after`, making `folders` on the way to it.
-    fn published_making(after: AfterState, folders: &[&str]) -> Published {
-        Published {
-            made_folders: folders.iter().map(PathBuf::from).collect(),
-            ..published(after)
-        }
-    }
-
-    /// **A folder a publication made is its own write.** A create into a
-    /// missing folder makes the folder, and the watcher reports the folder as
-    /// well as the file, so both are the applier's echo.
-    #[test]
-    fn a_folder_a_publication_made_is_suppressed_as_its_own_write() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder");
-        scratch.directory("vault/tasks");
-        let path = scratch.place("tasks/note.md", b"note");
-        recorder
-            .published(
-                &path,
-                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
-            )
-            .unwrap();
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["tasks", "tasks/note.md"]),
-        );
-        assert!(batch.is_empty(), "{:?}", batch.vault_roots());
-    }
-
-    /// **A made folder is its own write in every batch that names it.** One
-    /// folder made is reported as more than one event — its creation, then
-    /// the attributes the system stamps on it — and a batch can close between
-    /// them.
-    #[test]
-    fn a_made_folder_is_suppressed_in_every_batch_that_names_it() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-twice");
-        scratch.directory("vault/tasks");
-        let path = scratch.place("tasks/note.md", b"note");
-        recorder
-            .published(
-                &path,
-                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
-            )
-            .unwrap();
-        for report in ["its creation", "its attributes"] {
-            let batch = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, &["tasks"]),
-            );
-            assert!(batch.is_empty(), "{report}: {:?}", batch.vault_roots());
-        }
-    }
-
-    /// **A folder replaced since it was made is foreign.** A directory renamed
-    /// over the made one is another directory, and what it holds arrived with
-    /// no event naming it, so the root stays for a reconcile to walk.
-    #[test]
-    #[allow(clippy::disallowed_methods)] // Test arrangement: a foreign replacement of the folder.
-    fn a_folder_replaced_since_it_was_made_is_not_suppressed() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-replaced");
-        scratch.directory("vault/tasks");
-        let path = scratch.place("tasks/note.md", b"note");
-        recorder
-            .published(
-                &path,
-                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
-            )
-            .unwrap();
-        scratch.directory("vault/elsewhere");
-        scratch.place("elsewhere/foreign.md", b"foreign");
-        std::fs::remove_dir_all(scratch.at("tasks")).unwrap();
-        std::fs::rename(scratch.at("elsewhere"), scratch.at("tasks")).unwrap();
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["tasks"]),
-        );
-        assert_eq!(batch.vault_roots().len(), 1);
-    }
-
-    /// **A made folder's later report is its own after the file published into
-    /// it was named.** The folder's creation and the file can settle in one
-    /// batch and the attributes stamped on the folder in the next, and the
-    /// file is still beneath the folder as it was published.
-    #[test]
-    fn a_made_folder_reported_after_its_file_was_named_is_suppressed() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-later");
-        scratch.directory("vault/tasks");
-        let path = scratch.place("tasks/note.md", b"note");
-        recorder
-            .published(
-                &path,
-                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
-            )
-            .unwrap();
-        for (report, roots) in [
-            ("its creation and the file", &["tasks", "tasks/note.md"][..]),
-            ("its attributes", &["tasks"][..]),
-        ] {
-            let batch = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, roots),
-            );
-            assert!(batch.is_empty(), "{report}: {:?}", batch.vault_roots());
-        }
-    }
-
-    /// **A write that restores what a publication beneath a made folder wrote,
-    /// after another writer changed it, is foreign.** The store took the other
-    /// writer's change, so the restore is a change the store has not seen,
-    /// whatever folder the file stands in.
-    #[test]
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Test arrangement: a restore that keeps the published mtime.
-    fn a_restore_of_a_published_file_after_a_foreign_change_is_foreign() {
-        for made in [false, true] {
-            let (scratch, ledger, recorder) = own_write_harness("watch-restore-after-foreign");
-            scratch.directory("vault/tasks");
-            let path = scratch.place("tasks/note.md", b"note");
-            let state = observed(&path);
-            let folders: &[&str] = if made { &["tasks"] } else { &[] };
-            recorder
-                .published(
-                    &path,
-                    &published_making(AfterState::Present(state), folders),
-                )
-                .unwrap();
-            let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
-            let mut roots: Vec<&str> = folders.to_vec();
-            roots.push("tasks/note.md");
-            let own = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, &roots),
-            );
-            assert!(
-                own.is_empty(),
-                "made {made}: the publication itself: {:?}",
-                own.vault_roots()
-            );
-
-            scratch.place("tasks/note.md", b"foreign");
-            let foreign = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, &["tasks/note.md"]),
-            );
-            assert_eq!(
-                foreign.vault_roots().len(),
-                1,
-                "made {made}: the foreign change"
-            );
-
-            scratch.place("tasks/note.md", b"note");
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(mtime)
-                .unwrap();
-            let restored = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, &["tasks/note.md"]),
-            );
-            assert_eq!(restored.vault_roots().len(), 1, "made {made}: the restore");
-        }
-    }
-
-    /// **A made folder holding a name no publication wrote is foreign.** A
-    /// backend that watches a new folder only once it learns of it reports
-    /// nothing written into the folder before then, so the folder's own
-    /// report is the one signal of that write, and it stays for a reconcile.
-    #[test]
-    fn a_made_folder_holding_a_name_no_publication_wrote_is_not_suppressed() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-foreign");
-        scratch.directory("vault/tasks");
-        let path = scratch.place("tasks/note.md", b"note");
-        recorder
-            .published(
-                &path,
-                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
-            )
-            .unwrap();
-        scratch.place("tasks/foreign.md", b"foreign");
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["tasks"]),
-        );
-        assert_eq!(batch.vault_roots().len(), 1);
-    }
-
-    /// **A made folder holds what every publication into it wrote**, the ones
-    /// after the publication that made it included, and each folder made on
-    /// the way holds the next.
-    #[test]
-    fn a_made_folder_holds_every_publication_written_into_it() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-made-folders-held");
-        scratch.directory("vault/tasks/done");
-        let first = scratch.place("tasks/done/first.md", b"first");
-        recorder
-            .published(
-                &first,
-                &published_making(
-                    AfterState::Present(observed(&first)),
-                    &["tasks", "tasks/done"],
-                ),
-            )
-            .unwrap();
-        let second = scratch.place("tasks/done/second.md", b"second");
-        recorder
-            .published(&second, &published(AfterState::Present(observed(&second))))
-            .unwrap();
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["tasks", "tasks/done"]),
-        );
-        assert!(batch.is_empty(), "{:?}", batch.vault_roots());
-    }
-
-    /// A change another writer makes under a made folder.
-    type Arrangement = fn(&Scratch);
-
-    /// **A made folder's report stands for everything beneath it**, so it is
-    /// the applier's own only while every entry beneath it is: a backend that
-    /// watches a new folder only once it learns of it reports nothing written
-    /// anywhere inside before then. A held file another writer rewrote, a
-    /// file another writer put in a nested made folder, and a held name
-    /// another writer turned into a folder each keep the report.
-    #[test]
-    #[allow(clippy::disallowed_methods)] // Test arrangement: foreign changes under a made folder.
-    fn a_made_folder_holding_any_foreign_change_beneath_it_is_not_suppressed() {
-        let arrange: [(&str, Arrangement); 3] = [
-            ("rewrite", |scratch| {
-                scratch.place("tasks/done/first.md", b"FOREIGN bytes of another length");
-            }),
-            ("nested foreign file", |scratch| {
-                scratch.place("tasks/done/foreign.md", b"foreign");
-            }),
-            ("held name turned folder", |scratch| {
-                std::fs::remove_file(scratch.at("tasks/done/first.md")).unwrap();
-                scratch.directory("vault/tasks/done/first.md");
-                scratch.place("tasks/done/first.md/inner.md", b"inner");
-            }),
-        ];
-        for (change, foreign) in arrange {
-            let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-beneath");
-            scratch.directory("vault/tasks/done");
-            let first = scratch.place("tasks/done/first.md", b"first");
-            recorder
-                .published(
-                    &first,
-                    &published_making(
-                        AfterState::Present(observed(&first)),
-                        &["tasks", "tasks/done"],
-                    ),
-                )
-                .unwrap();
-            foreign(&scratch);
-            let batch = suppress(
-                &recorder.root,
-                &recorder.normalizer,
-                &ledger,
-                dirty(&recorder, &["tasks"]),
-            );
-            assert_eq!(batch.vault_roots().len(), 1, "{change} was suppressed");
-        }
     }
 
     /// **A suppressed root takes nothing with it.**
@@ -5841,12 +5426,7 @@ mod tests {
                 recorded: Instant::now() - OWN_WRITE_TTL - Duration::from_millis(1),
             },
         );
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["old.md"]),
-        );
+        let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["old.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
         assert!(ledger.lock().unwrap().entries.is_empty());
     }
@@ -5864,12 +5444,7 @@ mod tests {
             );
         }
         assert!(ledger.lock().unwrap().entries.is_empty());
-        let batch = suppress(
-            &recorder.root,
-            &recorder.normalizer,
-            &ledger,
-            dirty(&recorder, &["0.md"]),
-        );
+        let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["0.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
     }
 
