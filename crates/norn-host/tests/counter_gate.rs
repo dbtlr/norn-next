@@ -6174,3 +6174,87 @@ fn read_advisory_parameter(parameter: &str, size: u64) -> (norn_host::RepairAdvi
         document_count,
     )
 }
+
+/// **A repair of one planted broken link reads the same similarity work at both vault scales.**
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_similar_target_repair_costs_the_same_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let reading = |profile: &norn_fixtures::Profile| {
+        const TARGET: &str = "龘靐齉麤鸞麟";
+        const QUERY: &str = "龘靐齉麤鸞龍";
+        const HOLDER: &str = "龘靐持.md";
+        let sandbox = Sandbox::new(
+            Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &format!("similar-repair-{}", profile.name),
+        )
+        .expect("a sandbox");
+        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+        std::fs::write(vault.path().join(format!("{TARGET}.md")), "# Planted\n")
+            .expect("planting the similar target");
+        std::fs::write(vault.path().join(HOLDER), format!("See [[{QUERY}]].\n"))
+            .expect("planting the broken link");
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let planted = norn_store::similarity::trigrams(QUERY);
+        let mut store = vault.store();
+        let mut cursor = None;
+        loop {
+            let page = store
+                .begin_request()
+                .indexed_trigrams_after(cursor.as_ref(), MAX_PAGE)
+                .expect("a trigram page");
+            let Some(last) = page.last() else { break };
+            cursor = Some(last.clone());
+            for (path, trigram) in page {
+                if path.as_str() != HOLDER && path.stem() != TARGET {
+                    assert!(
+                        !planted.contains(&trigram),
+                        "generated stem carries {trigram:?}"
+                    );
+                }
+            }
+        }
+        let before = host.read_evidence();
+        let answered = host
+            .repair(
+                norn_wire::RepairParams::new(
+                    VaultAddress::name(vault.name().clone()),
+                    norn_wire::ApplyMode::Preview,
+                )
+                .with_predicates([Predicate::path(HOLDER)])
+                .with_threshold(norn_wire::Confidence::Suggested),
+            )
+            .expect("the repair is admitted")
+            .wait()
+            .expect("the repair answers a preview");
+        let norn_wire::ApplyReport::Previewed { plan, .. } = answered.report else {
+            panic!("preview")
+        };
+        assert_eq!(plan.operations.len(), 1);
+        let cost = host.read_evidence().since(before).similar_stems;
+        assert_eq!(cost.reads, 1);
+        assert!(cost.rarity_rows_read > 0 && cost.postings_rows_read > 0);
+        let counters: CounterSnapshot = [
+            ("reads", cost.reads),
+            ("rarity_rows_read", cost.rarity_rows_read),
+            ("postings_rows_read", cost.postings_rows_read),
+        ]
+        .into_iter()
+        .collect();
+        record_the_counters(
+            &format!("similar target repair over `{}`", profile.name),
+            &counters,
+        );
+        counters
+    };
+    let small_reading = reading(&small);
+    let large_reading = reading(&large);
+    SizeIndependencePair::new(
+        "suggesting a planted broken link's similar target",
+        ScaleObservation::new(&small, small_reading),
+        ScaleObservation::new(&large, large_reading),
+    )
+    .assert_size_independent();
+}
