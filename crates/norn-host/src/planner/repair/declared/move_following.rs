@@ -16,9 +16,8 @@
 //! **Similarity answers use the same composition at suggested confidence.**
 //! Their citations and below-threshold proposals carry the score note, and
 //! both addresses carry the same conditions as a follow. Only a follow
-//! carries a content-hash author condition. A failed suggestion preserves
-//! any move-following skip, except a below-threshold proposal, which carries
-//! the score followed by that move skip's reason and note.
+//! carries a content-hash author condition. A suggestion below threshold
+//! carries its score note.
 
 use std::collections::BTreeMap;
 

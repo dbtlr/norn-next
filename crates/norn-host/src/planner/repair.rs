@@ -20,8 +20,8 @@
 //! writes is recorded with what it resolves to at the after-state. A
 //! `link/broken` follows one tombstone to one live holder of its recorded
 //! hash, composed last ([`broken_links`]), with both the written and replaced
-//! addresses recorded and the hash carried as an author condition. Without a unique
-//! follow, its single best stem at Jaccard cutoff 0.5 proposes a suggested rewrite
+//! addresses recorded and the hash carried as an author condition. Without a
+//! tombstone, its single best other stem at Jaccard cutoff 0.5 proposes a suggested rewrite
 //! through the same composition, guarded by both addresses and no target hash. All are
 //! filled and judged by [`declared`], one operation per fix (a rename is
 //! two), numbered `repair-1`, `repair-2` and on in plan order, each cited at

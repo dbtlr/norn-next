@@ -499,6 +499,8 @@ pub enum SkipReason {
     RespellsAJudgedLink,
     // Move-following emits the four tombstone/hash reasons and link_not_rewritable.
     // Similarity emits too_common and too_short, and shares link_not_rewritable.
+    // Similarity reads only a broken link whose address finds no tombstone and
+    // never names its holder, so a move-following skip carries no similarity outcome.
     // The notes live here rather than in the doc comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest

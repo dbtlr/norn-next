@@ -44,9 +44,7 @@ induced-failure = [
 # rule's templates are filled from, read once per plan.
 [dependencies]
 jiff = { workspace = true }
-# `serde_json` measures advisory bytes, quotes YAML scalars, spells skip reasons
-# in repair notes through their wire serialization and carries process-death
-# test plans.
+# `serde_json` measures advisory bytes, quotes YAML scalars and carries process-death test plans.
 serde_json = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }

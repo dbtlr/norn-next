@@ -33,25 +33,26 @@
 //! keeps no tombstones. A norn move whose cascade rewrote the moved
 //! document's own links changed its hash, so it skips `no_holder`.
 //!
-//! **Without a unique follow, similarity suggests the single best leaf stem.**
+//! **Without a tombstone, similarity suggests the single best leaf stem.**
 //! The query takes the protocol-stripped address's last `/` segment, decodes
 //! it for Markdown and drops the document extension in any ASCII case.
 //! A failed decoding stays written. At least three folded Unicode scalars are admitted;
 //! shorter queries skip `too_short` without reading the index. Jaccard over
 //! padded folded trigram sets uses [`norn_store::similarity::CUTOFF`]. Equal best scores
 //! skip `tie`; a needed posting past cap 256 skips `too_common`. The fold is
-//! only a suggestion's, never a resolution rule (ADR 0039). With no tombstone
-//! and no candidate reaching the cutoff, `no_declared_fix` still stands.
+//! only a suggestion's, never a resolution rule (ADR 0039). The finding's
+//! holder is excluded before scoring, so no suggestion names its own document.
+//! With no tombstone and no candidate reaching the cutoff, `no_declared_fix`
+//! still stands.
 //!
 //! **A suggestion shares a follow's spelling and composition.** It proposes
 //! a `suggested` rewrite with the score note, guarding the written and
 //! replaced addresses without a candidate content-hash author condition.
-//! A unique follow outranks similarity even when composition later skips it.
-//! When both fail, the move skip's reason and value stand, and its note
-//! appends `; similarity: <outcome>`. An unreadable holder instead keeps
-//! `unreadable`, as every finding a fix would answer there does.
-//! A suggestion below threshold carries
-//! its operation and score note, followed by any move skip's reason and note.
+//! A unique follow never consults similarity, even when composition skips it.
+//! A tombstone records a deleted target, so a move-following skip stands
+//! with its own note and no similarity outcome, and the link stays broken.
+//! Quarantine tombstones are not read and count as none. A suggestion below
+//! threshold carries its operation and score note.
 
 use std::collections::BTreeMap;
 
@@ -69,7 +70,7 @@ pub(super) struct Answer {
     pub(super) before: DocumentPath,
     /// The destination, mapped to where the settled routes land it.
     pub(super) to: DocumentPath,
-    /// A moved hash or a suggestion's score and any failed move decision.
+    /// A moved hash or a suggestion's score note.
     pub(super) evidence: Evidence,
 }
 
@@ -169,10 +170,7 @@ fn read_moves<R: Reading>(
 /// The evidence that determines confidence and author conditions of a link answer.
 pub(super) enum Evidence {
     Moved(ContentHash),
-    Similar {
-        note: String,
-        following_skip: Option<Box<SkippedFinding>>,
-    },
+    Similar { note: String },
 }
 
 impl Answer {
@@ -186,39 +184,16 @@ impl Answer {
     pub(super) fn notes(&self) -> Vec<String> {
         match &self.evidence {
             Evidence::Moved(_) => Vec::new(),
-            Evidence::Similar { note, .. } => vec![note.clone()],
+            Evidence::Similar { note } => vec![note.clone()],
         }
     }
 
-    /// Preserve a failed move's decision when its weaker answer cannot compose.
+    /// A suggestion below the threshold retains the score on its proposal.
     pub(super) fn skipped(&self, mut skipped: SkippedFinding) -> SkippedFinding {
-        if skipped.reason == SkipReason::Unreadable {
-            return skipped;
-        }
-        if let Evidence::Similar {
-            note,
-            following_skip,
-        } = &self.evidence
+        if skipped.reason == SkipReason::BelowThreshold
+            && let Evidence::Similar { note } = &self.evidence
         {
-            if skipped.reason == norn_wire::SkipReason::BelowThreshold {
-                skipped.note = Some(match following_skip {
-                    Some(failed) => format!(
-                        "{note}; move-following: {}: {}",
-                        reason_name(failed.reason),
-                        failed.note.as_deref().unwrap_or_default()
-                    ),
-                    None => note.clone(),
-                });
-            } else if let Some(failed) = following_skip {
-                return both_fail(
-                    failed.as_ref().clone(),
-                    &format!(
-                        "{}: {}",
-                        reason_name(skipped.reason),
-                        skipped.note.as_deref().unwrap_or_default()
-                    ),
-                );
-            }
+            skipped.note = Some(note.clone());
         }
         skipped
     }
@@ -229,23 +204,7 @@ fn admits_stem(stem: &str) -> bool {
     norn_store::similarity::fold(stem).chars().count() >= 3
 }
 
-fn reason_name(reason: SkipReason) -> String {
-    serde_json::to_value(reason)
-        .expect("a skip reason serializes")
-        .as_str()
-        .expect("a skip reason serializes as a string")
-        .to_owned()
-}
-
-fn both_fail(mut failed: SkippedFinding, outcome: &str) -> SkippedFinding {
-    failed.note = Some(format!(
-        "{}; similarity: {outcome}",
-        failed.note.as_deref().unwrap_or_default()
-    ));
-    failed
-}
-
-/// Read move-following first, then suggest only for findings with no unique follow.
+/// Read move-following first, then suggest only where no tombstone was found.
 pub(super) fn read<R: Reading>(
     rows: &[FindingRow],
     links: &BTreeMap<u64, norn_store::FindingLink>,
@@ -256,7 +215,7 @@ pub(super) fn read<R: Reading>(
     let mut answers = read_moves(rows, links, vault)?;
     let mut queried = BTreeMap::new();
     for row in rows.iter().filter(|row| row.kind == FindingKind::Broken) {
-        if answers.get(&row.id).is_some_and(Result::is_ok) {
+        if answers.contains_key(&row.id) {
             continue;
         }
         let Some(found) = links.get(&row.id) else {
@@ -269,7 +228,6 @@ pub(super) fn read<R: Reading>(
         );
         let stem = norn_store::query_leaf(&link);
         let stem = stem.as_str();
-        let following_skip = answers.remove(&row.id).and_then(Result::err);
         let query_skip = |reason, note: String| {
             super::skip(row, reason)
                 .with_value(norn_wire::ValueHead::of(
@@ -301,7 +259,10 @@ pub(super) fn read<R: Reading>(
                 StemMatches::Candidates(candidates) => {
                     let mut best = Vec::new();
                     let mut score = norn_store::similarity::jaccard_counts(0, 1, 0);
-                    for candidate in candidates {
+                    for candidate in candidates
+                        .iter()
+                        .filter(|candidate| candidate.path.as_str() != row.path.as_str())
+                    {
                         let candidate_score = norn_store::similarity::jaccard_counts(
                             candidate.shared,
                             retrieved.query_trigrams,
@@ -325,18 +286,6 @@ pub(super) fn read<R: Reading>(
                         norn_store::similarity::CUTOFF
                     );
                     if best.is_empty() {
-                        if let Some(failed) = following_skip {
-                            answers.insert(
-                                row.id,
-                                Err(both_fail(
-                                    failed,
-                                    &format!(
-                                        "no stem reaches the cutoff {}",
-                                        norn_store::similarity::CUTOFF
-                                    ),
-                                )),
-                            );
-                        }
                         continue;
                     }
                     if best.len() == 1 {
@@ -346,10 +295,7 @@ pub(super) fn read<R: Reading>(
                             link,
                             before: to.clone(),
                             to,
-                            evidence: Evidence::Similar {
-                                note,
-                                following_skip: following_skip.clone().map(Box::new),
-                            },
+                            evidence: Evidence::Similar { note },
                         })
                     } else {
                         best.sort_by(|a, b| a.path.cmp(&b.path));
@@ -370,13 +316,6 @@ pub(super) fn read<R: Reading>(
                 }
             }
         };
-        let answer = answer.map_err(|skipped| match &following_skip {
-            Some(failed) => both_fail(
-                failed.clone(),
-                skipped.note.as_deref().expect("a similarity skip note"),
-            ),
-            None => skipped,
-        });
         answers.insert(row.id, answer);
     }
     Ok(answers)

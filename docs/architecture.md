@@ -3017,7 +3017,7 @@ preview and apply refuses the plan.
 A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
 where the hash changed.
 
-**A broken link without a unique follow suggests its most similar leaf stem.** The query
+**A broken link without a tombstone suggests its most similar leaf stem.** The query
 removes the protocol prefix, takes the last `/` segment, percent-decodes it for Markdown
 and drops the document extension in any ASCII case. A segment whose decoding fails stays as written.
 The stored address already excludes the anchor. Similarity folds stems to NFC and applies
@@ -3036,6 +3036,8 @@ by (T-k+1)*cap. A needed trigram past that cap skips `too_common`, naming the tr
 and cap. Both skips carry the query stem as their value. Every query reaching the index
 is counted on the host's similarity read account, including too-common answers. Each
 distinct query stem is read once per plan.
+The finding's own holder is excluded from the candidates before scoring, so no suggestion
+writes a link naming its own document. Exclusion is per finding, after the shared retrieval.
 
 The single best candidate proposes one `rewrite_link` at `suggested`, through the same
 spelling and composition as a follow. Its citation notes `similarity 0.71 (trigram,
@@ -3049,15 +3051,13 @@ Both written and replaced addresses carry the same conditions as a follow; the s
 carries no content-hash author condition on its candidate.
 
 Move-following outranks similarity: a unique follow never consults it, even where
-composition later skips that follow. Similarity reads only where there is no tombstone
-or move-following skips `several_tombstones`, `no_recorded_hash`, `no_holder` or
-`several_holders`. If both fail, the move-following reason and value stand, and its note
-appends `; similarity: <outcome>`: no stem reaches the cutoff, the tie or query skip note,
-or the composition skip's reason and note. An unreadable holder instead keeps
-`unreadable`, as every finding a fix would answer there does. With no tombstone, a similarity skip stands
-on its own; no candidate at the cutoff keeps `no_declared_fix`. A similarity answer
-below threshold instead carries the proposed operation, with its score note followed by
-`; move-following: <reason as snake_case>: <its note>` where move-following skipped.
+composition later skips that follow. Similarity reads only for a broken link whose address
+finds no tombstone. A quarantine tombstone is not read, so it counts as none. A tombstone
+is knowledge that the target was deleted, so `several_tombstones`, `no_recorded_hash`,
+`no_holder` or `several_holders` stands with its move-following note alone, and the link
+stays broken. A later repair without that tombstone may suggest a similar target; a rebuild
+records none. With no tombstone, a similarity skip stands on its own, and no candidate
+at the cutoff keeps `no_declared_fix`.
 
 **Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
 norn move whose cascade rewrote the moved document's own links changed its hash, so no live
