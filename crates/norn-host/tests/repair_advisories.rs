@@ -231,6 +231,142 @@ fn reload(host: &attach::ServingHost, vault: &attach::Vault, schema: &str) {
 }
 
 #[test]
+fn a_creation_default_key_is_named_and_is_the_target() {
+    let creation = "creatable:\n  named:\n    target: 'new/{{seq}}.md'\n    frontmatter_defaults: {zz_name: saved}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-creation-target",
+        &format!("version: 1\n{creation}"),
+        &[
+            ("a.md", "---\nZZ Name: one\n---\n"),
+            ("b.md", "---\nZZ Name: two\n---\n"),
+            ("c.md", "---\nzz_name: three\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"ZZ Name\"\n      : {rename_to: \"zz_name\"}\n";
+    assert_eq!(
+        near_duplicate(&found).expect("near duplicates")["yaml"],
+        yaml
+    );
+    let schema = format!("version: 1\n{creation}{yaml}");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    assert!(near_duplicate(&advisories(&host, &vault)).is_none());
+}
+
+#[test]
+fn the_tag_carrier_is_named_and_is_the_target() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-tag-carrier-target",
+        "version: 1\n",
+        &[
+            ("a.md", "---\nTags: []\n---\n"),
+            ("b.md", "---\nTags: []\n---\n"),
+            ("c.md", "---\ntags: []\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"Tags\"\n      : {rename_to: \"tags\"}\n";
+    assert_eq!(
+        near_duplicate(&found).expect("near duplicates")["yaml"],
+        yaml
+    );
+    let schema = format!("version: 1\n{yaml}");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    assert!(near_duplicate(&advisories(&host, &vault)).is_none());
+}
+
+#[test]
+fn a_forbidden_named_spelling_does_not_count_toward_the_one_named_target() {
+    let fields = "fields:\n  zz_name: {type: text}\n";
+    let rules = "  required:\n    match: {path: 'required/**'}\n    required: {'ZZ Name': null}\n  forbidden:\n    match: {path: 'forbidden/**'}\n    forbidden: {'ZZ Name': null}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-forbidden-named-target",
+        &format!("version: 1\n{fields}rules:\n{rules}"),
+        &[
+            ("required/a.md", "---\nZZ Name: one\n---\n"),
+            ("b.md", "---\nzz.name: two\n---\n"),
+            ("c.md", "---\nzz.name: three\n---\n"),
+            ("d.md", "---\nzz_name: four\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"zz.name\"\n      : {rename_to: \"zz_name\"}\n";
+    assert_eq!(
+        near_duplicate(&found).expect("near duplicates")["yaml"],
+        yaml
+    );
+    let schema = format!("version: 1\n{fields}{yaml}{rules}");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+}
+
+#[test]
+fn every_spelling_forbidden_renders_no_rename_and_keeps_the_advisory() {
+    let old = "  old:\n    forbidden: {'ZZ Name': null, zz_name: null}\n";
+    let schema = format!("version: 1\nrules:\n{old}");
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-every-spelling-forbidden",
+        &schema,
+        &[
+            ("a.md", "---\nZZ Name: one\n---\n"),
+            ("b.md", "---\nzz_name: two\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let duplicate = near_duplicate(&found).expect("near duplicates");
+    assert_eq!(duplicate["yaml"], "rules: {}\n");
+    let fragment = format!("version: 1\n{}", duplicate["yaml"].as_str().expect("yaml"));
+    norn_config::schema::VaultSchema::parse(fragment.as_bytes()).expect("the empty fragment loads");
+    // The empty fragment adds no rules to the existing schema.
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the merged schema loads");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 2);
+    let next = advisories(&host, &vault);
+    assert_eq!(
+        near_duplicate(&next).expect("the group remains")["spellings"],
+        json!([{"key":"ZZ Name","documents":1},{"key":"zz_name","documents":1}])
+    );
+}
+
+#[test]
+fn a_forbidden_fix_scoped_by_its_selector_keeps_the_advisory_for_documents_outside_it() {
+    let old = "  old:\n    match: {path: 'scoped/**'}\n    forbidden: {zz_name: remove}\n";
+    let schema = format!("version: 1\nrules:\n{old}");
+    let outside = "---\nzz_name: kept\n---\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-scoped-forbidden-fix",
+        &schema,
+        &[
+            ("scoped/a.md", "---\nzz_name: removed\n---\n"),
+            ("outside/a.md", outside),
+            ("outside/b.md", "---\nZZ Name: one\n---\n"),
+            ("outside/c.md", "---\nZZ Name: two\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let duplicate = near_duplicate(&found).expect("near duplicates");
+    assert_eq!(duplicate["yaml"], "rules: {}\n");
+    let fragment = format!("version: 1\n{}", duplicate["yaml"].as_str().expect("yaml"));
+    norn_config::schema::VaultSchema::parse(fragment.as_bytes()).expect("the empty fragment loads");
+    // The empty fragment adds no rules to the existing schema.
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the merged schema loads");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("outside/a.md")).expect("the outside document"),
+        outside
+    );
+    let next = advisories(&host, &vault);
+    assert_eq!(
+        near_duplicate(&next).expect("the group remains")["spellings"],
+        json!([{"key":"ZZ Name","documents":2},{"key":"zz_name","documents":1}])
+    );
+}
+
+#[test]
 fn a_required_spelling_is_the_target_even_when_another_spelling_is_more_used() {
     let (_sandbox, vault, host) = a_vault_under(
         "advisory-required-target",

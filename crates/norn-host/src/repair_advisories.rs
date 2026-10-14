@@ -203,31 +203,36 @@ fn near_duplicates(
     Ok(duplicates)
 }
 
-/// The spellings a schema's rules name or forbid, collected in one walk per pass.
+/// The spellings the config names for use, and those its rules forbid or fix,
+/// collected once per pass.
 ///
-/// A forbidden key is never a rename target, since renaming onto it breaches the
-/// rule forbidding it. One the schema forbids with its own fix (`remove` or
-/// `rename_to`) is left to that fix: a second, different fix on it ties and repair
-/// skips both. One forbidden with no fix is renamed like any unnamed spelling,
-/// since the rename is then the only fix repair has for it.
+/// A named spelling is never renamed away or forbidden by the advisory yaml. A
+/// forbidden key is never a rename target and does not count as named for target
+/// choice. One the schema forbids with its own fix (`remove` or `rename_to`) is
+/// left to that fix: a second, different fix on it ties and repair skips both. One
+/// forbidden with no fix and not named is renamed like an unnamed spelling, since
+/// the rename is then the only fix repair has for it.
 #[derive(Default)]
 struct RuleSpellings<'s> {
-    /// Keys a rule reads by value: selector, required, closed-set and length keys,
-    /// and rename targets.
-    named: BTreeSet<&'s str>,
+    /// Rule keys, rename targets, creation-default keys and the tag carrier.
+    named: BTreeSet<String>,
     /// Keys some rule forbids, whatever its fix.
     forbidden: BTreeSet<&'s str>,
     /// Keys some rule forbids with a declared fix.
     fixed: BTreeSet<&'s str>,
 }
 
-/// Collect the spellings the schema's rules name, forbid, and fix.
+/// Collect the spellings the config names for use and those its rules forbid or fix.
 fn rule_read_keys(schema: &VaultSchema) -> RuleSpellings<'_> {
     let mut keys = RuleSpellings::default();
     for rule in schema.rules() {
+        keys.named.extend(
+            rule.selector()
+                .frontmatter()
+                .map(|(key, _)| key.to_string()),
+        );
         keys.named
-            .extend(rule.selector().frontmatter().map(|(key, _)| key));
-        keys.named.extend(rule.required().map(|(key, _)| key));
+            .extend(rule.required().map(|(key, _)| key.to_string()));
         for (key, fix) in rule.forbidden() {
             keys.forbidden.insert(key);
             match fix {
@@ -237,13 +242,24 @@ fn rule_read_keys(schema: &VaultSchema) -> RuleSpellings<'_> {
                 }
                 ForbiddenFix::RenameTo(target) => {
                     keys.fixed.insert(key);
-                    keys.named.insert(target.as_str());
+                    keys.named.insert(target.to_string());
                 }
             }
         }
-        keys.named.extend(rule.one_of().map(|(key, _)| key));
-        keys.named.extend(rule.max_length().map(|(key, _)| key));
+        keys.named
+            .extend(rule.one_of().map(|(key, _)| key.to_string()));
+        keys.named
+            .extend(rule.max_length().map(|(key, _)| key.to_string()));
     }
+    for rule in schema.creation_rules() {
+        keys.named.extend(
+            rule.frontmatter_defaults()
+                .into_entries()
+                .into_iter()
+                .map(|(key, _)| key),
+        );
+    }
+    keys.named.insert(norn_store::TAG_CARRIER.to_string());
     keys
 }
 
@@ -255,12 +271,13 @@ fn rename_rules(
     rule_keys: &RuleSpellings<'_>,
     next_rule: &mut u64,
 ) -> String {
-    let (named, other): (Vec<_>, Vec<_>) = group.iter().partition(|spelling| {
+    let (mut named, other): (Vec<_>, Vec<_>) = group.iter().partition(|spelling| {
         schema.field(&spelling.key).is_some() || rule_keys.named.contains(spelling.key.as_str())
     });
     let target = |spelling: &&SpellingUse| !rule_keys.forbidden.contains(spelling.key.as_str());
+    named.retain(target);
     let winner = match named.as_slice() {
-        [only] if target(only) => Some(*only),
+        [only] => Some(*only),
         _ => other.iter().copied().filter(target).max_by(|left, right| {
             left.documents
                 .cmp(&right.documents)
