@@ -846,6 +846,11 @@ impl OwnWrites {
     /// spellings are one ledger key, so an event reported under either is
     /// matched, and on one that does not a respell is never published.
     ///
+    /// **Each folder a create made is recorded too**, by the identity it holds
+    /// when the publication is recorded: the watcher reports a made folder as
+    /// well as the file, and a folder no longer a directory by then records
+    /// nothing.
+    ///
     /// `path` may be vault-relative or absolute beneath the watched vault root.
     /// An absolute path outside that root is refused as [`PathError::Absolute`].
     pub fn published(&self, path: &Path, published: &Published) -> Result<(), PathError> {
@@ -855,6 +860,12 @@ impl OwnWrites {
             AfterState::Absent => Expected::Absent,
         };
         self.record(path, expected);
+        for folder in &published.made_folders {
+            let normalized = self.normalizer.normalize(folder)?;
+            if let Some(identity) = folder_identity(&self.root.join(folder)) {
+                self.record(normalized, Expected::Folder(identity));
+            }
+        }
         Ok(())
     }
 
@@ -1471,6 +1482,8 @@ struct LedgerEntry {
 enum Expected {
     Present(PostState),
     Absent,
+    /// A folder a create made, by the identity it was made with.
+    Folder(Identity),
 }
 
 struct Pending {
@@ -2018,6 +2031,12 @@ fn hand_over(
 /// the batch no longer carries, and a covering root dropped after it had
 /// subsumed a descendant would take that descendant's fact with it — a fact no
 /// ledger entry was ever about.
+///
+/// A file's entry answers the first batch that names it, so the next change
+/// at that path is judged as foreign. A made folder's entry answers every
+/// batch until it expires: the folder is reported as more than one event — its
+/// creation, then the attributes the system stamps on it — and a batch can
+/// close between them.
 fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch {
     let now = Instant::now();
     let candidates: BTreeMap<_, _> = {
@@ -2029,10 +2048,11 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
             .vault_roots
             .iter()
             .filter_map(|path| {
-                ledger
-                    .entries
-                    .remove(path)
-                    .map(|entry| (path.clone(), entry.expected))
+                let expected = ledger.entries.get(path)?.expected;
+                if !matches!(expected, Expected::Folder(_)) {
+                    ledger.entries.remove(path);
+                }
+                Some((path.clone(), expected))
             })
             .collect()
     };
@@ -2052,6 +2072,7 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and stat.
 fn matches_expected(path: &Path, expected: &Expected) -> bool {
     match expected {
+        Expected::Folder(identity) => folder_identity(path) == Some(*identity),
         Expected::Absent => match std::fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Ok(_) | Err(_) => false,
@@ -2077,6 +2098,16 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
                 .is_ok_and(|(hash, len)| hash == expected.content_hash && len == expected.len)
         }
     }
+}
+
+/// The identity of the directory at `path`, where a directory stands there
+/// rather than a link to one.
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
+fn folder_identity(path: &Path) -> Option<Identity> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    metadata
+        .is_dir()
+        .then(|| crate::identity::identity_of(&metadata))
 }
 
 #[cfg(test)]
@@ -5362,6 +5393,80 @@ mod tests {
                 .entries
                 .contains_key(&recorder.normalize(&path).unwrap())
         );
+    }
+
+    /// A create that landed at `after`, making `folders` on the way to it.
+    fn published_making(after: AfterState, folders: &[&str]) -> Published {
+        Published {
+            made_folders: folders.iter().map(PathBuf::from).collect(),
+            ..published(after)
+        }
+    }
+
+    /// **A folder a publication made is its own write.** A create into a
+    /// missing folder makes the folder, and the watcher reports the folder as
+    /// well as the file, so both are the applier's echo.
+    #[test]
+    fn a_folder_a_publication_made_is_suppressed_as_its_own_write() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder");
+        scratch.directory("vault/tasks");
+        let path = scratch.place("tasks/note.md", b"note");
+        recorder
+            .published(
+                &path,
+                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
+            )
+            .unwrap();
+        let batch = suppress(
+            &recorder.root,
+            &ledger,
+            dirty(&recorder, &["tasks", "tasks/note.md"]),
+        );
+        assert!(batch.is_empty(), "{:?}", batch.vault_roots());
+    }
+
+    /// **A made folder is its own write in every batch that names it.** One
+    /// folder made is reported as more than one event — its creation, then
+    /// the attributes the system stamps on it — and a batch can close between
+    /// them.
+    #[test]
+    fn a_made_folder_is_suppressed_in_every_batch_that_names_it() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-twice");
+        scratch.directory("vault/tasks");
+        let path = scratch.place("tasks/note.md", b"note");
+        recorder
+            .published(
+                &path,
+                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
+            )
+            .unwrap();
+        for report in ["its creation", "its attributes"] {
+            let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["tasks"]));
+            assert!(batch.is_empty(), "{report}: {:?}", batch.vault_roots());
+        }
+    }
+
+    /// **A folder replaced since it was made is foreign.** A directory renamed
+    /// over the made one is another directory, and what it holds arrived with
+    /// no event naming it, so the root stays for a reconcile to walk.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement: a foreign replacement of the folder.
+    fn a_folder_replaced_since_it_was_made_is_not_suppressed() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-replaced");
+        scratch.directory("vault/tasks");
+        let path = scratch.place("tasks/note.md", b"note");
+        recorder
+            .published(
+                &path,
+                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
+            )
+            .unwrap();
+        scratch.directory("vault/elsewhere");
+        scratch.place("elsewhere/foreign.md", b"foreign");
+        std::fs::remove_dir_all(scratch.at("tasks")).unwrap();
+        std::fs::rename(scratch.at("elsewhere"), scratch.at("tasks")).unwrap();
+        let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["tasks"]));
+        assert_eq!(batch.vault_roots().len(), 1);
     }
 
     /// **A suppressed root takes nothing with it.**
