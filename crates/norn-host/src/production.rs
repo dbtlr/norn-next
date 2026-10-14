@@ -26,7 +26,7 @@ use crate::applier::Applier;
 use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
-    WALKED_KINDS, document_path, plan_document, plan_quarantine,
+    WALKED_KINDS, decodes, document_path, plan_document, plan_quarantine,
 };
 use crate::evidence::{
     JobEvidence, count_changeset, count_document_derived, count_increment_work, count_rule_work,
@@ -2394,7 +2394,7 @@ fn scoped_increment(
                     .stored_document(&document_path)
                     .map_err(store_effect)?;
                 let stale = match standing.as_ref() {
-                    None => !pending.unchanged_quarantine(path, &hash)?,
+                    None => !pending.unchanged_quarantine(path, observed.bytes(), &hash)?,
                     Some(row) => {
                         row.content_hash != hash
                             || !pending.declared.judged(row.generation)
@@ -3763,7 +3763,7 @@ impl<'s> Pending<'s> {
     /// ([`Pending::unchanged_quarantine`]).
     fn derive(&mut self, spelling: &str, bytes: &[u8], hash: String) -> Result<(), JobFailure> {
         let path = Path::new(spelling);
-        if !self.unchanged_quarantine(path, &hash)? {
+        if !self.unchanged_quarantine(path, bytes, &hash)? {
             self.rederive(path, spelling, bytes, hash, None);
         }
         Ok(())
@@ -3823,7 +3823,19 @@ impl<'s> Pending<'s> {
     /// matches, the standing finding is the conclusion this reading would
     /// file, and the job counts the place's content side as filed, so a walk
     /// that read it does not prune that finding as unaccounted for.
-    fn unchanged_quarantine(&mut self, path: &Path, hash: &str) -> Result<bool, JobFailure> {
+    ///
+    /// Only bytes that do not decode are ever judged into a content finding,
+    /// so bytes that do are answered here without reading the store: a heal
+    /// over a vault nothing quarantines asks it nothing.
+    fn unchanged_quarantine(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        hash: &str,
+    ) -> Result<bool, JobFailure> {
+        if decodes(bytes) {
+            return Ok(false);
+        }
         let subject = DocumentPath::rendered(path);
         let standing = self
             .store
