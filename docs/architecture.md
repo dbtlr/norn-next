@@ -2917,10 +2917,10 @@ composes in the link phase with its respell veto, after the batch's routes settl
 link wrap or unwrap the judge admits keeps its place in finding order.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
-pooled for a finding and the strongest level present decides. A derived fix the threshold
+pooled for a finding and the strongest level present decides. A derived or suggested fix the threshold
 does not admit is skipped as `below_threshold` with the finding's value and `proposed`, the
 operation lowering the threshold writes for it, in preview and apply alike. One composition
-decides it: its document is composed again at the `derived` level, where the batch's routes
+decides it: its document is composed again at the proposed fix's confidence level, where the batch's routes
 as the request's threshold settles them leave it, so each below-threshold element of a list
 proposes the one write of the field every admitted element composes into, and a fix that
 lowered composition refuses skips with the lowered composition's reason; a fix the judge
@@ -2975,7 +2975,7 @@ several, or none), one condition per holder and address however many fixes write
 rides the resolved plan in preview and apply alike and is checked at the after-state, so a
 target deleted, or a competitor of the same stem created, between preview and apply refuses
 the plan, and a refused plan's fresh plan carries the condition as recorded. A
-move-following fix also records the replaced address, so recreating the old target between
+move-following or similarity fix also records the replaced address, so recreating the old target between
 preview and apply refuses the plan. Every link the batch's fixes write is resolved in one
 judgment of the link index over the settled routes, and the heads of those naming several
 in one more, so the cost follows the links written and the routes, never their product,
@@ -2987,7 +2987,8 @@ suffix, a relative or rooted Markdown link by the exact path it names from its h
 distinct by path and in path order, naming at most the first two. Quarantine tombstones are
 excluded, and ambiguity-ignore does not narrow this read. Exactly one tombstone with a
 recorded content hash and exactly one live document holding that hash gives a derived fix.
-No tombstone, or an address to which no read applies, keeps `no_declared_fix`. Two
+No tombstone, or an address to which no read applies, leaves the finding to the similarity
+suggestion below, which keeps `no_declared_fix` where no stem reaches its cutoff. Two
 tombstones, no recorded hash, no live holder or two live holders skip with the
 move-following reasons below. Each read stops at two. The followed document need not lie
 within the repair's selection.
@@ -3015,6 +3016,44 @@ moves the holder away. Changing the followed bytes or recreating the old target 
 preview and apply refuses the plan.
 A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
 where the hash changed.
+
+**A broken link without a unique follow suggests its most similar leaf stem.** The query
+removes the protocol prefix, takes the last `/` segment and drops a trailing `.md`.
+The stored address already excludes the anchor. Similarity folds stems to NFC and applies
+per-character lowercase, then takes distinct trigrams padded with two leading spaces and
+one trailing space. The fold is only a suggestion's, never a resolution rule
+([ADR 0039](decisions/0039-an-unquoted-frontmatter-wikilink-is-the-link-it-spells.md)).
+Jaccard is the shared trigram count divided by the union count, with a fixed cutoff of
+0.5. Scores are compared exactly by integer cross-multiplication. A candidate below the
+cutoff is never proposed. A query needs at least three folded Unicode scalars; shorter
+queries skip `too_short` without reading the index.
+
+For T query trigrams, k = ceil(T/2) is the least shared count implied by the cutoff.
+The read probes every trigram's rarity with at most cap+1 rows, then reads full postings
+for the T-k+1 rarest. With cap 256, rarity rows are bounded by T*(cap+1) and postings rows
+by (T-k+1)*cap. A needed trigram past that cap skips `too_common`, naming the trigram
+and cap. Both skips carry the query stem as their value. Every query reaching the index
+is counted on the host's similarity read account, including too-common answers.
+
+The single best candidate proposes one `rewrite_link` at `suggested`, through the same
+spelling and composition as a follow. Its citation notes `similarity 0.71 (trigram,
+cutoff 0.50)`, with the actual score to two decimals. Below the request's threshold,
+derived by default, it skips `below_threshold` carrying that operation and score note.
+Equal best scores skip `tie`, carrying the tied documents in path order, each named by
+its path without `.md`, with `tie at similarity 0.60 (trigram, cutoff 0.50)` and the actual
+score. A route of the batch moves a candidate's spelling toward where it lands.
+Both written and replaced addresses carry the same conditions as a follow; the suggestion
+carries no content-hash author condition on its candidate.
+
+Move-following outranks similarity: a unique follow never consults it, even where
+composition later skips that follow. Similarity reads only where there is no tombstone
+or move-following skips `several_tombstones`, `no_recorded_hash`, `no_holder` or
+`several_holders`. If both fail, the move-following reason and value stand, and its note
+appends `; similarity: <outcome>`: no stem reaches the cutoff, the tie or query skip note,
+or the composition skip's reason and note. With no tombstone, a similarity skip stands
+on its own; no candidate at the cutoff keeps `no_declared_fix`. A similarity answer
+below threshold instead carries the proposed operation, with its score note followed by
+`; move-following: <reason as snake_case>: <its note>` where move-following skipped.
 
 **Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
 norn move whose cascade rewrote the moved document's own links changed its hash, so no live
@@ -3127,8 +3166,8 @@ and `judge_would_refuse` with its candidates where it introduces any other viola
 where a route fills to no folder a document can be moved into, `below_threshold` and
 `excluded_class` as above. A
 finding the rules conflict over is `rules_conflict`. Move-following emits five link-fix skip
-reasons. The wire also names `too_common` and `too_short`, dormant until the similarity
-suggestion (NORN-400). They skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
+reasons. The similarity suggestion emits `too_common` and `too_short`.
+They skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
 `too_common` where the rarest trigrams the query needs exceed the postings cap (the note names
 the trigram past the cap) and `too_short` where the stem is below the shortest admitted query,
 three characters (the note gives it). `no_recorded_hash`, `no_holder`, `several_holders` and
@@ -3140,7 +3179,7 @@ to two and stop, so the note names the two paths and says
 with one answer that cannot be written to it, because no spelling reads back to the
 destination uniquely from the holder or the text layer refuses the edit, its note carrying the
 reason. A suggestion's score is note text, never a field. The similarity suggestion
-(NORN-400) and closest-heading suggestion (NORN-401) will also emit `link_not_rewritable`.
+also emits `link_not_rewritable`; the closest-heading suggestion (NORN-401) will emit it.
 Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
@@ -3712,8 +3751,8 @@ the plan does not record is an unrecorded one; the fresh plan records the set as
 A resolved plan may carry a third kind of condition beside a file's content and a
 change-set entry: an `address_resolution`, which repair's planner records for every link
 a fix writes a value holding, saying that from the link's holder the address resolves as
-recorded at the plan's after-state; an address a move-following fix replaces is recorded the
-same way, alongside the new address. The operation carries the followed document's content
+recorded at the plan's after-state; an address a move-following or similarity fix replaces is recorded the
+same way, alongside the new address. Only move-following carries the followed document's content
 hash as an author condition. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
