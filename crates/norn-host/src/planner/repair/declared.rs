@@ -2236,6 +2236,24 @@ mod tests {
         assert_eq!(planned, Planned::default());
     }
 
+    /// **A missing anchor on a holder whose bytes no longer decode has no
+    /// fix**: no link is read from it, as for a link the holder no longer
+    /// holds.
+    #[test]
+    fn a_missing_anchor_on_a_holder_that_no_longer_decodes_has_no_fix() {
+        let mut vault = Vault::of("version: 1\n", &[]);
+        vault
+            .documents
+            .insert("h.md".to_string(), Arc::from(&b"\xff [[t#Headin]]\n"[..]));
+        let mut row = finding(1, FindingKind::MissingAnchor, "h.md", "t#Headin");
+        row.head = CandidateHead::new([], 1).expect("one candidate");
+
+        let planned = vault.plan(&[row]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
     /// **A document whose bytes cannot be read skips the findings a fix
     /// would answer as unreadable**, each with the value it judged, and the
     /// rest as their rows say.

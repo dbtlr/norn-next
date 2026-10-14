@@ -25,9 +25,12 @@ pub(super) fn fixes<R: Reading>(
     }) {
         return Ok(());
     }
-    let original = norn_text::Document::parse(
-        std::str::from_utf8(&reckoned.start.bytes).expect("a read document"),
-    );
+    // A holder whose bytes no longer decode holds no link to rewrite, so its
+    // missing-anchor rows keep their plain skip.
+    let Ok(source) = crate::derivation::document_source(&reckoned.start.bytes) else {
+        return Ok(());
+    };
+    let original = norn_text::Document::parse(source);
     let mut links = std::collections::HashMap::new();
     for link in original
         .frontmatter_wikilinks()
