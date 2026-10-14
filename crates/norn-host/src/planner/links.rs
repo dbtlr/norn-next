@@ -699,8 +699,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 /// link by holder, syntax and address, and the link need not stand in the
 /// holder after the plan: an address a rewrite replaced is judged as well as
 /// one it writes. Each is handed to `index` as a link the plan writes, so it
-/// is judged and handed back whatever it resolves to, from its holder's
-/// after-state path, over an overlay that draws every target of the plan at
+/// is judged and handed back whatever it resolves to, from the holder path
+/// the condition records, over an overlay that draws every target of the plan at
 /// its after-state alone. The overlay changes no target's presence, so the
 /// judgment reads only the keys the probes name, in the one call every
 /// condition shares, and none of the links the store holds under the keys a
@@ -710,9 +710,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 /// A condition whose syntax the store holds no link of (`probe_of` is `None`)
 /// is reported failed: no resolution could confirm it.
 ///
-/// A holder a move carried is probed from where it lands: the condition names
-/// the holder at its after-state path, and only the after side of a judgment
-/// is read, so no lineage source is needed.
+/// A written address is probed from where its holder lands; a follow's
+/// replaced address from where the finding read it, even when the plan
+/// moves that holder away. Only the after side of the judgment is read,
+/// over the plan's targets; no holder need stand at the recorded path and
+/// no lineage source is needed.
 pub(crate) fn failed_address_resolutions<I: LinkIndex + ?Sized>(
     targets: &[Target<'_>],
     conditions: &[PlanCondition],
@@ -787,7 +789,7 @@ pub(crate) fn moved_overlay<'m>(
 
 /// `link` as a link its holder's after-state writes, to be judged wherever it
 /// resolves; `None` for a syntax the store holds no link of.
-fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
+pub(crate) fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
     let family = match link.syntax {
         LinkFamily::Wikilink => norn_store::LinkFamily::Wikilink,
         LinkFamily::Markdown => norn_store::LinkFamily::Markdown,
@@ -1539,7 +1541,7 @@ fn skip_rank(reason: RewriteSkip) -> u8 {
 /// carry one new address, and is unrepresentable: planning writes one
 /// rewrite per holder, syntax and address, so only a plan no planning wrote
 /// meets it.
-fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
+pub(crate) fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
     match reason {
         RewriteSkip::Unrepresentable | RewriteSkip::ConflictingRewrites => {
             LinkAdvisory::skipped_unrepresentable(link)
@@ -1688,7 +1690,7 @@ pub(crate) fn family_name(family: LinkFamily) -> Option<&'static str> {
 pub(crate) mod testing {
     use norn_store::{ContentModel, Snapshot, Store, StoredPathOrder};
     use norn_testkit::scratch::Scratch;
-    use norn_wire::{VaultAddress, VaultName};
+    use norn_wire::{DocumentPath, LinkKey, VaultAddress, VaultName};
 
     use super::LinkIndex;
     use crate::apply::PlanSnapshot;
@@ -1829,6 +1831,15 @@ pub(crate) mod testing {
                 .index()
                 .held_links(holder)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+    }
+
+    impl<E> crate::planner::repair::Following for (EmptyStore, std::marker::PhantomData<E>) {
+        fn tombstones(&self, _: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn live_holders(&self, _: &str) -> Result<Vec<DocumentPath>, Self::Error> {
+            Ok(Vec::new())
         }
     }
 

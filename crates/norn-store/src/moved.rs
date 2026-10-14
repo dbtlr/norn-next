@@ -27,11 +27,6 @@
 //! Each shape is named by [`MovedStatement`] and runs through
 //! [`Snapshot::run_statement`], so it is counted on the snapshot and explained
 //! by its `*_plans` method as every read builder's statements are.
-//!
-//! **A dormant carrier.** The consuming layer is Layer 5C move-following in the
-//! repair planner (NORN-399), which is not built yet, so no production caller
-//! reaches these reads; their bars and the counter lane's size-independence
-//! pair hold them at their seam until it lands.
 
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;

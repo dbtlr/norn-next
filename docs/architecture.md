@@ -805,8 +805,8 @@ both forms.
 The holders read seeks `documents_content_hash` over `(content_hash, path)`, so the holders
 it names come in path order without a sort. Each read stops at two rows, which is all a follow decides by: one, or more than one. A rebuild
 from zero records no tombstones, so a store rebuilt under a new DDL fingerprint or
-derivation version has none to follow. These reads await their consumer, the Layer 5C
-repair planner's move-following (NORN-399).
+derivation version has none to follow. The repair planner reads them to follow a broken
+link through an out-of-band move.
 
 The two change-feed drains carry the strongest bar of the set, because their indexes were
 declared to admit it. Each is a generation-ordered walk of an index that carries every
@@ -2861,8 +2861,8 @@ of the new field to the old one's whole value, then a `remove_frontmatter` of th
 requiring it) as a rule declares. Each operation is numbered
 `repair-1`, `repair-2` and on in plan order and cited at the confidence of its fix with the
 findings it fixes, and one writing a clock-filled value notes that it is the repair's time.
-**Derived fixes are built-in answers provably unique from the document and the declaration
-alone, made at the `derived` confidence.** A `field/shape-mismatch` finding is wrapped or
+**Derived fixes are built-in answers provably unique from the document, the declaration
+and the vault, made at the `derived` confidence.** A `field/shape-mismatch` finding is wrapped or
 unwrapped: a field declared a list holding a scalar is set to the one-item list of that
 scalar, its YAML type kept, and a field declared single holding a one-item list is set to its
 item; a list of any other length under single has no derived fix. A `field/type-mismatch`
@@ -2959,14 +2959,52 @@ wikilink, the address written, and what it resolves to at the after-state (one d
 several, or none), one condition per holder and address however many fixes write it. It
 rides the resolved plan in preview and apply alike and is checked at the after-state, so a
 target deleted, or a competitor of the same stem created, between preview and apply refuses
-the plan, and a refused plan's fresh plan carries the condition as recorded. No fix of this
-layer replaces a link address: a closed set never holds a wikilink, so no fold or synonym
-replaces one; a rename moves a value without changing it; and a wrap, an unwrap, a bare
-value made a link or an unquoted wikilink written as its link string writes an address without
-replacing one. Every link the batch's fixes write is resolved in one
+the plan, and a refused plan's fresh plan carries the condition as recorded. A
+move-following fix also records the replaced address, so recreating the old target between
+preview and apply refuses the plan. Every link the batch's fixes write is resolved in one
 judgment of the link index over the settled routes, and the heads of those naming several
 in one more, so the cost follows the links written and the routes, never their product,
 and a batch writing no link reads nothing for it.
+**A broken link follows a recorded move where the answer is unique.** A selected
+`link/broken` finding's stored link is read against tombstones: a suffix wikilink by its
+suffix, a relative or rooted Markdown link by the exact path it names from its holder, and a
+`vault://` wikilink by both root paths its name can reduce to. The deaths are pooled,
+distinct by path and in path order, naming at most the first two. Quarantine tombstones are
+excluded, and ambiguity-ignore does not narrow this read. Exactly one tombstone with a
+recorded content hash and exactly one live document holding that hash gives a derived fix.
+No tombstone, or an address to which no read applies, keeps `no_declared_fix`. Two
+tombstones, no recorded hash, no live holder or two live holders skip with the
+move-following reasons below. Each read stops at two. The followed document need not lie
+within the repair's selection.
+
+The fix is one `rewrite_link` per holder, syntax and old address, citing every selected
+broken finding it answers at `derived`. It respells every matching link, preserving the
+anchor, title and embed marker. The holder is named where the batch's settled routes leave
+it. Its bytes are read once through the planning view, and the rewrite composes after its
+other fixes, judged at every addition. Below the threshold it is `below_threshold` carrying
+the proposed operation. The spelling uses the cascade's shared rule: candidate spellings
+keep the authored style, and the first resolving uniquely to the destination wins. All
+candidates of all followed links and their replaced addresses are probed in one judgment
+over the settled routes. No candidate reaching the destination uniquely, or a text-layer
+`RewriteSkip`, is `link_not_rewritable` with that reason in its note.
+A followed document a route of the same batch moves is spelled toward where the route lands
+it, and its hash is then guarded by that move's own content condition.
+
+The operation carries the followed document's recorded hash as an author condition, lifted
+to a plan condition where the plan does not write that document. Both the written and the
+replaced address carry an `address_resolution` condition, recorded by the same batched
+`resolved_addresses` probe the applier repeats. The written address is keyed where the
+holder lands and names the followed document. The replaced address is keyed where the
+finding read it and records its after-state resolution, normally none, even when a route
+moves the holder away. Changing the followed bytes or recreating the old target between
+preview and apply refuses the plan.
+A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
+where the hash changed.
+
+**Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
+norn move whose cascade rewrote the moved document's own links changed its hash, so no live
+document may hold the tombstone's recorded bytes; that follow skips as `no_holder`.
+
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
 rule's own captures where the document stands and the plan's one clock reading — with the
@@ -3038,11 +3076,11 @@ concludes — a rule's, an undeclared tag, one about the document whole — is d
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
 and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
-judgment, so planning skips every one from its row, and the resolved plan settles them after
+judgment, so planning skips those it does not follow from their rows, and the resolved plan settles them after
 the whole resolution: the batch hands back, with each link finding, the family, address and
 frontmatter field of the link at the finding's ordinal in its holder (read beside the finding
 by two index seeks, no statement of its own), and the finding is dropped where the plan's resolution change set —
-keyed at the after-state, the holder as the batch's routes leave it and the address as the
+keyed at the after-state, the holder as the batch's routes leave it and the address as an authored rewrite or
 cascade respells it — shows that link no longer holds it: a broken link that now resolves,
 an ambiguous link that now names one document or none, a missing-anchor link that now names
 none or several. A link with no entry in that set keeps its finding unless a declared
@@ -3073,21 +3111,22 @@ so),
 and `judge_would_refuse` with its candidates where it introduces any other violation, or
 where a route fills to no folder a document can be moved into, `below_threshold` and
 `excluded_class` as above. A
-finding the rules conflict over is `rules_conflict`. The wire also names seven skip reasons
-for the link fixes of Layer 5C, which no repair emits yet. `too_common` and `too_short`
-skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
+finding the rules conflict over is `rules_conflict`. Move-following emits five link-fix skip
+reasons. The wire also names `too_common` and `too_short`, dormant until the similarity
+suggestion (NORN-400). They skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
 `too_common` where the rarest trigrams the query needs exceed the postings cap (the note names
 the trigram past the cap) and `too_short` where the stem is below the shortest admitted query,
 three characters (the note gives it). `no_recorded_hash`, `no_holder`, `several_holders` and
 `several_tombstones` skip a move-following fix: the one tombstone found recorded no content
 hash, no live document holds the hash, at least two live documents hold it, or at least two
-tombstones match; the last two read to two and stop, so the note names the two paths and says
+tombstones match. The first two name the tombstone's path in their note; the last two read
+to two and stop, so the note names the two paths and says
 "at least two" and the entry carries no candidate head. `link_not_rewritable` skips a link fix
 with one answer that cannot be written to it, because no spelling reads back to the
 destination uniquely from the holder or the text layer refuses the edit, its note carrying the
-reason. A suggestion's score is note text, never a field. The move-following fix (NORN-399),
-the similarity suggestion (NORN-400) and the closest-heading suggestion (NORN-401) produce
-these reasons. Any other
+reason. A suggestion's score is note text, never a field. The similarity suggestion
+(NORN-400) and closest-heading suggestion (NORN-401) will also emit `link_not_rewritable`.
+Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a
@@ -3610,11 +3649,9 @@ the plan does not record is an unrecorded one; the fresh plan records the set as
 A resolved plan may carry a third kind of condition beside a file's content and a
 change-set entry: an `address_resolution`, which repair's planner records for every link
 a fix writes a value holding, saying that from the link's holder the address resolves as
-recorded at the plan's after-state; an address a fix replaces is recorded the same way by
-the move-following and similarity fixes of a later layer, and no fix of today replaces
-one: a closed set never holds a wikilink, a rename moves a value without changing it, and a
-wrap, an unwrap, a bare value made a link or an unquoted wikilink written as its link string
-writes an address without replacing one. It is not an entry of the change set: the applier
+recorded at the plan's after-state; an address a move-following fix replaces is recorded the
+same way, alongside the new address. The operation carries the followed document's content
+hash as an author condition. It is not an entry of the change set: the applier
 never computes it again from the operations, and the comparison ignores it. The applier
 instead checks it at the plan's after-state, in a preview and an apply alike, as one
 judgment of the link index holding one probe per address resolution the plan carries,

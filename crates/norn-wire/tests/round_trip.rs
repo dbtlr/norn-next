@@ -8944,6 +8944,16 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
     );
 }
 
+/// **An advisory's string is the tag the wire writes it under**, so a note
+/// naming one spells it as a forecast does.
+#[test]
+fn an_advisory_string_is_its_wire_tag() {
+    for advisory in link_advisories() {
+        let json = serde_json::to_value(&advisory).expect("an advisory serializes");
+        assert_eq!(json["advisory"].as_str(), Some(advisory.as_str()));
+    }
+}
+
 #[test]
 fn every_apply_shape_survives_the_round_trip() {
     round_trip(&a_forecast());

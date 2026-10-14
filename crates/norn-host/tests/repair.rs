@@ -5399,3 +5399,826 @@ fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_
     assert_eq!(violation.target.as_deref(), Some("status"));
     assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
 }
+
+/// Wait until the out-of-band move has been derived and the holder is broken.
+fn moved_on_disk(host: &attach::ServingHost, vault: &attach::Vault, from: &str, to: &str) {
+    let destination = vault.path().join(FOLDER).join(to);
+    std::fs::create_dir_all(destination.parent().expect("a parent")).expect("make destination");
+    std::fs::rename(vault.path().join(FOLDER).join(from), destination).expect("move outside norn");
+    wait_until(
+        "the move and broken link are derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let snapshot = store.begin_request();
+            let held = snapshot
+                .stored_document(&norn_store::DocumentPath::new(at(to).as_str()).expect("path"))
+                .expect("live document");
+            let dead = snapshot
+                .stored_tombstone(&norn_store::DocumentPath::new(at(from).as_str()).expect("path"))
+                .expect("death");
+            let broken = link_findings_of(host, vault, "zz-holder.md");
+            if held.is_some()
+                && dead.is_some()
+                && broken.iter().any(|row| row.kind == FindingKind::Broken)
+            {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{held:?} {dead:?} {broken:?}"))
+            }
+        },
+    )
+    .expect("the move settles");
+}
+
+/// **A broken wikilink follows one tombstone to one live holder outside its selection.**
+#[test]
+fn a_broken_wikilink_follows_one_tombstone_to_one_live_holder() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-wiki",
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"See [[old#Heading|Title]] and ![[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let findings = link_findings_of(&host, &vault, "zz-holder.md");
+    let broken: Vec<_> = findings
+        .iter()
+        .filter(|row| row.kind == FindingKind::Broken)
+        .collect();
+    assert_eq!(broken.len(), 2);
+    let strict = previewed(
+        host.repair(
+            RepairParams::new(address(&vault), ApplyMode::Preview)
+                .with_predicates([Predicate::path(format!("{FOLDER}zz-holder.md"))])
+                .with_threshold(Confidence::Declared),
+        ),
+    );
+    assert!(strict.operations.is_empty(), "{strict:?}");
+    assert_eq!(provenance(&strict).skipped.len(), 2);
+    for skipped in &provenance(&strict).skipped {
+        assert_eq!(skipped.reason, SkipReason::BelowThreshold);
+        let proposed = skipped.proposed.as_ref().expect("the derived operation");
+        assert_eq!(
+            proposed.kind,
+            OperationKind::rewrite_link(
+                at("zz-holder.md"),
+                norn_wire::LinkFamily::Wikilink,
+                "old",
+                "new"
+            )
+        );
+        assert_eq!(proposed.conditions.len(), 1);
+    }
+    let plan = previewed(
+        host.repair(
+            RepairParams::new(address(&vault), ApplyMode::Preview)
+                .with_predicates([Predicate::path(format!("{FOLDER}zz-holder.md"))]),
+        ),
+    );
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    let operation = &plan.operations[0];
+    assert_eq!(
+        operation.kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "old",
+            "new"
+        )
+    );
+    let hash = norn_wire::ContentHash::new(format!(
+        "sha256:{}",
+        norn_fs::ContentHash::of(b"# Followed\n").to_hex()
+    ))
+    .expect("hash");
+    assert_eq!(
+        operation.conditions,
+        vec![norn_wire::AuthorCondition::content_hash(
+            at("new.md"),
+            hash.clone()
+        )]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::content_hash(at("new.md"), hash))
+    );
+    for (address, after) in [
+        ("new", norn_wire::Resolves::one(at("new.md"))),
+        ("old", norn_wire::Resolves::none()),
+    ] {
+        assert!(
+            plan.conditions
+                .contains(&norn_wire::PlanCondition::address_resolution(
+                    norn_wire::LinkKey::new(
+                        at("zz-holder.md"),
+                        norn_wire::LinkFamily::Wikilink,
+                        address
+                    ),
+                    after
+                )),
+            "{plan:?}"
+        );
+    }
+    let citations = &provenance(&plan).citations;
+    assert_eq!(citations.len(), 1);
+    let cited: BTreeSet<_> = citations[0]
+        .findings
+        .iter()
+        .map(|finding| {
+            assert_eq!(finding.confidence, Confidence::Derived);
+            finding.finding
+        })
+        .collect();
+    assert_eq!(cited, broken.iter().map(|row| row.id).collect());
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "See [[new#Heading|Title]] and ![[new]].\n"
+    );
+}
+
+/// **A relative Markdown link follows the exact tombstone path.**
+#[test]
+fn a_broken_relative_markdown_link_follows_one_tombstone_to_one_live_holder() {
+    followed_spelling(
+        "relative",
+        "See [Title](old.md#Heading \"Title\") and [Other](old.md).\n",
+        norn_wire::LinkFamily::Markdown,
+        "old.md",
+        "new.md",
+        "See [Title](new.md#Heading \"Title\") and [Other](new.md).\n",
+    );
+}
+
+/// **Each followed syntax carries the same evidence and lands the expected bytes.**
+fn followed_spelling(
+    label: &str,
+    before: &str,
+    syntax: norn_wire::LinkFamily,
+    old: &str,
+    new: &str,
+    after: &str,
+) {
+    let (_sandbox, vault, host) = a_vault_under(
+        &format!("host-repair-follow-{label}"),
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", before.as_bytes()),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let broken: BTreeSet<_> = link_findings_of(&host, &vault, "zz-holder.md")
+        .iter()
+        .filter(|row| row.kind == FindingKind::Broken)
+        .map(|row| row.id)
+        .collect();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_link(at("zz-holder.md"), syntax, old, new)
+    );
+    let hash = norn_wire::ContentHash::new(format!(
+        "sha256:{}",
+        norn_fs::ContentHash::of(b"# Followed\n").to_hex()
+    ))
+    .expect("hash");
+    assert_eq!(
+        plan.operations[0].conditions,
+        vec![norn_wire::AuthorCondition::content_hash(
+            at("new.md"),
+            hash.clone()
+        )]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::content_hash(at("new.md"), hash))
+    );
+    for (address, resolves) in [
+        (old, norn_wire::Resolves::none()),
+        (new, norn_wire::Resolves::one(at("new.md"))),
+    ] {
+        assert!(
+            plan.conditions
+                .contains(&norn_wire::PlanCondition::address_resolution(
+                    norn_wire::LinkKey::new(at("zz-holder.md"), syntax, address),
+                    resolves
+                )),
+            "{plan:?}"
+        );
+    }
+    let cited: BTreeSet<_> = provenance(&plan).citations[0]
+        .findings
+        .iter()
+        .map(|finding| {
+            assert_eq!(finding.confidence, Confidence::Derived);
+            finding.finding
+        })
+        .collect();
+    assert_eq!(cited, broken);
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(written(&vault, "zz-holder.md"), after);
+}
+
+/// **A rooted Markdown link follows the exact tombstone path.**
+#[test]
+fn a_broken_rooted_markdown_link_follows_one_tombstone_to_one_live_holder() {
+    followed_spelling(
+        "rooted",
+        "See [Title](/zz-repair/old.md#Heading).\n",
+        norn_wire::LinkFamily::Markdown,
+        "/zz-repair/old.md",
+        "/zz-repair/new.md",
+        "See [Title](/zz-repair/new.md#Heading).\n",
+    );
+}
+
+/// **A vault link follows the exact tombstone path with its protocol kept.**
+#[test]
+fn a_broken_vault_link_follows_one_tombstone_to_one_live_holder() {
+    followed_spelling(
+        "vault",
+        "See [[vault://zz-repair/old.md#Heading|Title]].\n",
+        norn_wire::LinkFamily::Wikilink,
+        "vault://zz-repair/old.md",
+        "vault://zz-repair/new.md",
+        "See [[vault://zz-repair/new.md#Heading|Title]].\n",
+    );
+}
+
+/// **A tombstone whose hash has no live holder skips with the old path.**
+#[test]
+fn a_tombstone_no_live_document_holds_skips_as_no_holder() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-no-holder",
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"See [[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::remove_file(vault.path().join(FOLDER).join("old.md")).expect("remove outside norn");
+    wait_for_broken(&host, &vault);
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_follow_skip(&plan, SkipReason::NoHolder, &["zz-repair/old.md"]);
+}
+
+/// **Wait for the holder's links to be judged broken after a disk change.**
+fn wait_for_broken(host: &attach::ServingHost, vault: &attach::Vault) {
+    wait_until(
+        "the broken link is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let rows = link_findings_of(host, vault, "zz-holder.md");
+            if rows.iter().any(|row| row.kind == FindingKind::Broken) {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{rows:?}"))
+            }
+        },
+    )
+    .expect("the broken link settles");
+}
+
+/// **A move-following skip carries its reason and paths, with no candidate head.**
+fn assert_follow_skip(plan: &ResolvedPlan, reason: SkipReason, paths: &[&str]) {
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(plan).skipped;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].reason, reason);
+    assert!(skipped[0].candidates.is_none());
+    let note = skipped[0].note.as_ref().expect("a reason note");
+    for path in paths {
+        assert!(note.contains(path), "{note}");
+    }
+    if matches!(
+        reason,
+        SkipReason::SeveralHolders | SkipReason::SeveralTombstones
+    ) {
+        assert!(note.contains("at least two"), "{note}");
+    }
+}
+
+/// **Two live hash holders skip with both paths and no candidate head.**
+#[test]
+fn a_tombstone_two_live_documents_hold_skips_as_several_holders() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-twins",
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"See [[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::write(vault.path().join(FOLDER).join("twin.md"), b"# Followed\n").expect("copy bytes");
+    wait_for_stored_path(&vault, "twin.md", false);
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_follow_skip(
+        &plan,
+        SkipReason::SeveralHolders,
+        &["zz-repair/new.md", "zz-repair/twin.md"],
+    );
+}
+
+/// **Wait for a live row or a death at an exact path.**
+fn wait_for_stored_path(vault: &attach::Vault, name: &str, dead: bool) {
+    wait_until(
+        "the disk change is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let snapshot = store.begin_request();
+            let path = norn_store::DocumentPath::new(at(name).as_str()).expect("path");
+            let present = if dead {
+                snapshot.stored_tombstone(&path).expect("death").is_some()
+            } else {
+                snapshot.stored_document(&path).expect("live row").is_some()
+            };
+            if present {
+                Observed::Met(())
+            } else {
+                Observed::pending(name)
+            }
+        },
+    )
+    .expect("the row settles");
+}
+
+/// **Two suffix tombstones skip with both paths and no candidate head.**
+#[test]
+fn a_broken_link_matching_two_tombstones_skips_as_several_tombstones() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-deaths",
+        "version: 1\n",
+        &[
+            ("a/old.md", b"# First\n"),
+            ("b/old.md", b"# Second\n"),
+            ("zz-holder.md", b"See [[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for path in ["a/old.md", "b/old.md"] {
+        std::fs::remove_file(vault.path().join(FOLDER).join(path)).expect("remove outside norn");
+        wait_for_stored_path(&vault, path, true);
+    }
+    wait_for_broken(&host, &vault);
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_follow_skip(
+        &plan,
+        SkipReason::SeveralTombstones,
+        &["zz-repair/a/old.md", "zz-repair/b/old.md"],
+    );
+}
+
+/// **An unwritable follow skips with the spelling or text layer's reason.**
+#[test]
+fn a_follow_no_spelling_or_edit_can_write_skips_as_link_not_rewritable() {
+    for (label, holder, destination, reason) in [
+        (
+            "unplaced",
+            "---\nsee: [\"[[old]]\"]\n---\n",
+            "new.md",
+            "skipped_unplaced",
+        ),
+        (
+            "no-spelling",
+            "See [[old]].\n",
+            "new.part.md",
+            "no spelling",
+        ),
+    ] {
+        let (_sandbox, vault, host) = a_vault_under(
+            &format!("host-repair-follow-{label}"),
+            "version: 1\n",
+            &[
+                ("old.md", b"# Followed\n"),
+                ("zz-holder.md", holder.as_bytes()),
+                ("new.md", b"# Competitor\n"),
+            ],
+        );
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        if destination == "new.md" {
+            std::fs::remove_file(vault.path().join(FOLDER).join("new.md"))
+                .expect("clear destination");
+        }
+        moved_on_disk(&host, &vault, "old.md", destination);
+        let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+        assert_follow_skip(&plan, SkipReason::LinkNotRewritable, &[reason]);
+        assert_eq!(written(&vault, "zz-holder.md"), holder);
+    }
+}
+
+/// **A quarantine tombstone never follows its hash to a live copy.**
+#[test]
+fn a_quarantine_tombstone_is_never_followed() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-quarantine",
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"See [[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::write(vault.path().join(FOLDER).join("copy.md"), b"# Followed\n")
+        .expect("copy good bytes");
+    std::fs::write(vault.path().join(FOLDER).join("old.md"), b"\xff").expect("quarantine old path");
+    wait_for_stored_path(&vault, "copy.md", false);
+    wait_for_stored_path(&vault, "old.md", true);
+    wait_for_broken(&host, &vault);
+    let plan = previewed(
+        host.repair(
+            RepairParams::new(address(&vault), ApplyMode::Preview)
+                .with_predicates([Predicate::path(format!("{FOLDER}zz-holder.md"))]),
+        ),
+    );
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    assert_eq!(provenance(&plan).skipped.len(), 1);
+    assert_eq!(
+        provenance(&plan).skipped[0].reason,
+        SkipReason::NoDeclaredFix
+    );
+}
+
+/// **Run a check against a previewed follow while the attachment stays held.**
+fn with_followed_plan(
+    label: &str,
+    check: impl FnOnce(&attach::ServingHost, &attach::Vault, ResolvedPlan),
+) {
+    let (_sandbox, vault, host) = a_vault_under(
+        label,
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"See [[old]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    check(&host, &vault, plan);
+}
+
+/// **Changing the followed bytes refuses the recorded hash before any write.**
+#[test]
+fn a_change_to_the_followed_document_between_preview_and_apply_refuses() {
+    with_followed_plan("host-repair-follow-changed", |host, vault, plan| {
+        std::fs::write(vault.path().join(FOLDER).join("new.md"), b"# Changed\n")
+            .expect("change followed document");
+        let (_, _, checks) = apply_refused(host, ApplyMode::Apply, &plan);
+        let hash = plan
+            .conditions
+            .iter()
+            .find(|condition| {
+                matches!(
+                    condition,
+                    norn_wire::PlanCondition::ContentHash { path, .. } if path == &at("new.md")
+                )
+            })
+            .expect("hash condition");
+        assert!(fails(&checks, hash), "{checks:?}");
+        assert_eq!(written(vault, "zz-holder.md"), "See [[old]].\n");
+    });
+}
+
+/// **Recreating the old target refuses the replaced address's recorded resolution.**
+#[test]
+fn recreating_the_old_target_between_preview_and_apply_refuses_through_the_replaced_address() {
+    with_followed_plan("host-repair-follow-recreated", |host, vault, plan| {
+        std::fs::write(vault.path().join(FOLDER).join("old.md"), b"# Recreated\n")
+            .expect("recreate old target");
+        wait_for_stored_path(vault, "old.md", false);
+        let (_, _, checks) = apply_refused(host, ApplyMode::Apply, &plan);
+        let replaced = norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("zz-holder.md"), norn_wire::LinkFamily::Wikilink, "old"),
+            norn_wire::Resolves::none(),
+        );
+        assert!(fails(&checks, &replaced), "{checks:?}");
+        assert_eq!(written(vault, "zz-holder.md"), "See [[old]].\n");
+    });
+}
+
+/// **A fresh plan keeps the hash with the operation whose evidence changed.**
+#[test]
+fn a_refused_follows_fresh_plan_keeps_the_hash_with_its_operation_listed_unresolved() {
+    with_followed_plan("host-repair-follow-fresh", |host, vault, plan| {
+        std::fs::write(vault.path().join(FOLDER).join("new.md"), b"# Changed\n")
+            .expect("change followed document");
+        let (refusal, fresh, _) = apply_refused(host, ApplyMode::Apply, &plan);
+        let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+            panic!("plan refusal");
+        };
+        assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+        assert_eq!(unresolved[0].operation, plan.operations[0]);
+        assert_eq!(
+            unresolved[0].operation.conditions,
+            plan.operations[0].conditions
+        );
+        assert!(fresh.operations.is_empty(), "{fresh:?}");
+    });
+}
+
+/// **A forbidden removal drops the followed link finding with its field.**
+/// No rewrite remains to match once the removal deletes the holder's link.
+#[test]
+fn a_followed_link_whose_field_a_forbidden_removal_deletes_is_dropped_not_rewritten() {
+    let schema = "version: 1\nrules:\n  bans:\n    match: {frontmatter: {type: task}}\n    forbidden:\n      scratch: remove\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-removed-field",
+        schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            (
+                "zz-holder.md",
+                b"---\ntype: task\nscratch: '[[old]]'\n---\n# Holder\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::remove_frontmatter(
+            WriteTarget::path(at("zz-holder.md")),
+            "scratch",
+        )],
+    );
+    assert!(provenance(&plan).skipped.is_empty(), "{plan:?}");
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\ntype: task\n---\n# Holder\n",
+    );
+}
+
+/// **A follow bringing in a required field names that field and its default.**
+#[test]
+fn a_follow_bringing_in_a_required_field_names_its_default() {
+    let schema = "version: 1\nfields:\n  see: {type: link}\nrules:\n  linked:\n    match: {frontmatter: {see: '[[new]]'}}\n    required:\n      status: {default: todo}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-required",
+        schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"---\nsee: '[[old]]'\n---\n# Holder\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, SkipReason::BringsInRequiredFields);
+    assert_eq!(
+        skipped[0].required_fields,
+        Some(
+            RequiredFieldHead::new(
+                [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
+                1,
+            )
+            .expect("a head")
+        ),
+    );
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "---\nsee: '[[old]]'\n---\n# Holder\n"
+    );
+}
+
+/// **A follow cannot activate a rule reading a link a settled route respells.**
+/// The follow skips with the bare-link veto's note, and the route still applies.
+#[test]
+fn a_follow_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
+    let schema = SELECTED_BY_LINK.replace("[[zz-projects]]", "[[new]]");
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-respelled",
+        &schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            ("loose/x.md", b"---\ntype: task\n---\n# X\n"),
+            (
+                "zz-holder.md",
+                b"---\nup: '[[old]]'\nparent: '[[zz-repair/loose/x]]'\n---\n# H\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+
+    let plan = applied_leaving_only_its_skips(&host, &vault);
+
+    assert_eq!(
+        kinds(&plan),
+        vec![OperationKind::move_document(
+            at("loose/x.md"),
+            at("tasks-all/x.md")
+        )]
+    );
+    assert!(stands(&vault, "tasks-all/x.md"));
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1, "{plan:?}");
+    assert_eq!(skipped[0].reason, SkipReason::JudgeWouldRefuse);
+    assert_eq!(
+        skipped[0].note.as_deref(),
+        Some(
+            "the link brings `zz-repair/zz-holder.md` under a rule reading `parent` by value, whose link the move of `zz-repair/loose/x.md` to `zz-repair/tasks-all/x.md` would respell"
+        )
+    );
+    let holder = written(&vault, "zz-holder.md");
+    assert!(holder.contains("up: '[[old]]'"), "{holder}");
+    assert!(holder.contains("[[tasks-all/x]]"), "{holder}");
+}
+
+/// **A follow that exceeds its field's length limit skips as the judge refuses.**
+#[test]
+fn a_follow_exceeding_its_fields_length_limit_skips_as_judge_would_refuse() {
+    let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    max_length: {see: 7}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-length",
+        schema,
+        &[
+            ("old.md", b"# Followed\n"),
+            (
+                "zz-holder.md",
+                b"---\ntype: task\nsee: '[[old]]'\n---\n# H\n",
+            ),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "much-longer.md");
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, SkipReason::JudgeWouldRefuse);
+}
+
+/// **A routed holder's follow guards the replaced address where it was read.**
+/// Recreating that target refuses apply, before the holder is moved or rewritten.
+#[test]
+fn recreating_the_old_target_refuses_a_follow_from_a_routed_holder() {
+    let before = b"---\ntype: task\n---\nSee [x](old.md).\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-routed-recreated",
+        TASKED,
+        &[("old.md", b"# Followed\n"), ("zz-holder.md", before)],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "new.md");
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.operations.len(), 2, "{plan:?}");
+    std::fs::write(vault.path().join(FOLDER).join("old.md"), b"# Recreated\n")
+        .expect("recreate old target");
+    wait_for_stored_path(&vault, "old.md", false);
+
+    let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+
+    let replaced = norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "old.md",
+        ),
+        norn_wire::Resolves::none(),
+    );
+    assert!(fails(&checks, &replaced), "{checks:?}");
+    assert_eq!(written(&vault, "zz-holder.md").as_bytes(), before);
+    assert!(!stands(&vault, "tasks/zz-holder.md"));
+}
+
+/// **Both root reductions of a vault link contribute their tombstones.**
+/// A live copy of the first death cannot turn the two deaths into one follow.
+#[test]
+fn a_vault_link_matching_both_root_reductions_skips_as_several_tombstones() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-vault-two-reductions",
+        "version: 1\n",
+        &[
+            ("old.md", b"# First\n"),
+            ("old.md.md", b"# Second\n"),
+            ("zz-holder.md", b"See [[vault://zz-repair/old.md]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for path in ["old.md", "old.md.md"] {
+        std::fs::remove_file(vault.path().join(FOLDER).join(path)).expect("remove outside norn");
+        wait_for_stored_path(&vault, path, true);
+    }
+    std::fs::write(vault.path().join(FOLDER).join("copy.md"), b"# First\n").expect("copy bytes");
+    wait_for_stored_path(&vault, "copy.md", false);
+    wait_for_broken(&host, &vault);
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert_follow_skip(
+        &plan,
+        SkipReason::SeveralTombstones,
+        &["zz-repair/old.md", "zz-repair/old.md.md"],
+    );
+}
+
+/// **A follow names the followed document where its settled route lands it.**
+/// Its author hash remains on that document's before-state path, guarded by the move.
+#[test]
+fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_lands() {
+    let target = b"---\ntype: task\n---\n# Followed\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-routed-destination",
+        TASKED,
+        &[("old.md", target), ("zz-holder.md", b"See [x](old.md).\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "loose/new.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(plan.operations.len(), 2, "{plan:?}");
+    let rewrite = plan
+        .operations
+        .iter()
+        .find(|operation| matches!(operation.kind, OperationKind::RewriteLink { .. }))
+        .expect("one followed link rewrite");
+    assert_eq!(
+        rewrite.kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "old.md",
+            "tasks/new.md",
+        )
+    );
+    let hash = norn_wire::ContentHash::new(format!(
+        "sha256:{}",
+        norn_fs::ContentHash::of(target).to_hex()
+    ))
+    .expect("hash");
+    assert_eq!(
+        rewrite.conditions,
+        vec![norn_wire::AuthorCondition::content_hash(
+            at("loose/new.md"),
+            hash.clone()
+        )]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    at("zz-holder.md"),
+                    norn_wire::LinkFamily::Markdown,
+                    "tasks/new.md"
+                ),
+                norn_wire::Resolves::one(at("tasks/new.md")),
+            )),
+        "{plan:?}"
+    );
+    assert!(!plan.conditions.iter().any(|condition| {
+        matches!(condition, norn_wire::PlanCondition::ContentHash { path, .. } if path == &at("loose/new.md"))
+    }));
+    let source = plan
+        .transitions
+        .iter()
+        .find(|transition| transition.path == at("loose/new.md"))
+        .expect("the move's source");
+    assert!(
+        matches!(&source.before, norn_wire::FileState::Present { hash: before, .. } if before == &hash)
+    );
+    assert!(provenance(&plan).skipped.is_empty(), "{plan:?}");
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(written(&vault, "zz-holder.md"), "See [x](tasks/new.md).\n");
+    assert!(stands(&vault, "tasks/new.md"));
+    assert!(!stands(&vault, "loose/new.md"));
+}
