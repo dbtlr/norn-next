@@ -191,13 +191,14 @@ fn deaths_sharing_a_key_are_named_in_path_order() {
     }
 }
 
-/// The suffix read's cost does not grow with quarantine deaths sharing its
-/// key: the partial index holds none of them for the read to step over.
+/// On either root, the suffix read's cost does not grow with quarantine deaths
+/// sharing its key: the root's partial suffix index, raw or folded, holds none
+/// of them for the read to step over.
 #[test]
 fn quarantine_deaths_sharing_the_key_do_not_grow_the_suffix_read() {
-    let steps = |quarantined: usize| {
+    let steps = |order: StoredPathOrder, quarantined: usize| {
         let scratch = Scratch::new("moved-quarantine-cost");
-        let mut store = scratch.open();
+        let mut store = scratch.open_under(order);
         let spellings: Vec<String> = (0..quarantined)
             .map(|at| format!("q/{at:04}/target.md"))
             .collect();
@@ -216,7 +217,12 @@ fn quarantine_deaths_sharing_the_key_do_not_grow_the_suffix_read() {
             .map(|(_, value)| value)
             .expect("a vm_steps reading")
     };
-    assert_eq!(steps(3), steps(600));
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        assert_eq!(steps(order, 3), steps(order, 600), "{order:?}");
+    }
 }
 
 /// The exact path names one recorded death or none, by stored spelling.
