@@ -3018,7 +3018,8 @@ A refusal's fresh plan keeps the hash with its operation, leaving that operation
 where the hash changed.
 
 **A broken link without a unique follow suggests its most similar leaf stem.** The query
-removes the protocol prefix, takes the last `/` segment and drops a trailing `.md`.
+removes the protocol prefix, takes the last `/` segment, percent-decodes it for Markdown
+and drops the document extension in any ASCII case. A segment whose decoding fails stays as written.
 The stored address already excludes the anchor. Similarity folds stems to NFC and applies
 per-character lowercase, then takes distinct trigrams padded with two leading spaces and
 one trailing space. The fold is only a suggestion's, never a resolution rule
@@ -3033,14 +3034,16 @@ The read probes every trigram's rarity with at most cap+1 rows, then reads full 
 for the T-k+1 rarest. With cap 256, rarity rows are bounded by T*(cap+1) and postings rows
 by (T-k+1)*cap. A needed trigram past that cap skips `too_common`, naming the trigram
 and cap. Both skips carry the query stem as their value. Every query reaching the index
-is counted on the host's similarity read account, including too-common answers.
+is counted on the host's similarity read account, including too-common answers. Each
+distinct query stem is read once per plan.
 
 The single best candidate proposes one `rewrite_link` at `suggested`, through the same
 spelling and composition as a follow. Its citation notes `similarity 0.71 (trigram,
 cutoff 0.50)`, with the actual score to two decimals. Below the request's threshold,
 derived by default, it skips `below_threshold` carrying that operation and score note.
 Equal best scores skip `tie`, carrying the tied documents in path order, each named by
-its path without `.md`, with `tie at similarity 0.60 (trigram, cutoff 0.50)` and the actual
+its minimal disambiguating suffix under the schema's ambiguity-ignore rule, with
+`tie at similarity 0.60 (trigram, cutoff 0.50)` and the actual
 score. A route of the batch moves a candidate's spelling toward where it lands.
 Both written and replaced addresses carry the same conditions as a follow; the suggestion
 carries no content-hash author condition on its candidate.
@@ -3050,7 +3053,8 @@ composition later skips that follow. Similarity reads only where there is no tom
 or move-following skips `several_tombstones`, `no_recorded_hash`, `no_holder` or
 `several_holders`. If both fail, the move-following reason and value stand, and its note
 appends `; similarity: <outcome>`: no stem reaches the cutoff, the tie or query skip note,
-or the composition skip's reason and note. With no tombstone, a similarity skip stands
+or the composition skip's reason and note. An unreadable holder instead keeps
+`unreadable`, as every finding a fix would answer there does. With no tombstone, a similarity skip stands
 on its own; no candidate at the cutoff keeps `no_declared_fix`. A similarity answer
 below threshold instead carries the proposed operation, with its score note followed by
 `; move-following: <reason as snake_case>: <its note>` where move-following skipped.

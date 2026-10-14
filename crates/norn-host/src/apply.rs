@@ -684,6 +684,17 @@ impl Matcher for PlanSnapshot<'_> {
 }
 
 impl repair::Following for PlanSnapshot<'_> {
+    fn candidate_head(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, PageRefused> {
+        self.reading(|snapshot| {
+            snapshot.candidate_head(paths, total, self.declared.ambiguity_ignore())
+        })?
+        .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
     fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, PageRefused> {
         let answer = self
             .reading(|snapshot| snapshot.similar_stems(stem))?

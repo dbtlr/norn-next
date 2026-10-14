@@ -124,7 +124,7 @@ fn similar_stems_candidates_are_complete_and_shared_counts_match_brute_force() {
             let candidate = candidates
                 .iter()
                 .find(|candidate| candidate.path == facts.path);
-            if norn_store::similarity::jaccard(&q, &c) >= norn_store::similarity::CUTOFF {
+            if norn_store::similarity::jaccard(&q, &c).reaches_cutoff() {
                 assert!(
                     candidate.is_some(),
                     "missed {} for {query}",

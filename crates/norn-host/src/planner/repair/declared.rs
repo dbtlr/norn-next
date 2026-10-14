@@ -40,8 +40,10 @@
 //! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
 //! ([`closed_set`]); and a broken link follows one tombstone to one live
-//! holder of its hash or suggests its single best similar stem ([`move_following`]).
-//! Both share spelling, judgment and address conditions; only a follow guards a hash.
+//! holder of its hash ([`move_following`]).
+//! **A broken link's single best similar stem is a suggestion, made at
+//! [`Confidence::Suggested`].** Both share spelling, judgment and address
+//! conditions; only a follow guards a hash.
 //! A link fix is the exception to
 //! finding order: its answer rests on the batch's settled routes, so a
 //! document's link fixes compose last, after the routes of the batch are
@@ -1854,6 +1856,13 @@ mod tests {
         ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             Ok(Vec::new())
         }
+        fn candidate_head(
+            &self,
+            _: &[DocumentPath],
+            total: u64,
+        ) -> Result<norn_wire::CandidateHead, Self::Error> {
+            Ok(norn_wire::CandidateHead::new([], total).expect("an empty head"))
+        }
         fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
             Ok(norn_store::SimilarStems {
                 matches: norn_store::StemMatches::Candidates(Vec::new()),
@@ -2264,6 +2273,65 @@ mod tests {
                 evidence: super::super::broken_links::Evidence::Moved(
                     crate::planner::compose::content_hash(b"# Followed\n"),
                 ),
+            }),
+        )]);
+
+        let drafted = draft(&rows, &repairing, &reading, &follows).expect("a draft");
+        let mut planned = Planned::default();
+        drafted.decide(None).emit(
+            &mut planned,
+            &Namings::new(),
+            None,
+            &follows,
+            &super::super::broken_links::Asked::new(),
+            &BTreeMap::new(),
+        );
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![SkippedFinding::new(1, SkipReason::Unreadable)]
+        );
+        assert_eq!(*reading.reads.borrow(), vec!["gone.md"]);
+    }
+
+    /// **A suggestion on an unreadable holder stays unreadable despite a prior move skip.**
+    #[test]
+    fn a_broken_finding_with_a_suggestion_and_a_move_skip_on_an_unreadable_holder_skips_as_unreadable()
+     {
+        let vault = Vault::of("version: 1\n", &[]);
+        let clock = || panic!("the follow reads no clock");
+        let clock = OneReading::of(&clock);
+        let repairing = Repairing {
+            declared: &vault.declared,
+            case: norn_wire::CaseFold::Exact,
+            clock: &clock,
+            rule_sets: &vault.rule_sets,
+            threshold: Confidence::Derived,
+        };
+        let index = (EmptyStore::new(), std::marker::PhantomData);
+        let reading = Read {
+            vault: &vault,
+            over: Over {
+                view: &vault.files,
+                index: &index,
+            },
+            reads: RefCell::new(Vec::new()),
+        };
+        let rows = [finding(1, FindingKind::Broken, "gone.md", "old")];
+        let destination = DocumentPath::new("new.md").expect("a document path");
+        let follows = super::super::broken_links::Answers::from([(
+            1,
+            Ok(super::super::broken_links::Answer {
+                link: LinkKey::new(rows[0].path.clone(), LinkFamily::Wikilink, "old"),
+                before: destination.clone(),
+                to: destination,
+                evidence: super::super::broken_links::Evidence::Similar {
+                    note: "similarity 0.69 (trigram, cutoff 0.50)".into(),
+                    following_skip: Some(Box::new(
+                        SkippedFinding::new(1, SkipReason::NoHolder).with_note("no live holder"),
+                    )),
+                },
             }),
         )]);
 

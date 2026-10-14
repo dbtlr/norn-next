@@ -7,16 +7,70 @@
 //! per-character lowercase decides which stems look alike; it decides nothing
 //! about which document a link resolves to.
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
 /// The Jaccard threshold the repair planner applies to stem suggestions.
-pub const CUTOFF: f64 = 0.5;
+pub const CUTOFF: Score = Score {
+    shared: 1,
+    union: 2,
+};
 /// The most postings a selected query trigram may hold before the read answers
 /// too common. It bounds the postings a retrieval reads at
 /// `(T - k + 1) * POSTINGS_CAP`; the realistic profile's measurement stands
 /// behind the starting value.
 pub const POSTINGS_CAP: usize = 256;
+
+/// An exact Jaccard ratio, ordered by cross-multiplication and rendered to two decimals.
+#[derive(Clone, Copy, Debug)]
+pub struct Score {
+    shared: usize,
+    union: usize,
+}
+
+impl Score {
+    /// Whether this ratio reaches the one similarity cutoff.
+    pub fn reaches_cutoff(self) -> bool {
+        self >= CUTOFF
+    }
+}
+
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> Ordering {
+        ((self.shared as u128) * (other.union as u128))
+            .cmp(&((other.shared as u128) * (self.union as u128)))
+    }
+}
+
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Score {}
+
+impl fmt::Display for Score {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:.2}", self.shared as f64 / self.union as f64)
+    }
+}
+
+/// The Jaccard ratio from the shared count and the two trigram-set sizes.
+pub const fn jaccard_counts(shared: usize, left: usize, right: usize) -> Score {
+    Score {
+        shared,
+        union: left + right - shared,
+    }
+}
 
 /// Normalize to NFC, then lowercase each Unicode scalar; lowercase may expand.
 pub fn fold(text: &str) -> String {
@@ -35,24 +89,14 @@ pub fn trigrams(stem: &str) -> BTreeSet<String> {
 }
 
 /// The shared fraction of the union of two trigram sets.
-pub fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
-    left.intersection(right).count() as f64 / left.union(right).count() as f64
+pub fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Score {
+    jaccard_counts(left.intersection(right).count(), left.len(), right.len())
 }
 
-/// The least shared count a query of t distinct trigrams needs at the cutoff:
-/// a candidate at the cutoff shares at least `CUTOFF * union`, and the union
-/// holds at least the query's t, so it shares at least `ceil(CUTOFF * t)`.
-/// The retrieval's prefix filter is complete only while this matches
-/// [`CUTOFF`]; computed in integers, it is `ceil(t / 2)`, and the assertion
-/// below ties the two so neither moves alone.
+/// The least shared count implied by the cutoff, since the union holds at least t.
 pub fn required_shared(t: usize) -> usize {
-    t.div_ceil(2)
+    (t * CUTOFF.shared).div_ceil(CUTOFF.union)
 }
-
-const _: () = assert!(
-    CUTOFF == 0.5,
-    "required_shared computes ceil(CUTOFF * t) for a cutoff of one half"
-);
 
 #[cfg(test)]
 mod tests {
@@ -76,7 +120,11 @@ mod tests {
     fn jaccard_of_a_known_pair() {
         let left = ["abc", "bcd", "cde"].map(String::from).into();
         let right = ["abc", "bcd", "def"].map(String::from).into();
-        assert_eq!(jaccard(&left, &right), 0.5);
+        let score = jaccard(&left, &right);
+        assert_eq!(score, CUTOFF);
+        assert!(score.reaches_cutoff());
+        assert_eq!(score.to_string(), "0.50");
+        assert_eq!(score, jaccard_counts(1, 1, 2));
     }
 
     #[test]

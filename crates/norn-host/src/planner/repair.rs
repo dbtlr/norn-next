@@ -280,6 +280,13 @@ pub(crate) trait Following: LinkIndex {
     /// for a suffix wikilink or by each exact path it names for a Markdown
     /// or `vault://` link, distinct by path and in path order.
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+    /// The bounded tie head, named by the snapshot's existing minimal suffix mechanism.
+    fn candidate_head(
+        &self,
+        paths: &[DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, Self::Error>;
+
     /// Bounded stem candidates with the counts used to score suggestions.
     fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error>;
 
@@ -298,6 +305,13 @@ pub(crate) trait Reading {
     /// address grammar, distinct by path and in path order; no tombstone
     /// where its address names no place the read applies to.
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+
+    /// The bounded tie head, named by the snapshot's existing minimal suffix mechanism.
+    fn candidate_head(
+        &self,
+        paths: &[DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, Self::Error>;
 
     /// Bounded stem candidates with the counts used to score suggestions.
     fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error>;
@@ -374,6 +388,15 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
 
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
         self.index.tombstones(link).map_err(Unread::Index)
+    }
+    fn candidate_head(
+        &self,
+        paths: &[DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, Self::Error> {
+        self.index
+            .candidate_head(paths, total)
+            .map_err(Unread::Index)
     }
     fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
         self.index.similar_stems(stem).map_err(Unread::Index)
@@ -721,6 +744,13 @@ mod tests {
         ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             Ok(Vec::new())
         }
+        fn candidate_head(
+            &self,
+            _: &[DocumentPath],
+            total: u64,
+        ) -> Result<norn_wire::CandidateHead, Self::Error> {
+            Ok(norn_wire::CandidateHead::new([], total).expect("an empty head"))
+        }
         fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
             Ok(norn_store::SimilarStems {
                 matches: norn_store::StemMatches::Candidates(Vec::new()),
@@ -937,6 +967,13 @@ mod tests {
                     last_content_hash: None,
                     provenance: norn_store::Provenance::WatcherRemoval,
                 }])
+            }
+            fn candidate_head(
+                &self,
+                _: &[DocumentPath],
+                total: u64,
+            ) -> Result<norn_wire::CandidateHead, Self::Error> {
+                Ok(norn_wire::CandidateHead::new([], total).expect("an empty head"))
             }
             fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
                 Ok(norn_store::SimilarStems {

@@ -6319,9 +6319,8 @@ fn equal_best_stems_skip_as_a_tie_with_both_documents() {
         Some("tie at similarity 0.69 (trigram, cutoff 0.50)")
     );
     let head = norn_wire::CandidateHead::new(
-        ["abcdefghij.md", "abcdefghik.md"].map(|name| {
-            norn_wire::Candidate::new(at(name), at(name).as_str().strip_suffix(".md").unwrap())
-        }),
+        ["abcdefghij.md", "abcdefghik.md"]
+            .map(|name| norn_wire::Candidate::new(at(name), name.strip_suffix(".md").unwrap())),
         2,
     )
     .unwrap();
@@ -6359,9 +6358,8 @@ fn rare_and_common_trigram_candidates_are_both_in_the_best_score_tie() {
         Some("tie at similarity 0.50 (trigram, cutoff 0.50)")
     );
     let head = norn_wire::CandidateHead::new(
-        ["ab.md", "abcaa.md"].map(|name| {
-            norn_wire::Candidate::new(at(name), at(name).as_str().strip_suffix(".md").unwrap())
-        }),
+        ["ab.md", "abcaa.md"]
+            .map(|name| norn_wire::Candidate::new(at(name), name.strip_suffix(".md").unwrap())),
         2,
     )
     .unwrap();
@@ -6429,7 +6427,7 @@ fn a_stem_below_the_cutoff_has_no_proposed_operation() {
         "host-similarity-cutoff",
         "version: 1\n",
         &[
-            ("abcxyz.md", b"# Low\n"),
+            ("abcdefghixqrstuvwxyz.md", b"# Low\n"),
             ("zz-holder.md", b"See [[abcdefghix]].\n"),
         ],
     );
@@ -6557,4 +6555,167 @@ fn failed_move_following_keeps_its_reason_and_the_similarity_outcome() {
     let skipped = &provenance(&plan).skipped[0];
     assert_eq!(skipped.reason, SkipReason::NoHolder);
     assert_eq!(skipped.note.as_deref(), Some(format!("no live document holds the hash recorded at `{FOLDER}abcdefghix.md`; similarity: no stem reaches the cutoff 0.50").as_str()));
+}
+
+/// **A Markdown query decodes its leaf and drops a document extension in any ASCII case.**
+#[test]
+fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_decoded_stem() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-decoded",
+        "version: 1\n",
+        &[
+            ("my note.md", b"# Target\n"),
+            ("zz-holder.md", b"See [x](My%20Note.MD).\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "My%20Note.MD",
+            "my%20note.md"
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Suggested
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].notes,
+        ["similarity 1.00 (trigram, cutoff 0.50)"]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    at("zz-holder.md"),
+                    norn_wire::LinkFamily::Markdown,
+                    "my%20note.md"
+                ),
+                norn_wire::Resolves::one(at("my note.md"))
+            ))
+    );
+}
+
+/// Arrange a move skip whose query is answered by the supplied live targets.
+fn with_no_holder_move_skip(
+    label: &str,
+    schema: &str,
+    holder: &[u8],
+    targets: &[(&str, &[u8])],
+    threshold: Confidence,
+    check: impl FnOnce(&attach::Vault, ResolvedPlan),
+) {
+    let mut documents = vec![
+        ("abcdefghix.md", &b"# Removed\n"[..]),
+        ("zz-holder.md", holder),
+    ];
+    documents.extend_from_slice(targets);
+    let (_sandbox, vault, host) = a_vault_under(label, schema, &documents);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "abcdefghix.md", "elsewhere.md");
+    std::fs::write(
+        vault.path().join(FOLDER).join("elsewhere.md"),
+        b"# Changed\n",
+    )
+    .expect("change the moved bytes");
+    wait_until(
+        "changed holder hash is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let held = store
+                .begin_request()
+                .stored_document(
+                    &norn_store::DocumentPath::new(at("elsewhere.md").as_str()).expect("a path"),
+                )
+                .expect("the moved document");
+            if held.as_ref().is_some_and(|doc| {
+                doc.content_hash == norn_fs::ContentHash::of(b"# Changed\n").to_hex()
+            }) {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{held:?}"))
+            }
+        },
+    )
+    .expect("the changed bytes are derived");
+    let plan =
+        previewed(host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(threshold)));
+    check(&vault, plan);
+}
+
+/// **A move skip keeps its reason and value when similarity ties, appending the tie note.**
+#[test]
+fn a_no_holder_move_skip_with_a_similarity_tie_keeps_the_move_reason_and_note() {
+    with_no_holder_move_skip(
+        "host-q3-tie",
+        "version: 1\n",
+        b"See [[abcdefghix]].\n",
+        &[("abcdefghij.md", b"# J\n"), ("abcdefghik.md", b"# K\n")],
+        Confidence::Suggested,
+        |_, plan| {
+            assert!(plan.operations.is_empty());
+            let skipped = &provenance(&plan).skipped[0];
+            assert_eq!(skipped.reason, SkipReason::NoHolder);
+            assert!(skipped.value.is_none());
+            assert_eq!(skipped.note.as_deref(), Some(format!("no live document holds the hash recorded at `{FOLDER}abcdefghix.md`; similarity: tie at similarity 0.69 (trigram, cutoff 0.50)").as_str()));
+        },
+    );
+}
+
+/// **A refused similarity rewrite preserves the move skip and appends its composition reason.**
+#[test]
+fn a_no_holder_move_skip_with_a_refused_suggestion_keeps_the_move_reason_and_composition_note() {
+    let schema = "version: 1\nfields:\n  see: {type: link}\nrules:\n  linked:\n    match: {frontmatter: {see: '[[abcdefghij]]'}}\n    required:\n      status: {default: todo}\n";
+    with_no_holder_move_skip(
+        "host-q3-composition",
+        schema,
+        b"---\nsee: '[[abcdefghix]]'\n---\n# Holder\n",
+        &[("abcdefghij.md", b"# J\n")],
+        Confidence::Suggested,
+        |vault, plan| {
+            assert!(plan.operations.is_empty());
+            let skipped = &provenance(&plan).skipped[0];
+            assert_eq!(skipped.reason, SkipReason::NoHolder);
+            assert!(skipped.note.as_deref().expect("both failure notes").starts_with(&format!("no live document holds the hash recorded at `{FOLDER}abcdefghix.md`; similarity: brings_in_required_fields:")));
+            assert_eq!(
+                written(vault, "zz-holder.md"),
+                "---\nsee: '[[abcdefghix]]'\n---\n# Holder\n"
+            );
+        },
+    );
+}
+
+/// **A below-threshold suggestion carries its operation, score and the previous move skip's note.**
+#[test]
+fn a_below_threshold_suggestion_under_a_move_skip_carries_the_move_reason_and_note() {
+    with_no_holder_move_skip(
+        "host-q3-below",
+        "version: 1\n",
+        b"See [[abcdefghix]].\n",
+        &[("abcdefghij.md", b"# J\n")],
+        Confidence::Derived,
+        |_, plan| {
+            assert!(plan.operations.is_empty());
+            let skipped = &provenance(&plan).skipped[0];
+            assert_eq!(skipped.reason, SkipReason::BelowThreshold);
+            assert_eq!(
+                skipped.proposed.as_ref().expect("the suggestion").kind,
+                OperationKind::rewrite_link(
+                    at("zz-holder.md"),
+                    norn_wire::LinkFamily::Wikilink,
+                    "abcdefghix",
+                    "abcdefghij"
+                )
+            );
+            assert_eq!(skipped.note.as_deref(), Some(format!("similarity 0.69 (trigram, cutoff 0.50); move-following: no_holder: no live document holds the hash recorded at `{FOLDER}abcdefghix.md`").as_str()));
+        },
+    );
 }

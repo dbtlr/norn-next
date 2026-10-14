@@ -1838,6 +1838,13 @@ pub(crate) mod testing {
         fn tombstones(&self, _: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             Ok(Vec::new())
         }
+        fn candidate_head(
+            &self,
+            _: &[DocumentPath],
+            total: u64,
+        ) -> Result<norn_wire::CandidateHead, Self::Error> {
+            Ok(norn_wire::CandidateHead::new([], total).expect("an empty head"))
+        }
         fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
             Ok(norn_store::SimilarStems {
                 matches: norn_store::StemMatches::Candidates(Vec::new()),

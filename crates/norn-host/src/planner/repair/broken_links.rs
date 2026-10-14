@@ -14,8 +14,8 @@
 //! two are `several_holders`. The tombstone and holder reads stop at two. The
 //! `no_recorded_hash` and `no_holder` notes name the tombstone's path; each
 //! several note names the first two paths and says "at least two", with no
-//! candidate head. No tombstone, or an address no read applies to, keeps
-//! `no_declared_fix`. Every skip keeps the value its finding judged. The
+//! candidate head. No tombstone, or an address no move read applies to, goes
+//! to the similarity read. Every move skip keeps the value its finding judged. The
 //! followed document need not lie within the repair's selection.
 //!
 //! **A follow is spelled over the batch's settled routes and composed last.**
@@ -34,10 +34,11 @@
 //! document's own links changed its hash, so it skips `no_holder`.
 //!
 //! **Without a unique follow, similarity suggests the single best leaf stem.**
-//! The query removes the protocol, takes the last `/` segment and drops a
-//! trailing `.md`. At least three folded Unicode scalars are admitted;
+//! The query takes the protocol-stripped address's last `/` segment, decodes
+//! it for Markdown and drops the document extension in any ASCII case.
+//! A failed decoding stays written. At least three folded Unicode scalars are admitted;
 //! shorter queries skip `too_short` without reading the index. Jaccard over
-//! padded folded trigram sets has a fixed cutoff of 0.5. Equal best scores
+//! padded folded trigram sets uses [`norn_store::similarity::CUTOFF`]. Equal best scores
 //! skip `tie`; a needed posting past cap 256 skips `too_common`. The fold is
 //! only a suggestion's, never a resolution rule (ADR 0039). With no tombstone
 //! and no candidate reaching the cutoff, `no_declared_fix` still stands.
@@ -47,7 +48,9 @@
 //! replaced addresses without a candidate content-hash author condition.
 //! A unique follow outranks similarity even when composition later skips it.
 //! When both fail, the move skip's reason and value stand, and its note
-//! appends `; similarity: <outcome>`. A suggestion below threshold carries
+//! appends `; similarity: <outcome>`. An unreadable holder instead keeps
+//! `unreadable`, as every finding a fix would answer there does.
+//! A suggestion below threshold carries
 //! its operation and score note, followed by any move skip's reason and note.
 
 use std::collections::BTreeMap;
@@ -189,6 +192,9 @@ impl Answer {
 
     /// Preserve a failed move's decision when its weaker answer cannot compose.
     pub(super) fn skipped(&self, mut skipped: SkippedFinding) -> SkippedFinding {
+        if skipped.reason == SkipReason::Unreadable {
+            return skipped;
+        }
         if let Evidence::Similar {
             note,
             following_skip,
@@ -246,8 +252,9 @@ pub(super) fn read<R: Reading>(
     vault: &R,
 ) -> Result<Answers, R::Error> {
     use norn_store::StemMatches;
-    use norn_wire::{Candidate, CandidateHead, SkippedCandidates};
+    use norn_wire::SkippedCandidates;
     let mut answers = read_moves(rows, links, vault)?;
+    let mut queried = BTreeMap::new();
     for row in rows.iter().filter(|row| row.kind == FindingKind::Broken) {
         if answers.get(&row.id).is_some_and(Result::is_ok) {
             continue;
@@ -260,9 +267,8 @@ pub(super) fn read<R: Reading>(
             crate::planner::links::wire_family(found.family),
             &found.address,
         );
-        let (_, target) = link.protocol_and_stem();
-        let leaf = target.rsplit('/').next().expect("a leaf segment");
-        let stem = leaf.strip_suffix(".md").unwrap_or(leaf);
+        let stem = norn_store::query_leaf(&link);
+        let stem = stem.as_str();
         let following_skip = answers.remove(&row.id).and_then(Result::err);
         let query_skip = |reason, note: String| {
             super::skip(row, reason)
@@ -278,8 +284,13 @@ pub(super) fn read<R: Reading>(
                 "the shortest admitted query is 3 characters".into(),
             ))
         } else {
-            let retrieved = vault.similar_stems(stem)?;
-            match retrieved.matches {
+            let retrieved = match queried.entry(stem.to_string()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(vault.similar_stems(stem)?)
+                }
+            };
+            match &retrieved.matches {
                 StemMatches::TooCommon { trigram } => Err(query_skip(
                     SkipReason::TooCommon,
                     format!(
@@ -289,18 +300,20 @@ pub(super) fn read<R: Reading>(
                 )),
                 StemMatches::Candidates(candidates) => {
                     let mut best = Vec::new();
-                    let mut score = (0, 1);
+                    let mut score = norn_store::similarity::jaccard_counts(0, 1, 0);
                     for candidate in candidates {
-                        let numerator = candidate.shared;
-                        let denominator =
-                            retrieved.query_trigrams + candidate.candidate_trigrams - numerator;
-                        if 2 * numerator < denominator {
+                        let candidate_score = norn_store::similarity::jaccard_counts(
+                            candidate.shared,
+                            retrieved.query_trigrams,
+                            candidate.candidate_trigrams,
+                        );
+                        if !candidate_score.reaches_cutoff() {
                             continue;
                         }
-                        match (numerator * score.1).cmp(&(score.0 * denominator)) {
+                        match candidate_score.cmp(&score) {
                             std::cmp::Ordering::Greater => {
                                 best.clear();
-                                score = (numerator, denominator);
+                                score = candidate_score;
                                 best.push(candidate);
                             }
                             std::cmp::Ordering::Equal => best.push(candidate),
@@ -308,14 +321,20 @@ pub(super) fn read<R: Reading>(
                         }
                     }
                     let note = format!(
-                        "similarity {:.2} (trigram, cutoff 0.50)",
-                        score.0 as f64 / score.1 as f64
+                        "similarity {score} (trigram, cutoff {})",
+                        norn_store::similarity::CUTOFF
                     );
                     if best.is_empty() {
                         if let Some(failed) = following_skip {
                             answers.insert(
                                 row.id,
-                                Err(both_fail(failed, "no stem reaches the cutoff 0.50")),
+                                Err(both_fail(
+                                    failed,
+                                    &format!(
+                                        "no stem reaches the cutoff {}",
+                                        norn_store::similarity::CUTOFF
+                                    ),
+                                )),
                             );
                         }
                         continue;
@@ -335,20 +354,15 @@ pub(super) fn read<R: Reading>(
                     } else {
                         best.sort_by(|a, b| a.path.cmp(&b.path));
                         let total = best.len() as u64;
-                        let head = CandidateHead::new(
-                            best.into_iter().map(|candidate| {
-                                let path = DocumentPath::new(candidate.path.as_str())
-                                    .expect("a candidate document path");
-                                let suffix = path
-                                    .as_str()
-                                    .strip_suffix(".md")
-                                    .unwrap_or(path.as_str())
-                                    .to_string();
-                                Candidate::new(path, suffix)
-                            }),
-                            total,
-                        )
-                        .expect("a candidate head");
+                        let paths = best
+                            .into_iter()
+                            .take(norn_store::CANDIDATE_HEAD)
+                            .map(|candidate| {
+                                DocumentPath::new(candidate.path.as_str())
+                                    .expect("a candidate document path")
+                            })
+                            .collect::<Vec<_>>();
+                        let head = vault.candidate_head(&paths, total)?;
                         Err(super::skip(row, SkipReason::Tie)
                             .with_candidates(SkippedCandidates::documents(head))
                             .with_note(format!("tie at {note}")))

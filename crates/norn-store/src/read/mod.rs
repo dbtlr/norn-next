@@ -229,6 +229,8 @@ pub enum ReadStatement {
     StemPostings,
     /// A statement the repair advisory field reads name.
     RepairAdvisory(crate::RepairAdvisoryStatement),
+    /// One tied candidate's document id at its exact indexed path.
+    CandidateDocument,
     /// A statement [`FindStatement`] names.
     Find(FindStatement),
     /// A statement [`CountStatement`] names.
