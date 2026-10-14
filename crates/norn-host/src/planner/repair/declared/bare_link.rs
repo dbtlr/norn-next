@@ -407,6 +407,9 @@ pub(super) mod tests {
         ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             self.0.tombstones(link)
         }
+        fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
+            self.0.similar_stems(stem)
+        }
         fn live_holders(&self, hash: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
             self.0.live_holders(hash)
         }

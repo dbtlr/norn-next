@@ -5828,6 +5828,11 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.read()
     }
 
+    /// Record the similarity reads made on a repair's planning hold.
+    pub(crate) fn count_similar_stems(&self, cost: crate::evidence::SimilarStemsCost) {
+        self.shared.reads.count_similar_stems(cost);
+    }
+
     /// Record what one preview spent judging its plan's links, in the read
     /// account the preview's read hold is counted in.
     pub(crate) fn count_preview_link_judgments(&self, cost: crate::evidence::LinkJudgmentCost) {

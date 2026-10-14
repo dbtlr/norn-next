@@ -2,7 +2,7 @@
 //! fixes, and the findings it leaves alone.
 //!
 //! **Four kinds of finding have a declared fix and four a derived one;
-//! every other is skipped.** A selected `field/required-missing` finding
+//! a broken link also has a suggested answer.** A selected `field/required-missing` finding
 //! fills from the default the rules requiring the field declare; a
 //! `field/not-one-of` finding is replaced by the member a rule's synonym maps
 //! its offending value to, a list field's elements fixed one by one into one
@@ -20,7 +20,9 @@
 //! writes is recorded with what it resolves to at the after-state. A
 //! `link/broken` follows one tombstone to one live holder of its recorded
 //! hash, composed last ([`broken_links`]), with both the written and replaced
-//! addresses recorded and the hash carried as an author condition. All are
+//! addresses recorded and the hash carried as an author condition. Without a unique
+//! follow, its single best stem at Jaccard cutoff 0.5 proposes a suggested rewrite
+//! through the same composition, guarded by both addresses and no target hash. All are
 //! filled and judged by [`declared`], one operation per fix (a rename is
 //! two), numbered `repair-1`, `repair-2` and on in plan order, each cited at
 //! the [`Confidence`] of its fix with the findings it fixes. A fix below the
@@ -272,12 +274,15 @@ pub(crate) enum Destination {
 }
 
 /// What the pinned snapshot reads to follow a broken link through a move:
-/// the deaths its address names and the live documents holding their hash.
+/// the deaths its address names, live hash holders and bounded stem candidates.
 pub(crate) trait Following: LinkIndex {
     /// At most two non-quarantine tombstones named by `link`, by its suffix
     /// for a suffix wikilink or by each exact path it names for a Markdown
     /// or `vault://` link, distinct by path and in path order.
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+    /// Bounded stem candidates with the counts used to score suggestions.
+    fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error>;
+
     /// At most two live documents holding `hash`, in path order.
     fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error>;
 }
@@ -293,6 +298,9 @@ pub(crate) trait Reading {
     /// address grammar, distinct by path and in path order; no tombstone
     /// where its address names no place the read applies to.
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+
+    /// Bounded stem candidates with the counts used to score suggestions.
+    fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error>;
 
     /// At most two live documents holding `hash`, in path order.
     fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error>;
@@ -366,6 +374,9 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
 
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
         self.index.tombstones(link).map_err(Unread::Index)
+    }
+    fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
+        self.index.similar_stems(stem).map_err(Unread::Index)
     }
     fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error> {
         self.index.live_holders(hash).map_err(Unread::Index)
@@ -565,7 +576,7 @@ pub(crate) fn plan<R: Reading>(
     let mut probes = Vec::new();
     let mut following = BTreeMap::new();
     for document in &decided {
-        document.follow_probes(&follows, &mut following, &mut probes);
+        document.broken_link_probes(&follows, &mut following, &mut probes);
     }
     let resolutions = if probes.is_empty() {
         BTreeMap::new()
@@ -709,6 +720,13 @@ mod tests {
             _: &norn_wire::LinkKey,
         ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             Ok(Vec::new())
+        }
+        fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
+            Ok(norn_store::SimilarStems {
+                matches: norn_store::StemMatches::Candidates(Vec::new()),
+                query_trigrams: norn_store::similarity::trigrams(stem).len(),
+                work: norn_store::SimilarStemsWork::default(),
+            })
         }
         fn live_holders(&self, _: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
             Ok(Vec::new())
@@ -919,6 +937,13 @@ mod tests {
                     last_content_hash: None,
                     provenance: norn_store::Provenance::WatcherRemoval,
                 }])
+            }
+            fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
+                Ok(norn_store::SimilarStems {
+                    matches: norn_store::StemMatches::Candidates(Vec::new()),
+                    query_trigrams: norn_store::similarity::trigrams(stem).len(),
+                    work: norn_store::SimilarStemsWork::default(),
+                })
             }
             fn live_holders(&self, _: &str) -> Result<Vec<DocumentPath>, Self::Error> {
                 panic!("no hash to read")
