@@ -346,13 +346,9 @@ impl Resolves {
 /// **An address resolution is checked at the after-state.** From this holder,
 /// this address must resolve to `after` once the plan has been applied, in a
 /// preview and an apply alike; the address need not stand in the holder after
-/// the plan. Repair records one today for every link a fix writes a value
-/// holding; the move-following and similarity fixes of a later layer record
-/// one for an address they replace, which is why the address need not stand
-/// in the holder after the plan. No fix of today replaces one: a closed set
-/// never holds a wikilink, so no fold or synonym replaces one; a rename moves
-/// a value without changing it; and a wrap, an unwrap or a bare value made a
-/// link writes an address without replacing one.
+/// the plan. Repair records one for every link a fix writes a value holding,
+/// and move-following records both the written and replaced address. The
+/// replaced address need not remain in the holder after the plan.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
@@ -499,15 +495,10 @@ pub enum SkipReason {
     /// finding — so the respelling could change what the holder is judged
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
-    // The next seven are Layer 5C's link-fix reasons: the move-following fix
-    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders` and
-    // `several_tombstones`, the similarity suggestion (NORN-400) emits
-    // `too_common` and `too_short`, and each link fix — those two and the
-    // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
-    // No repair runs those fixes yet, so nothing in the
-    // current call graph reaches them and each is a dormant carrier until its
-    // producer lands; NORN-396 lands the vocabulary first. The notes live
-    // here rather than in the doc comments schemars lifts.
+    // Move-following emits the four tombstone/hash reasons and link_not_rewritable.
+    // too_common and too_short remain dormant carriers for the similarity
+    // suggestion (NORN-400). The notes live here rather than in the doc
+    // comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest
     /// from. The entry's value is the query stem, and its note names the
