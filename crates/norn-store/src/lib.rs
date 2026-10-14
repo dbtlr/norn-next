@@ -176,7 +176,9 @@ pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
-pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
+pub use get::{
+    DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeldHeadings, SectionAt,
+};
 pub use hash::value_head;
 pub use health::resolution::{
     BeforeTargets, LinkChange, PathOverlay, PlanSide, ProbedLink, ResolutionWork, TargetNaming,
