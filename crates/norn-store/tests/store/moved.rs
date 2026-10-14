@@ -331,6 +331,56 @@ fn deaths_sharing_the_stem_do_not_grow_the_folded_exact_read() {
     assert_eq!(steps(3), steps(600));
 }
 
+/// On a folding root, quarantine deaths at the folded place leave the
+/// exact-path read's cost unchanged: the partial NOCASE index holds none of
+/// them, so the two-row limit counts only deaths whose file is gone.
+#[test]
+fn quarantine_deaths_at_the_folded_place_do_not_grow_the_exact_read() {
+    let steps = |quarantined: usize| {
+        let scratch = Scratch::new("moved-folded-exact-quarantine-cost");
+        let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
+        // Each nonzero mask upper-cases a distinct subset of the place's nine
+        // letters, so every spelling is a separate death at one folded place.
+        let spellings: Vec<String> = (1..=quarantined)
+            .map(|mask| {
+                let mut letter = 0;
+                "x/target.md"
+                    .chars()
+                    .map(|c| {
+                        if !c.is_ascii_alphabetic() {
+                            return c;
+                        }
+                        letter += 1;
+                        if mask & (1 << (letter - 1)) == 0 {
+                            c
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut entries: Vec<(&str, Provenance)> = spellings
+            .iter()
+            .map(|at| (at.as_str(), Provenance::Quarantine))
+            .collect();
+        entries.push(("x/target.md", Provenance::PlanDelete));
+        deaths(&mut store, &entries);
+        let read = snapshot(&store);
+        let found = read
+            .tombstone_at_path(&path("X/TARGET.MD"))
+            .expect("folded death");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, path("x/target.md"));
+        read.counters()
+            .readings()
+            .find(|(name, _)| *name == "vm_steps")
+            .map(|(_, value)| value)
+            .expect("a vm_steps reading")
+    };
+    assert_eq!(steps(3), steps(255));
+}
+
 /// A case-variant Markdown link can follow the same moved bytes as a wikilink.
 #[test]
 fn a_case_variant_markdown_link_finds_its_death_on_a_folding_root() {
