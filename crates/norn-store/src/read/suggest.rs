@@ -8,9 +8,10 @@ const OFFERED: usize = 3;
 
 /// The keys of `universe` near `asked`, nearest first.
 ///
-/// **The one rule for a suggestion.** A candidate is a key whose Levenshtein
-/// distance from `asked` is at most two — one edit being one character
-/// inserted, removed or replaced — with both compared with ASCII case folded,
+/// **The one rule for a suggestion.** A candidate is a key whose optimal
+/// string alignment distance from `asked` is at most two. One edit inserts,
+/// removes or replaces one character, or transposes two adjacent characters.
+/// Both names are compared with ASCII case folded,
 /// so `Status` offers `status` at distance zero. Case outside ASCII is not
 /// folded, as the store's case-insensitive path identity does not fold it:
 /// `É` and `é` are one edit apart. At most three are offered,
@@ -26,7 +27,8 @@ pub(crate) fn did_you_mean<'a>(
         .into_iter()
         .filter_map(|key| {
             let folded: Vec<char> = key.to_ascii_lowercase().chars().collect();
-            within(&asked, &folded, NEAREST).map(|distance| (distance, key))
+            crate::similarity::osa_distance(&asked, &folded, NEAREST)
+                .map(|distance| (distance, key))
         })
         .collect();
     near.sort_unstable();
@@ -35,31 +37,6 @@ pub(crate) fn did_you_mean<'a>(
         .take(OFFERED)
         .map(|(_, key)| key.to_string())
         .collect()
-}
-
-/// The Levenshtein distance between `left` and `right`, or nothing where it
-/// exceeds `bound`.
-///
-/// Two texts whose lengths differ by more than the bound are that many edits
-/// apart at least, so they are answered without the table.
-fn within(left: &[char], right: &[char], bound: usize) -> Option<usize> {
-    if left.len().abs_diff(right.len()) > bound {
-        return None;
-    }
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    let mut current = vec![0; right.len() + 1];
-    for (row, left_char) in left.iter().enumerate() {
-        current[0] = row + 1;
-        for (column, right_char) in right.iter().enumerate() {
-            let replace = previous[column] + usize::from(left_char != right_char);
-            current[column + 1] = replace
-                .min(previous[column + 1] + 1)
-                .min(current[column] + 1);
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    let distance = previous[right.len()];
-    (distance <= bound).then_some(distance)
 }
 
 #[cfg(test)]

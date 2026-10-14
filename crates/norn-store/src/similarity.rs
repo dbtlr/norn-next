@@ -39,6 +39,39 @@ pub fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
     left.intersection(right).count() as f64 / left.union(right).count() as f64
 }
 
+/// The optimal string alignment distance over characters, or `None` past
+/// `bound`. Insertion, removal, replacement and adjacent transposition each
+/// cost one edit, and no substring may be edited twice.
+///
+/// Three rows retain the previous two prefixes a transposition reads.
+pub fn osa_distance(left: &[char], right: &[char], bound: usize) -> Option<usize> {
+    if left.len().abs_diff(right.len()) > bound {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut earlier = previous.clone();
+    let mut current = vec![0; right.len() + 1];
+    for (row, left_char) in left.iter().enumerate() {
+        current[0] = row + 1;
+        for (column, right_char) in right.iter().enumerate() {
+            current[column + 1] = (previous[column] + usize::from(left_char != right_char))
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+            if row > 0
+                && column > 0
+                && *left_char == right[column - 1]
+                && left[row - 1] == *right_char
+            {
+                current[column + 1] = current[column + 1].min(earlier[column - 1] + 1);
+            }
+        }
+        std::mem::swap(&mut earlier, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distance = previous[right.len()];
+    (distance <= bound).then_some(distance)
+}
+
 /// The least shared count a query of t distinct trigrams needs at the cutoff:
 /// a candidate at the cutoff shares at least `CUTOFF * union`, and the union
 /// holds at least the query's t, so it shares at least `ceil(CUTOFF * t)`.
@@ -57,6 +90,26 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An adjacent transposition costs one edit over Unicode characters.
+    #[test]
+    fn an_adjacent_transposition_is_one_edit() {
+        assert_eq!(osa_distance(&['é', 'a'], &['a', 'é'], 1), Some(1));
+    }
+
+    /// A distance beyond the requested bound has no answer.
+    #[test]
+    fn the_distance_bound_answers_none_past_it() {
+        assert_eq!(osa_distance(&['a'], &['b', 'c', 'd'], 1), None);
+        assert_eq!(osa_distance(&['a', 'b'], &['c', 'd'], 1), None);
+        assert_eq!(osa_distance(&['a', 'b'], &['c', 'd'], 2), Some(2));
+    }
+
+    /// OSA cannot edit a substring twice as unrestricted Damerau can.
+    #[test]
+    fn a_substring_cannot_be_edited_twice() {
+        assert_eq!(osa_distance(&['c', 'a'], &['a', 'b', 'c'], 3), Some(3));
+    }
 
     #[test]
     fn padding_and_set_shape() {
