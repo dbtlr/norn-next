@@ -1548,7 +1548,7 @@ fn nested_texts<'a>(field: &'a str, value: &'a Value, texts: &mut Vec<FieldText<
 /// prefix up to the first difference and nothing after it, so a token past that
 /// point has no source position and the ones before it cannot be told apart
 /// from the ones after.
-fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
+pub(crate) fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
     if written == text {
         return Some(0);
     }
