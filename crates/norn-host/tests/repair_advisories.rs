@@ -300,6 +300,80 @@ fn a_group_with_multiple_schema_named_spellings_renames_only_between_unnamed_spe
         .expect("an empty rule fragment loads");
 }
 
+fn near_duplicate(advisories: &Value) -> Option<&Value> {
+    advisories["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["kind"] == "near_duplicate_fields")
+}
+
+fn apply_and_count_findings(host: &attach::ServingHost, vault: &attach::Vault) -> usize {
+    let address = VaultAddress::name(vault.name().clone());
+    host.repair(RepairParams::new(address.clone(), ApplyMode::Apply))
+        .expect("repair starts")
+        .wait()
+        .expect("repair applies");
+    let answer = host
+        .validate(&norn_wire::ValidateParams::new(address))
+        .expect("the findings");
+    let norn_wire::ValidateReport::Findings { page, .. } = answer.answer.report else {
+        panic!("the validate names findings");
+    };
+    page.rows.len()
+}
+
+const LEGACY_SPELLINGS: [(&str, &str); 3] = [
+    ("a.md", "---\nlegacy key: one\n---\n"),
+    ("b.md", "---\nlegacy key: two\n---\n"),
+    ("c.md", "---\nlegacy_key: three\n---\n"),
+];
+
+#[test]
+fn a_spelling_forbidden_with_no_fix_is_renamed_away_and_never_the_target() {
+    let old = "  old:\n    forbidden: {legacy_key: null}\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-unfixed-forbidden",
+        &format!("version: 1\nrules:\n{old}"),
+        &LEGACY_SPELLINGS,
+    );
+    let found = advisories(&host, &vault);
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"legacy_key\"\n      : {rename_to: \"legacy key\"}\n";
+    assert_eq!(
+        near_duplicate(&found).expect("near duplicates")["yaml"],
+        yaml
+    );
+    let schema = format!("version: 1\n{yaml}{old}");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("c.md")).expect("the document"),
+        "---\nlegacy key: three\n---\n"
+    );
+    assert!(near_duplicate(&advisories(&host, &vault)).is_none());
+}
+
+#[test]
+fn a_spelling_the_schema_removes_is_left_to_its_fix() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-removed-forbidden",
+        "version: 1\nrules:\n  old:\n    forbidden: {legacy_key: remove}\n",
+        &LEGACY_SPELLINGS,
+    );
+    let found = advisories(&host, &vault);
+    assert_eq!(
+        near_duplicate(&found).expect("near duplicates")["yaml"],
+        "rules: {}\n"
+    );
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("a.md")).expect("the document"),
+        "---\nlegacy key: one\n---\n"
+    );
+    assert!(near_duplicate(&advisories(&host, &vault)).is_none());
+}
+
 #[test]
 fn a_document_holding_two_spellings_keeps_both_and_is_named_by_the_occupied_rename_skip() {
     let text = "---\nZZ Name: one\nzz_name: two\n---\n";

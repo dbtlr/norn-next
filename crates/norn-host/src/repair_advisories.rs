@@ -203,46 +203,75 @@ fn near_duplicates(
     Ok(duplicates)
 }
 
-/// Collect the field names rules read in one walk for the pass.
-fn rule_read_keys(schema: &VaultSchema) -> BTreeSet<&str> {
-    let mut keys = BTreeSet::new();
+/// The spellings a schema's rules name or forbid, collected in one walk per pass.
+///
+/// A forbidden key is never a rename target, since renaming onto it breaches the
+/// rule forbidding it. One the schema forbids with its own fix (`remove` or
+/// `rename_to`) is left to that fix: a second, different fix on it ties and repair
+/// skips both. One forbidden with no fix is renamed like any unnamed spelling,
+/// since the rename is then the only fix repair has for it.
+#[derive(Default)]
+struct RuleSpellings<'s> {
+    /// Keys a rule reads by value: selector, required, closed-set and length keys,
+    /// and rename targets.
+    named: BTreeSet<&'s str>,
+    /// Keys some rule forbids, whatever its fix.
+    forbidden: BTreeSet<&'s str>,
+    /// Keys some rule forbids with a declared fix.
+    fixed: BTreeSet<&'s str>,
+}
+
+/// Collect the spellings the schema's rules name, forbid, and fix.
+fn rule_read_keys(schema: &VaultSchema) -> RuleSpellings<'_> {
+    let mut keys = RuleSpellings::default();
     for rule in schema.rules() {
-        keys.extend(rule.selector().frontmatter().map(|(key, _)| key));
-        keys.extend(rule.required().map(|(key, _)| key));
+        keys.named
+            .extend(rule.selector().frontmatter().map(|(key, _)| key));
+        keys.named.extend(rule.required().map(|(key, _)| key));
         for (key, fix) in rule.forbidden() {
-            keys.insert(key);
-            if let ForbiddenFix::RenameTo(target) = fix {
-                keys.insert(target.as_str());
+            keys.forbidden.insert(key);
+            match fix {
+                ForbiddenFix::Unfixed => {}
+                ForbiddenFix::Remove => {
+                    keys.fixed.insert(key);
+                }
+                ForbiddenFix::RenameTo(target) => {
+                    keys.fixed.insert(key);
+                    keys.named.insert(target.as_str());
+                }
             }
         }
-        keys.extend(rule.one_of().map(|(key, _)| key));
-        keys.extend(rule.max_length().map(|(key, _)| key));
+        keys.named.extend(rule.one_of().map(|(key, _)| key));
+        keys.named.extend(rule.max_length().map(|(key, _)| key));
     }
     keys
 }
 
-/// Render selectorless renames without forbidding a schema-named spelling.
+/// Render selectorless renames without forbidding a schema-named spelling or
+/// renaming onto a forbidden one.
 fn rename_rules(
     group: &[SpellingUse],
     schema: &VaultSchema,
-    rule_keys: &BTreeSet<&str>,
+    rule_keys: &RuleSpellings<'_>,
     next_rule: &mut u64,
 ) -> String {
     let (named, other): (Vec<_>, Vec<_>) = group.iter().partition(|spelling| {
-        schema.field(&spelling.key).is_some() || rule_keys.contains(spelling.key.as_str())
+        schema.field(&spelling.key).is_some() || rule_keys.named.contains(spelling.key.as_str())
     });
-    let winner = if named.len() == 1 {
-        Some(named[0])
-    } else {
-        other.iter().copied().max_by(|left, right| {
+    let target = |spelling: &&SpellingUse| !rule_keys.forbidden.contains(spelling.key.as_str());
+    let winner = match named.as_slice() {
+        [only] if target(only) => Some(*only),
+        _ => other.iter().copied().filter(target).max_by(|left, right| {
             left.documents
                 .cmp(&right.documents)
                 .then_with(|| right.key.cmp(&left.key))
-        })
+        }),
     };
     let mut renames = String::new();
     if let Some(winner) = winner {
-        for spelling in other.iter().filter(|spelling| spelling.key != winner.key) {
+        for spelling in other.iter().filter(|spelling| {
+            spelling.key != winner.key && !rule_keys.fixed.contains(spelling.key.as_str())
+        }) {
             let rule = next_rule_name(schema, next_rule);
             renames.push_str(&format!(
                 "  {rule}:\n    forbidden:\n      ? {}\n      : {{rename_to: {}}}\n",

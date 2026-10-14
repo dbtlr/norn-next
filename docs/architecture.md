@@ -3102,9 +3102,13 @@ JSON items is kept, YAML included, with `total` exact and samples bounded to fiv
 paths. YAML declares uniform fields by `fields` type and shape, and renames each
 alternate spelling through its own selectorless `forbidden`/`rename_to` rule. A
 near-duplicate group's target is the one spelling the schema names, as a declared field
-or a key a rule reads, when exactly one is named, and otherwise the most-used spelling,
-ties bytewise smallest. When two or more spellings are named, no rule renames onto or
-forbids a named spelling: the unnamed spellings rename onto the most-used unnamed one.
+or a key a rule's selector, `required`, `one_of`, `max_length` or `rename_to` names, when
+exactly one is named, and otherwise the most-used spelling, ties bytewise smallest. When
+two or more spellings are named, no rule renames onto or forbids a named spelling: the
+unnamed spellings rename onto the most-used unnamed one. A spelling a rule forbids is
+never the target. One forbidden with a declared fix (`remove` or `rename_to`) is left to
+that fix, because a second, different fix on it ties and repair skips both; one forbidden
+with no fix renames like an unnamed spelling.
 A document holding two spellings keeps both after the rules apply: repair skips each
 rename with `rename_onto_occupied_field`, naming the document, for the caller to merge.
 
