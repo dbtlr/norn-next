@@ -3538,7 +3538,11 @@ it unresolved. It authors no address, so move cascades still respell that addres
 A `rewrite_tag` respells every body token and frontmatter tags entry whose
 whole name equals `from` under the tag fold to exactly `to`, preserving each marker's
 spelling convention; matching none leaves it unresolved, and both kinds prove their edits
-by reading the document back. All acted name operations of one holder compose in one
+by reading the document back. A frontmatter tags entry with no literal place of its own, a
+flow-list item (`tags: [a, b]`) or an escaped or folded scalar, is respelled by rewriting
+the tags field whole in its own flow or block spelling, as a `set_frontmatter` of a flat
+list over a flat list is; block-list items with a literal place and body tags are edited
+in place. All acted name operations of one holder compose in one
 batch per kind, after its document-local operations and before address cascades. A shared
 proof refusal is searched by halving over the same starting bytes, with each operation's
 own position and detail kept. Survivors compose again as one batch over those bytes; a
@@ -3554,7 +3558,11 @@ changes the shape a field holds, or writes or replaces a nested value, rewrites 
 whole entry; a set of the value a field already holds changes no byte. A push or a pop on a
 block list splices or deletes only the lines of the items it adds or removes, an item
 spanning several lines included, and every byte it does not change stays; a flow list, or a
-block list whose items do not each re-read alone as themselves, is rewritten whole. An edit
+block list whose items do not each re-read alone as themselves, is rewritten whole. A set of
+a flat list over a flat list rewrites the list where it stands in its own flow or block
+spelling, and a YAML comment inside that entry is not kept, nor is one inside a tags entry
+`rewrite_tag` rewrites whole: a declared limit of frontmatter comment support, where
+comments are rare. An edit
 that cannot be made leaves its operation unresolved: a push onto a scalar or a map, a pop
 or a removal of what the document does not hold, a heading that is ambiguous, missing or
 inside a container, empty content to append or insert, and a refusal `norn-text` makes —
