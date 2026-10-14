@@ -1806,3 +1806,18 @@ pub fn assert_the_profile_the_bars_were_authored_on() {
 /// What is authored per crate is the numbers above, which is what a reviewer
 /// reads as one diff.
 pub use norn_testkit::readings::{mebibytes, milliseconds, multiple, per_mille, record};
+
+/// Allow the final distinct-key seek's eleven steps with five steps of headroom.
+pub const REPAIR_ADVISORY_VM_BASE: u64 = 16;
+
+/// Bound the indexed reads by the pass's declared input units.
+/// The units are K + V + N*K + R + S*(V + N + 1) + R*(R - 1)/2,
+/// where S counts selector values, glob characters and closed-set member/synonym checks.
+/// Find's driving seek and document tests may revisit value rows for different
+/// members or filters; rule pairs read the schema alone. The largest measured
+/// share is below 38 steps per unit; 48 leaves headroom over that share.
+/// Measured on Linux x86_64, 2026-10-14, after reusing find's page drive and
+/// taking samples from tally streams, at sizes 2, 4 and 8: rules [53, 95, 179],
+/// documents [76, 122, 214], selector complexity [118, 196, 352], keys [160, 310, 610]
+/// and values [100, 110, 130]. The counter lane pins each reading and its affine slope.
+pub const REPAIR_ADVISORY_VM_PER_INPUT: u64 = 48;

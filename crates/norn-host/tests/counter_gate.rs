@@ -4107,8 +4107,10 @@ fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) ->
 ///   [`FIRST_BATCH_STEPS_BASE`].
 /// - **The vault, under one selected set**: 30 gate documents over
 ///   `ambiguous` and over `realistic` (2000 documents). The gate rule's first
-///   batch, count included, reads the same on every counter at both sizes
-///   (3,731 steps over 90 findings at both). Its control is the unnarrowed
+///   batch read, count included, reads the same on its batch counters at both sizes
+///   (3,731 steps over 90 findings at both). A rule narrows findings, so this
+///   first batch also computes vault-wide advisories. Their cost is priced separately by
+///   [`repair_advisory_cost_varies_each_declared_parameter_alone`]. Its control is the unnarrowed
 ///   first batch, whose selection takes in the larger tree's findings and
 ///   whose count grows with them (11,208 steps over 809 findings, then
 ///   15,042 over 1,343).
@@ -4215,19 +4217,40 @@ fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_
             by_rule.selected, small.name, by_rule_larger.selected, large.name
         ));
     }
+    let batch_read = |counters: &CounterSnapshot| {
+        counters
+            .names()
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "repair_batches"
+                        | "validate_statements"
+                        | "validate_rows_read"
+                        | "validate_full_scan_steps"
+                        | "validate_sorts"
+                        | "validate_vm_steps"
+                )
+            })
+            .map(|name| (name, counters.get(name)))
+            .collect::<CounterSnapshot>()
+    };
     for (batch, at_small, at_large) in [
-        ("first batch", &by_rule.first, &by_rule_larger.first),
+        (
+            "first batch",
+            batch_read(&by_rule.first),
+            batch_read(&by_rule_larger.first),
+        ),
         (
             "continuation",
-            &by_rule.continuation,
-            &by_rule_larger.continuation,
+            by_rule.continuation.clone(),
+            by_rule_larger.continuation.clone(),
         ),
     ] {
         failures.extend(
             SizeIndependencePair::new(
                 &format!("the gate rule's {batch} under one selected set"),
-                ScaleObservation::new(&small, at_small.clone()),
-                ScaleObservation::new(&large, at_large.clone()),
+                ScaleObservation::new(&small, at_small),
+                ScaleObservation::new(&large, at_large),
             )
             .violations(),
         );
@@ -5932,4 +5955,164 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
         &counters,
     );
     counters
+}
+
+/// Each advisory parameter moves its own logical work and an affine number of SQLite steps.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn repair_advisory_cost_varies_each_declared_parameter_alone() {
+    for parameter in ["rules", "documents", "selector", "keys", "values"] {
+        let readings = [2_u64, 4, 8].map(|size| read_advisory_parameter(parameter, size));
+        let expected_steps = match parameter {
+            "rules" => [53, 95, 179],
+            "documents" => [76, 122, 214],
+            "selector" => [118, 196, 352],
+            "keys" => [160, 310, 610],
+            "values" => [100, 110, 130],
+            _ => unreachable!("the declared parameters"),
+        };
+        for ((size, reading), steps) in [2_u64, 4, 8].into_iter().zip(readings).zip(expected_steps)
+        {
+            let expected = match parameter {
+                "rules" => [1, 0, 0, size, 0, size * (size - 1) / 2, size + 1, 0, 0, 0],
+                "documents" => [1, 0, 0, 1, 4, 0, 2, 0, 0, 0],
+                "selector" => [1, 0, 0, 1, size * 3, 0, size + 2, 0, 0, 0],
+                "keys" => [1, size, 0, 0, 0, 0, size * 3 + 1, size * 2, 0, 0],
+                "values" => [1, 1, size, 0, 0, 0, 4, size + 2, 0, 0],
+                _ => unreachable!("the declared parameters"),
+            };
+            assert_eq!(
+                [
+                    reading.passes,
+                    reading.keys,
+                    reading.value_rows,
+                    reading.rules,
+                    reading.selector_parts,
+                    reading.rule_pairs,
+                    reading.statements,
+                    reading.rows_read,
+                    reading.full_scan_steps,
+                    reading.sorts,
+                ],
+                expected,
+                "{parameter} at {size}: {reading:?}"
+            );
+            assert_eq!(
+                reading.vm_steps, steps,
+                "{parameter} at {size}: the pinned SQLite work"
+            );
+            let documents = if parameter == "documents" {
+                size
+            } else if matches!(parameter, "keys" | "values") {
+                1
+            } else {
+                0
+            };
+            let work = reading.keys
+                + reading.value_rows
+                + documents * reading.keys
+                + reading.rules
+                + reading.selector_parts * (reading.value_rows + documents + 1)
+                + reading.rule_pairs;
+            assert!(
+                reading.vm_steps
+                    <= baselines::REPAIR_ADVISORY_VM_BASE
+                        + baselines::REPAIR_ADVISORY_VM_PER_INPUT * work,
+                "{parameter} at {size} exceeds the advisory's declared cost: {reading:?}"
+            );
+            norn_testkit::readings::record(
+                &format!("repair advisory {parameter} at {size}"),
+                &[("cost", format!("{reading:?}"))],
+            );
+        }
+        let steps = readings.map(|reading| reading.vm_steps);
+        assert!(
+            steps[1] > steps[0],
+            "{parameter} did not move its SQLite work: {steps:?}"
+        );
+        assert_eq!(
+            steps[2] - steps[1],
+            2 * (steps[1] - steps[0]),
+            "{parameter} did not move its SQLite work in proportion: {steps:?}"
+        );
+    }
+}
+
+/// One unnarrowed repair over a fixture varying exactly one declared parameter.
+fn read_advisory_parameter(parameter: &str, size: u64) -> norn_host::RepairAdvisoryCost {
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("advisory-{parameter}-{size}"),
+    )
+    .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+    for entry in std::fs::read_dir(vault.path()).expect("the fixture tree") {
+        let entry = entry.expect("a fixture entry");
+        if entry.file_name() == ".norn" {
+            continue;
+        }
+        if entry.file_type().expect("the fixture type").is_dir() {
+            std::fs::remove_dir_all(entry.path()).expect("remove the generated folder");
+        } else {
+            std::fs::remove_file(entry.path()).expect("remove the generated file");
+        }
+    }
+    let mut schema = "version: 1\n".to_string();
+    let mut documents = Vec::new();
+    match parameter {
+        "rules" => {
+            schema.push_str("rules:\n");
+            for at in 0..size {
+                schema.push_str(&format!("  rule{at}: {{}}\n"));
+            }
+        }
+        "documents" => {
+            schema.push_str(
+                "rules:\n  excluded:\n    match: {path: '**'}\n    exclude: {path: ['**']}\n",
+            );
+            for at in 0..size {
+                documents.push((format!("doc{at}.md"), "# A document\n".to_string()));
+            }
+        }
+        "selector" => {
+            let members = (0..size)
+                .map(|at| format!("value{at}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            schema.push_str(&format!("fields:\n  absent: {{type: text}}\nrules:\n  unmatched:\n    match: {{frontmatter: {{absent: [{members}]}}}}\n    one_of: {{absent: {{values: [{members}], synonyms: {{alternate: value0}}}}}}\n"));
+        }
+        "keys" => {
+            let fields = (0..size)
+                .map(|at| format!("key{at}: {{}}\n"))
+                .collect::<String>();
+            documents.push(("doc.md".to_string(), format!("---\n{fields}---\n")));
+        }
+        "values" => {
+            schema.push_str("fields:\n  values: {type: number, shape: list}\n");
+            let values = (0..size)
+                .map(|at| at.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            documents.push((
+                "doc.md".to_string(),
+                format!("---\nvalues: [{values}]\n---\n"),
+            ));
+        }
+        _ => unreachable!("the declared parameters"),
+    }
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the schema");
+    for (name, text) in documents {
+        std::fs::write(vault.path().join(name), text).expect("write a document");
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let earlier = host.read_evidence();
+    host.repair(norn_wire::RepairParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Preview,
+    ))
+    .expect("repair starts")
+    .wait()
+    .expect("repair previews");
+    host.read_evidence().since(earlier).repair_advisories
 }

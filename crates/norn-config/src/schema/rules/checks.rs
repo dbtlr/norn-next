@@ -429,3 +429,10 @@ fn check_unavoidable(schema: &VaultSchema) -> Result<(), VaultSchemaError> {
     }
     Ok(())
 }
+
+impl VaultSchema {
+    /// Whether two rules may select one document together under their declared field shapes.
+    pub fn may_co_select(&self, left: &Rule, right: &Rule) -> bool {
+        may_co_select(self, left, right)
+    }
+}

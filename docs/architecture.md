@@ -3091,11 +3091,29 @@ its total. A repair advisory is a record that names fields, rules and a bounded 
 documents (at most five, with their exact total) and carries no operation; its kinds are
 `mixed_types`, `mixed_shapes`, `undeclared_uniform` and `near_duplicate_fields`, the last two
 with a `yaml` fragment, and `schema_hygiene` for a rule that matches nothing, a closed-set
-value no document holds, or two rules whose combination admits no document. The slot is wire
-vocabulary no repair fills yet: `Host::repair` never sets it, so it is absent on every
-batch. The advisory computation (NORN-402) fills it, `omitted` on the first batch of a
-repair a path or document predicate narrowed and `computed` on the first batch of an
-unnarrowed one, leaving continuation batches without it. A cursor that is no repair's is refused as a
+value no document holds, or two rules whose combination admits no document.
+`Host::repair` computes the catalogue on the first batch without a path or document
+predicate, in preview and apply. A narrowed first batch carries `omitted: narrowed`;
+a continuation carries no slot. Kind, severity and rule narrow findings and do not
+narrow this pass. Advisories stand in catalogue order, then by key or rule name
+bytewise, with hygiene ordered as rules matching nothing, unused closed-set values
+and empty combinations. The longest prefix fitting 64 items and 32 KiB of serialized
+JSON items is kept, YAML included, with `total` exact and samples bounded to five
+paths. YAML declares uniform fields by `fields` type and shape, and renames each
+alternate spelling through its own selectorless `forbidden`/`rename_to` rule.
+
+**The pass has a declared cost on the host's `repair_advisories` read account.**
+With R rules, N documents, selector complexity S, K distinct keys and V value rows,
+field reads cost K distinct-key seeks and per-key tallies over at most N K presence
+rows and V value rows. Each rule and declared closed-set member runs a LIMIT 1 find,
+costing its driving seek and the documents its other parts reach and reject. S
+includes selector values, glob characters and member/synonym checks; memberships
+and filters can revisit value rows, so the read limit is
+K + V + N K + R + S (V + N + 1). Rule pairs cost R² over the schema with no vault
+read. The counter lane varies each parameter separately and pins the measured work;
+narrowed repairs still pay selection only (ruling on NORN-402, 2026-10-13).
+
+A cursor that is no repair's is refused as a
 validate refuses a foreign cursor: `request/cursor-not-taken`. A selection holding parts
 the builder cannot apply as asked, such as a predicate on a key the vault does not hold, is
 refused in both modes as `request/unsatisfied`, naming every part as a read reports it

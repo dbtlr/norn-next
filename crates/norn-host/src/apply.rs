@@ -1119,6 +1119,25 @@ where
             if let Some(next) = batch.next {
                 provenance = provenance.continued_by(next);
             }
+            if params.after.is_none() {
+                let advisories = if params.predicates.is_empty() {
+                    let (advisories, cost) = snapshot
+                        .reading(|held| {
+                            crate::repair_advisories::computed(
+                                held,
+                                ground.declared.schema(),
+                                snapshot.declared,
+                            )
+                        })
+                        .map_err(refused)?
+                        .map_err(|refusal| refused(page_refusal(refusal)))?;
+                    self.count_repair_advisories(cost);
+                    advisories
+                } else {
+                    norn_wire::RepairAdvisories::omitted_narrowed()
+                };
+                provenance = provenance.with_advisories(advisories);
+            }
             let plan = repaired.plan.with_provenance(provenance);
             let previewed = guarded(
                 plan.clone(),
