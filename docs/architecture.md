@@ -3070,6 +3070,10 @@ preview and apply refuses the plan.
 A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
 where the hash changed.
 
+**Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
+norn move whose cascade rewrote the moved document's own links changed its hash, so no live
+document may hold the tombstone's recorded bytes; that follow skips as `no_holder`.
+
 **A broken link without a tombstone suggests its most similar leaf stem.** The query
 removes the protocol prefix, takes the last `/` segment, percent-decodes it for Markdown
 and drops the document extension in any ASCII case. A segment whose decoding fails stays as written.
@@ -3108,13 +3112,8 @@ composition later skips that follow. Similarity reads only for a broken link who
 finds no tombstone. A quarantine tombstone is not read, so it counts as none. A tombstone
 is knowledge that the target was deleted, so `several_tombstones`, `no_recorded_hash`,
 `no_holder` or `several_holders` stands with its move-following note alone, and the link
-stays broken. A later repair without that tombstone may suggest a similar target; a rebuild
-records none. With no tombstone, a similarity skip stands on its own, and no candidate
-at the cutoff keeps `no_declared_fix`.
-
-**Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
-norn move whose cascade rewrote the moved document's own links changed its hash, so no live
-document may hold the tombstone's recorded bytes; that follow skips as `no_holder`.
+stays broken. A later repair without that tombstone may suggest a similar target. With no tombstone, a
+similarity skip stands on its own.
 
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
@@ -3199,19 +3198,19 @@ keyed at the after-state, the holder as the batch's routes leave it and the addr
 cascade respells it — shows that link no longer holds it: a broken link that now resolves,
 an ambiguous link that now names one document or none, a missing-anchor link that now names
 none or several. A link with no entry in that set keeps its finding unless a declared
-forbidden removal deletes its field. A
-missing-anchor link that now names another single document stands, as a declared limit:
-judging it would need the store's anchor predicate asked of the new document. A holder whose cascade respells some links of an address and leaves others as written
-is a declared limit too: the plan names a link by holder, syntax and address and never by ordinal, so where the
-forecast advises on a link of the old address the finding is read both ways, respelled and as
-written, and dropped only where neither holds it; one may stay listed though it no longer
-holds, and none is dropped that holds. Derivation records the top-level frontmatter field
+forbidden removal deletes its field. Derivation records the top-level frontmatter field
 on each frontmatter link. Planning records each admitted declared `field/forbidden` removal
 whose operations enter the plan, keyed by the finding row's holder path and field before any
 route. Settling drops a link finding whose stored field that removal deletes from its holder,
 even though the resolution change set has no entry for the removed link. A rename keeps
 the link in its new field and records no removal. A body link has no field and is judged
-by the resolution change set alone. Each fix is judged where its document
+by the resolution change set alone. A
+missing-anchor link that now names another single document stands, as a declared limit:
+judging it would need the store's anchor predicate asked of the new document. A holder whose cascade respells some links of an address and leaves others as written
+is a declared limit too: the plan names a link by holder, syntax and address and never by ordinal, so where the
+forecast advises on a link of the old address the finding is read both ways, respelled and as
+written, and dropped only where neither holds it; one may stay listed though it no longer
+holds, and none is dropped that holds. Each fix is judged where its document
 ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
 is skipped with its decision data, and every skip of a finding that judged a value carries
 that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
@@ -3239,9 +3238,9 @@ to two and stop, so the note names the two paths and says
 "at least two" and the entry carries no candidate head. `link_not_rewritable` skips a link fix
 with one answer that cannot be written to it, because no spelling reads back to the
 destination uniquely from the holder or the text layer refuses the edit, its note carrying the
-reason. A suggestion's score is note text, never a field. The similarity suggestion
-also emits `link_not_rewritable`, and so does the closest-heading suggestion when its text
-edit cannot read back. Any other
+reason. The similarity suggestion also emits `link_not_rewritable`, and so does the
+closest-heading suggestion when its text edit cannot read back. A suggestion's score is note
+text, never a field. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a
@@ -3253,9 +3252,8 @@ with the value it judged where it has one. **Judging on bytes is a declared cost
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
 resolution: each document holding a finding a fix may answer is read whole once,
 beside resolution and never a second time, and so is each document holding a link a
-route's cascade may respell, which the cascade composes from the same bytes, judged only
-where its frontmatter holds that link, since the store records no link's place as body or
-frontmatter; a document holding no such finding or link is not read. Those bytes stay held for the batch's
+route's cascade may respell, since the cascade composes its rewrite from those bytes, which
+also tell whether its frontmatter holds that link, judged only where it does; a document holding no such finding or link is not read. Those bytes stay held for the batch's
 planning, so the planning heap grows with the bytes of the batch's fixed documents and of
 those holders. The plan carries a provenance block recording
 what it was planned from: the write generation of the snapshot it read, the findings each

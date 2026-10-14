@@ -73,9 +73,9 @@
 //! may be respelled read once at its before-state, through the view the plan
 //! resolves on — which reads it again from memory where its cascade composes
 //! it — and judged once only where a frontmatter field of it holds such a
-//! link. The store keeps no record of whether a link stands in a frontmatter
-//! or a body, so a holder is read to tell; one whose links stand in its body
-//! alone is never judged.
+//! link. The holder is read because its cascade composes the rewrite from
+//! those bytes, which also tell whether a frontmatter field holds such a
+//! link; one whose links stand in its body alone is never judged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
