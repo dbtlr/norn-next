@@ -29,7 +29,7 @@
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
 //!
-//! **Three kinds have derived fixes, made at
+//! **Four kinds have derived fixes, made at
 //! [`Confidence::Derived`]** ([`derived`]): a shape mismatch is wrapped or
 //! unwrapped; a type mismatch on a boolean field whose string spells a
 //! boolean but for its case is written as the boolean, and one on a link
@@ -39,9 +39,11 @@
 //! a declared list's element becomes the string `"[[s]]"`.
 //! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
-//! ([`closed_set`]). A bare-value link fix is the exception to finding order:
-//! its answer rests on the batch's settled routes, so a document's link fixes compose
-//! last, after the routes of the batch are settled ([`Decided::emit`]). A
+//! ([`closed_set`]); and a broken link follows one tombstone to one live
+//! holder of its hash ([`move_following`]). A link fix is the exception to
+//! finding order: its answer rests on the batch's settled routes, so a
+//! document's link fixes compose last, after the routes of the batch are
+//! settled ([`Decided::emit`]). A
 //! refused wrap or unwrap composes with the element fixes it exposes, judged
 //! afresh as one addition at the weakest level of the shape and element
 //! fixes, carrying the element notes. An exposed element whose proposal
@@ -136,7 +138,8 @@
 //! fixed nor skipped, whichever the judgment concludes: a rule's, an
 //! undeclared tag, or one about the document whole, each decided against the
 //! document as the last fix leaves it. A link finding is no conclusion of it,
-//! and is skipped here as its row reads; the resolved plan settles it
+//! and without a move-following fix is skipped here as its row reads; the
+//! resolved plan settles it
 //! afterwards, dropping the finding where the plan's final state no longer holds
 //! it ([`super::held_links`]); a missing-anchor link that comes to resolve to
 //! one document keeps its finding.
@@ -155,6 +158,7 @@ mod closed_set;
 mod derived;
 mod elements;
 mod forbidden;
+mod move_following;
 mod names;
 mod respells;
 mod routes;
@@ -170,7 +174,7 @@ use norn_config::schema::{
 use norn_wire::{
     AuthoredValue, Captures, Citation, CitedFinding, Confidence, DocumentPath, FindingKind,
     FindingRow, LinkFamily, LinkKey, Operation, OperationId, OperationKind, PlanCondition,
-    RequiredField, RequiredFieldHead, SchemaViolation, SkipReason, SkippedCandidates,
+    RequiredField, RequiredFieldHead, Resolves, SchemaViolation, SkipReason, SkippedCandidates,
     SkippedFinding, UnresolvedOperation, UnresolvedReason, ValueCandidate, ValueCandidateHead,
     ValueHead, WriteTarget,
 };
@@ -192,18 +196,24 @@ use crate::planner::edit::edited;
 /// document gone from where each route that passed moves it from, and
 /// standing where it lands, as the applier draws every target of a plan at
 /// its after-state alone. Every link a fix writes is resolved over it.
+/// The accompanying map names those same routes' sources and destinations,
+/// so a followed document is spelled toward where its route lands it.
 pub(super) fn settled(
     drafts: &[Draft<'_>],
     refused: &std::collections::BTreeMap<usize, SkippedFinding>,
-) -> PathOverlay {
-    crate::planner::links::moved_overlay(
-        drafts
-            .iter()
-            .enumerate()
-            .filter(|(at, _)| !refused.contains_key(at))
-            .filter_map(|(_, draft)| draft.passed())
-            .map(|(passed, _)| (&passed.from, &passed.to)),
-    )
+) -> (
+    PathOverlay,
+    std::collections::BTreeMap<DocumentPath, DocumentPath>,
+) {
+    let routes: std::collections::BTreeMap<_, _> = drafts
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| !refused.contains_key(at))
+        .filter_map(|(_, draft)| draft.passed())
+        .map(|(passed, _)| (passed.from.clone(), passed.to.clone()))
+        .collect();
+    let overlay = crate::planner::links::moved_overlay(routes.iter());
+    (overlay, routes)
 }
 
 /// Whether `row` is a finding a fix may answer, so its document's bytes are
@@ -292,18 +302,22 @@ pub(super) fn draft<'d, R: Reading>(
     document: &'d [FindingRow],
     repairing: &'d Repairing<'d>,
     vault: &R,
+    follows: &super::broken_links::Follows,
 ) -> Result<Draft<'d>, R::Error> {
     let alone = |decide: &dyn Fn(&FindingRow) -> SkippedFinding| Draft {
         drafted: Drafted::Alone(document.iter().map(decide).collect()),
     };
-    if !document.iter().any(|row| has_fix(row, repairing)) {
+    if !document
+        .iter()
+        .any(|row| has_fix(row, repairing) || follows.get(&row.id).is_some_and(Result::is_ok))
+    {
         return Ok(alone(&|row| unfixed(row, repairing)));
     }
     let bytes = match vault.before(&document[0].path)? {
         Before::Held(bytes) => bytes,
         Before::Unread => {
             return Ok(alone(&|row| {
-                if has_fix(row, repairing) {
+                if has_fix(row, repairing) || follows.get(&row.id).is_some_and(Result::is_ok) {
                     skip(row, SkipReason::Unreadable)
                 } else {
                     unfixed(row, repairing)
@@ -424,6 +438,26 @@ enum Deciding<'d> {
 }
 
 impl Decided<'_> {
+    /// Add to `probes` each followed link's candidates and replaced address,
+    /// and record its candidates in `asked`, from the holder where this
+    /// document's settled route leaves it. Only a read document with a
+    /// unique follow contributes probes.
+    pub(super) fn follow_probes(
+        &self,
+        follows: &super::broken_links::Follows,
+        asked: &mut super::broken_links::Asked,
+        probes: &mut Vec<LinkKey>,
+    ) {
+        if let Deciding::Composed(composed) = &self.decided {
+            let (reckoned, composed) = &**composed;
+            for row in reckoned.rows {
+                if let Some(Ok(follow)) = follows.get(&row.id) {
+                    super::broken_links::ask(follow, &composed.state.at, asked, probes);
+                }
+            }
+        }
+    }
+
     /// Add to `written` every wikilink the document's fixes may write, by
     /// where the document stands once the plan has landed and the address
     /// written: what its operations set ([`written_links`]), and what its
@@ -451,7 +485,7 @@ impl Decided<'_> {
                 Made::Fixed { operations, .. } => operations
                     .iter()
                     .any(|kind| matches!(kind, OperationKind::RewriteTag { .. })),
-                Made::Unresolved { .. } => false,
+                Made::Unresolved { .. } | Made::Followed { .. } => false,
             });
             let proposed = composed.decided.iter().flatten().any(|skip| {
                 skip.reason == SkipReason::BelowThreshold
@@ -468,32 +502,59 @@ impl Decided<'_> {
 
     /// Add the document to `planned`: its link fixes composed last onto the
     /// composition its route's fate decided, each resolved as `namings`
-    /// answers ([`Reckoned::link_fixes`]); the operations of that
+    /// answers ([`Reckoned::link_fixes`]), then its closest-heading anchor
+    /// fixes, read through `vault` and scoring no target in `tagged`, and
+    /// its move-following fixes from `follows`; the operations of that
     /// composition, numbered on from the plan's, each cited for the findings
     /// it fixes and recording what each link it writes resolves to; its
     /// skipped findings settled against the state the composition leaves;
     /// and what the plan claims of each finding. A link fix bringing the
     /// document under a rule reading by value a link of `respellable` — one
     /// a settled route may respell — is skipped ([`respells`]).
+    #[allow(clippy::too_many_arguments)] // The plan-wide answers each phase of the emission reads, named at its one call.
     pub(super) fn emit<R: Reading>(
         self,
         planned: &mut Planned,
         namings: &Namings,
         respellable: Option<&Respellable>,
+        follows: &super::broken_links::Follows,
+        asked: &super::broken_links::Asked,
+        resolutions: &std::collections::BTreeMap<crate::planner::links::EntryKey, Resolves>,
         vault: &R,
         tagged: &BTreeSet<DocumentPath>,
     ) -> Result<(), R::Error> {
         let (reckoned, mut composed) = match self.decided {
             Deciding::Alone(decided) => {
-                planned.skipped.extend(decided);
+                planned.skipped.extend(decided.into_iter().map(|skipped| {
+                    follows
+                        .get(&skipped.finding)
+                        .and_then(|follow| follow.as_ref().err())
+                        .cloned()
+                        .unwrap_or(skipped)
+                }));
                 return Ok(());
             }
             Deciding::Composed(composed) => *composed,
         };
         reckoned.link_fixes(&reckoned.document, &mut composed, namings, respellable);
         anchors::fixes(&reckoned, &mut composed, vault, tagged)?;
+        reckoned.follow_fixes(
+            &reckoned.document,
+            &mut composed,
+            follows,
+            asked,
+            resolutions,
+            respellable,
+        );
         let claims = reckoned.settle(&mut composed);
-        reckoned.propose_lowered(&mut composed, namings, respellable);
+        reckoned.propose_lowered(
+            &mut composed,
+            namings,
+            respellable,
+            follows,
+            asked,
+            resolutions,
+        );
         for made in composed.made {
             push(planned, made, namings);
         }
@@ -548,6 +609,13 @@ struct Composed {
 /// One addition a composition makes.
 #[derive(Clone)]
 enum Made {
+    /// A move-following fix: one rewrite answering every finding `cited`,
+    /// carrying its hash author condition and both address `conditions`.
+    Followed {
+        operation: Operation,
+        cited: Vec<CitedFinding>,
+        conditions: Vec<PlanCondition>,
+    },
     /// A fix: its operations, in order, each answering the findings `cited`.
     Fixed {
         operations: Vec<OperationKind>,
@@ -847,6 +915,9 @@ impl<'d> Reckoned<'d> {
         composed: &mut Composed,
         namings: &Namings,
         respellable: Option<&Respellable>,
+        follows: &super::broken_links::Follows,
+        asked: &super::broken_links::Asked,
+        resolutions: &std::collections::BTreeMap<crate::planner::links::EntryKey, Resolves>,
     ) {
         // An anchor proposal is already one complete operation with its
         // evidence; field proposals need their grouped lowered composition.
@@ -880,23 +951,33 @@ impl<'d> Reckoned<'d> {
             let (from, made) = composed.began.clone();
             let mut lowered = self.compose(&lowered_document, from, made);
             self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
+            self.follow_fixes(
+                &lowered_document,
+                &mut lowered,
+                follows,
+                asked,
+                resolutions,
+                respellable,
+            );
             self.settle(&mut lowered);
             for at in pending.clone() {
                 let id = self.rows[at].id;
+                let fixes = |cited: &[CitedFinding]| cited.iter().any(|cited| cited.finding == id);
                 let written = lowered.made.iter().find_map(|made| match made {
                     Made::Fixed {
                         operations,
                         conditions,
                         cited,
                         ..
-                    } if cited.iter().any(|cited| cited.finding == id) => {
-                        match operations.as_slice() {
-                            [kind] => Some(
-                                Operation::new(kind.clone()).with_conditions(conditions.clone()),
-                            ),
-                            _ => None,
+                    } if fixes(cited) => match operations.as_slice() {
+                        [kind] => {
+                            Some(Operation::new(kind.clone()).with_conditions(conditions.clone()))
                         }
-                    }
+                        _ => None,
+                    },
+                    Made::Followed {
+                        operation, cited, ..
+                    } if fixes(cited) => Some(operation.clone()),
                     _ => None,
                 });
                 match (written, lowered.decided[at].take()) {
@@ -977,6 +1058,16 @@ fn decided_skips(decided: &mut [Option<SkippedFinding>], skipped: Vec<(usize, Sk
 /// answers it; or the operation left unresolved, numbered in its place.
 fn push(planned: &mut Planned, made: Made, namings: &Namings) {
     match made {
+        Made::Followed {
+            operation,
+            cited,
+            conditions,
+        } => {
+            let id = next_id(planned);
+            planned.operations.push(operation.with_id(id.clone()));
+            planned.citations.push(Citation::new(id, cited));
+            planned.conditions.extend(conditions);
+        }
         Made::Fixed {
             operations,
             conditions,
@@ -1346,7 +1437,8 @@ impl Document<'_> {
         candidates: &SkippedCandidates,
     ) -> Result<State, Box<SkippedFinding>> {
         let (state, introduced) = self.assessed(from, at, composed);
-        self.introducing(state, &introduced, row, candidates)
+        self.introducing(&state, &introduced, row, Some(candidates))?;
+        Ok(state)
     }
 
     /// Admit an already judged state, or the refusal of the finding it fixes.
@@ -1362,7 +1454,7 @@ impl Document<'_> {
             finding,
             candidates,
         } = fixing;
-        let state = self.introducing(state, introduced, row, candidates)?;
+        self.introducing(&state, introduced, row, Some(candidates))?;
         // A fix is cited only for a finding the result no longer holds.
         if state.holding(finding).is_some() {
             return Err(Box::new(
@@ -1374,15 +1466,17 @@ impl Document<'_> {
         Ok(state)
     }
 
-    /// The judged state, or the refusal its introduced violations give:
-    /// required fields brought in first, then any other violation.
+    /// The refusal of a change introducing `introduced` on `state`, if any:
+    /// required fields brought in first, with their defaults and any
+    /// disagreement noted, then any other violation, carrying `candidates`
+    /// where the fix has them.
     fn introducing(
         &self,
-        state: State,
+        state: &State,
         introduced: &[SchemaViolation],
         row: &FindingRow,
-        candidates: &SkippedCandidates,
-    ) -> Result<State, Box<SkippedFinding>> {
+        candidates: Option<&SkippedCandidates>,
+    ) -> Result<(), Box<SkippedFinding>> {
         let brought = brought_in(introduced);
         if !brought.is_empty() {
             let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
@@ -1402,11 +1496,13 @@ impl Document<'_> {
             }));
         }
         if !introduced.is_empty() {
-            return Err(Box::new(
-                skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
-            ));
+            let skipped = skip(row, SkipReason::JudgeWouldRefuse);
+            return Err(Box::new(match candidates {
+                Some(candidates) => skipped.with_candidates(candidates.clone()),
+                None => skipped,
+            }));
         }
-        Ok(state)
+        Ok(())
     }
 }
 
@@ -1865,7 +1961,7 @@ mod tests {
                 },
                 reads: RefCell::new(Vec::new()),
             };
-            let planned = match plan(rows, &repairing, &reading) {
+            let planned = match plan(rows, &BTreeMap::new(), &repairing, &reading) {
                 Ok(planned) => planned,
                 Err(Unread::View(never) | Unread::Index(never)) => match never {},
             };
@@ -1909,6 +2005,25 @@ mod tests {
             path: &DocumentPath,
         ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
             self.over.headings(path)
+        }
+        fn tombstones(
+            &self,
+            _: &norn_wire::LinkKey,
+        ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn live_holders(&self, _: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn resolutions(
+            &self,
+            _: &norn_store::PathOverlay,
+            _: &[norn_wire::LinkKey],
+        ) -> Result<
+            std::collections::BTreeMap<crate::planner::links::EntryKey, norn_wire::Resolves>,
+            Self::Error,
+        > {
+            Ok(std::collections::BTreeMap::new())
         }
 
         fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
@@ -2298,6 +2413,65 @@ mod tests {
                 SkippedFinding::new(11, SkipReason::NoDeclaredFix),
             ]
         );
+    }
+
+    /// **A unique follow on an unreadable holder skips as unreadable.**
+    #[test]
+    fn a_broken_finding_with_a_unique_follow_on_an_unreadable_holder_skips_as_unreadable() {
+        let vault = Vault::of("version: 1\n", &[]);
+        let clock = || panic!("the follow reads no clock");
+        let clock = OneReading::of(&clock);
+        let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
+            declared: &vault.declared,
+            case: norn_wire::CaseFold::Exact,
+            clock: &clock,
+            rule_sets: &vault.rule_sets,
+            threshold: Confidence::Derived,
+        };
+        let index = (EmptyStore::new(), std::marker::PhantomData);
+        let reading = Read {
+            vault: &vault,
+            over: Over {
+                view: &vault.files,
+                index: &index,
+            },
+            reads: RefCell::new(Vec::new()),
+        };
+        let rows = [finding(1, FindingKind::Broken, "gone.md", "old")];
+        let destination = DocumentPath::new("new.md").expect("a document path");
+        let follows = super::super::broken_links::Follows::from([(
+            1,
+            Ok(super::super::broken_links::Follow {
+                link: LinkKey::new(rows[0].path.clone(), LinkFamily::Wikilink, "old"),
+                before: destination.clone(),
+                to: destination,
+                hash: crate::planner::compose::content_hash(b"# Followed\n"),
+            }),
+        )]);
+
+        let drafted = draft(&rows, &repairing, &reading, &follows).expect("a draft");
+        let mut planned = Planned::default();
+        drafted
+            .decide(None)
+            .emit(
+                &mut planned,
+                &Namings::new(),
+                None,
+                &follows,
+                &super::super::broken_links::Asked::new(),
+                &BTreeMap::new(),
+                &reading,
+                &BTreeSet::new(),
+            )
+            .expect("an infallible read");
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![SkippedFinding::new(1, SkipReason::Unreadable)]
+        );
+        assert_eq!(*reading.reads.borrow(), vec!["gone.md"]);
     }
 
     /// **Only a document a fix may be made to is read, and once**, however

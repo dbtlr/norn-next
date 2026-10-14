@@ -265,6 +265,7 @@ mod tests {
         let index = store.index();
         plan(
             &rows,
+            &std::collections::BTreeMap::new(),
             &repairing,
             &Over {
                 view: &view,

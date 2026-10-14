@@ -651,7 +651,14 @@ mod tests {
             index: &index,
         };
         let rows = misplaced(routed);
-        let (planned, paid) = crate::evidence::rule_work_of(|| plan(&rows, &repairing, &reading));
+        let (planned, paid) = crate::evidence::rule_work_of(|| {
+            plan(
+                &rows,
+                &std::collections::BTreeMap::new(),
+                &repairing,
+                &reading,
+            )
+        });
         match planned {
             Ok(planned) => (planned, paid),
             Err(_) => panic!("the tree reads"),

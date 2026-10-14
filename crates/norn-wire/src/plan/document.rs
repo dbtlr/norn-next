@@ -225,13 +225,15 @@ impl Transition {
 /// One link, as a plan names it: the document holding it, its syntax and its
 /// address — what decides which documents it resolves to.
 ///
-/// **A key names a link as it stands at the plan's after-state.** A link a
-/// cascade rewrites is keyed by its new address, not the one it is written
-/// with before the plan. A link the after-state no longer holds — an old
+/// **A change-set key names a link as it stands at the plan's after-state.**
+/// A link a cascade rewrites is keyed by its new address, not the one it is
+/// written with before the plan. A link the after-state no longer holds — an old
 /// address a rewrite replaced, a link in a removed document — is no entry of
 /// the change set: its disappearance is the plan's own transition, guarded by
 /// that file's hashes. A key can still name such an address, as an address
-/// resolution about an address a repair replaces does.
+/// resolution about an address a repair replaces does. A follow's replaced
+/// address is keyed at the holder where the finding read it, even when the
+/// plan moves the holder away.
 ///
 /// On the wire a key is one object:
 /// `{"holder":"notes/c.md","syntax":"wikilink","address":"vault://notes/a"}`.
@@ -346,13 +348,9 @@ impl Resolves {
 /// **An address resolution is checked at the after-state.** From this holder,
 /// this address must resolve to `after` once the plan has been applied, in a
 /// preview and an apply alike; the address need not stand in the holder after
-/// the plan. Repair records one today for every link a fix writes a value
-/// holding; the move-following and similarity fixes of a later layer record
-/// one for an address they replace, which is why the address need not stand
-/// in the holder after the plan. No fix of today replaces one: a closed set
-/// never holds a wikilink, so no fold or synonym replaces one; a rename moves
-/// a value without changing it; and a wrap, an unwrap or a bare value made a
-/// link writes an address without replacing one.
+/// the plan. Repair records one for every link a fix writes a value holding,
+/// and move-following records both the written and replaced address. The
+/// replaced address need not remain in the holder after the plan.
 ///
 /// On the wire a condition is an object tagged `condition`:
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
@@ -500,13 +498,13 @@ pub enum SkipReason {
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
     // The next seven are Layer 5C's link-fix reasons: the move-following fix
-    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders` and
-    // `several_tombstones`, the similarity suggestion (NORN-400) emits
-    // `too_common` and `too_short`, and each link fix — those two and the
-    // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
-    // The other six remain dormant carriers until NORN-399 and NORN-400 land:
-    // repair's current call graph does not yet reach their producers. The
-    // notes live here rather than in the doc comments schemars lifts.
+    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders`,
+    // `several_tombstones` and `link_not_rewritable`, and the closest-heading
+    // suggestion (NORN-401) emits `link_not_rewritable` too. `too_common` and
+    // `too_short` remain dormant carriers for the similarity suggestion
+    // (NORN-400), which will also emit `link_not_rewritable`: repair's current
+    // call graph does not yet reach their producer. The notes live here rather
+    // than in the doc comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest
     /// from. The entry's value is the query stem, and its note names the

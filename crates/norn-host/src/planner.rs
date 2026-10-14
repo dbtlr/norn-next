@@ -190,6 +190,7 @@ pub(crate) mod edit;
 pub(crate) mod expand;
 pub(crate) mod forecast;
 pub(crate) mod lineage;
+pub(crate) mod link_spelling;
 pub(crate) mod links;
 pub(crate) mod order;
 pub(crate) mod repair;
