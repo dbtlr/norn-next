@@ -43,9 +43,11 @@
 //! its answer rests on the batch's settled routes, so a document's link fixes compose
 //! last, after the routes of the batch are settled ([`Decided::emit`]). A
 //! refused wrap or unwrap composes with the element fixes it exposes, judged
-//! as one addition at the weakest level of the shape and element fixes,
-//! carrying the element notes. An exposed element whose proposal skips
-//! gives the shape finding its reason and decision data. An exposed link
+//! afresh as one addition at the weakest level of the shape and element
+//! fixes, carrying the element notes. An exposed element whose proposal
+//! skips gives the shape finding its reason and decision data, unless the
+//! plain reshape brings in required fields or introduces another violation,
+//! which keeps the plain refusal ([`derived::reshape`]). An exposed link
 //! type mismatch waits for the link phase; an admitted plain link reshape
 //! stays in finding order.
 //! A type mismatch on a `date`, `number` or `boolean` field no derived fix
@@ -3458,156 +3460,6 @@ mod tests {
 
     const SHAPE_MISMATCH: FindingKind = FindingKind::ShapeMismatch;
 
-    /// **An unwrap and the boolean case it exposes are one derived addition.**
-    #[test]
-    fn an_unwrap_composes_with_the_boolean_case_it_exposes() {
-        let vault = Vault::of(
-            "version: 1\nfields:\n  flag: {type: boolean, shape: single}\n",
-            &[("a.md", "---\nflag: ['True']\n---\n")],
-        );
-        let planned = vault.plan(&[judging(1, SHAPE_MISMATCH, "a.md", "flag", &list(&["True"]))]);
-        assert_eq!(
-            planned.operations,
-            vec![set_to(1, "a.md", "flag", AuthoredValue::Bool(true))]
-        );
-        assert_eq!(
-            planned.citations[0].findings[0].confidence,
-            Confidence::Derived
-        );
-        assert!(planned.skipped.is_empty());
-    }
-
-    /// **A combined wrap below the threshold proposes the whole combined operation.**
-    #[test]
-    fn a_combined_wrap_below_the_threshold_proposes_the_combined_operation() {
-        let vault = Vault::of(
-            "version: 1\nfields:\n  flags: {type: boolean, shape: list}\n",
-            &[("a.md", "---\nflags: 'True'\n---\n")],
-        )
-        .at(Confidence::Declared);
-        let planned = vault.plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "flags",
-            &AuthoredValue::string("True"),
-        )]);
-        assert!(planned.operations.is_empty());
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::BelowThreshold)
-                    .with_value(head(&AuthoredValue::string("True")))
-                    .with_proposed(proposing(
-                        "a.md",
-                        "flags",
-                        AuthoredValue::List(vec![AuthoredValue::Bool(true)])
-                    ))
-            ]
-        );
-    }
-
-    /// **A wrap composed with a declared synonym is derived and stays below
-    /// a declared threshold.** The combined proposal writes the synonym in a list.
-    #[test]
-    fn a_wrap_composed_with_a_declared_synonym_carries_the_weaker_derived_level() {
-        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
-        let documents = [("a.md", "---\nstatus: complete\n---\n")];
-        let row = judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "status",
-            &AuthoredValue::string("complete"),
-        );
-
-        let planned = Vault::of(schema, &documents).plan(std::slice::from_ref(&row));
-
-        assert_eq!(
-            planned.operations,
-            vec![set_to(1, "a.md", "status", list(&["done"]))]
-        );
-        assert_eq!(
-            planned.citations,
-            vec![citing_derived(1, &[(1, "complete")])]
-        );
-        assert!(planned.skipped.is_empty());
-
-        let strict = Vault::of(schema, &documents)
-            .at(Confidence::Declared)
-            .plan(&[row]);
-
-        assert!(strict.operations.is_empty());
-        assert_eq!(
-            strict.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::BelowThreshold)
-                    .with_value(head(&AuthoredValue::string("complete")))
-                    .with_proposed(proposing("a.md", "status", list(&["done"])))
-            ]
-        );
-    }
-
-    /// **A closed-set wrap whose value folds to two members carries the
-    /// element's tie**, with both candidates and the shape finding's value.
-    #[test]
-    fn a_closed_set_wrap_folding_to_two_members_carries_a_tie_with_its_candidates() {
-        let schema = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [Todo, TODO, done]}\n";
-        let planned = Vault::of(schema, &[("a.md", "---\nstatus: todo\n---\n")]).plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "status",
-            &AuthoredValue::string("todo"),
-        )]);
-
-        assert!(planned.operations.is_empty());
-        let candidates = SkippedCandidates::values(
-            ValueCandidateHead::new(
-                ["TODO", "Todo"]
-                    .into_iter()
-                    .map(|member| ValueCandidate::new(norn_store::value_head(member))),
-                2,
-            )
-            .expect("a head"),
-        );
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::Tie)
-                    .with_value(norn_store::value_head("todo"))
-                    .with_candidates(candidates)
-            ]
-        );
-    }
-
-    /// **A combined value refused by the judge is carried as the candidate.**
-    #[test]
-    fn a_combined_wrap_the_judge_refuses_carries_the_combined_candidate() {
-        let vault = Vault::of(
-            "version: 1\nfields:\n  flags: {type: boolean, shape: list}\nrules:\n  flagged:\n    match: {frontmatter: {flags: true}}\n    forbidden:\n      draft:\n",
-            &[("a.md", "---\nflags: 'True'\ndraft: x\n---\n")],
-        );
-        let planned = vault.plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "flags",
-            &AuthoredValue::string("True"),
-        )]);
-        assert!(planned.operations.is_empty());
-        assert_eq!(
-            planned.skipped,
-            vec![
-                SkippedFinding::new(1, SkipReason::JudgeWouldRefuse)
-                    .with_value(head(&AuthoredValue::string("True")))
-                    .with_candidates(derived::candidate_of(&AuthoredValue::List(vec![
-                        AuthoredValue::Bool(true)
-                    ])))
-            ]
-        );
-    }
-
     const PRIORITIES: &str = "version: 1\nfields:\n  priority: {type: number, shape: list}\n  owner: {type: text, shape: single}\n";
 
     /// **A field declared a list holding a scalar is set to the one-item list
@@ -3858,84 +3710,6 @@ mod tests {
         };
         assert_eq!(skipped.reason, SkipReason::BringsInRequiredFields);
         assert_eq!(skipped.required_fields, Some(fields));
-    }
-
-    /// **A wrap bringing in required fields keeps that refusal though the
-    /// element it exposes skips too**: `kind: [task]` brings in the rule
-    /// requiring `status`, and `task` folding to both `Task` and `TASK` is a
-    /// tie the shape finding does not carry instead.
-    #[test]
-    fn a_wrap_bringing_in_required_fields_keeps_that_skip_over_its_elements_tie() {
-        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [Task, TASK]}\n";
-        let vault = Vault::of(schema, &[("a.md", "---\nkind: task\n---\n")]);
-
-        let planned = vault.plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "kind",
-            &AuthoredValue::string("task"),
-        )]);
-
-        assert!(planned.operations.is_empty());
-        let fields = RequiredFieldHead::new(
-            [RequiredField::new("status").with_default(norn_store::value_head("todo"))],
-            1,
-        )
-        .expect("a head");
-        let [skipped] = planned.skipped.as_slice() else {
-            panic!("one skip: {:?}", planned.skipped);
-        };
-        assert_eq!(skipped.reason, SkipReason::BringsInRequiredFields);
-        assert_eq!(skipped.required_fields, Some(fields));
-    }
-
-    /// **A wrap bringing in required fields composes with the element fix it
-    /// exposes, judged afresh**: `kind: [complete]` selects the rule
-    /// requiring `status`, but the synonym makes it `[done]`, which selects
-    /// none, so the combined change stands with no skip.
-    #[test]
-    fn a_wrap_bringing_in_required_fields_composes_where_its_element_fix_brings_in_none() {
-        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  legacy:\n    match: {frontmatter: {kind: complete}}\n    required:\n      status: {default: todo}\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [done, todo], synonyms: {complete: done}}\n";
-        let vault = Vault::of(schema, &[("a.md", "---\nkind: complete\n---\n")]);
-
-        let planned = vault.plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "kind",
-            &AuthoredValue::string("complete"),
-        )]);
-
-        assert_eq!(
-            planned.operations,
-            vec![set_to(1, "a.md", "kind", list(&["done"]))]
-        );
-        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
-    }
-
-    /// **A wrap refused for a violation other than its exposed elements keeps
-    /// `judge_would_refuse`**: `kind: [task]` brings `draft` under the rule
-    /// forbidding it, so the tie `task` folding to `Task` and `TASK` is not
-    /// the shape finding's skip.
-    #[test]
-    fn a_wrap_introducing_another_violation_keeps_judge_would_refuse_over_its_elements_tie() {
-        let schema = "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    forbidden:\n      draft:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [Task, TASK]}\n";
-        let vault = Vault::of(schema, &[("a.md", "---\nkind: task\ndraft: x\n---\n")]);
-
-        let planned = vault.plan(&[judging(
-            1,
-            SHAPE_MISMATCH,
-            "a.md",
-            "kind",
-            &AuthoredValue::string("task"),
-        )]);
-
-        assert!(planned.operations.is_empty());
-        let [skipped] = planned.skipped.as_slice() else {
-            panic!("one skip: {:?}", planned.skipped);
-        };
-        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
     }
 
     const TYPE_MISMATCH: FindingKind = FindingKind::TypeMismatch;

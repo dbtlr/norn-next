@@ -16,14 +16,18 @@
 //!   list holding a scalar is set to the one-item list of that scalar, its
 //!   YAML type kept; a field declared single holding a one-item list is set
 //!   to that item. A list of any other length under single has no derived
-//!   fix. Where the plain reshape is refused only for the element findings
-//!   it exposes or the required fields it brings in, the element fixes it
-//!   exposes compose with it as one addition, judged afresh, at their
-//!   weakest confidence and with their notes. An exposed element's skipped
-//!   proposal is the shape finding's skip, with its reason and decision
-//!   data, save that a reshape bringing in required fields keeps that skip;
-//!   any exposed link type mismatch waits for the settled routes to decide
-//!   it. A reshape introducing any other violation keeps its refusal.
+//!   fix. **A reshape the judge refuses follows one composition table**
+//!   ([`reshape`]): the element fixes it exposes always compose with it as
+//!   one addition, judged afresh whatever refused the plain reshape.
+//!   Admitted, the composed value is the fix at the weakest confidence of
+//!   its parts, with their notes. Refused, or not buildable because an
+//!   exposed element's proposal skips, the first reason that applies is the
+//!   shape finding's: `brings_in_required_fields`, then
+//!   `judge_would_refuse` for any violation beyond the exposed elements'
+//!   findings, then the exposed element's own skip with its reason and
+//!   decision data — read from the plain reshape where nothing composed.
+//!   Any exposed link type mismatch waits for the settled routes to decide
+//!   it.
 //! - **Unquoted wikilinks** on link fields answer exactly `[["s"]]`, YAML's
 //!   reading of `[[s]]`, where the text layer reads one whole wikilink.
 //!   Obsidian's frontmatter link is a quoted string: a non-list field's whole
@@ -174,10 +178,12 @@ pub(super) enum Reshaping {
     NeedsLinks,
 }
 
-/// The shape fix of `row`, composed with every exposed element fix where
-/// the plain reshape is refused for those elements or for the required
-/// fields it brings in; a reshape bringing in required fields keeps that skip
-/// where its elements do not compose. A bare link answer waits for `links`.
+/// The shape fix of `row`: the plain reshape where the judge admits it, and
+/// otherwise the composition table's answer — the reshape composed with
+/// every exposed element fix and judged afresh, or, where that cannot be
+/// built, the plain refusal for a reshape introducing anything beyond its
+/// exposed elements' findings and the exposed element's own skip for one
+/// introducing nothing else. A bare link answer waits for `links`.
 pub(super) fn reshape(
     document: &Document<'_>,
     state: &State,
@@ -248,22 +254,18 @@ pub(super) fn reshape(
         }
         Err(skip) => skip,
     };
-    // Only a reshape refused for the elements it exposes, or for the
-    // required fields it brings in, composes with them: any other violation
-    // it introduces keeps the plain refusal.
-    if introduced.iter().any(|violation| {
-        violation.kind != FindingKind::RequiredMissing
-            && !(violation.target.as_deref() == Some(field) && elements::is_exposed(violation.kind))
-    }) {
-        return Err(refused);
-    }
-    // A composed value is judged afresh, so it reports the required fields it
-    // brings in itself; where nothing composes, the plain reshape's
-    // `brings_in_required_fields` stands over its element's skip.
-    let bringing_in = refused.reason == SkipReason::BringsInRequiredFields;
+    // The composed value is built and judged afresh whatever refused the
+    // plain reshape. Where it cannot be built, the plain refusal stands for a
+    // reshape introducing anything beyond its exposed elements' findings —
+    // `brings_in_required_fields` before `judge_would_refuse`, as the judge
+    // orders them — and otherwise the exposed element's own skip is the
+    // shape finding's.
+    let beyond_elements = introduced.iter().any(|violation| {
+        !(violation.target.as_deref() == Some(field) && elements::is_exposed(violation.kind))
+    });
     match elements::after_reshape(document, &exposed, row, field, &reshaped, links) {
         elements::Reshaped::Unanswered => Err(refused),
-        elements::Reshaped::Skipped(_) if bringing_in => Err(refused),
+        elements::Reshaped::Skipped(_) if beyond_elements => Err(refused),
         elements::Reshaped::Skipped(skip) => Err(skip),
         elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
         elements::Reshaped::Replaced(replacement) => {
@@ -432,7 +434,13 @@ impl FoldCache {
 
 #[cfg(test)]
 mod tests {
+    use norn_wire::{
+        AuthoredValue, Confidence, FindingKind, OperationKind, SkipReason, SkippedCandidates,
+        SkippedFinding,
+    };
+
     use super::fold;
+    use crate::planner::repair::declared::bare_link::tests::{finding, planned_at};
 
     /// Whether the text layer reads a wikilink anywhere in `text`.
     fn holds_wikilink(text: &str) -> bool {
@@ -476,5 +484,398 @@ mod tests {
                 fold(text)
             );
         }
+    }
+
+    /// What the composition table expects of one wrap or unwrap.
+    enum Outcome {
+        /// The field is set to the value, the shape finding cited at the level.
+        Fixed(AuthoredValue, Confidence),
+        /// The shape finding is skipped for the reason, carrying the data.
+        Skipped(SkipReason, Data),
+    }
+
+    /// The decision data a cell's skip carries.
+    enum Data {
+        /// The operation lowering the threshold would write, setting the field
+        /// to the value.
+        Proposed(AuthoredValue),
+        /// The one value the refused change would have written.
+        Candidate(AuthoredValue),
+        /// The required fields the change would bring in, by name.
+        RequiredFields(&'static [&'static str]),
+        /// The tied members, in the order the skip carries them.
+        Values(&'static [&'static str]),
+        /// The documents an ambiguous link names, in any order.
+        Documents(&'static [&'static str]),
+        /// Words the note holds.
+        Note(&'static str),
+        /// Nothing beyond the reason.
+        Nothing,
+    }
+
+    /// One cell of the composition table: the shape finding `1` of `a.md`'s
+    /// `field`, judging `value`, planned at `threshold`.
+    struct Cell {
+        name: &'static str,
+        schema: &'static str,
+        documents: &'static [(&'static str, &'static str)],
+        field: &'static str,
+        value: &'static str,
+        threshold: Confidence,
+        outcome: Outcome,
+    }
+
+    /// What `skipped` departs from in `data`, if anything.
+    fn departs(skipped: &SkippedFinding, data: &Data) -> Option<String> {
+        let held = match data {
+            Data::Proposed(value) => skipped.proposed.as_ref().is_some_and(|operation| {
+                matches!(&operation.kind, OperationKind::SetFrontmatter { value: set, .. } if set == value)
+            }),
+            Data::Candidate(value) => {
+                skipped.candidates.as_ref() == Some(&super::candidate_of(value))
+            }
+            Data::RequiredFields(names) => skipped.required_fields.as_ref().is_some_and(|head| {
+                head.fields()
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .eq(names.iter().copied())
+            }),
+            Data::Values(members) => match &skipped.candidates {
+                Some(SkippedCandidates::Values { head, .. }) => head
+                    .candidates()
+                    .iter()
+                    .map(|candidate| candidate.value.text())
+                    .eq(members.iter().copied()),
+                _ => false,
+            },
+            Data::Documents(paths) => match &skipped.candidates {
+                Some(SkippedCandidates::Documents { head, .. }) => {
+                    let mut named: Vec<&str> = head
+                        .candidates()
+                        .iter()
+                        .map(|candidate| candidate.path.as_str())
+                        .collect();
+                    named.sort_unstable();
+                    named == *paths
+                }
+                _ => false,
+            },
+            Data::Note(words) => skipped.note.as_deref().is_some_and(|note| note.contains(words)),
+            Data::Nothing => {
+                skipped.candidates.is_none()
+                    && skipped.required_fields.is_none()
+                    && skipped.proposed.is_none()
+            }
+        };
+        (!held).then(|| format!("{skipped:?}"))
+    }
+
+    /// What planning `cell` departs from its outcome in, if anything.
+    fn departure(cell: &Cell) -> Option<String> {
+        let planned = planned_at(
+            cell.schema,
+            cell.documents,
+            &[finding(
+                1,
+                FindingKind::ShapeMismatch,
+                "a.md",
+                cell.field,
+                cell.value,
+            )],
+            cell.threshold,
+        );
+        match (&cell.outcome, planned.skipped.as_slice()) {
+            (Outcome::Fixed(value, level), []) => {
+                let set = planned
+                    .operations
+                    .iter()
+                    .map(|operation| &operation.kind)
+                    .collect::<Vec<_>>();
+                let fixed = matches!(set.as_slice(), [OperationKind::SetFrontmatter { field, value: written, .. }] if field == cell.field && written == value);
+                let cited = planned
+                    .citations
+                    .iter()
+                    .flat_map(|citation| &citation.findings)
+                    .map(|cited| (cited.finding, cited.confidence))
+                    .collect::<Vec<_>>();
+                (!fixed || cited != [(1, *level)])
+                    .then(|| format!("{:?} citing {cited:?}", planned.operations))
+            }
+            (Outcome::Skipped(reason, data), [skipped]) if skipped.reason == *reason => {
+                if planned.operations.is_empty() {
+                    departs(skipped, data)
+                } else {
+                    Some(format!("{:?} beside the skip", planned.operations))
+                }
+            }
+            _ => Some(format!(
+                "{:?} skipping {:?}",
+                planned.operations, planned.skipped
+            )),
+        }
+    }
+
+    const BOOLEAN_SINGLE: &str = "version: 1\nfields:\n  flag: {type: boolean, shape: single}\n";
+    const BOOLEAN_LIST: &str = "version: 1\nfields:\n  flags: {type: boolean, shape: list}\n";
+    const SYNONYM: &str = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
+    const LINKS: &str = "version: 1\nfields:\n  ups: {type: link, shape: list}\n";
+
+    /// The rule closing `kind` to `done` and `todo`, `complete` a synonym of `done`.
+    macro_rules! kinds {
+        () => {
+            "  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [done, todo], synonyms: {complete: done}}\n"
+        };
+    }
+
+    /// The rule closing `kind` to `Task` and `TASK`, which `task` folds equal to both.
+    macro_rules! tied {
+        () => {
+            "  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [Task, TASK]}\n"
+        };
+    }
+
+    /// The composition table for a wrap or unwrap the judge refuses, each
+    /// cell by its name: the composed value is built with the exposed
+    /// elements' fixes and judged afresh whatever refused the plain reshape;
+    /// admitted, it is the fix at the weaker level; refused or not buildable,
+    /// the first reason that applies is reported — `brings_in_required_fields`,
+    /// then `judge_would_refuse` for any other violation, then the exposed
+    /// element's own skip with its decision data.
+    fn table() -> Vec<Cell> {
+        let done = || AuthoredValue::List(vec![AuthoredValue::string("done")]);
+        vec![
+            Cell {
+                name: "an unwrap composes with the boolean case it exposes",
+                schema: BOOLEAN_SINGLE,
+                documents: &[("a.md", "---\nflag: ['True']\n---\n")],
+                field: "flag",
+                value: "[\"True\"]",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(AuthoredValue::Bool(true), Confidence::Derived),
+            },
+            Cell {
+                name: "a wrap composes with the boolean case it exposes",
+                schema: BOOLEAN_LIST,
+                documents: &[("a.md", "---\nflags: 'True'\n---\n")],
+                field: "flags",
+                value: "True",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(
+                    AuthoredValue::List(vec![AuthoredValue::Bool(true)]),
+                    Confidence::Derived,
+                ),
+            },
+            Cell {
+                name: "a wrap composed with a declared synonym is the weaker, derived level",
+                schema: SYNONYM,
+                documents: &[("a.md", "---\nstatus: complete\n---\n")],
+                field: "status",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(done(), Confidence::Derived),
+            },
+            Cell {
+                name: "a wrap composes with the bare link it exposes",
+                schema: LINKS,
+                documents: &[("a.md", "---\nups: b\n---\n"), ("b.md", "# B\n")],
+                field: "ups",
+                value: "b",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(
+                    AuthoredValue::List(vec![AuthoredValue::string("[[b]]")]),
+                    Confidence::Derived,
+                ),
+            },
+            Cell {
+                name: "a plain reshape bringing in required fields composes where the composed value brings in none",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  legacy:\n    match: {frontmatter: {kind: complete}}\n    required:\n      status: {default: todo}\n",
+                    kinds!()
+                ),
+                documents: &[("a.md", "---\nkind: complete\n---\n")],
+                field: "kind",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(done(), Confidence::Derived),
+            },
+            Cell {
+                name: "a plain reshape introducing another violation composes where the composed value introduces none",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  legacy:\n    match: {frontmatter: {kind: complete}}\n    forbidden:\n      draft:\n",
+                    kinds!()
+                ),
+                documents: &[("a.md", "---\nkind: complete\ndraft: x\n---\n")],
+                field: "kind",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(done(), Confidence::Derived),
+            },
+            Cell {
+                name: "a composed fix below the threshold proposes the combined operation",
+                schema: SYNONYM,
+                documents: &[("a.md", "---\nstatus: complete\n---\n")],
+                field: "status",
+                value: "complete",
+                threshold: Confidence::Declared,
+                outcome: Outcome::Skipped(SkipReason::BelowThreshold, Data::Proposed(done())),
+            },
+            Cell {
+                name: "a composed value bringing in required fields reports its own",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  finished:\n    match: {frontmatter: {kind: done}}\n    required:\n      status: {default: todo}\n",
+                    kinds!()
+                ),
+                documents: &[("a.md", "---\nkind: complete\n---\n")],
+                field: "kind",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::BringsInRequiredFields,
+                    Data::RequiredFields(&["status"]),
+                ),
+            },
+            Cell {
+                name: "a composed value bringing in required fields and another violation brings them in first",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  finished:\n    match: {frontmatter: {kind: done}}\n    required:\n      status: {default: todo}\n    forbidden:\n      draft:\n",
+                    kinds!()
+                ),
+                documents: &[("a.md", "---\nkind: complete\ndraft: x\n---\n")],
+                field: "kind",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::BringsInRequiredFields,
+                    Data::RequiredFields(&["status"]),
+                ),
+            },
+            Cell {
+                name: "an unbuildable reshape bringing in required fields keeps them over its element's tie",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n",
+                    tied!()
+                ),
+                documents: &[("a.md", "---\nkind: task\n---\n")],
+                field: "kind",
+                value: "task",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::BringsInRequiredFields,
+                    Data::RequiredFields(&["status"]),
+                ),
+            },
+            Cell {
+                name: "an unbuildable reshape bringing in required fields and another violation brings them in first",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    required:\n      status: {default: todo}\n    forbidden:\n      draft:\n",
+                    tied!()
+                ),
+                documents: &[("a.md", "---\nkind: task\ndraft: x\n---\n")],
+                field: "kind",
+                value: "task",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::BringsInRequiredFields,
+                    Data::RequiredFields(&["status"]),
+                ),
+            },
+            Cell {
+                name: "a composed value introducing another violation is refused with the combined candidate",
+                schema: "version: 1\nfields:\n  flags: {type: boolean, shape: list}\nrules:\n  flagged:\n    match: {frontmatter: {flags: true}}\n    forbidden:\n      draft:\n",
+                documents: &[("a.md", "---\nflags: 'True'\ndraft: x\n---\n")],
+                field: "flags",
+                value: "True",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::JudgeWouldRefuse,
+                    Data::Candidate(AuthoredValue::List(vec![AuthoredValue::Bool(true)])),
+                ),
+            },
+            Cell {
+                name: "an unbuildable reshape introducing another violation is refused over its element's tie",
+                schema: concat!(
+                    "version: 1\nfields:\n  kind: {type: text, shape: list}\nrules:\n  tasks:\n    match: {frontmatter: {kind: task}}\n    forbidden:\n      draft:\n",
+                    tied!()
+                ),
+                documents: &[("a.md", "---\nkind: task\ndraft: x\n---\n")],
+                field: "kind",
+                value: "task",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::JudgeWouldRefuse,
+                    Data::Candidate(AuthoredValue::List(vec![AuthoredValue::string("task")])),
+                ),
+            },
+            Cell {
+                name: "an exposed closed-set tie is the shape finding's, with its candidates",
+                schema: "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [Todo, TODO, done]}\n",
+                documents: &[("a.md", "---\nstatus: todo\n---\n")],
+                field: "status",
+                value: "todo",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(SkipReason::Tie, Data::Values(&["TODO", "Todo"])),
+            },
+            Cell {
+                name: "an exposed ambiguous link is the shape finding's, with its documents",
+                schema: LINKS,
+                documents: &[
+                    ("a.md", "---\nups: b\n---\n"),
+                    ("x/b.md", "# X\n"),
+                    ("y/b.md", "# Y\n"),
+                ],
+                field: "ups",
+                value: "b",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::AmbiguousLink,
+                    Data::Documents(&["x/b.md", "y/b.md"]),
+                ),
+            },
+            Cell {
+                name: "an exposed link naming no document is the shape finding's no_declared_fix, with its note",
+                schema: LINKS,
+                documents: &[("a.md", "---\nups: ghost\n---\n")],
+                field: "ups",
+                value: "ghost",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(
+                    SkipReason::NoDeclaredFix,
+                    Data::Note("`[[ghost]]` would resolve to no document"),
+                ),
+            },
+            Cell {
+                name: "an exposed closed-set value with no fix is the shape finding's no_declared_fix",
+                schema: "version: 1\nfields:\n  tags_of: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      tags_of: {values: [red, blue]}\n",
+                documents: &[("a.md", "---\ntags_of: bogus\n---\n")],
+                field: "tags_of",
+                value: "bogus",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(SkipReason::NoDeclaredFix, Data::Nothing),
+            },
+            Cell {
+                name: "an exposed number coercion is the shape finding's excluded class",
+                schema: "version: 1\nfields:\n  priority: {type: number, shape: list}\n",
+                documents: &[("a.md", "---\npriority: abc\n---\n")],
+                field: "priority",
+                value: "abc",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Skipped(SkipReason::ExcludedClass, Data::Note("number coercion")),
+            },
+        ]
+    }
+
+    /// **A wrap or unwrap the judge refuses follows the composition table,
+    /// cell by cell**: each cell that departs is named with what was planned.
+    #[test]
+    fn a_refused_wrap_or_unwrap_follows_the_composition_table() {
+        let departed: Vec<String> = table()
+            .iter()
+            .filter_map(|cell| departure(cell).map(|planned| format!("{}: {planned}", cell.name)))
+            .collect();
+        assert!(
+            departed.is_empty(),
+            "cells departing:\n{}",
+            departed.join("\n")
+        );
     }
 }

@@ -329,7 +329,7 @@ impl Reckoned<'_> {
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree each case plans over.
-mod tests {
+pub(super) mod tests {
     use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
     use norn_testkit::scratch::Scratch;
     use norn_wire::{
@@ -385,7 +385,7 @@ mod tests {
 
     /// `rows` planned over `documents` written to a tree on disk, whose links
     /// a store derived, under `schema` at `threshold`.
-    fn planned_at(
+    pub(in crate::planner::repair::declared) fn planned_at(
         schema: &str,
         documents: &[(&str, &str)],
         rows: &[FindingRow],
@@ -678,66 +678,6 @@ mod tests {
                 (2, SkipReason::NoDeclaredFix)
             ]
         );
-    }
-
-    /// **A link wrap naming two documents carries the exposed element's
-    /// ambiguity**, keeping the shape finding's id and value.
-    #[test]
-    fn a_link_wrap_naming_two_documents_carries_ambiguous_link_with_its_documents() {
-        let planned = planned(
-            LINKED,
-            &[
-                ("h.md", "---\nups: b\n---\n"),
-                ("x/b.md", "# X\n"),
-                ("y/b.md", "# Y\n"),
-            ],
-            &[finding(1, FindingKind::ShapeMismatch, "h.md", "ups", "b")],
-        );
-
-        assert!(planned.operations.is_empty());
-        assert!(planned.conditions.is_empty());
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::AmbiguousLink)]);
-        assert_eq!(planned.skipped[0].value, Some(norn_store::value_head("b")));
-        let Some(SkippedCandidates::Documents { head, .. }) = &planned.skipped[0].candidates else {
-            panic!("document candidates: {:?}", planned.skipped);
-        };
-        let mut paths: Vec<_> = head
-            .candidates()
-            .iter()
-            .map(|candidate| candidate.path.as_str())
-            .collect();
-        paths.sort_unstable();
-        assert_eq!(paths, vec!["x/b.md", "y/b.md"]);
-    }
-
-    /// **A link wrap naming no document carries the exposed element's
-    /// no-declared-fix skip**, including its resolution note.
-    #[test]
-    fn a_link_wrap_naming_no_document_carries_no_declared_fix_with_its_note() {
-        let planned = planned(
-            LINKED,
-            &[("h.md", "---\nups: ghost\n---\n")],
-            &[finding(
-                1,
-                FindingKind::ShapeMismatch,
-                "h.md",
-                "ups",
-                "ghost",
-            )],
-        );
-
-        assert!(planned.operations.is_empty());
-        assert!(planned.conditions.is_empty());
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
-        assert_eq!(
-            planned.skipped[0].value,
-            Some(norn_store::value_head("ghost"))
-        );
-        assert_eq!(
-            planned.skipped[0].note.as_deref(),
-            Some("`[[ghost]]` would resolve to no document")
-        );
-        assert!(planned.skipped[0].candidates.is_none());
     }
 
     /// **A nested list holding several strings spells no single wikilink.**
@@ -1177,7 +1117,13 @@ mod tests {
     }
 
     /// The finding `id` of `kind` on `field` of `at`, judging `value`.
-    fn finding(id: u64, kind: FindingKind, at: &str, field: &str, value: &str) -> FindingRow {
+    pub(in crate::planner::repair::declared) fn finding(
+        id: u64,
+        kind: FindingKind,
+        at: &str,
+        field: &str,
+        value: &str,
+    ) -> FindingRow {
         FindingRow::new(
             id,
             kind,
