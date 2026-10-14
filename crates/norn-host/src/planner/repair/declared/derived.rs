@@ -619,6 +619,10 @@ mod tests {
     const BOOLEAN_LIST: &str = "version: 1\nfields:\n  flags: {type: boolean, shape: list}\n";
     const SYNONYM: &str = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n";
     const LINKS: &str = "version: 1\nfields:\n  ups: {type: link, shape: list}\n";
+    /// `status` closed to `todo` and `done`, `complete` a synonym of `done`,
+    /// and at most four characters long, declared a list or single.
+    const LIMITED_LIST: &str = "version: 1\nfields:\n  status: {type: text, shape: list}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    max_length:\n      status: 4\n";
+    const LIMITED_SINGLE: &str = "version: 1\nfields:\n  status: {type: text, shape: single}\nrules:\n  tasks:\n    match: {path: '**'}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    max_length:\n      status: 4\n";
 
     /// The rule closing `kind` to `done` and `todo`, `complete` a synonym of `done`.
     macro_rules! kinds {
@@ -860,6 +864,24 @@ mod tests {
                 value: "abc",
                 threshold: Confidence::DEFAULT_THRESHOLD,
                 outcome: Outcome::Skipped(SkipReason::ExcludedClass, Data::Note("number coercion")),
+            },
+            Cell {
+                name: "a wrap composes with the synonym answering both findings of its exposed element",
+                schema: LIMITED_LIST,
+                documents: &[("a.md", "---\nstatus: complete\n---\n")],
+                field: "status",
+                value: "complete",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(done(), Confidence::Derived),
+            },
+            Cell {
+                name: "an unwrap composes with the synonym answering both findings of its exposed element",
+                schema: LIMITED_SINGLE,
+                documents: &[("a.md", "---\nstatus: [complete]\n---\n")],
+                field: "status",
+                value: "[\"complete\"]",
+                threshold: Confidence::DEFAULT_THRESHOLD,
+                outcome: Outcome::Fixed(AuthoredValue::string("done"), Confidence::Derived),
             },
         ]
     }

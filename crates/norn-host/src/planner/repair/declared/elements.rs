@@ -355,6 +355,13 @@ pub(super) fn after_reshape(
             return Reshaped::Unanswered;
         };
         let Some(element) = named_element(&working, document.schema(), field, text) else {
+            // The judge orders an element's closed-set finding before its
+            // length finding, so a member answering the first has replaced
+            // the element the second names; the composed value is judged
+            // afresh, so that finding needs no answer of its own.
+            if named_element(value, document.schema(), field, text).is_some() {
+                continue;
+            }
             return Reshaped::Unanswered;
         };
         let mut element_row = row.clone();
