@@ -153,7 +153,16 @@ pub(super) fn fix_value(
                 .with_note(note),
         ));
     }
-    document.within_threshold(replacement.level, row, &set)?;
+    // A suggestion below the threshold carries its score note, as an
+    // element's does ([`super::elements`]).
+    document
+        .within_threshold(replacement.level, row, &set)
+        .map_err(|mut skip| {
+            if !replacement.notes.is_empty() {
+                skip.note = Some(replacement.notes.join("; "));
+            }
+            skip
+        })?;
     Ok(Fix {
         removed_field: None,
         operations: vec![set],

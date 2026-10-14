@@ -225,6 +225,7 @@ pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
         }),
         FindingKind::MissingAnchor => {
             row.head.total() == 1
+                && row.head.candidates().len() == 1
                 && row
                     .target
                     .as_deref()
@@ -2254,6 +2255,21 @@ mod tests {
         assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
     }
 
+    /// **A missing anchor whose row names no resolved document has no fix**:
+    /// a head counting one candidate but holding none reads no holder.
+    #[test]
+    fn a_missing_anchor_whose_head_holds_no_candidate_has_no_fix() {
+        let vault = Vault::of("version: 1\n", &[("h.md", "[[t#Headin]]\n")]);
+        let mut row = finding(1, FindingKind::MissingAnchor, "h.md", "t#Headin");
+        row.head = CandidateHead::new([], 1).expect("a head counting one");
+        row.span = Some(norn_wire::Span::new(1, 1, 0));
+
+        let planned = vault.plan(&[row]);
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+    }
+
     /// **A document whose bytes cannot be read skips the findings a fix
     /// would answer as unreadable**, each with the value it judged, and the
     /// rest as their rows say.
@@ -3747,6 +3763,12 @@ mod tests {
                 assert_eq!(
                     planned.skipped[0].proposed,
                     Some(proposing("a.md", "status", list(&["done"])))
+                );
+                assert_eq!(
+                    planned.skipped[0].note.as_deref(),
+                    Some(
+                        "closest member `done` is 1 edit away by optimal string alignment, at most 1 for its 4 characters"
+                    )
                 );
             }
         }
