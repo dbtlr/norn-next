@@ -3100,7 +3100,13 @@ bytewise, with hygiene ordered as rules matching nothing, unused closed-set valu
 and empty combinations. The longest prefix fitting 64 items and 32 KiB of serialized
 JSON items is kept, YAML included, with `total` exact and samples bounded to five
 paths. YAML declares uniform fields by `fields` type and shape, and renames each
-alternate spelling through its own selectorless `forbidden`/`rename_to` rule.
+alternate spelling through its own selectorless `forbidden`/`rename_to` rule. A
+near-duplicate group's target is the one spelling the schema names, as a declared field
+or a key a rule reads, when exactly one is named, and otherwise the most-used spelling,
+ties bytewise smallest. When two or more spellings are named, no rule renames onto or
+forbids a named spelling: the unnamed spellings rename onto the most-used unnamed one.
+A document holding two spellings keeps both after the rules apply: repair skips each
+rename with `rename_onto_occupied_field`, naming the document, for the caller to merge.
 
 **The pass has a declared cost on the host's `repair_advisories` read account.**
 With R rules, N documents, selector complexity S, K distinct keys and V value rows,
@@ -3116,7 +3122,7 @@ near-duplicate group of G spellings whose merge reads P presence rows. Rule pair
 cost R² over the schema with no document read. Memory grows with K: one spelling
 entry per distinct key, at most 64 items / 32 KiB in each kind's collector, and no
 document payload. The counter lane varies each parameter separately and pins the measured work;
-narrowed repairs still pay selection only (ruling on NORN-402, 2026-10-13).
+narrowed repairs still pay selection only.
 
 A cursor that is no repair's is refused as a
 validate refuses a foreign cursor: `request/cursor-not-taken`. A selection holding parts

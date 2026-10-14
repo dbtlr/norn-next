@@ -231,6 +231,129 @@ fn reload(host: &attach::ServingHost, vault: &attach::Vault, schema: &str) {
 }
 
 #[test]
+fn a_required_spelling_is_the_target_even_when_another_spelling_is_more_used() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-required-target",
+        "version: 1\nrules:\n  named:\n    required: {zz_name: null}\n",
+        &[
+            ("a.md", "---\nZZ Name: one\n---\n"),
+            ("b.md", "---\nZZ Name: two\n---\n"),
+            ("c.md", "---\nzz_name: three\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let duplicate = found["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["kind"] == "near_duplicate_fields")
+        .expect("near duplicates");
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"ZZ Name\"\n      : {rename_to: \"zz_name\"}\n";
+    assert_eq!(duplicate["yaml"], yaml);
+    let schema = format!("version: 1\n{yaml}  named:\n    required: {{zz_name: null}}\n");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    host.repair(RepairParams::new(
+        VaultAddress::name(vault.name().clone()),
+        ApplyMode::Apply,
+    ))
+    .expect("repair starts")
+    .wait()
+    .expect("repair applies");
+    let next = advisories(&host, &vault);
+    assert!(
+        !next["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["kind"] == "near_duplicate_fields")
+    );
+}
+
+#[test]
+fn a_group_with_multiple_schema_named_spellings_renames_only_between_unnamed_spellings() {
+    let fields = "fields:\n  'ZZ Name': {type: text}\n  'AA Empty': {type: text}\n";
+    let named = "  named:\n    required: {zz_name: null, aa_empty: null}\n";
+    let schema = format!("version: 1\n{fields}rules:\n{named}");
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-multiple-named-targets",
+        &schema,
+        &[(
+            "a.md",
+            "---\nZZ Name: one\nzz_name: two\nzz-name: three\nzz.name: four\nAA Empty: old\naa_empty: old\n---\n",
+        )],
+    );
+    let found = advisories(&host, &vault);
+    let groups: Vec<_> = found["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["kind"] == "near_duplicate_fields")
+        .collect();
+    assert_eq!(groups.len(), 2);
+    let yaml = "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"zz.name\"\n      : {rename_to: \"zz-name\"}\n";
+    assert_eq!(groups[1]["yaml"], yaml);
+    let merged = format!("version: 1\n{fields}{yaml}{named}");
+    norn_config::schema::VaultSchema::parse(merged.as_bytes()).expect("the rename loads");
+    assert_eq!(groups[0]["yaml"], "rules: {}\n");
+    norn_config::schema::VaultSchema::parse(b"version: 1\nrules: {}\n")
+        .expect("an empty rule fragment loads");
+}
+
+#[test]
+fn a_document_holding_two_spellings_keeps_both_and_is_named_by_the_occupied_rename_skip() {
+    let text = "---\nZZ Name: one\nzz_name: two\n---\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-coholding-spellings",
+        "version: 1\n",
+        &[("a.md", text)],
+    );
+    let found = advisories(&host, &vault);
+    let duplicate = found["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["kind"] == "near_duplicate_fields")
+        .expect("near duplicates");
+    let schema = format!("version: 1\n{}", duplicate["yaml"].as_str().expect("yaml"));
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    let address = VaultAddress::name(vault.name().clone());
+    host.repair(RepairParams::new(address.clone(), ApplyMode::Apply))
+        .expect("repair starts")
+        .wait()
+        .expect("repair applies");
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("a.md")).expect("the document"),
+        text
+    );
+    let answer = host
+        .repair(RepairParams::new(address.clone(), ApplyMode::Preview))
+        .expect("the next repair starts")
+        .wait()
+        .expect("the next repair answers");
+    let ApplyReport::Previewed { plan, .. } = answer.report else {
+        panic!("the next repair previews");
+    };
+    assert!(plan.operations.is_empty());
+    let skipped = plan.provenance.expect("provenance").skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(
+        skipped[0].reason,
+        norn_wire::SkipReason::RenameOntoOccupiedField
+    );
+    let answer = host
+        .validate(&norn_wire::ValidateParams::new(address))
+        .expect("the findings");
+    let norn_wire::ValidateReport::Findings { page, .. } = answer.answer.report else {
+        panic!("the validate names findings");
+    };
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].id, skipped[0].finding);
+    assert_eq!(page.rows[0].path.as_str(), "a.md");
+}
+
+#[test]
 fn near_duplicate_fields_render_renames_that_remove_the_advisory() {
     let (_sandbox, vault, host) = a_vault_under(
         "advisory-spellings",

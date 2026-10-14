@@ -1,8 +1,8 @@
 //! Compute deterministic field and schema observations on a repair's read hold.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use norn_config::schema::{Rule, RulesConflict, VaultSchema};
+use norn_config::schema::{ForbiddenFix, Rule, RulesConflict, VaultSchema};
 use norn_store::{ContentModel, PageRefusal, RepairFieldTally, Snapshot};
 use norn_wire::{
     AdvisoryValueType, ContainerKind, HygieneConflict, Predicate, RepairAdvisories, RepairAdvisory,
@@ -182,6 +182,7 @@ fn near_duplicates(
         .filter(|group| group.len() > 1)
         .collect();
     groups.sort_by(|left, right| left[0].key.cmp(&right[0].key));
+    let rule_keys = rule_read_keys(schema);
     let mut duplicates = Collected::default();
     let mut next_rule = 1;
     for group in groups {
@@ -192,7 +193,7 @@ fn near_duplicates(
         let keys: Vec<_> = group.iter().map(|spelling| spelling.key.clone()).collect();
         let tally = snapshot.repair_spelling_tally(&keys)?;
         cost.absorb(tally.work);
-        let yaml = rename_rules(&group, schema, &mut next_rule);
+        let yaml = rename_rules(&group, schema, &rule_keys, &mut next_rule);
         duplicates.add(RepairAdvisory::near_duplicate_fields(
             group,
             tally.sample,
@@ -202,26 +203,59 @@ fn near_duplicates(
     Ok(duplicates)
 }
 
-/// Render one selectorless rule per alternate spelling, with names unique to this pass.
-fn rename_rules(group: &[SpellingUse], schema: &VaultSchema, next_rule: &mut u64) -> String {
-    let winner = group
-        .iter()
-        .max_by(|left, right| {
+/// Collect the field names rules read in one walk for the pass.
+fn rule_read_keys(schema: &VaultSchema) -> BTreeSet<&str> {
+    let mut keys = BTreeSet::new();
+    for rule in schema.rules() {
+        keys.extend(rule.selector().frontmatter().map(|(key, _)| key));
+        keys.extend(rule.required().map(|(key, _)| key));
+        for (key, fix) in rule.forbidden() {
+            keys.insert(key);
+            if let ForbiddenFix::RenameTo(target) = fix {
+                keys.insert(target.as_str());
+            }
+        }
+        keys.extend(rule.one_of().map(|(key, _)| key));
+        keys.extend(rule.max_length().map(|(key, _)| key));
+    }
+    keys
+}
+
+/// Render selectorless renames without forbidding a schema-named spelling.
+fn rename_rules(
+    group: &[SpellingUse],
+    schema: &VaultSchema,
+    rule_keys: &BTreeSet<&str>,
+    next_rule: &mut u64,
+) -> String {
+    let (named, other): (Vec<_>, Vec<_>) = group.iter().partition(|spelling| {
+        schema.field(&spelling.key).is_some() || rule_keys.contains(spelling.key.as_str())
+    });
+    let winner = if named.len() == 1 {
+        Some(named[0])
+    } else {
+        other.iter().copied().max_by(|left, right| {
             left.documents
                 .cmp(&right.documents)
                 .then_with(|| right.key.cmp(&left.key))
         })
-        .expect("a near-duplicate group holds two spellings");
-    let mut yaml = "rules:\n".to_string();
-    for spelling in group.iter().filter(|spelling| spelling.key != winner.key) {
-        let rule = next_rule_name(schema, next_rule);
-        yaml.push_str(&format!(
-            "  {rule}:\n    forbidden:\n      ? {}\n      : {{rename_to: {}}}\n",
-            quoted(&spelling.key),
-            quoted(&winner.key)
-        ));
+    };
+    let mut renames = String::new();
+    if let Some(winner) = winner {
+        for spelling in other.iter().filter(|spelling| spelling.key != winner.key) {
+            let rule = next_rule_name(schema, next_rule);
+            renames.push_str(&format!(
+                "  {rule}:\n    forbidden:\n      ? {}\n      : {{rename_to: {}}}\n",
+                quoted(&spelling.key),
+                quoted(&winner.key)
+            ));
+        }
     }
-    yaml
+    if renames.is_empty() {
+        "rules: {}\n".to_string()
+    } else {
+        format!("rules:\n{renames}")
+    }
 }
 
 /// Advance the pass's rule names past every name the schema already declares.
