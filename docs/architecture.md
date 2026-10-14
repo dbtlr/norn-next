@@ -703,8 +703,9 @@ discards — the path discard an equality seek of the path-key index, and the su
 in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values and the clear
 it runs over the folds of the keys a schema declares `tags` or `link`, the page
 a walk reads its scope's unaccounted finding subjects through, the ordered document page a
-heal merges its walk against, the six enumerations a caller drains a whole pillar through —
-the findings table, the tombstones, the content-quarantined places' hashes, every row's stored suffix keys, raw and folded, beside
+heal merges its walk against, the seven enumerations a caller drains a whole pillar through —
+the findings table, the tombstones, the content-quarantined places' hashes, the stem trigram
+index, every row's stored suffix keys, raw and folded, beside
 the path that has to produce them, the vocabulary the full-text index holds, and the rule
 sets the findings cite — and the two drains a lane-2 consumer
 ([ADR 0027](decisions/0027-link-health-rides-the-changeset.md)) reads change through:

@@ -34,8 +34,9 @@ pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
 /// The longest a continuous event stream may postpone delivery.
 pub const MAX_BATCH_AGE: Duration = Duration::from_millis(500);
 /// The longest an own-write outcome stays eligible for suppression. A file's
-/// is spent by the first batch that names it; a made folder's answers every
-/// batch until this expires.
+/// is spent by the first batch that names it, unless it lies beneath a made
+/// folder; a made folder's, and those beneath one, answer every batch until
+/// this expires.
 pub const OWN_WRITE_TTL: Duration = Duration::from_secs(5);
 /// The authored bound on distinct dirty roots retained before widening to a rescan.
 ///
@@ -852,8 +853,8 @@ impl OwnWrites {
     /// **Each folder a create made is recorded too**, by the identity it holds
     /// when the publication is recorded: the watcher reports a made folder as
     /// well as the file, and a folder no longer a directory by then records
-    /// nothing. What a made folder's report covers is judged when it arrives
-    /// ([`suppress`]).
+    /// nothing. What a made folder's report covers is judged when the report
+    /// arrives.
     ///
     /// `path` may be vault-relative or absolute beneath the watched vault root.
     /// An absolute path outside that root is refused as [`PathError::Absolute`].
@@ -2041,7 +2042,10 @@ fn hand_over(
 /// at that path is judged as foreign. A made folder's entry answers every
 /// batch until it expires: the folder is reported as more than one event — its
 /// creation, then the attributes the system stamps on it — and a batch can
-/// close between them.
+/// close between them. So does the entry of a file beneath a made folder, which
+/// is what a later report of the folder is judged against; its content is
+/// compared on every answer, so a change another writer makes there is still
+/// foreign.
 ///
 /// **A made folder's report stands for everything beneath it**, so it is
 /// dropped only while everything beneath it is an own write
@@ -2081,7 +2085,10 @@ fn suppress(
             })
             .collect();
         for (path, (expected, _)) in &candidates {
-            if !matches!(expected, Expected::Folder(_)) {
+            let beneath_a_made_folder = ledger.entries.iter().any(|(at, entry)| {
+                matches!(entry.expected, Expected::Folder(_)) && at != path && path.starts_with(at)
+            });
+            if !matches!(expected, Expected::Folder(_)) && !beneath_a_made_folder {
                 ledger.entries.remove(path);
             }
         }
@@ -5557,6 +5564,35 @@ mod tests {
             dirty(&recorder, &["tasks"]),
         );
         assert_eq!(batch.vault_roots().len(), 1);
+    }
+
+    /// **A made folder's later report is its own after the file published into
+    /// it was named.** The folder's creation and the file can settle in one
+    /// batch and the attributes stamped on the folder in the next, and the
+    /// file is still beneath the folder as it was published.
+    #[test]
+    fn a_made_folder_reported_after_its_file_was_named_is_suppressed() {
+        let (scratch, ledger, recorder) = own_write_harness("watch-made-folder-later");
+        scratch.directory("vault/tasks");
+        let path = scratch.place("tasks/note.md", b"note");
+        recorder
+            .published(
+                &path,
+                &published_making(AfterState::Present(observed(&path)), &["tasks"]),
+            )
+            .unwrap();
+        for (report, roots) in [
+            ("its creation and the file", &["tasks", "tasks/note.md"][..]),
+            ("its attributes", &["tasks"][..]),
+        ] {
+            let batch = suppress(
+                &recorder.root,
+                &recorder.normalizer,
+                &ledger,
+                dirty(&recorder, roots),
+            );
+            assert!(batch.is_empty(), "{report}: {:?}", batch.vault_roots());
+        }
     }
 
     /// **A made folder holding a name no publication wrote is foreign.** A
