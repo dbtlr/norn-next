@@ -19,6 +19,8 @@
 //! followed document need not lie within the repair's selection.
 //!
 //! **A follow is spelled over the batch's settled routes and composed last.**
+//! A followed document a route of the batch moves is spelled toward where
+//! the route lands it.
 //! All candidates and replaced addresses share the applier's resolution
 //! probe. The fix records the written address resolving to the followed
 //! document from where the holder lands, and the replaced address's
@@ -27,12 +29,9 @@
 //! that never reaches it uniquely, or a text-layer refusal, skips as
 //! `link_not_rewritable`, with that reason in its note.
 //!
-//! **Three declared limits bound the evidence a follow uses.** A rebuild
+//! **Two declared limits bound the evidence a follow uses.** A rebuild
 //! keeps no tombstones. A norn move whose cascade rewrote the moved
-//! document's own links changed its hash, so it skips `no_holder`. A
-//! followed document that a route of the same batch moves is spelled toward
-//! where it stood, so the follow skips `link_not_rewritable`; the next repair
-//! follows it.
+//! document's own links changed its hash, so it skips `no_holder`.
 
 use std::collections::BTreeMap;
 
@@ -47,7 +46,9 @@ use norn_wire::{
 pub(super) struct Follow {
     /// The finding's link, held where its document stood before any route.
     pub(super) link: LinkKey,
-    /// The one live hash holder, at its path before the batch's routes.
+    /// The live holder's before-state path, where its hash is observed.
+    pub(super) before: DocumentPath,
+    /// The one live hash holder, mapped to where the settled routes land it.
     pub(super) to: DocumentPath,
     /// The tombstone's recorded hash, carried as an author condition.
     pub(super) hash: ContentHash,
@@ -135,6 +136,7 @@ pub(super) fn read<R: Reading>(
             row.id,
             Ok(Follow {
                 link,
+                before: to.clone(),
                 to: to.clone(),
                 hash: ContentHash::new(format!("sha256:{hash}")).expect("a recorded content hash"),
             }),

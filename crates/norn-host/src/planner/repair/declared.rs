@@ -184,18 +184,24 @@ use crate::planner::edit::edited;
 /// document gone from where each route that passed moves it from, and
 /// standing where it lands, as the applier draws every target of a plan at
 /// its after-state alone. Every link a fix writes is resolved over it.
+/// The accompanying map names those same routes' sources and destinations,
+/// so a followed document is spelled toward where its route lands it.
 pub(super) fn settled(
     drafts: &[Draft<'_>],
     refused: &std::collections::BTreeMap<usize, SkippedFinding>,
-) -> PathOverlay {
-    crate::planner::links::moved_overlay(
-        drafts
-            .iter()
-            .enumerate()
-            .filter(|(at, _)| !refused.contains_key(at))
-            .filter_map(|(_, draft)| draft.passed())
-            .map(|(passed, _)| (&passed.from, &passed.to)),
-    )
+) -> (
+    PathOverlay,
+    std::collections::BTreeMap<DocumentPath, DocumentPath>,
+) {
+    let routes: std::collections::BTreeMap<_, _> = drafts
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| !refused.contains_key(at))
+        .filter_map(|(_, draft)| draft.passed())
+        .map(|(passed, _)| (passed.from.clone(), passed.to.clone()))
+        .collect();
+    let overlay = crate::planner::links::moved_overlay(routes.iter());
+    (overlay, routes)
 }
 
 /// Whether `row` is a finding a fix may answer, so its document's bytes are
@@ -2196,6 +2202,59 @@ mod tests {
                 SkippedFinding::new(11, SkipReason::NoDeclaredFix),
             ]
         );
+    }
+
+    /// **A unique follow on an unreadable holder skips as unreadable.**
+    #[test]
+    fn a_broken_finding_with_a_unique_follow_on_an_unreadable_holder_skips_as_unreadable() {
+        let vault = Vault::of("version: 1\n", &[]);
+        let clock = || panic!("the follow reads no clock");
+        let clock = OneReading::of(&clock);
+        let repairing = Repairing {
+            declared: &vault.declared,
+            case: norn_wire::CaseFold::Exact,
+            clock: &clock,
+            rule_sets: &vault.rule_sets,
+            threshold: Confidence::Derived,
+        };
+        let index = (EmptyStore::new(), std::marker::PhantomData);
+        let reading = Read {
+            vault: &vault,
+            over: Over {
+                view: &vault.files,
+                index: &index,
+            },
+            reads: RefCell::new(Vec::new()),
+        };
+        let rows = [finding(1, FindingKind::Broken, "gone.md", "old")];
+        let destination = DocumentPath::new("new.md").expect("a document path");
+        let follows = super::super::broken_links::Follows::from([(
+            1,
+            Ok(super::super::broken_links::Follow {
+                link: LinkKey::new(rows[0].path.clone(), LinkFamily::Wikilink, "old"),
+                before: destination.clone(),
+                to: destination,
+                hash: crate::planner::compose::content_hash(b"# Followed\n"),
+            }),
+        )]);
+
+        let drafted = draft(&rows, &repairing, &reading, &follows).expect("a draft");
+        let mut planned = Planned::default();
+        drafted.decide(None).emit(
+            &mut planned,
+            &Namings::new(),
+            None,
+            &follows,
+            &super::super::broken_links::Asked::new(),
+            &BTreeMap::new(),
+        );
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![SkippedFinding::new(1, SkipReason::Unreadable)]
+        );
+        assert_eq!(*reading.reads.borrow(), vec!["gone.md"]);
     }
 
     /// **Only a document a fix may be made to is read, and once**, however

@@ -528,7 +528,7 @@ pub(crate) fn plan<R: Reading>(
     repairing: &Repairing<'_>,
     vault: &R,
 ) -> Result<Planned, R::Error> {
-    let follows = broken_links::read(rows, links, vault)?;
+    let mut follows = broken_links::read(rows, links, vault)?;
     let mut drafts = Vec::new();
     // A batch never splits a document, and it reads in path order, so one
     // document's findings stand together.
@@ -541,7 +541,13 @@ pub(crate) fn plan<R: Reading>(
     let respellable = respelled.respellable(&drafts, &refused);
     // The routes are settled: a link fix, composed last, is resolved with
     // them as the plan's moves, and so is every link a fix writes.
-    let settled = declared::settled(&drafts, &refused);
+    let (settled, routes) = declared::settled(&drafts, &refused);
+    for follow in follows
+        .values_mut()
+        .filter_map(|follow| follow.as_mut().ok())
+    {
+        follow.to = routes.get(&follow.to).unwrap_or(&follow.to).clone();
+    }
     let decided: Vec<declared::Decided<'_>> = drafts
         .into_iter()
         .enumerate()

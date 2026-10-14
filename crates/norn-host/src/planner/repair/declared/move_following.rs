@@ -161,7 +161,7 @@ impl Reckoned<'_> {
                 to,
             ))
             .with_conditions(vec![AuthorCondition::content_hash(
-                follow.to.clone(),
+                follow.before.clone(),
                 follow.hash.clone(),
             )]);
             if !composing.admits(Confidence::Derived) {

@@ -6146,3 +6146,79 @@ fn a_vault_link_matching_both_root_reductions_skips_as_several_tombstones() {
         &["zz-repair/old.md", "zz-repair/old.md.md"],
     );
 }
+
+/// **A follow names the followed document where its settled route lands it.**
+/// Its author hash remains on that document's before-state path, guarded by the move.
+#[test]
+fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_lands() {
+    let target = b"---\ntype: task\n---\n# Followed\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-follow-routed-destination",
+        TASKED,
+        &[("old.md", target), ("zz-holder.md", b"See [x](old.md).\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "old.md", "loose/new.md");
+
+    let plan = previewed(host.repair(repairing_beneath(&vault, ApplyMode::Preview)));
+
+    assert_eq!(plan.operations.len(), 2, "{plan:?}");
+    let rewrite = plan
+        .operations
+        .iter()
+        .find(|operation| matches!(operation.kind, OperationKind::RewriteLink { .. }))
+        .expect("one followed link rewrite");
+    assert_eq!(
+        rewrite.kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "old.md",
+            "tasks/new.md",
+        )
+    );
+    let hash = norn_wire::ContentHash::new(format!(
+        "sha256:{}",
+        norn_fs::ContentHash::of(target).to_hex()
+    ))
+    .expect("hash");
+    assert_eq!(
+        rewrite.conditions,
+        vec![norn_wire::AuthorCondition::content_hash(
+            at("loose/new.md"),
+            hash.clone()
+        )]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    at("zz-holder.md"),
+                    norn_wire::LinkFamily::Markdown,
+                    "tasks/new.md"
+                ),
+                norn_wire::Resolves::one(at("tasks/new.md")),
+            )),
+        "{plan:?}"
+    );
+    assert!(!plan.conditions.iter().any(|condition| {
+        matches!(condition, norn_wire::PlanCondition::ContentHash { path, .. } if path == &at("loose/new.md"))
+    }));
+    let source = plan
+        .transitions
+        .iter()
+        .find(|transition| transition.path == at("loose/new.md"))
+        .expect("the move's source");
+    assert!(
+        matches!(&source.before, norn_wire::FileState::Present { hash: before, .. } if before == &hash)
+    );
+    assert!(provenance(&plan).skipped.is_empty(), "{plan:?}");
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(written(&vault, "zz-holder.md"), "See [x](tasks/new.md).\n");
+    assert!(stands(&vault, "tasks/new.md"));
+    assert!(!stands(&vault, "loose/new.md"));
+}

@@ -2987,6 +2987,8 @@ keep the authored style, and the first resolving uniquely to the destination win
 candidates of all followed links and their replaced addresses are probed in one judgment
 over the settled routes. No candidate reaching the destination uniquely, or a text-layer
 `RewriteSkip`, is `link_not_rewritable` with that reason in its note.
+A followed document a route of the same batch moves is spelled toward where the route lands
+it, and its hash is then guarded by that move's own content condition.
 
 The operation carries the followed document's recorded hash as an author condition, lifted
 to a plan condition where the plan does not write that document. Both the written and the
@@ -2999,11 +3001,9 @@ preview and apply refuses the plan.
 A refusal's fresh plan keeps the hash with its operation, leaving that operation unresolved
 where the hash changed.
 
-**Move-following has three declared limits.** A rebuild retains no tombstones to follow. A
+**Move-following has two declared limits.** A rebuild retains no tombstones to follow. A
 norn move whose cascade rewrote the moved document's own links changed its hash, so no live
-document may hold the tombstone's recorded bytes; that follow skips as `no_holder`. A
-followed document that a route of the same batch moves is spelled toward where it stood, so
-the follow skips `link_not_rewritable`; the next repair follows it.
+document may hold the tombstone's recorded bytes; that follow skips as `no_holder`.
 
 **A `document/misplaced` finding is moved along its rules' route.** The placement rules
 its finding cites each propose their `allowed_paths` route, filled as a default is — the
