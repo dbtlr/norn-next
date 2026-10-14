@@ -367,6 +367,79 @@ fn a_forbidden_fix_scoped_by_its_selector_keeps_the_advisory_for_documents_outsi
 }
 
 #[test]
+fn a_named_spelling_another_rule_forbids_stays_apart_from_the_unnamed_target() {
+    let rules = "  req:\n    match: {path: 'a/**'}\n    required: {zz_name: null}\n  ban:\n    match: {path: 'b/**'}\n    forbidden: {zz_name: null}\n";
+    let schema = format!("version: 1\nrules:\n{rules}");
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-named-and-forbidden-spelling",
+        &schema,
+        &[
+            ("a/x.md", "---\nzz_name: one\n---\n"),
+            ("other/y.md", "---\nZZ Name: two\n---\n"),
+            ("other/z.md", "---\nZZ Name: three\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let duplicate = near_duplicate(&found).expect("near duplicates");
+    assert_eq!(duplicate["yaml"], "rules: {}\n");
+    reload(&host, &vault, &schema);
+    assert_eq!(apply_and_count_findings(&host, &vault), 0);
+    let next = advisories(&host, &vault);
+    assert_eq!(
+        near_duplicate(&next).expect("the group remains")["spellings"],
+        json!([{"key":"ZZ Name","documents":2},{"key":"zz_name","documents":1}])
+    );
+}
+
+#[test]
+fn a_value_the_target_declaration_refuses_keeps_its_spelling_and_is_named_by_the_judge_skip() {
+    let fields = "fields:\n  zz_name: {type: number}\n";
+    let text = "---\nZZ Name: unparseable\n---\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-target-type-refuses",
+        &format!("version: 1\n{fields}"),
+        &[("a.md", text), ("b.md", "---\nzz_name: 42\n---\n")],
+    );
+    let found = advisories(&host, &vault);
+    let yaml = near_duplicate(&found).expect("near duplicates")["yaml"]
+        .as_str()
+        .expect("yaml")
+        .to_string();
+    assert_eq!(
+        yaml,
+        "rules:\n  near_duplicate_1:\n    forbidden:\n      ? \"ZZ Name\"\n      : {rename_to: \"zz_name\"}\n"
+    );
+    let schema = format!("version: 1\n{fields}{yaml}");
+    norn_config::schema::VaultSchema::parse(schema.as_bytes()).expect("the rename loads");
+    reload(&host, &vault, &schema);
+    let answer = host
+        .repair(RepairParams::new(
+            VaultAddress::name(vault.name().clone()),
+            ApplyMode::Preview,
+        ))
+        .expect("repair starts")
+        .wait()
+        .expect("repair previews");
+    let ApplyReport::Previewed { plan, .. } = answer.report else {
+        panic!("the repair previews");
+    };
+    assert!(plan.operations.is_empty());
+    let skipped = plan.provenance.expect("provenance").skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, norn_wire::SkipReason::JudgeWouldRefuse);
+    assert_eq!(apply_and_count_findings(&host, &vault), 1);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("a.md")).expect("the document"),
+        text
+    );
+    let next = advisories(&host, &vault);
+    assert_eq!(
+        near_duplicate(&next).expect("the group remains")["spellings"],
+        json!([{"key":"ZZ Name","documents":1},{"key":"zz_name","documents":1}])
+    );
+}
+
+#[test]
 fn a_required_spelling_is_the_target_even_when_another_spelling_is_more_used() {
     let (_sandbox, vault, host) = a_vault_under(
         "advisory-required-target",

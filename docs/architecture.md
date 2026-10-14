@@ -3128,9 +3128,13 @@ repair skips both; one forbidden with no fix and not named renames like an unnam
 spelling. Where no YAML that loads can clear a group, the YAML renames what it may and
 the advisory stays, naming the group: a document holding two spellings keeps both,
 since repair skips each rename onto it with `rename_onto_occupied_field`, naming the
-document, for the caller to merge; two or more named spellings stay apart; a group
-whose every remaining spelling is forbidden has no target; and a spelling left to a
-forbidden fix stays in the documents its rule's selector does not match.
+document, for the caller to merge; a document whose value the target's declaration
+refuses keeps its spelling, since repair skips that rename with `judge_would_refuse`,
+naming the document; two or more named spellings stay apart; a named spelling that a
+rule also forbids stays apart from the target, since it is never renamed away and
+never the target; a group whose every remaining spelling is forbidden has no target;
+and a spelling left to a forbidden fix stays in the documents its rule's selector does
+not match.
 
 **The pass has a declared cost on the host's `repair_advisories` read account.**
 With R rules, N documents, selector complexity S, K distinct keys and V value rows,
