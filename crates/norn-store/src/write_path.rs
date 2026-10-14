@@ -23,8 +23,9 @@
 //! stamped under another fingerprint. One registered
 //! statement is run by a trigger rather than prepared:
 //! [`WriteStatement::CollectRuleSet`] is the body of
-//! `findings_collect_rule_set`, which the DDL builds from this text, so its
-//! bar is a plan of what the trigger runs. The
+//! `findings_collect_rule_set`, and [`WriteStatement::EndQuarantine`] the body
+//! of `quarantines_end_with_their_finding`, which the DDL builds from this
+//! text, so each one's bar is a plan of what its trigger runs. The
 //! findings discards an increment runs are
 //! [`crate::ExplainedStatement::SubjectDiscard`] and
 //! [`crate::ExplainedStatement::PathDiscard`], which carry their own bars, and the
@@ -114,6 +115,14 @@ registry! {
     /// One rule a finding cites, with the finding's key copied beside it in
     /// the order a validate selecting by rule seeks.
     InsertFindingRule,
+    /// The hash of the bytes a content finding was judged over, replacing the
+    /// one its place held.
+    RecordQuarantine,
+    /// The end of a place's hash, which the trigger
+    /// `quarantines_end_with_their_finding` runs as a content finding about
+    /// the place is deleted, the deleted finding's subject bound in place of
+    /// `?1`.
+    EndQuarantine,
     /// The discard a schema pin runs over findings stamped under another
     /// fingerprint.
     DiscardStaleFindings,
@@ -262,6 +271,11 @@ impl WriteStatement {
                  SELECT id, ?2, vault_schema_fingerprint, kind, severity, path, position
                  FROM findings WHERE id = ?1"
             }
+            Self::RecordQuarantine => {
+                "INSERT INTO quarantines (path, content_hash) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash"
+            }
+            Self::EndQuarantine => "DELETE FROM quarantines WHERE path = ?1",
             // Two open ranges rather than `<>`: an inequality is not a predicate
             // an index can answer, so it would read every finding in the table
             // on every pin — including the pins that discard nothing.

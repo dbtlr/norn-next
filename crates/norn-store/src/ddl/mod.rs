@@ -69,6 +69,7 @@ pub(crate) mod findings;
 pub(crate) mod fts;
 pub(crate) mod meta;
 pub(crate) mod migrations;
+pub(crate) mod quarantines;
 pub(crate) mod stems;
 pub(crate) mod tombstones;
 
@@ -100,6 +101,7 @@ const AREAS: &[fn() -> Vec<String>] = &[
     fts::statements,
     stems::statements,
     findings::statements,
+    quarantines::statements,
     migrations::statements,
 ];
 

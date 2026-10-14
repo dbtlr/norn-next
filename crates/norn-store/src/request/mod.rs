@@ -794,6 +794,22 @@ impl<'a> Request<'a> {
         // is the same outcome as a `COMMIT` without a statement that says so.
     }
 
+    /// The hash of the bytes the content finding standing at `path` was
+    /// judged over, where one was recorded with it.
+    ///
+    /// A place no document row stands at has no row hash to compare, and this
+    /// is its counterpart: a reading of the same bytes there concludes what
+    /// the standing finding already says.
+    pub fn quarantined_hash(&self, path: &DocumentPath) -> Result<Option<String>, StoreError> {
+        Self::read_one(
+            self.store.connection(),
+            QUARANTINED_HASH_SQL,
+            params![path.as_str()],
+            |row| row.get(0).map(Ok),
+            "reading a quarantined place's hash",
+        )
+    }
+
     /// The death recorded for one path, if any.
     pub fn stored_tombstone(
         &self,
@@ -1854,6 +1870,28 @@ pub(crate) fn check_finding_paths(
 /// its hash, which is taken here over the whole value being written. Rule
 /// judgment in derivation files the findings that cite rules and judge
 /// values; every other producer's carry neither.
+/// Record `hash` as the bytes the content finding `finding` was judged over,
+/// in place of the hash its place held.
+///
+/// Refused for any other kind ([`StoreError::NotAContentFinding`]): only a
+/// content finding's deletion ends a place's hash.
+pub(crate) fn record_quarantine(
+    transaction: &rusqlite::Transaction<'_>,
+    finding: &FindingFacts,
+    hash: &str,
+) -> Result<(), StoreError> {
+    if finding.kind != FindingKind::BodyBytesNotUtf8 {
+        return Err(StoreError::NotAContentFinding {
+            kind: finding.kind.as_str(),
+        });
+    }
+    transaction
+        .prepare_cached(WriteStatement::RecordQuarantine.sql())
+        .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
+        .map_err(|error| error::sql("recording a quarantined place's hash", error))?;
+    Ok(())
+}
+
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -2163,6 +2201,11 @@ pub(crate) fn folded_value_discard_sql() -> String {
         crate::TAG_CARRIER
     )
 }
+
+/// The statement [`Request::quarantined_hash`] emits: one seek of the
+/// primary key.
+pub(crate) const QUARANTINED_HASH_SQL: &str =
+    "SELECT content_hash FROM quarantines WHERE path = ?1";
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///

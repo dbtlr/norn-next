@@ -1116,7 +1116,10 @@ impl Store {
     /// selects it by. The eighth is the disjointness the
     /// `tombstones_clear_on_derive` trigger maintains — nothing structural
     /// holds it, so it is checked at rest rather than trusted, the same
-    /// ruling the vocabularies get.
+    /// ruling the vocabularies get. The tenth is the same ruling over the
+    /// trigger `quarantines_end_with_their_finding`: a quarantined place's
+    /// hash stands only beside a content finding at that place, where no
+    /// document row stands.
     ///
     /// The ninth is a **recompute at rest**, for the reason the stored suffix
     /// key gets one: a sub-fingerprint is a derived column, and every read that
@@ -1282,6 +1285,31 @@ impl Store {
         if undead != 0 {
             return Err(StoreError::Damaged {
                 what: format!("{undead} tombstones stand at a path that holds a document row"),
+            });
+        }
+
+        let unfounded: i64 = self
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM quarantines
+                     WHERE EXISTS (SELECT 1 FROM documents WHERE documents.path = quarantines.path)
+                        OR NOT EXISTS (
+                            SELECT 1 FROM findings
+                            WHERE findings.path = quarantines.path AND findings.kind = '{}'
+                        )",
+                    norn_wire::FindingKind::BodyBytesNotUtf8.as_str()
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("checking each quarantined hash's finding", error))?;
+        if unfounded != 0 {
+            return Err(StoreError::Damaged {
+                what: format!(
+                    "{unfounded} quarantined hashes stand without their content finding or beside \
+                     a document row"
+                ),
             });
         }
 

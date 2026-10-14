@@ -137,6 +137,15 @@ pub struct DerivedFinding<'a> {
     /// refused ([`crate::StoreError::StoreJudged`]) before the changeset takes
     /// its lock, as [`crate::Request::discard_findings_about`] refuses it.
     pub replaces: Option<DiscardScope<'a>>,
+    /// The content hash of the bytes a content finding was judged over, and
+    /// `None` for every other finding and for one filed without its bytes.
+    ///
+    /// It is recorded beside the finding, so a later reading of the same bytes
+    /// at a place no row stands at knows the place unchanged
+    /// ([`crate::Request::quarantined_hash`]), and it ends with the finding.
+    /// A hash on any other kind is refused
+    /// ([`crate::StoreError::NotAContentFinding`]): nothing would end it.
+    pub bytes_hash: Option<String>,
 }
 
 /// Where a changeset's post-state came from.
@@ -360,12 +369,20 @@ pub(crate) fn apply(
     // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
-    for DerivedFinding { facts, replaces } in findings {
+    for DerivedFinding {
+        facts,
+        replaces,
+        bytes_hash,
+    } in findings
+    {
         if let Some(scope) = replaces {
             tally.findings_discarded +=
                 request::discard_about_in(&transaction, &facts.path, *scope)?;
         }
         request::write_finding(&transaction, facts)?;
+        if let Some(hash) = bytes_hash {
+            request::record_quarantine(&transaction, facts, hash)?;
+        }
     }
 
     // Link health, re-decided last, so every fact it reads is the one this
