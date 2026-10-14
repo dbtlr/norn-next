@@ -184,6 +184,8 @@ pub(super) fn kind_name(kind: &OperationKind) -> &'static str {
         OperationKind::DeleteDocument { .. } => "delete_document",
         OperationKind::MoveFolder { .. } => "move_folder",
         OperationKind::RewriteLink { .. } => "rewrite_link",
+        OperationKind::RewriteAnchor { .. } => "rewrite_anchor",
+        OperationKind::RewriteTag { .. } => "rewrite_tag",
         OperationKind::RewriteWikilink { .. } => "rewrite_wikilink",
         OperationKind::SetFrontmatter { .. } => "set_frontmatter",
         OperationKind::RemoveFrontmatter { .. } => "remove_frontmatter",
@@ -252,6 +254,20 @@ pub(super) fn operation_cases() -> Vec<(OperationKind, Vec<Publication>)> {
             vec![Replace("h.md")],
         ),
         (
+            OperationKind::rewrite_anchor(
+                path("h.md"),
+                LinkFamily::Wikilink,
+                "source",
+                "Source",
+                "source",
+            ),
+            vec![Replace("h.md")],
+        ),
+        (
+            OperationKind::rewrite_tag(path("h.md"), "draft", "final"),
+            vec![Replace("h.md")],
+        ),
+        (
             OperationKind::rewrite_wikilink(target("source"), target("destination")),
             vec![Replace("h.md"), Replace("k.md")],
         ),
@@ -309,7 +325,7 @@ pub(super) fn tree(root: &Path, verb: Verb) {
         ("subject.md", SUBJECT),
         ("source.md", "# Source\n"),
         ("destination.md", "# Destination\n"),
-        ("h.md", "[[source]]\n"),
+        ("h.md", "[[source]]\n[[source#Source]] #draft\n"),
         ("k.md", "see [[source]]\n"),
         ("gone.md", "gone\n"),
         ("old/a.md", "# A\n"),

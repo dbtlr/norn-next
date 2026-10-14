@@ -37,7 +37,7 @@ pub use derivation::DERIVATION_VERSION;
 pub use evidence::{EvidenceReading, JobEvidence};
 pub use evidence::{
     LinkJudgmentCost, PlanningHoldCost, ReadReading, ReadsSince, RepairAdvisoryCost,
-    RepairBatchCost, SimilarStemsCost,
+    RepairBatchCost, RepairSuggestionsCost, SimilarStemsCost,
 };
 /// **What is running against an entry**, read by the harness that has to know
 /// the host stopped working before it measures one at rest. Behind the same

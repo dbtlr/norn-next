@@ -123,6 +123,27 @@ impl Snapshot {
         })
     }
 
+    /// Read a document's identity and recorded hash through the shared Holder
+    /// point seek, recording its named statement in `record`.
+    pub(crate) fn read_holder(
+        &self,
+        path: &DocumentPath,
+        record: &mut Vec<Ran>,
+    ) -> Result<Option<(i64, String)>, StoreError> {
+        let holder = Ran::new(
+            HeldLinksStatement::Holder,
+            (
+                "SELECT d.id, d.content_hash FROM documents AS d WHERE d.path = ?1".to_string(),
+                vec![Value::Text(path.as_str().to_string())],
+            ),
+        );
+        self.run_statement(record, holder, |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|problem| error::sql("reading a holder's row", problem))
+        .map(|rows| rows.into_iter().next())
+    }
+
     /// The read [`Snapshot::held_links`] answers and
     /// [`Snapshot::held_links_plans`] explains, recording every statement it
     /// runs in `record`.
@@ -131,21 +152,7 @@ impl Snapshot {
         path: &DocumentPath,
         record: &mut Vec<Ran>,
     ) -> Result<Option<HeldLinks>, StoreError> {
-        let holder = Ran::new(
-            HeldLinksStatement::Holder,
-            (
-                "SELECT d.id, d.content_hash FROM documents AS d WHERE d.path = ?1".to_string(),
-                vec![Value::Text(path.as_str().to_string())],
-            ),
-        );
-        let Some((document, content_hash)) = self
-            .run_statement(record, holder, |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|problem| error::sql("reading a holder's row", problem))?
-            .into_iter()
-            .next()
-        else {
+        let Some((document, content_hash)) = self.read_holder(path, record)? else {
             return Ok(None);
         };
         let links = Ran::new(

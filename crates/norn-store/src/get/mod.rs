@@ -169,6 +169,15 @@ pub struct SectionAt {
     pub body: Range<usize>,
 }
 
+/// Indexed headings of one document, beside the hash their derivation read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldHeadings {
+    /// The document's recorded content hash.
+    pub content_hash: String,
+    /// The document's headings in source order, including their stored slugs.
+    pub headings: Vec<HeadingFact>,
+}
+
 /// What [`Snapshot::get`] answers: the report, and what the request could not
 /// apply.
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +386,32 @@ struct Named {
 }
 
 impl Snapshot {
+    /// Read one document's indexed headings without its file or stored body:
+    /// `HeldLinksStatement::Holder` seeks its identity and hash, then the get
+    /// builder's `GetStatement::DocumentHeadings` range seek reads its headings.
+    pub fn held_headings(
+        &self,
+        path: &crate::DocumentPath,
+    ) -> Result<Option<HeldHeadings>, StoreError> {
+        let mut ran = Vec::new();
+        let Some((document, content_hash)) = self.read_holder(path, &mut ran)? else {
+            return Ok(None);
+        };
+        let headings = self
+            .run_statement(
+                &mut ran,
+                compose(&Spelled::DocumentHeadings { document }),
+                stored_heading,
+            )
+            .map_err(|problem| error::sql("reading a document's headings", problem))?
+            .into_iter()
+            .collect::<Result<_, StoreError>>()?;
+        Ok(Some(HeldHeadings {
+            content_hash,
+            headings,
+        }))
+    }
+
     /// The document `params.target` names, answered as `params` asks.
     ///
     /// `declared` is the vault's declaration, read from the schema the

@@ -70,6 +70,8 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteDocument { .. }
         | OperationKind::MoveFolder { .. }
         | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::RewriteWikilink { .. } => return None,
     };
     Some(match target {
@@ -150,6 +152,8 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         | OperationKind::DeleteDocument { .. }
         | OperationKind::MoveFolder { .. }
         | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::RewriteWikilink { .. }
         | OperationKind::WriteControlFile { .. } => {
             unreachable!("only a document-local kind is edited here")
@@ -158,6 +162,183 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
     result
         .map(|edited| Arc::from(edited.into_bytes()))
         .map_err(|error| refusal(&error))
+}
+
+/// Why one name operation cannot compose or its batch cannot prove its text.
+#[derive(Clone)]
+pub(crate) enum NameRefusal {
+    /// No original occurrence matched the operation.
+    NoMatch,
+    /// The holder's bytes are not a readable document.
+    Unreadable,
+    /// The requested link syntax has no anchor editor.
+    UnsupportedSyntax,
+    /// The text layer cannot carry or prove the requested spelling.
+    Text(norn_text::RewriteSkip),
+}
+
+impl NameRefusal {
+    /// Word this refusal for the operation it leaves unresolved.
+    pub(crate) fn detail(&self, kind: &OperationKind) -> String {
+        match self {
+            Self::NoMatch => format!(
+                "no occurrence matches `{}`, so the rewrite changes nothing",
+                kind.name()
+            ),
+            Self::Unreadable => {
+                "the document is not UTF-8 text, so its names cannot be rewritten".to_string()
+            }
+            Self::UnsupportedSyntax => {
+                "no link of this syntax can match an anchor rewrite".to_string()
+            }
+            Self::Text(reason) => format!(
+                "the `{}` edit cannot read back: {}",
+                kind.name(),
+                rewrite_skip(*reason)
+            ),
+        }
+    }
+}
+
+/// The holder's composed bytes and one outcome per name operation.
+pub(crate) type NameComposition = (Arc<[u8]>, Vec<Result<(), NameRefusal>>);
+
+/// Compose one holder's homogeneous name batch with one parse and proof.
+/// Input-aligned scan refusals remain individual; a shared proof refusal
+/// leaves the whole set to the caller's halving search.
+pub(crate) fn rewritten_names(
+    kinds: &[&OperationKind],
+    bytes: &[u8],
+) -> Result<NameComposition, NameRefusal> {
+    let text = document_source(bytes).map_err(|_| NameRefusal::Unreadable)?;
+    let document = Document::parse(text);
+    let result = match kinds[0] {
+        OperationKind::RewriteAnchor { .. } => {
+            let rewrites = kinds
+                .iter()
+                .map(|kind| {
+                    let OperationKind::RewriteAnchor {
+                        syntax,
+                        address,
+                        from,
+                        to,
+                        ..
+                    } = kind
+                    else {
+                        unreachable!("one name kind per batch");
+                    };
+                    let family = match syntax {
+                        LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
+                        LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
+                        _ => return Err(NameRefusal::UnsupportedSyntax),
+                    };
+                    Ok(norn_text::AnchorRewrite::new(family, address, from, to))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            document.rewrite_anchors(&rewrites)
+        }
+        OperationKind::RewriteTag { .. } => {
+            let rewrites: Vec<_> = kinds
+                .iter()
+                .map(|kind| {
+                    let OperationKind::RewriteTag { from, to, .. } = kind else {
+                        unreachable!("one name kind per batch");
+                    };
+                    norn_text::TagRewrite::new(from, to)
+                })
+                .collect();
+            document.rewrite_tags(&rewrites, norn_wire::fold_tag)
+        }
+        _ => unreachable!("only name rewrites compose here"),
+    }
+    .map_err(NameRefusal::Text)?;
+    let outcomes = result
+        .rewritten
+        .into_iter()
+        .map(|count| match count {
+            Ok(0) => Err(NameRefusal::NoMatch),
+            Ok(_) => Ok(()),
+            Err(reason) => Err(NameRefusal::Text(reason)),
+        })
+        .collect();
+    Ok((Arc::from(result.text.into_bytes()), outcomes))
+}
+
+/// Compose a nonempty set over its starting state, never chaining its members.
+/// A shared refusal searches halves over that same state for individual refusals;
+/// the survivors compose again as one batch. If no member is refused individually,
+/// every member takes the set's refusal. Scan refusals remain input-aligned.
+pub(crate) fn compose_set<S, F: Clone, E: Clone>(
+    state: &mut S,
+    fixes: &[F],
+    attempt: &mut impl FnMut(&S, &[F]) -> Result<(S, Vec<Result<(), E>>), E>,
+) -> Vec<Result<(), E>> {
+    match attempt(state, fixes) {
+        Ok((next, outcomes)) => {
+            *state = next;
+            outcomes
+        }
+        Err(reason) => {
+            let mut outcomes = individual_refusals(state, fixes, reason.clone(), attempt);
+            if outcomes.iter().all(Result::is_ok) {
+                return fixes.iter().map(|_| Err(reason.clone())).collect();
+            }
+            let survivors: Vec<_> = fixes
+                .iter()
+                .zip(&outcomes)
+                .filter_map(|(fix, outcome)| outcome.is_ok().then_some(fix.clone()))
+                .collect();
+            if !survivors.is_empty() {
+                for (outcome, retried) in outcomes
+                    .iter_mut()
+                    .filter(|outcome| outcome.is_ok())
+                    .zip(compose_set(state, &survivors, attempt))
+                {
+                    *outcome = retried;
+                }
+            }
+            outcomes
+        }
+    }
+}
+
+/// Search a refused set without carrying any trial's bytes into another trial.
+fn individual_refusals<S, F, E>(
+    state: &S,
+    fixes: &[F],
+    reason: E,
+    attempt: &mut impl FnMut(&S, &[F]) -> Result<(S, Vec<Result<(), E>>), E>,
+) -> Vec<Result<(), E>> {
+    if fixes.len() == 1 {
+        return vec![Err(reason)];
+    }
+    let (left, right) = fixes.split_at(fixes.len() / 2);
+    [left, right]
+        .into_iter()
+        .flat_map(|half| match attempt(state, half) {
+            Ok((_, outcomes)) => outcomes,
+            Err(reason) => individual_refusals(state, half, reason, attempt),
+        })
+        .collect()
+}
+
+/// Word the text layer's refusal without exposing its enum spelling.
+pub(crate) fn rewrite_skip(reason: norn_text::RewriteSkip) -> &'static str {
+    match reason {
+        norn_text::RewriteSkip::Unrepresentable => {
+            "the requested spelling cannot be represented without changing how the document reads"
+        }
+        norn_text::RewriteSkip::WouldCorruptFrontmatter => {
+            "the requested spelling would change the surrounding frontmatter"
+        }
+        norn_text::RewriteSkip::LinkNotRewritable => {
+            "the occurrence's source bytes cannot be rewritten"
+        }
+        norn_text::RewriteSkip::Unplaced => "the occurrence has no literal source span",
+        norn_text::RewriteSkip::ConflictingRewrites => {
+            "the occurrence has conflicting requested spellings"
+        }
+    }
 }
 
 /// `bytes` with every one of `rewrites` composed at once — each link of a

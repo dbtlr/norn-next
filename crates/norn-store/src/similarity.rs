@@ -1,7 +1,9 @@
 //! The one similarity module: the stem fold, the padded trigram set and the
 //! Jaccard score that the stem trigram index, its retrieval read and the
 //! repair planner's suggestions all compute by, so the index and the score
-//! cannot disagree about what a trigram is.
+//! cannot disagree about what a trigram is; and the bounded optimal string
+//! alignment distance that the planner's closest-member and declared-tag
+//! suggestions and the `did_you_mean` hint count edits by.
 //!
 //! **The fold is a suggestion's, never a resolution rule.** NFC then
 //! per-character lowercase decides which stems look alike; it decides nothing
@@ -12,7 +14,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 
-/// The Jaccard threshold the repair planner applies to stem suggestions.
+/// The Jaccard threshold the repair planner applies to stem and heading-anchor
+/// suggestions.
 pub const CUTOFF: Score = Score {
     shared: 1,
     union: 2,
@@ -93,6 +96,39 @@ pub fn jaccard(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Score {
     jaccard_counts(left.intersection(right).count(), left.len(), right.len())
 }
 
+/// The optimal string alignment distance over characters, or `None` past
+/// `bound`. Insertion, removal, replacement and adjacent transposition each
+/// cost one edit, and no substring may be edited twice.
+///
+/// Three rows retain the previous two prefixes a transposition reads.
+pub fn osa_distance(left: &[char], right: &[char], bound: usize) -> Option<usize> {
+    if left.len().abs_diff(right.len()) > bound {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut earlier = previous.clone();
+    let mut current = vec![0; right.len() + 1];
+    for (row, left_char) in left.iter().enumerate() {
+        current[0] = row + 1;
+        for (column, right_char) in right.iter().enumerate() {
+            current[column + 1] = (previous[column] + usize::from(left_char != right_char))
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+            if row > 0
+                && column > 0
+                && *left_char == right[column - 1]
+                && left[row - 1] == *right_char
+            {
+                current[column + 1] = current[column + 1].min(earlier[column - 1] + 1);
+            }
+        }
+        std::mem::swap(&mut earlier, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distance = previous[right.len()];
+    (distance <= bound).then_some(distance)
+}
+
 /// The least shared count implied by the cutoff, since the union holds at least t.
 pub fn required_shared(t: usize) -> usize {
     (t * CUTOFF.shared).div_ceil(CUTOFF.union)
@@ -101,6 +137,26 @@ pub fn required_shared(t: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An adjacent transposition costs one edit over Unicode characters.
+    #[test]
+    fn an_adjacent_transposition_is_one_edit() {
+        assert_eq!(osa_distance(&['é', 'a'], &['a', 'é'], 1), Some(1));
+    }
+
+    /// A distance beyond the requested bound has no answer.
+    #[test]
+    fn the_distance_bound_answers_none_past_it() {
+        assert_eq!(osa_distance(&['a'], &['b', 'c', 'd'], 1), None);
+        assert_eq!(osa_distance(&['a', 'b'], &['c', 'd'], 1), None);
+        assert_eq!(osa_distance(&['a', 'b'], &['c', 'd'], 2), Some(2));
+    }
+
+    /// OSA cannot edit a substring twice as unrestricted Damerau can.
+    #[test]
+    fn a_substring_cannot_be_edited_twice() {
+        assert_eq!(osa_distance(&['c', 'a'], &['a', 'b', 'c'], 3), Some(3));
+    }
 
     #[test]
     fn padding_and_set_shape() {

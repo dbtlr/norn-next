@@ -5409,6 +5409,207 @@ fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_
     assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
 }
 
+/// A holder with a missing heading anchor and its indexed target.
+fn a_vault_with_a_missing_anchor(label: &str) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(
+        label,
+        "version: 1\n",
+        &[
+            ("zz-holder.md", b"[[zz-target#Important Headinh]]\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+        ],
+    )
+}
+
+/// Tag comparisons count even when the read gate finds no possible fix.
+#[test]
+fn an_unfixable_undeclared_tag_counts_each_declared_tag_the_read_gate_compares() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-unfixable-tag-reading",
+        "version: 1\ntags:\n  declared: [alpha, bravo, delta]\n  undeclared: report\n",
+        &[("a.md", b"#zzzzzz\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = host.read_evidence();
+
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+
+    assert!(plan.operations.is_empty());
+    assert_eq!(
+        host.read_evidence()
+            .since(before)
+            .repair_suggestions
+            .declared_tags,
+        3
+    );
+}
+
+/// A Markdown suggestion scores the decoded anchor and rewrites its written fragment.
+#[test]
+fn a_percent_encoded_markdown_anchor_gets_its_closest_heading_fix_and_resolves() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "repair-percent-encoded-anchor",
+        "version: 1\n",
+        &[
+            ("zz-holder.md", b"[x](zz-target.md#Importnt%20Heading)\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_anchor(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "zz-target.md",
+            "Importnt%20Heading",
+            "important-heading",
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Suggested
+    );
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[x](zz-target.md#important-heading)\n"
+    );
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// A changed target heading invalidates the snapshot evidence of an anchor fix.
+#[test]
+fn a_previewed_anchor_suggestion_refuses_apply_when_the_target_heading_changes() {
+    {
+        let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-target-change");
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let plan =
+            previewed(host.repair(
+                repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested),
+            ));
+        assert_eq!(plan.operations.len(), 1);
+        assert!(
+            matches!(&plan.operations[0].conditions[0], norn_wire::AuthorCondition::ContentHash { path, .. } if path == &at("zz-target.md"))
+        );
+        std::fs::write(
+            vault.path().join(FOLDER).join("zz-target.md"),
+            "# Changed Heading\n",
+        )
+        .unwrap();
+        let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+        assert!(!checks.is_empty());
+        assert_eq!(
+            written(&vault, "zz-holder.md"),
+            "[[zz-target#Important Headinh]]\n"
+        );
+    }
+
+    let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-target-unchanged");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let preview = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(preview.clone()),
+    )))
+    else {
+        panic!("the unchanged target admits the previewed plan");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(plan, preview);
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[[zz-target#Important Heading]]\n"
+    );
+}
+
+/// A fresh plan retains the operation's snapshot hash and names it unresolved.
+#[test]
+fn a_refused_anchor_suggestions_fresh_plan_keeps_its_hash_condition_and_unresolved_operation() {
+    let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-fresh-condition");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1);
+    let operation = plan.operations[0].clone();
+    std::fs::write(
+        vault.path().join(FOLDER).join("zz-target.md"),
+        "# Changed Heading\n",
+    )
+    .unwrap();
+    let (refusal, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("a refused plan");
+    };
+    assert!(fresh.operations.is_empty());
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].operation, operation);
+    assert!(matches!(
+        unresolved[0].operation.conditions[0],
+        norn_wire::AuthorCondition::ContentHash { .. }
+    ));
+}
+
+/// Snapshot headings are not suggested when the same plan rewrites the target's tags.
+#[test]
+fn a_closest_heading_is_not_proposed_when_the_plan_rewrites_tags_in_its_target() {
+    for own in [false, true] {
+        let documents: &[(&str, &[u8])] = if own {
+            &[("zz-holder.md", b"# Notes #darft\n[[#Notes darft]]\n")]
+        } else {
+            &[
+                ("zz-holder.md", b"[[zz-target#Notes darft]]\n"),
+                ("zz-target.md", b"# Notes #darft\n"),
+            ]
+        };
+        let (_sandbox, vault, host) = a_vault_under(
+            "repair-anchor-target-tag-rewrite",
+            "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n",
+            documents,
+        );
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        for threshold in [Confidence::Suggested, Confidence::DEFAULT_THRESHOLD] {
+            let plan = previewed(
+                host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(threshold)),
+            );
+            if threshold == Confidence::Suggested {
+                assert!(
+                    plan.operations.iter().any(|operation| matches!(
+                        operation.kind,
+                        OperationKind::RewriteTag { .. }
+                    ))
+                );
+            }
+            assert!(
+                !plan
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::RewriteAnchor { .. }))
+            );
+            assert!(provenance(&plan).skipped.iter().all(|skip| !matches!(
+                skip.proposed.as_ref().map(|operation| &operation.kind),
+                Some(OperationKind::RewriteAnchor { .. })
+            )));
+        }
+    }
+}
+
 /// Wait until the out-of-band move has been derived and the holder is broken.
 fn moved_on_disk(host: &attach::ServingHost, vault: &attach::Vault, from: &str, to: &str) {
     let destination = vault.path().join(FOLDER).join(to);

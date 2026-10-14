@@ -140,8 +140,9 @@ impl Reckoned<'_> {
             if !result.introduced.is_empty() {
                 for (at, answer) in &group {
                     composed.decided[*at] = composing
-                        .introduced_skip(&self.rows[*at], &state, &result.introduced, None)
-                        .map(|skipped| answer.skipped(skipped));
+                        .introducing(&state, &result.introduced, &self.rows[*at], None)
+                        .err()
+                        .map(|skipped| answer.skipped(*skipped));
                 }
                 continue;
             }

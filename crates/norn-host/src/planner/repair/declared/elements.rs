@@ -150,6 +150,11 @@ pub(super) fn fix_field(
             continue;
         };
         let set = document.set(&state.at, field, replaced.clone());
+        if replacement.level == Confidence::Suggested {
+            let mut work = document.repairing.work.get();
+            work.compositions += 1;
+            document.repairing.work.set(work);
+        }
         let admitted = document
             .admit(
                 &current,
@@ -179,7 +184,12 @@ pub(super) fn fix_field(
                 current = next;
                 cites.push(cited(row, replacement.level, replacement.notes));
             }
-            Err(skip) => skipped.push((at, *skip)),
+            Err(mut skip) => {
+                if skip.reason == SkipReason::BelowThreshold && !replacement.notes.is_empty() {
+                    skip.note = Some(replacement.notes.join("; "));
+                }
+                skipped.push((at, *skip));
+            }
         }
     }
     if cites.is_empty() {

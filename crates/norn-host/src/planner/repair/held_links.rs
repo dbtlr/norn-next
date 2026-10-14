@@ -1,9 +1,11 @@
 //! Held links: which skipped link findings the plan's final state still
 //! holds.
 //!
-//! **A repair settles every link finding its fixes leave skipped.** A broken
-//! link not followed through a move, a link naming a heading that is not there,
-//! or an ambiguous one is skipped from its row. A route's move can still change what another
+//! **A repair settles every link finding its fixes leave skipped.** An
+//! admitted closest-heading fix is cited and never enters this settlement. A
+//! broken link not followed through a move, a link naming a heading that is
+//! not there without an admitted fix, or an ambiguous one is skipped from its
+//! row. A route's move can still change what another
 //! document's link resolves to, and a finding the final state no longer holds
 //! is **dropped** — neither fixed nor skipped — as a finding the judgment of
 //! a document's bytes concludes the composed document no longer holds is. This

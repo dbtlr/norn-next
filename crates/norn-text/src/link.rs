@@ -180,6 +180,32 @@ impl Link {
             .map(|span| span.byte_offset..span.byte_offset + self.raw.len())
     }
 
+    /// The heading fragment's written bytes inside the token, excluding `#`.
+    /// A decoded or escaped destination with no literal stem has no such span.
+    pub fn heading_anchor_range(&self) -> Option<Range<usize>> {
+        self.anchor.as_ref()?;
+        let stem = self.stem_range.as_ref()?;
+        let start = stem.end + 1;
+        if self.raw.get(stem.end..start)? != "#" {
+            return None;
+        }
+        let end = match self.family {
+            LinkFamily::Wikilink => {
+                let addressed = self
+                    .raw
+                    .get(..self.raw.len().checked_sub(2)?)?
+                    .split('|')
+                    .next()?;
+                addressed.trim_end().len()
+            }
+            LinkFamily::Markdown => {
+                let close = self.raw.get(..stem.start)?.rfind(']')?;
+                destination_span(&self.raw, close)?.end
+            }
+        };
+        (start <= end).then_some(start..end)
+    }
+
     /// How this link's stem is to be resolved: its protocol when it was
     /// written with one, and otherwise its family's reading.
     ///
@@ -360,7 +386,7 @@ pub(crate) fn markdown_link(
 /// with its own copy of this loop: the store depends on no text layer, and a
 /// segment that decodes to no UTF-8 names no document there rather than
 /// standing as written.
-fn decoded(fragment: &str) -> String {
+pub fn decoded(fragment: &str) -> String {
     let bytes = fragment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -581,15 +607,15 @@ pub(crate) fn addresses_the_vault(link: &Link) -> bool {
     !matches!(link.resolution(), Resolution::Protocol(scheme) if scheme != VAULT_PROTOCOL)
 }
 
-/// Why a matching link was not rewritten.
+/// Why a matching link or tag occurrence was not rewritten.
 ///
 /// Plain rather than `#[non_exhaustive]`: a consumer that has not decided how
 /// to word a new reason should fail to compile rather than fall into a
 /// default arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RewriteSkip {
-    /// `to` cannot be written where this link's target is written and read
-    /// back as `to`: it is no target this family can spell, its protocol is
+    /// `to` cannot be written over the selected address, heading anchor or
+    /// tag name and read back as `to`: it is no target this family can spell, its protocol is
     /// not the link's, or the bytes it would put there change what the
     /// document reads — the link itself, or a link, heading, tag or code span
     /// around it. A link written inside the stem of another link the batch

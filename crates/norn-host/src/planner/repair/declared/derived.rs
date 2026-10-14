@@ -153,7 +153,16 @@ pub(super) fn fix_value(
                 .with_note(note),
         ));
     }
-    document.within_threshold(replacement.level, row, &set)?;
+    // A suggestion below the threshold carries its score note, as an
+    // element's does ([`super::elements`]).
+    document
+        .within_threshold(replacement.level, row, &set)
+        .map_err(|mut skip| {
+            if !replacement.notes.is_empty() {
+                skip.note = Some(replacement.notes.join("; "));
+            }
+            skip
+        })?;
     Ok(Fix {
         removed_field: None,
         operations: vec![set],
@@ -174,7 +183,7 @@ pub(super) fn replacement(member: AuthoredValue) -> Replacement {
 
 /// What a shape fix reaches now, or leaves for the settled routes to answer.
 pub(super) enum Reshaping {
-    Fixed(Fix),
+    Fixed(Box<Fix>),
     NeedsLinks,
 }
 
@@ -211,7 +220,7 @@ pub(super) fn reshape(
             replacement(link),
             vetoed,
         )
-        .map(Reshaping::Fixed);
+        .map(|fix| Reshaping::Fixed(Box::new(fix)));
     }
     let Some(reshaped) = reshaped(shape, &value) else {
         return Err(Box::new(crate::planner::repair::skipped(row)));
@@ -245,12 +254,12 @@ pub(super) fn reshape(
                 ));
             }
             document.within_threshold(Confidence::Derived, row, &set)?;
-            return Ok(Reshaping::Fixed(Fix {
+            return Ok(Reshaping::Fixed(Box::new(Fix {
                 removed_field: None,
                 operations: vec![set],
                 cited: vec![cited(row, Confidence::Derived, Vec::new())],
                 state: composed,
-            }));
+            })));
         }
         Err(skip) => skip,
     };
@@ -270,7 +279,7 @@ pub(super) fn reshape(
         elements::Reshaped::NeedsLinks => Ok(Reshaping::NeedsLinks),
         elements::Reshaped::Replaced(replacement) => {
             fix_value(document, state, row, finding, field, replacement, vetoed)
-                .map(Reshaping::Fixed)
+                .map(|fix| Reshaping::Fixed(Box::new(fix)))
         }
     }
 }
@@ -351,7 +360,7 @@ pub(super) fn excluded(row: &FindingRow, schema: &VaultSchema) -> Option<Skipped
 /// characters that read as one. Two texts folding equal therefore both hold a
 /// wikilink or neither does, and since a closed set holds none, a value that
 /// folds equal to a member holds none.
-fn fold(text: &str) -> String {
+pub(super) fn fold(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()

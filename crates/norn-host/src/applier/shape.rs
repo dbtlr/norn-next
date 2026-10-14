@@ -118,6 +118,46 @@ mod tests {
         )])
     }
 
+    /// An anchor rewrite accounts for its document's transition.
+    #[test]
+    fn a_rewrite_anchor_accepts_its_planned_transition() {
+        let vault = MemoryVault::with(&[]);
+        let plan = plan(
+            vec![Operation::new(OperationKind::rewrite_anchor(
+                path("h.md"),
+                norn_wire::LinkFamily::Wikilink,
+                "a",
+                "Old",
+                "New",
+            ))],
+            vec![Transition::new(
+                path("h.md"),
+                FileState::absent(),
+                FileState::absent(),
+            )],
+        );
+        assert!(shape_disagrees(&plan, VaultView::normalizer(&vault)).is_empty());
+    }
+
+    /// A tag rewrite accounts for its document's transition.
+    #[test]
+    fn a_rewrite_tag_accepts_its_planned_transition() {
+        let vault = MemoryVault::with(&[]);
+        let plan = plan(
+            vec![Operation::new(OperationKind::rewrite_tag(
+                path("h.md"),
+                "work",
+                "Place",
+            ))],
+            vec![Transition::new(
+                path("h.md"),
+                FileState::absent(),
+                FileState::absent(),
+            )],
+        );
+        assert!(shape_disagrees(&plan, VaultView::normalizer(&vault)).is_empty());
+    }
+
     /// **A cascade's holder is a file its operation touches**, so a plan
     /// carrying a transition at it is shaped as its operations are.
     #[test]

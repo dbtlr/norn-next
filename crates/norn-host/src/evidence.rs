@@ -1100,6 +1100,7 @@ pub(crate) struct ReadEvidence {
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
     similar_stems: SimilarStemsAccount,
+    repair_suggestions: RepairSuggestionsAccount,
     repair_advisories: RepairAdvisoryAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
@@ -1267,6 +1268,8 @@ pub struct ReadReading {
     pub repair_batches: RepairBatchCost,
     /// Work reported by similarity candidate reads.
     pub similar_stems: SimilarStemsCost,
+    /// Logical candidates the repair suggestions read.
+    pub repair_suggestions: RepairSuggestionsCost,
     /// What repair advisory passes reported on the planning hold.
     pub repair_advisories: RepairAdvisoryCost,
     /// What the read holds this host planned on ran on their snapshots, over
@@ -1323,6 +1326,8 @@ pub struct ReadsSince {
     pub repair_batches: RepairBatchCost,
     /// Work reported by similarity candidate reads.
     pub similar_stems: SimilarStemsCost,
+    /// Logical candidates the repair suggestions read.
+    pub repair_suggestions: RepairSuggestionsCost,
     /// What repair advisory passes reported on the planning hold.
     pub repair_advisories: RepairAdvisoryCost,
     /// What this window's planning holds ran on their snapshots.
@@ -1360,6 +1365,7 @@ impl ReadReading {
                 .since(earlier.preview_link_judgments),
             repair_batches: self.repair_batches.since(earlier.repair_batches),
             similar_stems: self.similar_stems.since(earlier.similar_stems),
+            repair_suggestions: self.repair_suggestions.since(earlier.repair_suggestions),
             repair_advisories: self.repair_advisories.since(earlier.repair_advisories),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
@@ -1391,6 +1397,7 @@ impl ReadEvidence {
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
             similar_stems: self.similar_stems.read(),
+            repair_suggestions: self.repair_suggestions.read(),
             repair_advisories: self.repair_advisories.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
@@ -1407,6 +1414,11 @@ impl ReadEvidence {
     /// read answered.
     pub(crate) fn count_repair_batch(&self, cost: RepairBatchCost) {
         self.repair_batches.add(cost);
+    }
+
+    /// Record the candidate work a repair's planner reported.
+    pub(crate) fn count_repair_suggestions(&self, cost: RepairSuggestionsCost) {
+        self.repair_suggestions.add(cost);
     }
 
     /// Count the similarity reads made on a repair planning hold.
@@ -1803,6 +1815,66 @@ impl RepairBatchAccount {
             validate_full_scan_steps: get(&self.validate_full_scan_steps),
             validate_sorts: get(&self.validate_sorts),
             validate_vm_steps: get(&self.validate_vm_steps),
+        }
+    }
+}
+
+/// Candidate reads and whole-document compositions spent by the three suggestions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepairSuggestionsCost {
+    /// Whole-document suggestion compositions, including refused attempts.
+    pub compositions: u64,
+    /// The closed-set members compared.
+    pub closed_set_members: u64,
+    /// The literal declared tags compared.
+    pub declared_tags: u64,
+    /// The rows the target-heading seeks returned.
+    pub headings: u64,
+}
+
+impl RepairSuggestionsCost {
+    /// Suggestion work spent between an earlier total and this one.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            compositions: self.compositions.saturating_sub(earlier.compositions),
+            closed_set_members: self
+                .closed_set_members
+                .saturating_sub(earlier.closed_set_members),
+            declared_tags: self.declared_tags.saturating_sub(earlier.declared_tags),
+            headings: self.headings.saturating_sub(earlier.headings),
+        }
+    }
+}
+
+/// Running totals written when a repair's planner hands back its work.
+#[derive(Debug, Default)]
+struct RepairSuggestionsAccount {
+    compositions: AtomicU64,
+    closed_set_members: AtomicU64,
+    declared_tags: AtomicU64,
+    headings: AtomicU64,
+}
+
+impl RepairSuggestionsAccount {
+    /// Add one planner's suggestion work.
+    fn add(&self, cost: RepairSuggestionsCost) {
+        self.compositions
+            .fetch_add(cost.compositions, Ordering::Relaxed);
+        self.closed_set_members
+            .fetch_add(cost.closed_set_members, Ordering::Relaxed);
+        self.declared_tags
+            .fetch_add(cost.declared_tags, Ordering::Relaxed);
+        self.headings.fetch_add(cost.headings, Ordering::Relaxed);
+    }
+
+    /// Read the lifetime totals.
+    fn read(&self) -> RepairSuggestionsCost {
+        RepairSuggestionsCost {
+            compositions: self.compositions.load(Ordering::Relaxed),
+            closed_set_members: self.closed_set_members.load(Ordering::Relaxed),
+            declared_tags: self.declared_tags.load(Ordering::Relaxed),
+            headings: self.headings.load(Ordering::Relaxed),
         }
     }
 }

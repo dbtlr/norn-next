@@ -54,7 +54,9 @@
 //!   grows with the vault, run at the same two attachments, and each control
 //!   must read more at the larger scale on the counts it names. The similar-stems
 //!   pair reads planted stems whose trigrams no generated stem carries, beside
-//!   a generated stem control whose rarity rows grow with the vault. A plan's
+//!   a generated stem control whose rarity rows grow with the vault. Suggestion
+//!   candidate counters — closed-set members, declared tags and heading rows —
+//!   follow M, D and H, not the vault. A plan's
 //!   links are held the same way: judging the links a hub's delete reaches,
 //!   and generating the cascade a hub's move plans, each cost the hub's
 //!   in-links at both scales. A hub's write and the judgment of its delete
@@ -3864,6 +3866,16 @@ fn repair_reading(
     let held = spent.planning_holds;
     let judged = spent.preview_link_judgments;
     let counters = [
+        (
+            "suggestion_members",
+            spent.repair_suggestions.closed_set_members,
+        ),
+        (
+            "suggestion_compositions",
+            spent.repair_suggestions.compositions,
+        ),
+        ("suggestion_tags", spent.repair_suggestions.declared_tags),
+        ("suggestion_headings", spent.repair_suggestions.headings),
         ("repair_batches", batch.batches),
         ("validate_statements", batch.validate_statements),
         ("validate_rows_read", batch.validate_rows_read),
@@ -5958,6 +5970,226 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
         &counters,
     );
     counters
+}
+
+/// Preview the three suggestions on one holder with M members, D literal
+/// tags and H indexed headings, retaining only their logical candidate work.
+/// The field finding admits the holder before the read gate compares any tags.
+fn suggestion_reading(profile: &norn_fixtures::Profile, sizes: [usize; 3]) -> CounterSnapshot {
+    let [members, tags, headings] = sizes;
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "counter-gate-suggestions",
+    )
+    .unwrap();
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let member_names: String = std::iter::once("done".to_string())
+        .chain((1..members).map(|n| format!("unrelated-member-{n}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tag_names: String = std::iter::once("draft".to_string())
+        .chain((1..tags).map(|n| format!("unrelated-tag-{n}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let schema = format!(
+        "version: 1\ntags:\n  declared: [{tag_names}]\n  undeclared: report\nrules:\n  probe:\n    match: {{frontmatter: {{type: suggestion-probe}}}}\n    one_of:\n      status: {{values: [{member_names}]}}\n"
+    );
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).unwrap();
+    std::fs::write(vault.path().join("zz-suggestion-holder.md"), "---\ntype: suggestion-probe\nstatus: dnoe\n---\n#darft [[zz-suggestion-target#Important Headinh]]\n").unwrap();
+    let target: String = std::iter::once("# Important Heading\n".to_string())
+        .chain((1..headings).map(|n| format!("# Unrelated Section {n}\n")))
+        .collect();
+    std::fs::write(vault.path().join("zz-suggestion-target.md"), target).unwrap();
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mut last = None;
+    for threshold in [
+        norn_wire::Confidence::Suggested,
+        norn_wire::Confidence::DEFAULT_THRESHOLD,
+    ] {
+        let before = host.read_evidence();
+        let answered = host
+            .repair(
+                norn_wire::RepairParams::new(
+                    VaultAddress::name(vault.name().clone()),
+                    norn_wire::ApplyMode::Preview,
+                )
+                .with_threshold(threshold)
+                .with_predicates([Predicate::path("zz-suggestion-holder.md")]),
+            )
+            .unwrap()
+            .wait()
+            .unwrap();
+        let norn_wire::ApplyReport::Previewed { plan, .. } = answered.report else {
+            panic!("a preview");
+        };
+        assert_eq!(
+            plan.operations.len(),
+            if threshold == norn_wire::Confidence::Suggested {
+                3
+            } else {
+                0
+            }
+        );
+        let work = host.read_evidence().since(before).repair_suggestions;
+        let reading: CounterSnapshot = [
+            ("suggestion_members", work.closed_set_members),
+            ("suggestion_tags", work.declared_tags),
+            ("suggestion_headings", work.headings),
+        ]
+        .into_iter()
+        .collect();
+        for (key, expected) in [
+            ("suggestion_members", members),
+            ("suggestion_tags", tags),
+            ("suggestion_headings", headings),
+        ] {
+            let multiplier = if threshold == norn_wire::Confidence::DEFAULT_THRESHOLD
+                && key != "suggestion_headings"
+            {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                reading.get(key),
+                (expected * multiplier) as u64,
+                "{threshold:?}: {key}"
+            );
+        }
+        if threshold == norn_wire::Confidence::Suggested {
+            last = Some(reading);
+        }
+    }
+    last.expect("both thresholds were read")
+}
+
+/// Hold the selected candidate count to its parameter and the two other
+/// counts to two, then hold the same work to the realistic profile pair.
+fn suggestions_follow_parameter(parameter: usize) {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").unwrap();
+    let large = norn_fixtures::Profile::by_name("realistic").unwrap();
+    let keys = [
+        "suggestion_members",
+        "suggestion_tags",
+        "suggestion_headings",
+    ];
+    for value in [2, 4, 8] {
+        let mut sizes = [2; 3];
+        sizes[parameter] = value;
+        let work = suggestion_reading(&small, sizes);
+        record_the_counters("suggestion parameter", &work);
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(work.get(key), sizes[index] as u64);
+        }
+    }
+    SizeIndependencePair::new(
+        "repair suggestion candidates",
+        ScaleObservation::new(&small, suggestion_reading(&small, [2; 3])),
+        ScaleObservation::new(&large, suggestion_reading(&large, [2; 3])),
+    )
+    .assert_size_independent();
+}
+
+/// Closed-set comparisons follow set size and are independent of vault size.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn suggestion_members_follow_set_size_and_are_independent_of_vault_size() {
+    suggestions_follow_parameter(0);
+}
+
+/// Literal-tag comparisons follow D and are independent of vault size.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn suggestion_tags_follow_declared_count_and_are_independent_of_vault_size() {
+    suggestions_follow_parameter(1);
+}
+
+/// The heading seek returns H rows regardless of the surrounding vault size.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn suggestion_headings_follow_heading_count_and_are_independent_of_vault_size() {
+    suggestions_follow_parameter(2);
+}
+
+/// Read the work of one holder's anchor or tag batch at the suggested threshold.
+fn name_batch_reading(count: usize, tags: bool) -> norn_host::RepairSuggestionsCost {
+    the_hosts_account_is_readable();
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "counter-gate-name-batch",
+    )
+    .unwrap();
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "ambiguous");
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n",
+    )
+    .unwrap();
+    let source = if tags {
+        [
+            "darft", "draff", "draftt", "draf", "craft", "graft", "drift", "drafts",
+        ][..count]
+            .iter()
+            .map(|tag| format!("#{tag}\n"))
+            .collect::<String>()
+    } else {
+        ['b', 'c', 'd', 'e', 'f', 'h', 'i', 'j'][..count]
+            .iter()
+            .map(|letter| format!("[[zz-name-target#Important Headin{letter}]]\n"))
+            .collect::<String>()
+    };
+    std::fs::write(vault.path().join("zz-name-holder.md"), source).unwrap();
+    std::fs::write(
+        vault.path().join("zz-name-target.md"),
+        "# Important Heading\n# Unrelated Section\n",
+    )
+    .unwrap();
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = host.read_evidence();
+    let answer = host
+        .repair(
+            norn_wire::RepairParams::new(
+                VaultAddress::name(vault.name().clone()),
+                norn_wire::ApplyMode::Preview,
+            )
+            .with_threshold(norn_wire::Confidence::Suggested)
+            .with_predicates([Predicate::path("zz-name-holder.md")]),
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+    let norn_wire::ApplyReport::Previewed { plan, .. } = answer.report else {
+        panic!("a preview");
+    };
+    assert_eq!(plan.operations.len(), count);
+    host.read_evidence().since(before).repair_suggestions
+}
+
+/// More missing anchors on one target spend one holder composition and one H seek.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn missing_anchor_batches_keep_holder_compositions_and_heading_reads_flat() {
+    for count in [2, 4, 8] {
+        let work = name_batch_reading(count, false);
+        assert_eq!(work.compositions, 1);
+        assert_eq!(work.headings, 2);
+    }
+}
+
+/// More undeclared tags spend one holder composition and D comparisons per finding,
+/// beside the read gate's: at most D per finding, stopping at the first finding with
+/// a fix. Here that is one, since the only declared tag is one edit from the first.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn undeclared_tag_batches_keep_holder_compositions_flat() {
+    for count in [2, 4, 8] {
+        let work = name_batch_reading(count, true);
+        assert_eq!(work.compositions, 1);
+        assert_eq!(work.declared_tags, count as u64 + 1);
+    }
 }
 
 /// Each advisory parameter moves its own logical work, including the spelling merge

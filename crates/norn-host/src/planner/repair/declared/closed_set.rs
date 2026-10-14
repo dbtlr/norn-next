@@ -1,6 +1,6 @@
 //! Closed-set fixes: the member a value outside a closed set is replaced by.
 //!
-//! **Two levels answer a selected `field/not-one-of` finding.** The declared
+//! **Three levels answer a selected `field/not-one-of` finding.** The declared
 //! candidates are the members the contributing rules' synonyms for the
 //! offending value map it to. A rule that declares a `one_of` on the field
 //! but no synonym for the value proposes nothing. The value is compared with a
@@ -11,7 +11,9 @@
 //! The derived answer is the one member of the combined closed set that
 //! differs from the value only by case and white space
 //! ([`super::derived::Folds`]). A closed set holds no wikilink, so no fold
-//! re-cases a link.
+//! re-cases a link. If that fold finds none and no declared candidate exists,
+//! a suggested answer takes the nearest combined member by OSA under the
+//! derived fold and NFC, within max(1, n / 4) edits for its n characters.
 //!
 //! **The strongest level present decides.** A declared candidate decides even
 //! where the combined constraint or the judge refuses it: the derived answer
@@ -22,9 +24,10 @@
 //! outside the combined closed set the co-selecting rules narrow the field
 //! to, is [`SkipReason::JudgeWouldRefuse`], with every candidate, the derived
 //! answer among them. With no declared candidate the derived answer decides:
-//! one member is written, several are [`SkipReason::Tie`] with those members,
-//! and none is [`SkipReason::NoDeclaredFix`], with the offending value. A
-//! derived level the request's threshold does not admit decides nothing.
+//! one member is written and several tie when derived fixes are admitted.
+//! With no folded member, the suggested nearest member is considered;
+//! equal best distances tie only when suggestions are admitted. No answer
+//! is [`SkipReason::NoDeclaredFix`], with the offending value.
 //!
 //! **A field's offending values are fixed together**
 //! ([`elements`](super::elements)): a scalar field's one finding is a
@@ -72,6 +75,9 @@ pub(super) fn propose(
             Folded::Many(members) if derived_admitted => Proposed::Skipped(Box::new(
                 skip(row, SkipReason::Tie).with_candidates(derived_candidates(&members)),
             )),
+            Folded::None if offending.string && schema.compares_as_text(field) => {
+                closest(document, field, offending)
+            }
             Folded::Many(_) | Folded::None => {
                 Proposed::Skipped(Box::new(crate::planner::repair::skipped(row)))
             }
@@ -111,7 +117,7 @@ fn differing(derived: &str) -> String {
 
 /// The candidates a skip carries when the derived members `members` are the
 /// ones in question: proposed by no named rule.
-fn derived_candidates(members: &[String]) -> SkippedCandidates {
+pub(super) fn derived_candidates(members: &[String]) -> SkippedCandidates {
     pooled(&[], members)
 }
 
@@ -158,4 +164,78 @@ fn proposals(
         }
     }
     proposals
+}
+
+/// The fixed score wording of a closest-member suggestion.
+fn score_note(member: &str, distance: usize, bound: usize, characters: usize) -> String {
+    let edits = if distance == 1 { "edit" } else { "edits" };
+    format!(
+        "closest member `{member}` is {distance} {edits} away by optimal string alignment, at most {bound} for its {characters} characters"
+    )
+}
+
+/// The unique nearest combined member under the derived fold and NFC.
+fn closest(document: &Document<'_>, field: &str, offending: &Offending<'_>) -> Proposed {
+    use norn_store::similarity;
+    let rules: Vec<_> = offending
+        .held
+        .rules
+        .iter()
+        .filter_map(|name| document.schema().rule(name))
+        .collect();
+    let combined = document.schema().combined(&rules);
+    let set = combined.field(field).and_then(|field| field.one_of());
+    let fold = |text: &str| {
+        similarity::fold(&super::derived::fold(text))
+            .chars()
+            .collect::<Vec<_>>()
+    };
+    let value = fold(offending.text);
+    let mut best = usize::MAX;
+    let mut winners = Vec::new();
+    for member in set.into_iter().flat_map(|set| set.members()) {
+        let mut work = document.repairing.work.get();
+        work.closed_set_members += 1;
+        document.repairing.work.set(work);
+        let folded = fold(member);
+        let bound = 1.max(folded.len() / 4);
+        if let Some(distance) = similarity::osa_distance(&value, &folded, bound) {
+            if distance < best {
+                best = distance;
+                winners.clear();
+            }
+            if distance == best {
+                winners.push((member.to_string(), bound, folded.len()));
+            }
+        }
+    }
+    let Some((first, rest)) = winners.split_first() else {
+        return Proposed::Skipped(Box::new(crate::planner::repair::skipped(offending.row)));
+    };
+    let members: Vec<_> = winners
+        .iter()
+        .map(|(member, _, _)| member.clone())
+        .collect();
+    if !rest.is_empty() {
+        return Proposed::Skipped(Box::new(if document.admits(Confidence::Suggested) {
+            skip(offending.row, SkipReason::Tie)
+                .with_candidates(derived_candidates(&members))
+                .with_note(
+                    winners
+                        .iter()
+                        .take(norn_wire::CANDIDATE_HEAD)
+                        .map(|(member, bound, n)| score_note(member, best, *bound, *n))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+        } else {
+            crate::planner::repair::skipped(offending.row)
+        }));
+    }
+    Proposed::Replace(Replacement {
+        member: AuthoredValue::string(&first.0),
+        level: Confidence::Suggested,
+        candidates: derived_candidates(&members),
+        notes: vec![score_note(&first.0, best, first.1, first.2)],
+    })
 }

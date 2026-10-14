@@ -636,6 +636,7 @@ mod tests {
         };
         let one = OneReading::of(&clock);
         let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
             declared: &declared,
             case: norn_wire::CaseFold::Exact,
             clock: &one,

@@ -6,8 +6,10 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ops::Range;
 
-use crate::document::{Document, splice_all};
+use crate::Value;
+use crate::document::{Document, literal_text_offset, splice_all};
 use crate::link::{Link, LinkFamily, RewriteSkip, addresses_the_vault, respelled, split_protocol};
+use crate::tag::frontmatter_tag_name;
 
 /// One address a link rewrite respells: in the document rewritten, every link
 /// of `family` whose address is `from` is respelled `to`.
@@ -94,7 +96,374 @@ pub struct SkippedLink {
     pub reason: RewriteSkip,
 }
 
+/// One heading fragment respelling, matched against the original document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorRewrite {
+    /// The link syntax to match.
+    pub family: LinkFamily,
+    /// The exact written address, including its protocol prefix.
+    pub address: String,
+    /// The heading fragment as written before the batch.
+    pub from: String,
+    /// The heading fragment to write.
+    pub to: String,
+}
+
+impl AnchorRewrite {
+    /// Respell the matching heading fragments while keeping their addresses.
+    pub fn new(
+        family: LinkFamily,
+        address: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        Self {
+            family,
+            address: address.into(),
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+/// One whole tag name respelling, matched under the batch's fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRewrite {
+    /// The original tag name without its marker.
+    pub from: String,
+    /// The exact replacement name without its marker.
+    pub to: String,
+}
+
+impl TagRewrite {
+    /// Respell every matching whole name, preserving its marker convention.
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+/// A proven name batch and each respelling's occurrence count or scan refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewrittenText {
+    /// The whole document, with only the accepted name spans changed.
+    pub text: String,
+    /// One count or scan refusal per input respelling, in input order.
+    pub rewritten: Vec<Result<usize, RewriteSkip>>,
+}
+
+/// Refuse every input naming the same original occurrence.
+fn refuse_names(
+    indices: &[usize],
+    written: &mut [Result<usize, RewriteSkip>],
+    reason: RewriteSkip,
+) {
+    for &index in indices {
+        written[index] = Err(reason);
+    }
+}
+
+/// Select one target for an occurrence, refusing conflicting spellings together.
+fn name_target<'a>(
+    indices: &[usize],
+    targets: &[&'a str],
+    written: &mut [Result<usize, RewriteSkip>],
+) -> Option<(usize, &'a str)> {
+    let first = indices[0];
+    if written[first].is_err() {
+        return None;
+    }
+    let to = targets[first];
+    if indices.iter().any(|&index| targets[index] != to) {
+        refuse_names(indices, written, RewriteSkip::ConflictingRewrites);
+        return None;
+    }
+    Some((first, to))
+}
+
 impl Document<'_> {
+    /// Respell original heading fragments in one scan and one read-back proof.
+    /// Scan refusals belong to their respelling; block references never match.
+    /// Targets do not chain, and conflicting targets refuse their shared occurrence.
+    ///
+    /// # Errors
+    /// The whole batch is refused when the shared read-back proof fails.
+    pub fn rewrite_anchors(
+        &self,
+        rewrites: &[AnchorRewrite],
+    ) -> Result<RewrittenText, RewriteSkip> {
+        let mut rules: HashMap<_, Vec<usize>> = HashMap::new();
+        for (index, rewrite) in rewrites.iter().enumerate() {
+            let address = Address::of(&rewrite.address);
+            rules
+                .entry((
+                    rewrite.family,
+                    address.protocol,
+                    address.target,
+                    rewrite.from.as_str(),
+                ))
+                .or_default()
+                .push(index);
+        }
+        let targets: Vec<_> = rewrites.iter().map(|rewrite| rewrite.to.as_str()).collect();
+        let mut written = vec![Ok(0); rewrites.len()];
+        let mut edits = Vec::new();
+        for (ordinal, link) in self
+            .frontmatter_wikilinks()
+            .into_iter()
+            .chain(self.links())
+            .enumerate()
+        {
+            let Some(anchor) = link.anchor.as_deref() else {
+                continue;
+            };
+            let fragment = link.heading_anchor_range();
+            let from = fragment
+                .as_ref()
+                .map(|range| &link.raw[range.clone()])
+                .unwrap_or(anchor);
+            let Some(indices) = rules.get(&(
+                link.family,
+                link.protocol.clone(),
+                link.target.clone(),
+                from,
+            )) else {
+                continue;
+            };
+            let Some((rule, to)) = name_target(indices, &targets, &mut written) else {
+                continue;
+            };
+            let refusal = if fragment.is_none() {
+                Some(RewriteSkip::LinkNotRewritable)
+            } else if to.contains(['\r', '\n'])
+                || (link.family == LinkFamily::Markdown && to.contains('|'))
+            {
+                Some(RewriteSkip::Unrepresentable)
+            } else if link.span.is_none() {
+                Some(RewriteSkip::Unplaced)
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                refuse_names(indices, &mut written, reason);
+                continue;
+            }
+            let fragment = fragment.expect("a placed heading fragment");
+            let at = link.span.expect("a placed link").byte_offset;
+            let token = splice_all(&link.raw, &[(fragment.clone(), to)]);
+            for &index in indices {
+                if let Ok(count) = &mut written[index] {
+                    *count += 1;
+                }
+            }
+            edits.push((
+                rule,
+                Edit {
+                    ordinal,
+                    anchor: true,
+                    at,
+                    range: at + fragment.start..at + fragment.end,
+                    to: to.to_string(),
+                    token,
+                    link,
+                    in_frontmatter: at < self.body_start(),
+                },
+            ));
+        }
+        let mut edits: Vec<_> = edits
+            .into_iter()
+            .filter(|(rule, _)| written[*rule].is_ok())
+            .map(|(_, edit)| edit)
+            .collect();
+        edits.sort_by_key(|edit| edit.range.start);
+        let text = Proof::of(self)
+            .read_back(&edits.iter().collect::<Vec<_>>())
+            .map_err(|_| RewriteSkip::Unrepresentable)?
+            .ok_or(RewriteSkip::Unrepresentable)?;
+        Ok(RewrittenText {
+            text,
+            rewritten: written,
+        })
+    }
+
+    /// Respell original whole tag names in one scan and one read-back proof.
+    /// The caller supplies the derivation fold. Each occurrence keeps its marker;
+    /// scan refusals belong to one respelling, and targets never chain.
+    /// An entry without a literal place is respelled by rewriting the tags field
+    /// in its own spelling where that field reads back, as it does for a flow-list
+    /// item. A folded scalar, and an escaped block-list item followed by another
+    /// entry, are refused.
+    ///
+    /// # Errors
+    /// The shared proof refuses the batch if its edited facts or frontmatter differ.
+    pub fn rewrite_tags(
+        &self,
+        rewrites: &[TagRewrite],
+        fold: fn(&str) -> String,
+    ) -> Result<RewrittenText, RewriteSkip> {
+        let mut rules: HashMap<_, Vec<usize>> = HashMap::new();
+        for (index, rewrite) in rewrites.iter().enumerate() {
+            rules.entry(fold(&rewrite.from)).or_default().push(index);
+        }
+        let targets: Vec<_> = rewrites.iter().map(|rewrite| rewrite.to.as_str()).collect();
+        let mut written = vec![Ok(0); rewrites.len()];
+        let tags: Vec<_> = self
+            .frontmatter_tags()
+            .into_iter()
+            .chain(self.tags())
+            .collect();
+        let mut selected = vec![None; tags.len()];
+        for (ordinal, tag) in tags.iter().enumerate() {
+            let key = fold(&tag.name);
+            let Some(indices) = rules.get(&key) else {
+                continue;
+            };
+            let Some((rule, to)) = name_target(indices, &targets, &mut written) else {
+                continue;
+            };
+            if frontmatter_tag_name(to).as_deref() != Some(to) || fold(to) == key {
+                refuse_names(indices, &mut written, RewriteSkip::Unrepresentable);
+                continue;
+            }
+            selected[ordinal] = Some(rule);
+            for &index in indices {
+                if let Ok(count) = &mut written[index] {
+                    *count += 1;
+                }
+            }
+        }
+        let mut edits = Vec::new();
+        let mut frontmatter_rewrites = Vec::new();
+        let mut rewrite_field = false;
+        for text in self
+            .field_texts()
+            .into_iter()
+            .filter(|text| text.field == crate::TAGS_FIELD)
+        {
+            let Some(name) = frontmatter_tag_name(text.text) else {
+                continue;
+            };
+            let Some(indices) = rules.get(&fold(&name)) else {
+                continue;
+            };
+            let Some((rule, to)) = name_target(indices, &targets, &mut written) else {
+                continue;
+            };
+            frontmatter_rewrites.extend_from_slice(indices);
+            let start = text.range.and_then(|range| {
+                literal_text_offset(&self.source()[range.clone()], text.text)
+                    .map(|offset| range.start + offset + usize::from(text.text.starts_with('#')))
+            });
+            let Some(start) = start else {
+                rewrite_field = true;
+                continue;
+            };
+            edits.push((
+                rule,
+                start..start + text.text.trim_start_matches('#').len(),
+                to,
+            ));
+        }
+        if rewrite_field {
+            edits.clear();
+        }
+        for tag in self.tags() {
+            let Some(indices) = rules.get(&fold(&tag.name)) else {
+                continue;
+            };
+            let Some((rule, to)) = name_target(indices, &targets, &mut written) else {
+                continue;
+            };
+            let start = tag.span.expect("body tags are placed").byte_offset + 1;
+            edits.push((rule, start..start + tag.name.len(), to));
+        }
+        let mut field_edit = None;
+        let mut expected_frontmatter = self.frontmatter().cloned();
+        if let Some(Value::Map(map)) = &mut expected_frontmatter
+            && let Some(value) = map.get(crate::TAGS_FIELD)
+        {
+            let rewrite = |value: &Value| match value {
+                Value::String(name) => {
+                    let rule = frontmatter_tag_name(name)
+                        .and_then(|name| rules.get(&fold(&name)))
+                        .map(|indices| indices[0])
+                        .filter(|&rule| written[rule].is_ok());
+                    match rule {
+                        Some(rule) => Value::String(format!(
+                            "{}{}",
+                            if name.starts_with('#') { "#" } else { "" },
+                            rewrites[rule].to
+                        )),
+                        None => value.clone(),
+                    }
+                }
+                other => other.clone(),
+            };
+            let mut replacement = match value {
+                Value::Sequence(items) => Value::Sequence(items.iter().map(rewrite).collect()),
+                value => rewrite(value),
+            };
+            if rewrite_field {
+                match self.existing_field_edit(
+                    self.field(crate::TAGS_FIELD).expect("a matched tags field"),
+                    &replacement,
+                ) {
+                    Ok(edit) => field_edit = Some(edit),
+                    Err(_) => {
+                        refuse_names(&frontmatter_rewrites, &mut written, RewriteSkip::Unplaced);
+                        replacement = value.clone();
+                    }
+                }
+            }
+            map.insert(crate::TAGS_FIELD, replacement);
+        }
+        let mut edits: Vec<_> = edits
+            .into_iter()
+            .filter(|(rule, _, _)| written[*rule].is_ok())
+            .map(|(_, range, to)| (range, to))
+            .collect();
+        if let Some((range, replacement)) = &field_edit {
+            edits.push((range.clone(), replacement.as_str()));
+        }
+        edits.sort_by_key(|(range, _)| range.start);
+        let text = splice_all(self.source(), &edits);
+        let after = Document::parse(&text);
+        if after.frontmatter() != expected_frontmatter.as_ref() {
+            return Err(RewriteSkip::WouldCorruptFrontmatter);
+        }
+        let spans = NameSpans::of(&edits);
+        let mut expected = Reading::of(self);
+        for (ordinal, (name, at)) in expected.tags.iter_mut().enumerate() {
+            if let Some(rule) = selected[ordinal].filter(|&rule| written[rule].is_ok()) {
+                *name = rewrites[rule].to.clone();
+            }
+            *at = at.map(|at| spans.moved(at));
+        }
+        for link in &mut expected.links {
+            link.at = link.at.as_ref().map(|range| spans.range(range));
+        }
+        for heading in &mut expected.headings {
+            heading.text = spans
+                .carried(&heading.text, &heading.at, self.source())
+                .ok_or(RewriteSkip::Unrepresentable)?;
+            heading.at = spans.range(&heading.at);
+        }
+        expected.code = expected
+            .code
+            .iter()
+            .map(|range| spans.range(range))
+            .collect();
+        if Reading::of(&after) != expected {
+            return Err(RewriteSkip::Unrepresentable);
+        }
+        Ok(RewrittenText {
+            text,
+            rewritten: written,
+        })
+    }
+
     /// Respell, for each [`AddressRewrite`] in `rewrites`, every link of its
     /// family whose address is its `from` to its `to`, and return the whole
     /// rewritten document.
@@ -219,6 +588,7 @@ impl Document<'_> {
             match rule.and_then(|to| Ok((to.respell(&link)?, to.target.clone()))) {
                 Ok(((at, range, token), to)) => edits.push(Edit {
                     ordinal,
+                    anchor: false,
                     at,
                     range,
                     to,
@@ -299,7 +669,7 @@ impl<'a, 'd> Proof<'a, 'd> {
     /// text and compared with what this document's own [`Reading`] becomes
     /// under the edits ([`Reading::respelled`]): the links of both families,
     /// frontmatter ones included, in the same order, with only the rewritten
-    /// ones' targets changed, each to its own edit's; the headings and the
+    /// ones' targets or anchors changed, each to its own edit's; the headings and the
     /// tags of both sources as they were, a heading or link title holding a
     /// rewritten wikilink with only that link's token changed; and the code
     /// ranges, which decide which bytes can be any of those. Each is compared
@@ -322,6 +692,14 @@ impl<'a, 'd> Proof<'a, 'd> {
         self.reads += 1;
         #[cfg(test)]
         tests::PROOF_READS.with(|reads| reads.set(reads.get() + 1));
+        // Overlapping name spans cannot be spliced together; let the caller
+        // isolate their proof refusal rather than composing intersecting bytes.
+        if edits
+            .windows(2)
+            .any(|pair| pair[0].range.end > pair[1].range.start)
+        {
+            return Ok(None);
+        }
         let respelling = Respelling::of(edits, &self.markdown_starts);
         let text = self.document.spliced(edits.iter().copied());
         let reads_back = self
@@ -428,8 +806,91 @@ impl<'a, 'd> Proof<'a, 'd> {
     }
 }
 
-/// One link a rewrite respells: the source bytes its stem stands at, the
-/// target written over them, and the link's whole token once they are.
+/// Literal name splices and cumulative byte changes, so each derived fact's
+/// new position is one binary search rather than a walk over the batch.
+struct NameSpans<'a> {
+    edits: &'a [(Range<usize>, &'a str)],
+    written: Vec<(usize, usize)>,
+}
+
+impl<'a> NameSpans<'a> {
+    /// Record the byte changes of ascending, disjoint name spans.
+    fn of(edits: &'a [(Range<usize>, &'a str)]) -> Self {
+        let mut written = vec![(0, 0)];
+        for (range, to) in edits {
+            let (grown, shrunk) = *written.last().expect("an initial prefix");
+            written.push((grown + to.len(), shrunk + range.len()));
+        }
+        Self { edits, written }
+    }
+
+    /// Where a source byte lands after every preceding name splice.
+    fn moved(&self, at: usize) -> usize {
+        let ended = self.edits.partition_point(|(range, _)| range.end <= at);
+        let (grown, shrunk) = self.written[ended];
+        at + grown - shrunk
+    }
+
+    /// Where a fact's boundaries land after the splices.
+    fn range(&self, range: &Range<usize>) -> Range<usize> {
+        self.moved(range.start)..self.moved(range.end)
+    }
+
+    /// Carry each literal tag splice at its source span's position in the
+    /// flattened heading text. An unlocatable name refuses the proof.
+    fn carried(&self, text: &str, range: &Range<usize>, source: &str) -> Option<String> {
+        let start = self
+            .edits
+            .partition_point(|(edit, _)| edit.end <= range.start);
+        let fragment = &source[range.clone()];
+        let normalized = crate::span::lf_normalized(fragment);
+        let mut flattened = String::new();
+        let mut places = Vec::new();
+        for (event, at) in pulldown_cmark::Parser::new(&normalized).into_offset_iter() {
+            match event {
+                pulldown_cmark::Event::Text(text) => {
+                    if &fragment[at.clone()] == text.as_ref() {
+                        places.push((
+                            range.start + at.start..range.start + at.end,
+                            flattened.len(),
+                        ));
+                    }
+                    flattened.push_str(&text);
+                }
+                pulldown_cmark::Event::Code(text) => flattened.push_str(&text),
+                pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                    flattened.push(' ')
+                }
+                _ => {}
+            }
+        }
+        let leading = flattened.len()
+            - flattened
+                .trim_start_matches(crate::section::is_ascii_space)
+                .len();
+        let mut placed = Vec::new();
+        for (edit, to) in &self.edits[start..] {
+            if edit.start >= range.end {
+                break;
+            }
+            let place = places
+                .partition_point(|(literal, _)| literal.start <= edit.start)
+                .checked_sub(1)?;
+            let (literal, at) = &places[place];
+            if edit.end > literal.end {
+                return None;
+            }
+            let at = (at + edit.start - literal.start).checked_sub(leading)?;
+            let written = at..at + edit.len();
+            text.get(written.clone())?;
+            placed.push((written, *to));
+        }
+        Some(splice_all(text, &placed))
+    }
+}
+
+/// One link a rewrite respells: the source bytes its target or heading
+/// fragment stands at, the name written over them, and the rewritten token.
 ///
 /// An edit is the stem alone, so `[[a]](b)` — a wikilink and a Markdown link
 /// sharing their outer brackets — is two edits that do not touch. A
@@ -441,6 +902,8 @@ struct Edit {
     /// Where the link stands among the document's links, frontmatter first,
     /// which is the order its skip is reported in.
     ordinal: usize,
+    /// Whether this edit changes the heading fragment rather than the target.
+    anchor: bool,
     /// The source byte the link's token begins at.
     at: usize,
     range: Range<usize>,
@@ -586,7 +1049,7 @@ impl Address {
 /// - Block ids. A definition is the last word on its line outside code, and
 ///   a stem is never the last bytes on its line, since `]]` or `)` follows
 ///   it, so a rewrite changes a definition only by changing what is code.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Reading {
     links: Vec<LinkReading>,
     headings: Vec<HeadingReading>,
@@ -611,7 +1074,7 @@ struct LinkReading {
 }
 
 /// A heading as the index reads it: where its construct begins and ends.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct HeadingReading {
     level: u8,
     text: String,
@@ -667,7 +1130,8 @@ impl Reading {
     }
 
     /// What this reading becomes under `respelling`: every fact where its
-    /// bytes moved to, each respelled link targeting its own `to`, and each heading or
+    /// bytes moved to, each respelled link's target or anchor reading its own
+    /// `to` as its family reads that spelling, and each heading or
     /// link title holding a respelled wikilink with that link's token
     /// respelled ([`Respelling::carried`]). `None` where such a text does not
     /// hold the wikilink as written, so what it should read as is unknown.
@@ -692,6 +1156,13 @@ impl Reading {
                         .target_of(link.family, at.start)
                         .unwrap_or(&link.target)
                         .to_string(),
+                    anchor: respelling
+                        .anchor_of(link.family, at.start)
+                        .map(|to| match link.family {
+                            LinkFamily::Markdown => crate::link::decoded(to),
+                            LinkFamily::Wikilink => to.to_string(),
+                        })
+                        .or_else(|| link.anchor.clone()),
                     title,
                     at: Some(moved(at)),
                     ..link.clone()
@@ -770,6 +1241,7 @@ struct RespelledStem<'t> {
     at: usize,
     stem: Range<usize>,
     to: &'t str,
+    anchor: bool,
     read_as: Option<(&'t str, &'t str)>,
 }
 
@@ -786,6 +1258,7 @@ impl<'t> Respelling<'t> {
                 at: edit.at,
                 stem: edit.range.clone(),
                 to: &edit.to,
+                anchor: edit.anchor,
                 read_as: Self::read_as(&edit.link, &edit.token, markdown_starts.contains(&edit.at)),
             })
             .collect();
@@ -834,7 +1307,15 @@ impl<'t> Respelling<'t> {
     /// respelled to, where this respelling rewrites it.
     fn target_of(&self, family: LinkFamily, at: usize) -> Option<&'t str> {
         let place = *self.named.get(&(family, at))?;
-        Some(self.stems.get(place).to)
+        let stem = self.stems.get(place);
+        (!stem.anchor).then_some(stem.to)
+    }
+
+    /// The heading anchor this respelling writes on the named link.
+    fn anchor_of(&self, family: LinkFamily, at: usize) -> Option<&'t str> {
+        let place = *self.named.get(&(family, at))?;
+        let stem = self.stems.get(place);
+        stem.anchor.then_some(stem.to)
     }
 
     /// Where the source byte at `at` stands once every stem ending at or
@@ -1246,6 +1727,7 @@ mod tests {
             if let Ok((at, range, token)) = to.respell(&link) {
                 edits.push(Edit {
                     ordinal,
+                    anchor: false,
                     at,
                     range,
                     to: to.target.clone(),

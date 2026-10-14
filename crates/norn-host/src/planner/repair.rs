@@ -1,9 +1,10 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **Four kinds of finding have a declared fix and four a derived one;
-//! a broken link also has a suggested answer.** A selected `field/required-missing` finding
-//! fills from the default the rules requiring the field declare; a
+//! **Four kinds of finding have a declared fix, four a derived one, and
+//! four deterministic families offer suggested answers; every other is
+//! skipped.** A selected `field/required-missing` finding fills from the
+//! default the rules requiring the field declare; a
 //! `field/not-one-of` finding is replaced by the member a rule's synonym maps
 //! its offending value to, a list field's elements fixed one by one into one
 //! `set_frontmatter` of the field; a `field/forbidden` finding is removed or
@@ -16,8 +17,14 @@
 //! for its case is written as the boolean, and one on a link field whose bare
 //! value resolves to one document at the plan's after-state is written as
 //! the link; and a `field/not-one-of` value differing from exactly one member
-//! only by case and white space is replaced by that member. Every link a fix
-//! writes is recorded with what it resolves to at the after-state. A
+//! only by case and white space is replaced by that member. Suggested fixes
+//! take a missing heading anchor's unique best indexed heading by trigram
+//! Jaccard (rewrite_anchor, guarded by the target's recorded hash), a string
+//! closed-set value's nearest member by optimal string alignment distance
+//! within max(1, n / 4) edits after the derived fold and NFC, or an undeclared
+//! tag's one literal declared tag exactly one OSA edit away under the tag
+//! fold (rewrite_tag). Their scores are note text. Every link a fix writes
+//! is recorded with what it resolves to at the after-state. A
 //! `link/broken` follows one tombstone to one live holder of its recorded
 //! hash, composed last ([`broken_links`]), with both the written and replaced
 //! addresses recorded and the hash carried as an author condition. Without a
@@ -62,8 +69,9 @@
 //! is dropped: it is neither fixed nor skipped — a route out of a rule's area
 //! drops that rule's findings. **A link finding is settled by the resolved
 //! plan instead** ([`skipped_still_held`]): link health is no conclusion of
-//! that judgment, so planning skips every link finding it does not follow
-//! from its row, and the step that follows the whole resolution drops those the plan's resolution
+//! that judgment, so planning skips every link finding it neither follows
+//! nor fixes by an admitted anchor rewrite from its row, and the step that
+//! follows the whole resolution drops those the plan's resolution
 //! change set shows no longer hold. A broken link a route's move makes resolve, an
 //! ambiguous link it makes name one document or none, and a link naming a
 //! heading that is not there which the plan makes resolve to no document or
@@ -148,8 +156,8 @@ pub(crate) struct Planned {
     pub(crate) removed_fields: BTreeSet<(DocumentPath, String)>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
-    /// The findings left alone, in batch order, including link findings
-    /// the host settles against the resolved plan ([`skipped_still_held`]).
+    /// The findings left alone, in batch order, including unfixed link
+    /// findings the host settles against the resolved plan ([`skipped_still_held`]).
     pub(crate) skipped: Vec<SkippedFinding>,
     /// The operations a fix would have been that cannot be resolved because
     /// the clock gives no reading, numbered in the operations' sequence. The
@@ -166,6 +174,8 @@ pub(crate) struct Planned {
     /// once the plan lands, and whether the finding still stands there. The
     /// host holds the resolved plan to these claims ([`Claim`]).
     pub(crate) claims: Vec<Claim>,
+    /// The candidates this planner compared and the heading rows it read.
+    pub(crate) work: crate::evidence::RepairSuggestionsCost,
 }
 
 /// What a repair plan claims of one selected finding: the finding, where its
@@ -226,6 +236,8 @@ pub(super) fn naming_of<'n>(namings: &'n Namings, written: &Written) -> &'n Nami
 /// by, how that declaration's path globs compare letters, and the plan's one
 /// clock reading.
 pub(crate) struct Repairing<'a> {
+    /// Logical work, shared by the document compositions of this one plan.
+    pub(crate) work: std::cell::Cell<crate::evidence::RepairSuggestionsCost>,
     /// The declaration the entry's store pins.
     pub(crate) declared: &'a Declared,
     /// How the rules' path globs compare letters with a document's path, as
@@ -301,6 +313,12 @@ pub(crate) trait Reading {
     /// Why the vault could not be read: a machine failure, never absence.
     type Error;
 
+    /// The target's indexed headings beside its recorded hash, without
+    /// reading its file. The rows are returned by one heading range seek.
+    fn headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error>;
     /// At most two non-quarantine tombstones named by `link`, by its
     /// address grammar, distinct by path and in path order; no tombstone
     /// where its address names no place the read applies to.
@@ -386,6 +404,12 @@ pub(crate) enum Unread<V, I> {
 impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     type Error = Unread<V::Error, I::Error>;
 
+    fn headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+        self.index.held_headings(path).map_err(Unread::Index)
+    }
     fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
         self.index.tombstones(link).map_err(Unread::Index)
     }
@@ -588,8 +612,10 @@ pub(crate) fn plan<R: Reading>(
         .map(|(at, draft)| draft.decide(refused.remove(&at)))
         .collect();
     let mut written = BTreeSet::new();
+    let mut tagged = BTreeSet::new();
     for document in &decided {
         document.written(&mut written);
+        document.tagged(&mut tagged);
     }
     let namings = if written.is_empty() {
         Namings::new()
@@ -615,7 +641,9 @@ pub(crate) fn plan<R: Reading>(
             &follows,
             &following,
             &resolutions,
-        );
+            vault,
+            &tagged,
+        )?;
     }
     // One condition per link a plan writes, however many fixes write it.
     let mut recorded = BTreeSet::new();
@@ -625,6 +653,7 @@ pub(crate) fn plan<R: Reading>(
         }
         PlanCondition::ContentHash { .. } | PlanCondition::LinkResolution { .. } => true,
     });
+    planned.work = repairing.work.get();
     Ok(planned)
 }
 
@@ -738,6 +767,12 @@ mod tests {
     impl Reading for Unread {
         type Error = std::convert::Infallible;
 
+        fn headings(
+            &self,
+            _: &DocumentPath,
+        ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+            panic!("a plan without a fix reads no headings")
+        }
         fn tombstones(
             &self,
             _: &norn_wire::LinkKey,
@@ -809,6 +844,7 @@ mod tests {
         let clock = || panic!("a plan of no fix read the clock");
         let reading = OneReading::of(&clock);
         let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
             declared: &declared,
             case: CaseFold::Exact,
             clock: &reading,
@@ -958,6 +994,12 @@ mod tests {
         struct NoHash;
         impl Reading for NoHash {
             type Error = std::convert::Infallible;
+            fn headings(
+                &self,
+                _: &DocumentPath,
+            ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+                panic!("a broken link reads no headings")
+            }
             fn tombstones(
                 &self,
                 _: &LinkKey,
@@ -1031,6 +1073,7 @@ mod tests {
         let clock = || panic!("no clock");
         let clock = OneReading::of(&clock);
         let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
             declared: &declared,
             case: CaseFold::Exact,
             clock: &clock,

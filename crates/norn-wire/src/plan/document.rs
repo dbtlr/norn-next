@@ -498,7 +498,8 @@ pub enum SkipReason {
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
     // Move-following emits the four tombstone/hash reasons and link_not_rewritable.
-    // Similarity emits too_common and too_short, and shares link_not_rewritable.
+    // Similarity emits too_common and too_short, and shares link_not_rewritable,
+    // as the closest-heading suggestion does.
     // Similarity reads only a broken link whose address finds no tombstone and
     // never names its holder, so a move-following skip carries no similarity outcome.
     // The notes live here rather than in the doc comments schemars lifts.

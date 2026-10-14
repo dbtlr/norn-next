@@ -65,11 +65,13 @@
 //! whose path the plan refills among them, whose backlinks are judged as any
 //! other delete's.
 //!
-//! **Which links a plan writes is one predicate** ([`WrittenLinks::holds`]):
+//! **Which link addresses a plan writes is one predicate**
+//! ([`WrittenLinks::holds`]):
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
 //! one of a cascade's — held in its document under the syntax and the
-//! address the rewrite writes. Every such link is an entry whatever it
-//! resolves to, so a rewrite is checked where it lands. Whether it is a
+//! address the rewrite writes. An anchor rewrite is recorded by the forecast
+//! separately, keeping its address subject to cascades. Every such link is an
+//! entry whatever it resolves to, so a rewrite is checked where it lands. Whether it is a
 //! backlink of a document a delete removes is read from the text it had —
 //! the address the rewrite matched, probed from where its holder's content
 //! stood ([`Reached::originals`]) — never from its new text, unless the
@@ -206,6 +208,16 @@ pub(crate) trait LinkIndex {
         Ok(None)
     }
 
+    /// The indexed headings and recorded hash of one target, without its
+    /// body. An index holding no store has no heading evidence to offer.
+    fn held_headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+        let _ = path;
+        Ok(None)
+    }
+
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
     /// another.
@@ -234,6 +246,7 @@ fn reads_links_over<'o>(
             matches!(
                 operation.kind,
                 OperationKind::RewriteLink { .. }
+                    | OperationKind::RewriteAnchor { .. }
                     | OperationKind::RewriteWikilink { .. }
                     | OperationKind::DeleteDocument { .. }
             ) || !operation.cascade.is_empty()
@@ -478,9 +491,17 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let written = WrittenLinks::of(operations, normalizer);
     let Reached {
         overlay,
-        probed,
+        mut probed,
         originals,
     } = reach(targets, lineage, normalizer, &written);
+    // The forecast must retain anchor-only text writes before the index drops
+    // unchanged address keys. Cascade probes keep only address authorship.
+    for probe in &mut probed {
+        probe.written |= normalizer
+            .normalize(Path::new(probe.after_holder.as_str()))
+            .ok()
+            .is_some_and(|holder| written.holds_anchor(&holder, &probe.link));
+    }
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
     let retargeted = retarget_namings(lineage, &overlay, index)?;
     let overlay = reaching(overlay, lineage, &retargeted);
@@ -525,7 +546,12 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // Whether the key holds a link the plan does not write: every link
         // under a key a rewrite writes reads as written, so one a cascade
         // left as written there is known by its key alone.
-        let unwritten = !change.written || kept.contains(&entry);
+        let address_written = change.written
+            && normalizer
+                .normalize(Path::new(change.holder.as_str()))
+                .ok()
+                .is_some_and(|holder| written.holds(&holder, &change.link));
+        let unwritten = !address_written || kept.contains(&entry);
         // A backlink of a document a delete removes, a link left behind by
         // a cascade — a move's, a delete's rewriting the links naming its
         // document, or a wikilink rewrite's — and an ambiguous link that
@@ -1561,6 +1587,8 @@ pub(crate) fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory 
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
     rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,
+    /// Heading fragments the plan writes, read by their syntax to match the forecast's facts.
+    anchors: BTreeSet<(NormalizedPath, &'static str, String, String)>,
 }
 
 impl WrittenLinks {
@@ -1572,7 +1600,27 @@ impl WrittenLinks {
         normalizer: &PathNormalizer,
     ) -> Self {
         let mut rewritten: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
+        let mut anchors = BTreeSet::new();
         for operation in operations {
+            if let OperationKind::RewriteAnchor {
+                path,
+                syntax,
+                address,
+                to,
+                ..
+            } = &operation.kind
+                && let (Ok(file), Some(family)) = (
+                    normalizer.normalize(Path::new(path.as_str())),
+                    family_name(*syntax),
+                )
+            {
+                let anchor = if *syntax == LinkFamily::Markdown {
+                    norn_text::decode_markdown_fragment(to)
+                } else {
+                    to.clone()
+                };
+                anchors.insert((file, family, address.clone(), anchor));
+            }
             let authored = match &operation.kind {
                 OperationKind::RewriteLink {
                     path,
@@ -1598,15 +1646,28 @@ impl WrittenLinks {
                 }
             }
         }
-        WrittenLinks { rewritten }
+        WrittenLinks { rewritten, anchors }
     }
 
-    /// Whether the plan writes `link`, as its after-state holds it in the
-    /// document `holder`: the one predicate "a link whose text the plan
-    /// writes" is read by.
+    /// Whether the plan writes `link`'s address in `holder`'s after-state.
+    /// An anchor rewrite keeps the address subject to the move cascade.
     pub(crate) fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
         self.rewritten
             .contains_key(&(holder.clone(), link.family.as_str(), address(link)))
+    }
+
+    /// Whether the plan writes the heading fragment, recorded by the forecast
+    /// without treating its address as authored for a cascade.
+    fn holds_anchor(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
+        match &link.anchor {
+            Some(norn_store::LinkAnchor::Heading { written, .. }) => self.anchors.contains(&(
+                holder.clone(),
+                link.family.as_str(),
+                address(link),
+                written.clone(),
+            )),
+            _ => false,
+        }
     }
 
     /// `link`, which the plan writes in the document `holder`, as it was
@@ -2003,6 +2064,32 @@ mod tests {
 
     fn path(text: &str) -> DocumentPath {
         DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// An encoded Markdown rewrite is recognized by the anchor the store derives.
+    #[test]
+    fn a_written_markdown_anchor_is_held_by_its_percent_decoded_replacement() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let holder = normalizer
+            .normalize(std::path::Path::new("h.md"))
+            .expect("a document identity");
+        let operation = Operation::new(OperationKind::rewrite_anchor(
+            path("h.md"),
+            LinkFamily::Markdown,
+            "t.md",
+            "a%20b",
+            "c%20d",
+        ));
+        let written = super::WrittenLinks::of([&operation], &normalizer);
+        let links = crate::derivation::document_links(b"[x](t.md#c%20d)");
+        let [link] = links.as_slice() else {
+            panic!("one written link");
+        };
+        assert!(matches!(
+            &link.anchor,
+            Some(norn_store::LinkAnchor::Heading { written, .. }) if written == "c d"
+        ));
+        assert!(written.holds_anchor(&holder, link));
     }
 
     /// **Whether a cascade follows a place an ambiguous link could name is

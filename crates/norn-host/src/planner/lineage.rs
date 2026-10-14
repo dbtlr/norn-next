@@ -295,6 +295,14 @@ impl Lineage {
                         rewritten.push((position, file));
                     }
                 }
+                // Name rewrites edit the holder where the plan leaves it,
+                // so their source is read after the lineage walk finishes.
+                OperationKind::RewriteAnchor { path, .. }
+                | OperationKind::RewriteTag { path, .. } => {
+                    if let Some(file) = identity(path.as_str()) {
+                        rewritten.push((position, file));
+                    }
+                }
                 // A folder move arrives expanded into the moves it makes.
                 OperationKind::MoveFolder { .. } => {}
             }

@@ -1319,6 +1319,16 @@ impl<'a> Document<'a> {
     }
 
     fn splice_existing(&self, located: &Field, value: &Value) -> Result<String, EditError> {
+        let (range, replacement) = self.existing_field_edit(located, value)?;
+        Ok(splice(self.source, range, &replacement))
+    }
+
+    /// Render an existing field's edit in its own spelling for a shared batch splice.
+    pub(crate) fn existing_field_edit(
+        &self,
+        located: &Field,
+        value: &Value,
+    ) -> Result<(Range<usize>, String), EditError> {
         let held = match &self.frontmatter {
             Some(Value::Map(map)) => map.get(&located.name),
             _ => None,
@@ -1343,7 +1353,7 @@ impl<'a> Document<'a> {
                 // space is part of what the splice writes.
                 rendered.insert(0, ' ');
             }
-            return Ok(splice(self.source, range.clone(), &rendered));
+            return Ok((range.clone(), rendered));
         }
 
         // A flat sequence over a flat sequence rewrites the list where it
@@ -1365,7 +1375,7 @@ impl<'a> Document<'a> {
             } else {
                 render_entry(&located.name, value, self.line_ending)?
             };
-            return Ok(splice(self.source, located.line_range.clone(), &entry));
+            return Ok((located.line_range.clone(), entry));
         }
 
         // Every other set changes what the field holds — a collection over a
@@ -1379,7 +1389,7 @@ impl<'a> Document<'a> {
             });
         }
         let entry = render_entry(&located.name, value, self.line_ending)?;
-        Ok(splice(self.source, located.line_range.clone(), &entry))
+        Ok((located.line_range.clone(), entry))
     }
 
     /// Re-read the edited bytes and refuse unless the frontmatter is exactly
@@ -1548,7 +1558,7 @@ fn nested_texts<'a>(field: &'a str, value: &'a Value, texts: &mut Vec<FieldText<
 /// prefix up to the first difference and nothing after it, so a token past that
 /// point has no source position and the ones before it cannot be told apart
 /// from the ones after.
-fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
+pub(crate) fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
     if written == text {
         return Some(0);
     }
