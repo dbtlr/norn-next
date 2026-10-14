@@ -218,14 +218,35 @@ fn rooted_name(name: &str) -> Vec<String> {
 pub fn spelled_place(address: &str) -> Option<DocumentPath> {
     suffix_probe(address).ok()?;
     let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
-    let stem = leaf_stem(leaf);
-    let written = stem != leaf && leaf[stem.len() + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION);
-    let place = if written {
+    let place = if without_document_extension(leaf) != leaf {
         address.to_string()
     } else {
         format!("{address}.{DOCUMENT_EXTENSION}")
     };
     DocumentPath::new(&place).ok()
+}
+
+/// The protocol-stripped leaf a similarity query reads, decoded for Markdown
+/// and without the document extension in any ASCII case. A failed decoding
+/// stays written, as the query must still describe the authored segment.
+pub fn query_leaf(link: &norn_wire::LinkKey) -> String {
+    let (_, address) = link.protocol_and_stem();
+    let written = address.rsplit(SEPARATOR).next().expect("a leaf segment");
+    let leaf = if link.syntax == norn_wire::LinkFamily::Markdown {
+        percent_decoded(written).unwrap_or_else(|| written.to_string())
+    } else {
+        written.to_string()
+    };
+    without_document_extension(&leaf).to_string()
+}
+
+fn without_document_extension(leaf: &str) -> &str {
+    let stem = leaf_stem(leaf);
+    if stem != leaf && leaf[stem.len() + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION) {
+        stem
+    } else {
+        leaf
+    }
 }
 
 /// The vault paths `link`, held by the document at `holder`, names by path:

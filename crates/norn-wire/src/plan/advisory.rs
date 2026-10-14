@@ -18,12 +18,9 @@
 //! bounded heads the rest of a repair plan uses, so a sample never exceeds
 //! [`CANDIDATE_HEAD`](crate::CANDIDATE_HEAD) documents.
 
-// Layer 5C's advisory computation (NORN-402) builds these; NORN-396 lands the
-// wire vocabulary first. That computation reads the vault's field index and
-// its schema once per unnarrowed repair, and nothing in the current call graph
-// runs it, so `Host::repair` never sets the slot and each type here is a
-// dormant carrier until NORN-402 lands. The notes live here rather than in the
-// doc comments schemars lifts into the published schema.
+// Host::repair builds this catalogue on the first batch without document
+// predicates, on the same snapshot as the findings. Continuations omit it,
+// and a narrowed first batch records why it was omitted.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -51,6 +48,8 @@ pub enum AdvisoryValueType {
     Null,
     /// A mapping of values by key.
     Map,
+    /// A list of values.
+    Sequence,
 }
 
 /// The way two schema rules conflict when combined, as a schema-hygiene

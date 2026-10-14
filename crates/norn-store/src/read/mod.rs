@@ -55,7 +55,7 @@ use crate::validate::ValidateStatement;
 
 pub(crate) use advisory::{Compared, DateComparison};
 pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, answer_range};
-pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
+pub(crate) use conjunction::{Conjunction, KeyPlace, Part, Report, ResolvesPart, predicate_key};
 pub use drive::MATCHED_DRIVE_FACTOR;
 pub(crate) use drive::{Driver, Paged, Settled};
 pub(crate) use filter::{Binder, Filter, PathPart, Reach};
@@ -227,6 +227,10 @@ pub enum ReadStatement {
     StemRarity,
     /// The selected trigram's postings, joined to document paths.
     StemPostings,
+    /// A statement the repair advisory field reads name.
+    RepairAdvisory(crate::RepairAdvisoryStatement),
+    /// One tied candidate's document id at its exact indexed path.
+    CandidateDocument,
     /// A statement [`FindStatement`] names.
     Find(FindStatement),
     /// A statement [`CountStatement`] names.

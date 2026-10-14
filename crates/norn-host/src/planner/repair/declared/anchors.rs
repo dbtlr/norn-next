@@ -7,8 +7,11 @@ use norn_store::similarity;
 use norn_wire::{AuthorCondition, Confidence, ContentHash, FindingKind, OperationKind, SkipReason};
 
 /// The fixed score wording of a closest-heading suggestion.
-fn score_note(heading: &str, score: f64) -> String {
-    format!("closest heading `{heading}` scores {score:.2} by trigram Jaccard, cutoff 0.50")
+fn score_note(heading: &str, score: similarity::Score) -> String {
+    format!(
+        "closest heading `{heading}` scores {score} by trigram Jaccard, cutoff {}",
+        similarity::CUTOFF
+    )
 }
 
 /// Compose anchor fixes last, using the selected link's original spelling

@@ -5828,6 +5828,11 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.read()
     }
 
+    /// Record the similarity reads made on a repair's planning hold.
+    pub(crate) fn count_similar_stems(&self, cost: crate::evidence::SimilarStemsCost) {
+        self.shared.reads.count_similar_stems(cost);
+    }
+
     /// Record what one preview spent judging its plan's links, in the read
     /// account the preview's read hold is counted in.
     pub(crate) fn count_preview_link_judgments(&self, cost: crate::evidence::LinkJudgmentCost) {
@@ -5843,6 +5848,11 @@ impl<O: EntryOps> Host<O> {
     /// Record the candidate work of one repair on its planning hold.
     pub(crate) fn count_repair_suggestions(&self, cost: crate::evidence::RepairSuggestionsCost) {
         self.shared.reads.count_repair_suggestions(cost);
+    }
+
+    /// Record the advisory pass on one repair's read hold.
+    pub(crate) fn count_repair_advisories(&self, cost: crate::evidence::RepairAdvisoryCost) {
+        self.shared.reads.count_repair_advisories(cost);
     }
 
     /// Record what one planning hold ran on its snapshot, in the read account

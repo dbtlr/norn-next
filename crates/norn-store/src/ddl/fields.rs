@@ -1,5 +1,5 @@
 //! The field pillar — one row per key a document's frontmatter carries, and one
-//! per scalar value under it.
+//! per value under it.
 //!
 //! What the rows are, and how they are derived, is [`crate::FieldRows`]'s to
 //! state. This area is the table they are written to.
@@ -91,6 +91,11 @@
 //! table is `WITHOUT ROWID`, so each index also carries the primary key: a read
 //! that wants the document id reads it off the index.
 //!
+//! - `document_fields_value_type` holds value rows by `(key, value_type,
+//!   document)`: repair advisories seek one key's parsed types in this
+//!   order and count each document once per type, without reading frontmatter
+//!   or retaining the key's value rows. The type is a parse fact maintained
+//!   inside the document's changeset and never cleared by a schema pin.
 //! - `document_fields_raw` holds the value rows, by `(key, raw, path COLLATE
 //!   NOCASE, path)`: an equality, a membership and a `before`/`after` bound on
 //!   a key with no typed order are one seek on it, and an equality's or a
@@ -141,6 +146,7 @@ pub(crate) fn statements() -> Vec<String> {
     path        TEXT    NOT NULL,
     container   TEXT    CHECK (container IN ({containers})),
     raw         TEXT,
+    value_type  TEXT CHECK (value_type IN ('string', 'integer', 'real', 'boolean', 'null', 'map', 'sequence')),
     typed       TEXT,
     least_raw   INTEGER NOT NULL DEFAULT 0 CHECK (least_raw IN (0, 1)),
     least_typed INTEGER NOT NULL DEFAULT 0 CHECK (least_typed IN (0, 1)),
@@ -148,6 +154,7 @@ pub(crate) fn statements() -> Vec<String> {
     folded      TEXT,
     PRIMARY KEY (document, key, ordinal),
     CHECK ((ordinal = 0) = (container IS NOT NULL)),
+    CHECK ((ordinal > 0) = (value_type IS NOT NULL)),
     CHECK (ordinal > 0 OR (raw IS NULL AND typed IS NULL AND least_raw = 0 AND least_typed = 0)),
     CHECK (least_raw = 0 OR raw IS NOT NULL),
     CHECK (least_typed = 0 OR typed IS NOT NULL),
@@ -155,6 +162,9 @@ pub(crate) fn statements() -> Vec<String> {
     CHECK (folded IS NULL OR raw IS NOT NULL)
 ) WITHOUT ROWID"
         ),
+        "CREATE INDEX document_fields_value_type ON document_fields(key, value_type, document)
+    WHERE value_type IS NOT NULL"
+            .to_string(),
         "CREATE INDEX document_fields_raw ON document_fields(
     key, raw, path COLLATE NOCASE, path
 )

@@ -438,8 +438,10 @@ impl Snapshot {
             | ReadStatement::HeldLinks(_)
             | ReadStatement::StemRarity
             | ReadStatement::StemPostings
+            | ReadStatement::CandidateDocument
             | ReadStatement::Moved(_)
-            | ReadStatement::HeldFrontmatter(_) => (false, 0),
+            | ReadStatement::HeldFrontmatter(_)
+            | ReadStatement::RepairAdvisory(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {
             let mut group: Vec<Option<String>> = Vec::with_capacity(width);

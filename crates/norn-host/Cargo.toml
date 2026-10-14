@@ -44,6 +44,8 @@ induced-failure = [
 # rule's templates are filled from, read once per plan.
 [dependencies]
 jiff = { workspace = true }
+# `serde_json` measures advisory bytes, quotes YAML scalars and carries process-death test plans.
+serde_json = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }
 norn-fs = { path = "../norn-fs" }
@@ -68,6 +70,3 @@ norn-fixtures = { path = "../norn-fixtures" }
 norn-fs = { path = "../norn-fs", features = ["test-support"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }
-# The applier's process-death cases hand a resolved plan to a child and read
-# its outcome back, both as the wire's JSON.
-serde_json = { workspace = true }

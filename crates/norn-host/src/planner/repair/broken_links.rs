@@ -14,8 +14,8 @@
 //! two are `several_holders`. The tombstone and holder reads stop at two. The
 //! `no_recorded_hash` and `no_holder` notes name the tombstone's path; each
 //! several note names the first two paths and says "at least two", with no
-//! candidate head. No tombstone, or an address no read applies to, keeps
-//! `no_declared_fix`. Every skip keeps the value its finding judged. The
+//! candidate head. No tombstone, or an address no move read applies to, goes
+//! to the similarity read. Every move skip keeps the value its finding judged. The
 //! followed document need not lie within the repair's selection.
 //!
 //! **A follow is spelled over the batch's settled routes and composed last.**
@@ -32,6 +32,27 @@
 //! **Two declared limits bound the evidence a follow uses.** A rebuild
 //! keeps no tombstones. A norn move whose cascade rewrote the moved
 //! document's own links changed its hash, so it skips `no_holder`.
+//!
+//! **Without a tombstone, similarity suggests the single best leaf stem.**
+//! The query takes the protocol-stripped address's last `/` segment, decodes
+//! it for Markdown and drops the document extension in any ASCII case.
+//! A failed decoding stays written. At least three folded Unicode scalars are admitted;
+//! shorter queries skip `too_short` without reading the index. Jaccard over
+//! padded folded trigram sets uses [`norn_store::similarity::CUTOFF`]. Equal best scores
+//! skip `tie`; a needed posting past cap 256 skips `too_common`. The fold is
+//! only a suggestion's, never a resolution rule (ADR 0039). The finding's
+//! holder is excluded before scoring, so no suggestion names its own document.
+//! With no tombstone and no candidate reaching the cutoff, `no_declared_fix`
+//! still stands.
+//!
+//! **A suggestion shares a follow's spelling and composition.** It proposes
+//! a `suggested` rewrite with the score note, guarding the written and
+//! replaced addresses without a candidate content-hash author condition.
+//! A unique follow never consults similarity, even when composition skips it.
+//! A tombstone records a deleted target, so a move-following skip stands
+//! with its own note and no similarity outcome, and the link stays broken.
+//! Quarantine tombstones are not read and count as none. A suggestion below
+//! threshold carries its operation and score note.
 
 use std::collections::BTreeMap;
 
@@ -41,22 +62,21 @@ use norn_wire::{
     ContentHash, DocumentPath, FindingKind, FindingRow, LinkKey, SkipReason, SkippedFinding,
 };
 
-/// A broken link's unique answer: the live document holding the one
-/// tombstone's recorded bytes, with the address and hash the fix rests on.
-pub(super) struct Follow {
+/// A broken link's single destination, with the evidence its rewrite rests on.
+pub(super) struct Answer {
     /// The finding's link, held where its document stood before any route.
     pub(super) link: LinkKey,
-    /// The live holder's before-state path, where its hash is observed.
+    /// The destination's before-state path, where a moved hash is observed.
     pub(super) before: DocumentPath,
-    /// The one live hash holder, mapped to where the settled routes land it.
+    /// The destination, mapped to where the settled routes land it.
     pub(super) to: DocumentPath,
-    /// The tombstone's recorded hash, carried as an author condition.
-    pub(super) hash: ContentHash,
+    /// A moved hash or a suggestion's score note.
+    pub(super) evidence: Evidence,
 }
 
-/// The selected broken findings with a follow or a move-following skip,
-/// keyed by finding id; no entry where no tombstone was found.
-pub(super) type Follows = BTreeMap<u64, Result<Follow, SkippedFinding>>;
+/// Selected broken findings with an answer or skip, keyed by finding id;
+/// no entry when neither a tombstone nor a qualifying similarity answer exists.
+pub(super) type Answers = BTreeMap<u64, Result<Answer, SkippedFinding>>;
 /// The candidate addresses prepared for the batch's one resolution probe,
 /// keyed by the holder where it lands, syntax and old address. Candidate
 /// probes use that landed holder; the replaced address's probe uses the
@@ -67,11 +87,11 @@ pub(super) type Asked = BTreeMap<EntryKey, Vec<LinkKey>>;
 /// each stored link of `links` through `vault`: the tombstones its address
 /// names, then the live holders of the one tombstone's recorded hash. The
 /// selection narrows the findings, never the documents a follow may name.
-pub(super) fn read<R: Reading>(
+fn read_moves<R: Reading>(
     rows: &[FindingRow],
     links: &BTreeMap<u64, norn_store::FindingLink>,
     vault: &R,
-) -> Result<Follows, R::Error> {
+) -> Result<Answers, R::Error> {
     let mut follows = BTreeMap::new();
     for row in rows.iter().filter(|row| row.kind == FindingKind::Broken) {
         let Some(found) = links.get(&row.id) else {
@@ -134,24 +154,180 @@ pub(super) fn read<R: Reading>(
         };
         follows.insert(
             row.id,
-            Ok(Follow {
+            Ok(Answer {
                 link,
                 before: to.clone(),
                 to: to.clone(),
-                hash: ContentHash::new(format!("sha256:{hash}")).expect("a recorded content hash"),
+                evidence: Evidence::Moved(
+                    ContentHash::new(format!("sha256:{hash}")).expect("a recorded content hash"),
+                ),
             }),
         );
     }
     Ok(follows)
 }
 
+/// The evidence that determines confidence and author conditions of a link answer.
+pub(super) enum Evidence {
+    Moved(ContentHash),
+    Similar { note: String },
+}
+
+impl Answer {
+    pub(super) fn confidence(&self) -> norn_wire::Confidence {
+        match self.evidence {
+            Evidence::Moved(_) => norn_wire::Confidence::Derived,
+            Evidence::Similar { .. } => norn_wire::Confidence::Suggested,
+        }
+    }
+
+    pub(super) fn notes(&self) -> Vec<String> {
+        match &self.evidence {
+            Evidence::Moved(_) => Vec::new(),
+            Evidence::Similar { note } => vec![note.clone()],
+        }
+    }
+
+    /// A suggestion below the threshold retains the score on its proposal.
+    pub(super) fn skipped(&self, mut skipped: SkippedFinding) -> SkippedFinding {
+        if skipped.reason == SkipReason::BelowThreshold
+            && let Evidence::Similar { note } = &self.evidence
+        {
+            skipped.note = Some(note.clone());
+        }
+        skipped
+    }
+}
+
+/// The floor is measured after the suggestion's fold, in Unicode scalars.
+fn admits_stem(stem: &str) -> bool {
+    norn_store::similarity::fold(stem).chars().count() >= 3
+}
+
+/// Read move-following first, then suggest only where no tombstone was found.
+pub(super) fn read<R: Reading>(
+    rows: &[FindingRow],
+    links: &BTreeMap<u64, norn_store::FindingLink>,
+    vault: &R,
+) -> Result<Answers, R::Error> {
+    use norn_store::StemMatches;
+    use norn_wire::SkippedCandidates;
+    let mut answers = read_moves(rows, links, vault)?;
+    let mut queried = BTreeMap::new();
+    for row in rows.iter().filter(|row| row.kind == FindingKind::Broken) {
+        if answers.contains_key(&row.id) {
+            continue;
+        }
+        let Some(found) = links.get(&row.id) else {
+            continue;
+        };
+        let link = LinkKey::new(
+            row.path.clone(),
+            crate::planner::links::wire_family(found.family),
+            &found.address,
+        );
+        let stem = norn_store::query_leaf(&link);
+        let stem = stem.as_str();
+        let query_skip = |reason, note: String| {
+            super::skip(row, reason)
+                .with_value(norn_wire::ValueHead::of(
+                    stem,
+                    crate::planner::compose::content_hash(stem.as_bytes()),
+                ))
+                .with_note(note)
+        };
+        let answer = if !admits_stem(stem) {
+            Err(query_skip(
+                SkipReason::TooShort,
+                "the shortest admitted query is 3 characters".into(),
+            ))
+        } else {
+            let retrieved = match queried.entry(stem.to_string()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(vault.similar_stems(stem)?)
+                }
+            };
+            match &retrieved.matches {
+                StemMatches::TooCommon { trigram } => Err(query_skip(
+                    SkipReason::TooCommon,
+                    format!(
+                        "trigram `{trigram}` exceeds the postings cap {}",
+                        norn_store::similarity::POSTINGS_CAP
+                    ),
+                )),
+                StemMatches::Candidates(candidates) => {
+                    let mut best = Vec::new();
+                    let mut score = norn_store::similarity::jaccard_counts(0, 1, 0);
+                    for candidate in candidates
+                        .iter()
+                        .filter(|candidate| candidate.path.as_str() != row.path.as_str())
+                    {
+                        let candidate_score = norn_store::similarity::jaccard_counts(
+                            candidate.shared,
+                            retrieved.query_trigrams,
+                            candidate.candidate_trigrams,
+                        );
+                        if !candidate_score.reaches_cutoff() {
+                            continue;
+                        }
+                        match candidate_score.cmp(&score) {
+                            std::cmp::Ordering::Greater => {
+                                best.clear();
+                                score = candidate_score;
+                                best.push(candidate);
+                            }
+                            std::cmp::Ordering::Equal => best.push(candidate),
+                            std::cmp::Ordering::Less => {}
+                        }
+                    }
+                    let note = format!(
+                        "similarity {score} (trigram, cutoff {})",
+                        norn_store::similarity::CUTOFF
+                    );
+                    if best.is_empty() {
+                        continue;
+                    }
+                    if best.len() == 1 {
+                        let to = DocumentPath::new(best[0].path.as_str())
+                            .expect("a candidate document path");
+                        Ok(Answer {
+                            link,
+                            before: to.clone(),
+                            to,
+                            evidence: Evidence::Similar { note },
+                        })
+                    } else {
+                        best.sort_by(|a, b| a.path.cmp(&b.path));
+                        let total = best.len() as u64;
+                        let paths = best
+                            .into_iter()
+                            .take(norn_store::CANDIDATE_HEAD)
+                            .map(|candidate| {
+                                DocumentPath::new(candidate.path.as_str())
+                                    .expect("a candidate document path")
+                            })
+                            .collect::<Vec<_>>();
+                        let head = vault.candidate_head(&paths, total)?;
+                        Err(super::skip(row, SkipReason::Tie)
+                            .with_candidates(SkippedCandidates::documents(head))
+                            .with_note(format!("tie at {note}")))
+                    }
+                }
+            }
+        };
+        answers.insert(row.id, answer);
+    }
+    Ok(answers)
+}
+
 /// Add to `probes` every candidate spelling of `follow` and its replaced
 /// address, and record the candidates in `asked`. Candidates are probed
 /// from where `holder` lands; the replaced address from where the finding
-/// read it ([`Follow::link`]). One holder, syntax and old address is prepared
+/// read it ([`Answer::link`]). One holder, syntax and old address is prepared
 /// once, however many selected findings name it.
 pub(super) fn ask(
-    follow: &Follow,
+    follow: &Answer,
     holder: &DocumentPath,
     asked: &mut Asked,
     probes: &mut Vec<LinkKey>,
@@ -179,4 +355,26 @@ pub(super) fn ask(
     probes.push(follow.link.clone());
     probes.extend(candidates.iter().cloned());
     asked.insert(key, candidates);
+}
+
+#[cfg(test)]
+mod tests {
+    /// **Every admitted stem length requires at least one shared trigram across distinct, repeated and folded shapes.**
+    #[test]
+    fn every_admitted_stem_length_requires_at_least_one_shared_trigram() {
+        use norn_store::similarity::{required_shared, trigrams};
+        for length in 3..=128 {
+            let distinct: String = (0..length)
+                .map(|n| char::from_u32(0x4e00 + n).unwrap())
+                .collect();
+            let repeated = "a".repeat(length as usize);
+            let mixed_nfd: String = (0..length)
+                .map(|n| if n % 2 == 0 { "E\u{301}" } else { "a" })
+                .collect();
+            for stem in [distinct, repeated, mixed_nfd] {
+                assert!(super::admits_stem(&stem), "length {length}: {stem}");
+                assert!(required_shared(trigrams(&stem).len()) >= 1);
+            }
+        }
+    }
 }

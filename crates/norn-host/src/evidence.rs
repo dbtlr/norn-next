@@ -1101,6 +1101,7 @@ pub(crate) struct ReadEvidence {
     repair_batches: RepairBatchAccount,
     similar_stems: SimilarStemsAccount,
     repair_suggestions: RepairSuggestionsAccount,
+    repair_advisories: RepairAdvisoryAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
 }
@@ -1269,6 +1270,8 @@ pub struct ReadReading {
     pub similar_stems: SimilarStemsCost,
     /// Logical candidates the repair suggestions read.
     pub repair_suggestions: RepairSuggestionsCost,
+    /// What repair advisory passes reported on the planning hold.
+    pub repair_advisories: RepairAdvisoryCost,
     /// What the read holds this host planned on ran on their snapshots, over
     /// every preview and repair.
     pub planning_holds: PlanningHoldCost,
@@ -1325,6 +1328,8 @@ pub struct ReadsSince {
     pub similar_stems: SimilarStemsCost,
     /// Logical candidates the repair suggestions read.
     pub repair_suggestions: RepairSuggestionsCost,
+    /// What repair advisory passes reported on the planning hold.
+    pub repair_advisories: RepairAdvisoryCost,
     /// What this window's planning holds ran on their snapshots.
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
@@ -1361,6 +1366,7 @@ impl ReadReading {
             repair_batches: self.repair_batches.since(earlier.repair_batches),
             similar_stems: self.similar_stems.since(earlier.similar_stems),
             repair_suggestions: self.repair_suggestions.since(earlier.repair_suggestions),
+            repair_advisories: self.repair_advisories.since(earlier.repair_advisories),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
         }
@@ -1392,6 +1398,7 @@ impl ReadEvidence {
             repair_batches: self.repair_batches.read(),
             similar_stems: self.similar_stems.read(),
             repair_suggestions: self.repair_suggestions.read(),
+            repair_advisories: self.repair_advisories.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
         }
@@ -1414,17 +1421,14 @@ impl ReadEvidence {
         self.repair_suggestions.add(cost);
     }
 
-    /// Count a similarity read from NORN-400's repair planning hold. No caller
-    /// reaches this dormant carrier until the broken-link suggestion lands.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "NORN-400 will count its similarity reads from the planning hold"
-        )
-    )]
+    /// Count the similarity reads made on a repair planning hold.
     pub(crate) fn count_similar_stems(&self, cost: SimilarStemsCost) {
         self.similar_stems.add(cost);
+    }
+
+    /// Record the advisory pass on one repair's planning hold.
+    pub(crate) fn count_repair_advisories(&self, cost: RepairAdvisoryCost) {
+        self.repair_advisories.add(cost);
     }
 
     /// Record what one planning hold ran on its snapshot, where the hold is
@@ -1876,8 +1880,7 @@ impl RepairSuggestionsAccount {
 }
 
 /// Logical rows spent retrieving similarity candidates, summed across reads.
-/// NORN-400's broken-link similarity suggestion will report these from its
-/// planning hold; no production caller reaches the account's writer yet.
+/// The broken-link similarity suggestion reports these from its planning hold.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SimilarStemsCost {
     pub reads: u64,
@@ -1919,10 +1922,6 @@ struct SimilarStemsAccount {
 }
 
 impl SimilarStemsAccount {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "NORN-400 will write the similarity account")
-    )]
     fn add(&self, cost: SimilarStemsCost) {
         for (field, value) in [
             (&self.reads, cost.reads),
@@ -1938,6 +1937,113 @@ impl SimilarStemsAccount {
             reads: self.reads.load(Ordering::Relaxed),
             rarity_rows_read: self.rarity_rows_read.load(Ordering::Relaxed),
             postings_rows_read: self.postings_rows_read.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// What repair advisory passes spent on the repair's snapshot, summed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepairAdvisoryCost {
+    /// Advisory passes computed.
+    pub passes: u64,
+    /// Distinct field keys tallied.
+    pub keys: u64,
+    /// Value rows tallied.
+    pub value_rows: u64,
+    /// Schema rules checked.
+    pub rules: u64,
+    /// Selector values, glob characters and closed-set member/synonym checks.
+    pub selector_parts: u64,
+    /// Schema rule pairs checked.
+    pub rule_pairs: u64,
+    /// Statements the pass ran.
+    pub statements: u64,
+    /// Rows the field tallies, key seeks and first-match pages returned.
+    pub rows_read: u64,
+    /// Steps through an unbounded scan.
+    pub full_scan_steps: u64,
+    /// Temporary sorts run.
+    pub sorts: u64,
+    /// Virtual-machine steps run.
+    pub vm_steps: u64,
+}
+
+impl RepairAdvisoryCost {
+    /// The cost between an earlier account and this one.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            passes: self.passes.saturating_sub(earlier.passes),
+            keys: self.keys.saturating_sub(earlier.keys),
+            value_rows: self.value_rows.saturating_sub(earlier.value_rows),
+            rules: self.rules.saturating_sub(earlier.rules),
+            selector_parts: self.selector_parts.saturating_sub(earlier.selector_parts),
+            rule_pairs: self.rule_pairs.saturating_sub(earlier.rule_pairs),
+            statements: self.statements.saturating_sub(earlier.statements),
+            rows_read: self.rows_read.saturating_sub(earlier.rows_read),
+            full_scan_steps: self.full_scan_steps.saturating_sub(earlier.full_scan_steps),
+            sorts: self.sorts.saturating_sub(earlier.sorts),
+            vm_steps: self.vm_steps.saturating_sub(earlier.vm_steps),
+        }
+    }
+
+    /// Include the work reported by a store advisory read.
+    pub(crate) fn absorb(&mut self, work: norn_store::ValidateWork) {
+        self.statements += work.statements;
+        self.rows_read += work.rows_read;
+        self.full_scan_steps += work.full_scan_steps;
+        self.sorts += work.sorts;
+        self.vm_steps += work.vm_steps;
+    }
+}
+
+#[derive(Debug, Default)]
+struct RepairAdvisoryAccount {
+    passes: AtomicU64,
+    keys: AtomicU64,
+    value_rows: AtomicU64,
+    rules: AtomicU64,
+    selector_parts: AtomicU64,
+    rule_pairs: AtomicU64,
+    statements: AtomicU64,
+    rows_read: AtomicU64,
+    full_scan_steps: AtomicU64,
+    sorts: AtomicU64,
+    vm_steps: AtomicU64,
+}
+
+impl RepairAdvisoryAccount {
+    fn add(&self, cost: RepairAdvisoryCost) {
+        self.passes.fetch_add(cost.passes, Ordering::Relaxed);
+        self.keys.fetch_add(cost.keys, Ordering::Relaxed);
+        self.value_rows
+            .fetch_add(cost.value_rows, Ordering::Relaxed);
+        self.rules.fetch_add(cost.rules, Ordering::Relaxed);
+        self.selector_parts
+            .fetch_add(cost.selector_parts, Ordering::Relaxed);
+        self.rule_pairs
+            .fetch_add(cost.rule_pairs, Ordering::Relaxed);
+        self.statements
+            .fetch_add(cost.statements, Ordering::Relaxed);
+        self.rows_read.fetch_add(cost.rows_read, Ordering::Relaxed);
+        self.full_scan_steps
+            .fetch_add(cost.full_scan_steps, Ordering::Relaxed);
+        self.sorts.fetch_add(cost.sorts, Ordering::Relaxed);
+        self.vm_steps.fetch_add(cost.vm_steps, Ordering::Relaxed);
+    }
+
+    fn read(&self) -> RepairAdvisoryCost {
+        RepairAdvisoryCost {
+            passes: self.passes.load(Ordering::Relaxed),
+            keys: self.keys.load(Ordering::Relaxed),
+            value_rows: self.value_rows.load(Ordering::Relaxed),
+            rules: self.rules.load(Ordering::Relaxed),
+            selector_parts: self.selector_parts.load(Ordering::Relaxed),
+            rule_pairs: self.rule_pairs.load(Ordering::Relaxed),
+            statements: self.statements.load(Ordering::Relaxed),
+            rows_read: self.rows_read.load(Ordering::Relaxed),
+            full_scan_steps: self.full_scan_steps.load(Ordering::Relaxed),
+            sorts: self.sorts.load(Ordering::Relaxed),
+            vm_steps: self.vm_steps.load(Ordering::Relaxed),
         }
     }
 }

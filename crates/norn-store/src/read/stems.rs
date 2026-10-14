@@ -2,12 +2,9 @@
 //! whose stems may reach the similarity cutoff against a query stem, with the
 //! counts a score is computed from.
 //!
-//! **A dormant carrier.** Its consuming layer is Layer 5C's similarity
-//! suggestion (NORN-400), the repair planner's broken-link fix, which scores
-//! the candidates and decides the tie, too-common and too-short skips on its
-//! planning snapshot. No planner reaches it yet, so its bars are its own seam's:
-//! the store suite's retrieval and plan cases and the counter gate's
-//! size-independence pair.
+//! The repair planner's broken-link suggestion scores these candidates on
+//! its planning snapshot and decides ties, too-common and too-short skips.
+//! The store's retrieval bars and the host counter gate hold its bounded work.
 
 use crate::error::{self, StoreError};
 use crate::path::DocumentPath;

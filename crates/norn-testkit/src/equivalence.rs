@@ -1323,13 +1323,15 @@ impl StoredColumns for StoredTag {
 /// nowhere, since no reader joins it back to `documents` to check.
 impl StoredColumns for FieldRow {
     fn columns(&self) -> Vec<(&'static str, String)> {
-        let (container, raw, typed, least_raw, least_typed, offset, folded) = match self {
+        let (container, raw, typed, least_raw, least_typed, offset, folded, value_type) = match self
+        {
             FieldRow::Presence { container, .. } => (
                 Some(container.as_str()),
                 None,
                 None,
                 false,
                 false,
+                None,
                 None,
                 None,
             ),
@@ -1340,6 +1342,7 @@ impl StoredColumns for FieldRow {
                 least_raw,
                 least_typed,
                 folded,
+                value_type,
                 ..
             } => (
                 None,
@@ -1349,6 +1352,7 @@ impl StoredColumns for FieldRow {
                 *least_typed,
                 *offset,
                 folded.as_deref(),
+                Some(value_type.as_str()),
             ),
         };
         vec![
@@ -1357,6 +1361,7 @@ impl StoredColumns for FieldRow {
             ("path", quoted(self.path())),
             ("container", optional_text(container)),
             ("raw", optional_text(raw)),
+            ("value_type", optional_text(value_type)),
             ("typed", optional_text(typed)),
             ("least_raw", flag(least_raw)),
             ("least_typed", flag(least_typed)),

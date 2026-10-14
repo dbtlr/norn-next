@@ -56,6 +56,8 @@ pub enum ReadFilter {
     /// validate spells the part over a finding's own path instead
     /// ([`crate::ValidateStatement`]).
     PathGlob(StoredPathOrder),
+    /// The document does not match a path glob, tested at its row key.
+    ExcludePathGlob(StoredPathOrder),
     /// The document is in the class a resolution target opens on the root:
     /// the target's suffix ranges on `documents_suffix_key` where the root
     /// tells spellings apart, and on `documents_folded_suffix_key` where it
@@ -83,7 +85,7 @@ pub enum ReadFilter {
 }
 
 /// How many filter shapes [`ReadFilter::all`] holds.
-pub const READ_FILTERS: usize = 13;
+pub const READ_FILTERS: usize = 14;
 
 impl ReadFilter {
     /// Every filter shape, in slot order. A filter that compares values is
@@ -105,15 +107,19 @@ impl ReadFilter {
             Self::Tag,
             Self::Finding,
             Self::LinksTo(SuffixKey::Raw),
+            Self::ExcludePathGlob(StoredPathOrder::Sensitive),
         ]
     }
 
     /// Whether this filter excludes: its seek reaches the documents a page
     /// must not hold rather than the ones it keeps, so a page is never driven
-    /// from it. Inequality and absence exclude; every other filter keeps what
-    /// its seek reaches.
+    /// from it. Inequality, absence and a schema selector's path exclusion
+    /// exclude; every other filter keeps what its seek reaches.
     pub fn excludes(self) -> bool {
-        matches!(self, Self::NotEqual(_) | Self::Absent)
+        matches!(
+            self,
+            Self::NotEqual(_) | Self::Absent | Self::ExcludePathGlob(_)
+        )
     }
 
     /// Whether this filter hands the documents it keeps back in the answer's
@@ -129,6 +135,7 @@ impl ReadFilter {
             Self::Equal(_) | Self::Tag | Self::Finding | Self::PathGlob(_) => true,
             Self::Member(_) | Self::Present => !descending,
             Self::NotEqual(_)
+            | Self::ExcludePathGlob(_)
             | Self::Absent
             | Self::Before(_)
             | Self::After(_)
@@ -155,6 +162,7 @@ impl ReadFilter {
             Self::Tag => 10,
             Self::Finding => 11,
             Self::LinksTo(_) => 12,
+            Self::ExcludePathGlob(_) => 13,
         };
         assert!(
             slot < READ_FILTERS,
@@ -173,6 +181,8 @@ pub(crate) enum Filter {
     /// ([`super::glob::path_range`]), a validate the answer's
     /// ([`super::answer_order::answer_range`]).
     Path(PathPart),
+    /// A schema selector exclusion, tested by the same glob reading.
+    ExcludedPath(PathPart),
     /// Every other part: its shape, and the values it binds.
     Bound {
         shape: ReadFilter,
@@ -213,6 +223,7 @@ impl Filter {
     pub(crate) fn shape(&self) -> ReadFilter {
         match self {
             Filter::Path(part) => ReadFilter::PathGlob(part.order),
+            Filter::ExcludedPath(part) => ReadFilter::ExcludePathGlob(part.order),
             Filter::Bound { shape, .. } => *shape,
         }
     }
@@ -222,7 +233,7 @@ impl Filter {
     pub(crate) fn path_part(&self) -> Option<&PathPart> {
         match self {
             Filter::Path(part) => Some(part),
-            Filter::Bound { .. } => None,
+            Filter::Bound { .. } | Filter::ExcludedPath(_) => None,
         }
     }
 
@@ -284,7 +295,7 @@ impl Filter {
     /// other part its own rows.
     fn kept_rows(&self, reached: Reached, binder: &mut Binder) -> Rows {
         match self {
-            Filter::Path(part) => {
+            Filter::Path(part) | Filter::ExcludedPath(part) => {
                 let (lower, upper) = super::glob::path_range(&part.pattern, part.order);
                 rows_of(
                     self.shape(),
@@ -315,6 +326,11 @@ impl Filter {
                      WHERE dg.id = {id} AND {})",
                 part.glob_test("dg.path", binder)
             ),
+            Filter::ExcludedPath(part) => format!(
+                "NOT EXISTS (SELECT 1 FROM documents AS dg
+                     WHERE dg.id = {id} AND {})",
+                part.glob_test("dg.path", binder)
+            ),
             Filter::Bound { shape, values, .. } => test_bound(*shape, values, id, binder),
         }
     }
@@ -326,7 +342,7 @@ impl Filter {
     pub(crate) fn is_path_ordered(&self, descending: bool) -> bool {
         let merges_few = match self {
             Filter::Bound { members, .. } => members.len() <= MERGED_SOURCE_VALUES,
-            Filter::Path(_) => true,
+            Filter::Path(_) | Filter::ExcludedPath(_) => true,
         };
         self.shape().is_path_ordered(descending) && merges_few
     }
@@ -366,6 +382,7 @@ impl Filter {
                 let rows = Rows::new("documents AS dg", "dg.id", glob);
                 Some(reach.arm(&rows, false, binder))
             }
+            Filter::ExcludedPath(_) => None,
             Filter::Bound {
                 shape,
                 values,
@@ -609,7 +626,7 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                 format!("documents_fts MATCH {query}"),
             )
         }
-        ReadFilter::PathGlob(order) => {
+        ReadFilter::PathGlob(order) | ReadFilter::ExcludePathGlob(order) => {
             let (lower, upper) = (next(), next());
             let collation = order.collation();
             let range = format!("dg.path >= {lower}{collation} AND dg.path < {upper}{collation}");
@@ -810,6 +827,7 @@ fn source_bound(
         | ReadFilter::After(_)
         | ReadFilter::FullText
         | ReadFilter::PathGlob(_)
+        | ReadFilter::ExcludePathGlob(_)
         | ReadFilter::Resolves(_)
         | ReadFilter::LinksTo(_) => {
             unreachable!("{shape:?} is no part a bound source spells")

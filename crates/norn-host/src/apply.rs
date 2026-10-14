@@ -74,7 +74,9 @@ use crate::address::registered_name;
 use crate::applier;
 use crate::clock::OneReading;
 use crate::derivation::Declared;
-use crate::evidence::{LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SnapshotWork};
+use crate::evidence::{
+    LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SimilarStemsCost, SnapshotWork,
+};
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadHold, ReadRefusal,
     ReadSource, ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
@@ -493,12 +495,14 @@ where
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
 /// every judgment of the resolution door it runs adds what the door reported
 /// and what its snapshot's counters moved by, so a preview's account holds
-/// what its planning and its check really ran.
+/// what its planning and its check really ran. Similarity retrieval also keeps
+/// its logical rows and read count for the planning hold's read account.
 pub(crate) struct PlanSnapshot<'a> {
     vault: VaultAddress,
     declared: &'a ContentModel,
     on: ReadOn<'a>,
     judged: Cell<LinkJudgmentCost>,
+    similar: Cell<SimilarStemsCost>,
 }
 
 /// Where a [`PlanSnapshot`] reads.
@@ -520,7 +524,7 @@ enum ReadOn<'a> {
 
 impl<'a> PlanSnapshot<'a> {
     /// Reading `vault`'s `snapshot`, which pins `declared`.
-    pub(crate) const fn held(
+    pub(crate) fn held(
         vault: VaultAddress,
         snapshot: &'a Snapshot,
         declared: &'a ContentModel,
@@ -530,12 +534,13 @@ impl<'a> PlanSnapshot<'a> {
             declared,
             on: ReadOn::Held(snapshot),
             judged: Cell::new(LinkJudgmentCost::NONE),
+            similar: Cell::new(SimilarStemsCost::default()),
         }
     }
 
     /// Reading the snapshot `mint` establishes for `vault`, once, when first
     /// asked; `declared` is what that snapshot pins.
-    pub(crate) const fn on_demand(
+    pub(crate) fn on_demand(
         vault: VaultAddress,
         mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         declared: &'a ContentModel,
@@ -549,6 +554,7 @@ impl<'a> PlanSnapshot<'a> {
                 released: Cell::new(SnapshotWork::NONE),
             },
             judged: Cell::new(LinkJudgmentCost::NONE),
+            similar: Cell::new(SimilarStemsCost::default()),
         }
     }
 
@@ -681,6 +687,31 @@ impl Matcher for PlanSnapshot<'_> {
 }
 
 impl repair::Following for PlanSnapshot<'_> {
+    fn candidate_head(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, PageRefused> {
+        self.reading(|snapshot| {
+            snapshot.candidate_head(paths, total, self.declared.ambiguity_ignore())
+        })?
+        .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
+    fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, PageRefused> {
+        let answer = self
+            .reading(|snapshot| snapshot.similar_stems(stem))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))?;
+        let cost = SimilarStemsCost::of(&answer.work);
+        let total = self.similar.get();
+        self.similar.set(SimilarStemsCost {
+            reads: total.reads + cost.reads,
+            rarity_rows_read: total.rarity_rows_read + cost.rarity_rows_read,
+            postings_rows_read: total.postings_rows_read + cost.postings_rows_read,
+        });
+        Ok(answer)
+    }
+
     fn tombstones(
         &self,
         link: &norn_wire::LinkKey,
@@ -1081,7 +1112,9 @@ where
     /// The plan carries its [`Provenance`]: the findings it left alone, the
     /// findings each operation fixes, the generation it read, the cursor that
     /// continues the batch, and, on a first batch, how many selected findings
-    /// remain after it.
+    /// remain after it and the vault's repair advisories: computed where no
+    /// path or document predicate narrows the repair, and omitted as narrowed
+    /// where one does. A continuation carries no advisories.
     ///
     /// **The plan is judged by the applier's own check on the same hold**,
     /// and held to what its planning claims of every finding (`guarded`):
@@ -1148,9 +1181,10 @@ where
             }
             // The batch's `moved` is not carried: a repair cursor names a
             // path and the batch reads the state that stands now, so
-            // nothing in it is the caller's to act on. Its advisories are
-            // dropped as a `where` target's are (`PlanSnapshot::matching`
-            // reads only the find's rows).
+            // nothing in it is the caller's to act on. Its read advisories
+            // (mixed-offset comparisons, not repair advisories) are dropped as
+            // a `where` target's are (`PlanSnapshot::matching` reads only the
+            // find's rows).
             // One view of the vault serves the fixes and the planning
             // they resolve through, so a document a fix is made to is read
             // once and composed from the bytes its fix was judged on; and
@@ -1181,6 +1215,25 @@ where
             }
             if let Some(next) = batch.next {
                 provenance = provenance.continued_by(next);
+            }
+            if params.after.is_none() {
+                let advisories = if params.predicates.is_empty() {
+                    let (advisories, cost) = snapshot
+                        .reading(|held| {
+                            crate::repair_advisories::computed(
+                                held,
+                                ground.declared.schema(),
+                                snapshot.declared,
+                            )
+                        })
+                        .map_err(refused)?
+                        .map_err(|refusal| refused(page_refusal(refusal)))?;
+                    self.count_repair_advisories(cost);
+                    advisories
+                } else {
+                    norn_wire::RepairAdvisories::omitted_narrowed()
+                };
+                provenance = provenance.with_advisories(advisories);
             }
             let plan = repaired.plan.with_provenance(provenance);
             let previewed = guarded(
@@ -1230,6 +1283,7 @@ where
         let (planned, clock_reads) =
             crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused));
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
+        self.count_similar_stems(snapshot.similar.get());
         self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
         self.count_clock_reads(clock_reads);
         Ok((reading, planned?))

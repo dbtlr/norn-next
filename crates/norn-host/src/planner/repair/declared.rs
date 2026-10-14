@@ -40,7 +40,11 @@
 //! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
 //! ([`closed_set`]); and a broken link follows one tombstone to one live
-//! holder of its hash ([`move_following`]). A link fix is the exception to
+//! holder of its hash ([`move_following`]).
+//! **A broken link's single best similar stem is a suggestion, made at
+//! [`Confidence::Suggested`].** Both share spelling, judgment and address
+//! conditions; only a follow guards a hash.
+//! A link fix is the exception to
 //! finding order: its answer rests on the batch's settled routes, so a
 //! document's link fixes compose last, after the routes of the batch are
 //! settled ([`Decided::emit`]). A
@@ -64,16 +68,18 @@
 //! An undeclared tag takes the one literal declared tag exactly one OSA edit
 //! away under the tag fold ([`tags`]). All are made at Suggested, each score
 //! carried as note text; equal best candidates tie only at an admitted level.
+//! The fourth, a broken link's most similar stem, is read with move-following
+//! and composed through it ([`move_following`]).
 //!
 //! **Every candidate at or above the request's threshold is pooled for a
 //! finding, and the strongest level present decides.** A declared fix counts
 //! even where it fails the combined constraint or the judge: it blocks the
 //! derived answer, and the finding skips with every candidate. Where a
 //! declared fix decides and the derived answer differs, the citation notes
-//! the derived answer. A derived fix the threshold does not admit is judged
+//! the derived answer. A derived or suggested fix below the threshold is judged
 //! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
 //! operation lowering the threshold writes for it: the document composed
-//! again at that fix's level ([`Reckoned::propose_lowered`]), so each
+//! again at its confidence level ([`Reckoned::propose_lowered`]), so each
 //! element of a list proposes the one write of the field every admitted
 //! element composes into, and a fix that composition refuses skips with its
 //! reason.
@@ -138,7 +144,7 @@
 //! fixed nor skipped, whichever the judgment concludes: a rule's, an
 //! undeclared tag, or one about the document whole, each decided against the
 //! document as the last fix leaves it. A link finding is no conclusion of it,
-//! and without a move-following fix is skipped here as its row reads; the
+//! and without a move-following or similarity fix is skipped here as its row reads; the
 //! resolved plan settles it
 //! afterwards, dropping the finding where the plan's final state no longer holds
 //! it ([`super::held_links`]); a missing-anchor link that comes to resolve to
@@ -302,7 +308,7 @@ pub(super) fn draft<'d, R: Reading>(
     document: &'d [FindingRow],
     repairing: &'d Repairing<'d>,
     vault: &R,
-    follows: &super::broken_links::Follows,
+    follows: &super::broken_links::Answers,
 ) -> Result<Draft<'d>, R::Error> {
     let alone = |decide: &dyn Fn(&FindingRow) -> SkippedFinding| Draft {
         drafted: Drafted::Alone(document.iter().map(decide).collect()),
@@ -438,13 +444,13 @@ enum Deciding<'d> {
 }
 
 impl Decided<'_> {
-    /// Add to `probes` each followed link's candidates and replaced address,
+    /// Add to `probes` each broken-link answer's candidates and replaced address,
     /// and record its candidates in `asked`, from the holder where this
     /// document's settled route leaves it. Only a read document with a
-    /// unique follow contributes probes.
-    pub(super) fn follow_probes(
+    /// single answer contributes probes.
+    pub(super) fn broken_link_probes(
         &self,
-        follows: &super::broken_links::Follows,
+        follows: &super::broken_links::Answers,
         asked: &mut super::broken_links::Asked,
         probes: &mut Vec<LinkKey>,
     ) {
@@ -517,7 +523,7 @@ impl Decided<'_> {
         planned: &mut Planned,
         namings: &Namings,
         respellable: Option<&Respellable>,
-        follows: &super::broken_links::Follows,
+        follows: &super::broken_links::Answers,
         asked: &super::broken_links::Asked,
         resolutions: &std::collections::BTreeMap<crate::planner::links::EntryKey, Resolves>,
         vault: &R,
@@ -526,11 +532,11 @@ impl Decided<'_> {
         let (reckoned, mut composed) = match self.decided {
             Deciding::Alone(decided) => {
                 planned.skipped.extend(decided.into_iter().map(|skipped| {
-                    follows
-                        .get(&skipped.finding)
-                        .and_then(|follow| follow.as_ref().err())
-                        .cloned()
-                        .unwrap_or(skipped)
+                    match follows.get(&skipped.finding) {
+                        Some(Err(failed)) => failed.clone(),
+                        Some(Ok(answer)) => answer.skipped(skipped),
+                        None => skipped,
+                    }
                 }));
                 return Ok(());
             }
@@ -538,7 +544,7 @@ impl Decided<'_> {
         };
         reckoned.link_fixes(&reckoned.document, &mut composed, namings, respellable);
         anchors::fixes(&reckoned, &mut composed, vault, tagged)?;
-        reckoned.follow_fixes(
+        reckoned.broken_link_fixes(
             &reckoned.document,
             &mut composed,
             follows,
@@ -609,8 +615,8 @@ struct Composed {
 /// One addition a composition makes.
 #[derive(Clone)]
 enum Made {
-    /// A move-following fix: one rewrite answering every finding `cited`,
-    /// carrying its hash author condition and both address `conditions`.
+    /// A broken-link answer: one rewrite answering every finding `cited`,
+    /// carrying both address `conditions` and a followed hash where applicable.
     Followed {
         operation: Operation,
         cited: Vec<CitedFinding>,
@@ -915,7 +921,7 @@ impl<'d> Reckoned<'d> {
         composed: &mut Composed,
         namings: &Namings,
         respellable: Option<&Respellable>,
-        follows: &super::broken_links::Follows,
+        follows: &super::broken_links::Answers,
         asked: &super::broken_links::Asked,
         resolutions: &std::collections::BTreeMap<crate::planner::links::EntryKey, Resolves>,
     ) {
@@ -951,7 +957,7 @@ impl<'d> Reckoned<'d> {
             let (from, made) = composed.began.clone();
             let mut lowered = self.compose(&lowered_document, from, made);
             self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
-            self.follow_fixes(
+            self.broken_link_fixes(
                 &lowered_document,
                 &mut lowered,
                 follows,
@@ -1300,8 +1306,8 @@ impl Document<'_> {
         self.threshold.admits(level)
     }
 
-    /// Compose at the confidence of a fix below the threshold, so its
-    /// proposal is the grouped write admitting that level makes.
+    /// Compose at the proposed fix's confidence, after the earlier fixes
+    /// that lowering to that level admits.
     fn lowered(&self, level: Confidence) -> Self {
         Document {
             threshold: level,
@@ -2012,6 +2018,20 @@ mod tests {
         ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
             Ok(Vec::new())
         }
+        fn candidate_head(
+            &self,
+            _: &[DocumentPath],
+            total: u64,
+        ) -> Result<norn_wire::CandidateHead, Self::Error> {
+            Ok(norn_wire::CandidateHead::new([], total).expect("an empty head"))
+        }
+        fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, Self::Error> {
+            Ok(norn_store::SimilarStems {
+                matches: norn_store::StemMatches::Candidates(Vec::new()),
+                query_trigrams: norn_store::similarity::trigrams(stem).len(),
+                work: norn_store::SimilarStemsWork::default(),
+            })
+        }
         fn live_holders(&self, _: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
             Ok(Vec::new())
         }
@@ -2440,13 +2460,15 @@ mod tests {
         };
         let rows = [finding(1, FindingKind::Broken, "gone.md", "old")];
         let destination = DocumentPath::new("new.md").expect("a document path");
-        let follows = super::super::broken_links::Follows::from([(
+        let follows = super::super::broken_links::Answers::from([(
             1,
-            Ok(super::super::broken_links::Follow {
+            Ok(super::super::broken_links::Answer {
                 link: LinkKey::new(rows[0].path.clone(), LinkFamily::Wikilink, "old"),
                 before: destination.clone(),
                 to: destination,
-                hash: crate::planner::compose::content_hash(b"# Followed\n"),
+                evidence: super::super::broken_links::Evidence::Moved(
+                    crate::planner::compose::content_hash(b"# Followed\n"),
+                ),
             }),
         )]);
 

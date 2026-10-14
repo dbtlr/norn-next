@@ -12,6 +12,12 @@
 //! `judge_would_refuse`, including selecting a rule reading by value a link
 //! a settled route may respell. An admitted rewrite below the threshold is
 //! `below_threshold` with its operation.
+//!
+//! **Similarity answers use the same composition at suggested confidence.**
+//! Their citations and below-threshold proposals carry the score note, and
+//! both addresses carry the same conditions as a follow. Only a follow
+//! carries a content-hash author condition. A suggestion below threshold
+//! carries its score note.
 
 use std::collections::BTreeMap;
 
@@ -19,24 +25,24 @@ use super::{
     Composed, Document, Made, Reckoned, Respellable, State, cited, respells, skip, verdict,
 };
 use crate::planner::links::{EntryKey, address, entry_key, skip_advisory, wire_family};
-use crate::planner::repair::broken_links::{Asked, Follow, Follows};
+use crate::planner::repair::broken_links::{Answer, Answers, Asked, Evidence};
 use norn_wire::{
-    AuthorCondition, Confidence, LinkKey, LinkRewrite, Operation, OperationKind, PlanCondition,
-    Resolves, SkipReason,
+    AuthorCondition, LinkKey, LinkRewrite, Operation, OperationKind, PlanCondition, Resolves,
+    SkipReason,
 };
 
 impl Reckoned<'_> {
-    /// Compose the unique follows of this document onto `composed`, after
+    /// Compose the single broken-link answers of this document onto `composed`, after
     /// its ordinary and bare-link fixes, as `composing` judges each addition
     /// and the batch's `resolutions` answer its candidate addresses. A group
     /// whose old links are gone makes no fix; an unwritable follow or a
     /// refused addition skips with its reason, and a rewrite below the
     /// threshold skips carrying its proposed operation.
-    pub(super) fn follow_fixes(
+    pub(super) fn broken_link_fixes(
         &self,
         composing: &Document<'_>,
         composed: &mut Composed,
-        follows: &Follows,
+        follows: &Answers,
         asked: &Asked,
         resolutions: &BTreeMap<EntryKey, Resolves>,
         respellable: Option<&Respellable>,
@@ -46,7 +52,7 @@ impl Reckoned<'_> {
                 composed.decided[at] = Some(skipped.clone());
             }
         }
-        let mut groups: BTreeMap<_, Vec<(usize, &Follow)>> = BTreeMap::new();
+        let mut groups: BTreeMap<_, Vec<(usize, &Answer)>> = BTreeMap::new();
         for (at, row) in self.rows.iter().enumerate() {
             if let Some(Ok(follow)) = follows.get(&row.id) {
                 let link = LinkKey::new(
@@ -72,13 +78,13 @@ impl Reckoned<'_> {
                 },
             );
             let Some(to) = spelling else {
-                for (at, _) in &group {
-                    composed.decided[*at] = Some(
+                for (at, answer) in &group {
+                    composed.decided[*at] = Some(answer.skipped(
                         skip(&self.rows[*at], SkipReason::LinkNotRewritable).with_note(format!(
                             "no spelling resolves uniquely to `{}` from `{}`",
                             follow.to, composed.state.at
                         )),
-                    );
+                    ));
                 }
                 continue;
             };
@@ -90,19 +96,20 @@ impl Reckoned<'_> {
                 &follow.link.address,
                 &to,
             );
-            let rewritten = match crate::planner::edit::rewritten(&composed.state.bytes, [&rewrite])
-            {
-                Ok(rewritten) => rewritten,
-                Err(reason) => {
-                    for (at, _) in &group {
-                        composed.decided[*at] = Some(
-                            skip(&self.rows[*at], SkipReason::LinkNotRewritable)
-                                .with_note(format!("the text layer refuses the rewrite: {reason}")),
-                        );
+            let rewritten =
+                match crate::planner::edit::rewritten(&composed.state.bytes, [&rewrite]) {
+                    Ok(rewritten) => rewritten,
+                    Err(reason) => {
+                        for (at, answer) in &group {
+                            composed.decided[*at] = Some(answer.skipped(
+                                skip(&self.rows[*at], SkipReason::LinkNotRewritable).with_note(
+                                    format!("the text layer refuses the rewrite: {reason}"),
+                                ),
+                            ));
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             if !rewritten.links.iter().any(|link| {
                 wire_family(link.family) == follow.link.syntax
                     && address(link) == follow.link.address
@@ -111,10 +118,12 @@ impl Reckoned<'_> {
             }
             if let Some(skipped) = rewritten.skipped.first() {
                 let reason = skip_advisory(old.clone(), skipped.reason).as_str();
-                for (at, _) in &group {
+                for (at, answer) in &group {
                     composed.decided[*at] = Some(
-                        skip(&self.rows[*at], SkipReason::LinkNotRewritable)
-                            .with_note(format!("the text layer refuses the rewrite: {reason}")),
+                        answer.skipped(
+                            skip(&self.rows[*at], SkipReason::LinkNotRewritable)
+                                .with_note(format!("the text layer refuses the rewrite: {reason}")),
+                        ),
                     );
                 }
                 continue;
@@ -129,11 +138,11 @@ impl Reckoned<'_> {
             );
             let state = State::of(composed.state.at.clone(), rewritten.bytes, result.standing);
             if !result.introduced.is_empty() {
-                for (at, _) in &group {
+                for (at, answer) in &group {
                     composed.decided[*at] = composing
                         .introducing(&state, &result.introduced, &self.rows[*at], None)
                         .err()
-                        .map(|skipped| *skipped);
+                        .map(|skipped| answer.skipped(*skipped));
                 }
                 continue;
             }
@@ -145,10 +154,10 @@ impl Reckoned<'_> {
                      move of `{from}` to `{to}` would respell",
                     state.at
                 );
-                for (at, _) in &group {
-                    composed.decided[*at] = Some(
+                for (at, answer) in &group {
+                    composed.decided[*at] = Some(answer.skipped(
                         skip(&self.rows[*at], SkipReason::JudgeWouldRefuse).with_note(note.clone()),
-                    );
+                    ));
                 }
                 continue;
             }
@@ -157,16 +166,23 @@ impl Reckoned<'_> {
                 follow.link.syntax,
                 &follow.link.address,
                 to,
-            ))
-            .with_conditions(vec![AuthorCondition::content_hash(
-                follow.before.clone(),
-                follow.hash.clone(),
-            )]);
-            if !composing.admits(Confidence::Derived) {
-                for (at, _) in &group {
+            ));
+            let operation = match &follow.evidence {
+                Evidence::Moved(hash) => {
+                    operation.with_conditions(vec![AuthorCondition::content_hash(
+                        follow.before.clone(),
+                        hash.clone(),
+                    )])
+                }
+                Evidence::Similar { .. } => operation,
+            };
+            if !composing.admits(follow.confidence()) {
+                for (at, answer) in &group {
                     composed.decided[*at] = Some(
-                        skip(&self.rows[*at], SkipReason::BelowThreshold)
-                            .with_proposed(operation.clone()),
+                        answer.skipped(
+                            skip(&self.rows[*at], SkipReason::BelowThreshold)
+                                .with_proposed(operation.clone()),
+                        ),
                     );
                 }
                 continue;
@@ -185,7 +201,7 @@ impl Reckoned<'_> {
                 operation,
                 cited: group
                     .iter()
-                    .map(|(at, _)| cited(&self.rows[*at], Confidence::Derived, Vec::new()))
+                    .map(|(at, _)| cited(&self.rows[*at], follow.confidence(), follow.notes()))
                     .collect(),
                 conditions,
             });

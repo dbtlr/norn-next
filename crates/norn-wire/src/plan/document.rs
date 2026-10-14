@@ -497,14 +497,12 @@ pub enum SkipReason {
     /// finding — so the respelling could change what the holder is judged
     /// to be. The note names the holder and the field.
     RespellsAJudgedLink,
-    // The next seven are Layer 5C's link-fix reasons: the move-following fix
-    // (NORN-399) emits `no_recorded_hash`, `no_holder`, `several_holders`,
-    // `several_tombstones` and `link_not_rewritable`, and the closest-heading
-    // suggestion (NORN-401) emits `link_not_rewritable` too. `too_common` and
-    // `too_short` remain dormant carriers for the similarity suggestion
-    // (NORN-400), which will also emit `link_not_rewritable`: repair's current
-    // call graph does not yet reach their producer. The notes live here rather
-    // than in the doc comments schemars lifts.
+    // Move-following emits the four tombstone/hash reasons and link_not_rewritable.
+    // Similarity emits too_common and too_short, and shares link_not_rewritable,
+    // as the closest-heading suggestion does.
+    // Similarity reads only a broken link whose address finds no tombstone and
+    // never names its holder, so a move-following skip carries no similarity outcome.
+    // The notes live here rather than in the doc comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest
     /// from. The entry's value is the query stem, and its note names the
@@ -784,11 +782,8 @@ pub struct Provenance {
     // small; the bytes are the cursor's either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Box<Cursor>>,
-    // Dormant carrier: Layer 5C's advisory computation (NORN-402) fills this
-    // slot, on the first batch of a repair. `Host::repair` never sets it
-    // today, so it is absent on every batch; NORN-396 lands the vocabulary
-    // first. The note lives here rather than in the doc comment schemars
-    // lifts.
+    // Host::repair fills the slot on an unnarrowed first batch, carries
+    // omitted: narrowed on a narrowed one, and leaves it absent on continuations.
     /// The repair advisories: what the repair noticed about the vault's
     /// fields and schema. The slot is in one of three states: absent, where
     /// the batch carries none, as every continuation batch does; `omitted`,

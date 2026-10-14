@@ -94,10 +94,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use norn_store::{
-    FieldMatch, FieldOrder, MERGED_SOURCE_VALUES, ReadFilter, Store, StoredPathOrder, SuffixKey,
-    induced_failure,
+    FieldMatch, FieldOrder, MERGED_SOURCE_VALUES, ReadFilter, RepairAdvisoryStatement, Store,
+    StoredPathOrder, SuffixKey, induced_failure,
 };
-use norn_testkit::explain::{PlanRow, QueryPlan};
+use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     ApplyMode, ApplyReport, FindingKind, Predicate, Provenance, ReasonCode, RepairParams,
@@ -107,7 +107,8 @@ use norn_wire::{
 /// The schema the census vault pins: a task rule with a default, a synonym
 /// and a route, at `error`; a hub rule reading `up` by value, at `warning`;
 /// and a `link` field a bare value is a type mismatch of.
-const SCHEMA: &str = "version: 1\nfields:\n  ref: {type: link}\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    severity: warning\n    match: {frontmatter: {type: hub}}\n    max_length:\n      up: 40\n";
+/// A number field's unreadable synonym reaches a shaped raw membership seek.
+const SCHEMA: &str = "version: 1\nfields:\n  ref: {type: link}\n  zz_syn: {type: number, shape: single}\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  numbers:\n    one_of:\n      zz_syn: {values: ['1', '2'], synonyms: {one: '1'}}\n  hubs:\n    severity: warning\n    match: {frontmatter: {type: hub}}\n    exclude: {path: ['archive/**']}\n    max_length:\n      up: 40\n";
 
 /// Where every document the census arranges stands.
 const FOLDER: &str = "zz-repair/";
@@ -153,10 +154,13 @@ const DOCUMENTS: [(&str, &[u8]); 7] = [
     ),
     (
         "hub.md",
-        b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\n---\n",
+        b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\nzz-M: marker\n---\n",
     ),
-    ("zz-holder.md", b"---\nref: zz-target\n---\n# Holder\n"),
-    ("zz-target.md", b"# Target\n"),
+    (
+        "zz-holder.md",
+        b"---\nref: zz-target\nzz_syn: one\n---\n# Holder\n",
+    ),
+    ("zz-target.md", b"---\nzz-M: marker\n---\n# Target\n"),
 ];
 
 /// How many documents the census stands under `n/`, each a task holding four
@@ -333,6 +337,11 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         planned.contains("SELECT k, v FROM 'main'.'documents_fts_config'"),
         "the census planned no read of the full-text configuration: {planned:?}"
     );
+    assert!(
+        planned.contains("SELECT document FROM document_trigrams WHERE trigram = ?1 LIMIT ?2"),
+        "the census planned no stem rarity read"
+    );
+    assert!(planned.iter().any(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ") == "SELECT d.path FROM document_trigrams AS t JOIN documents AS d ON d.id = t.document WHERE t.trigram = ?1"), "the census planned no stem postings read");
     assert_eq!(
         begun.symmetric_difference(&planned).collect::<Vec<_>>(),
         Vec::<&String>::new(),
@@ -345,6 +354,43 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         unbarred.len(),
         unbarred.join("\n\n")
     );
+    for statement in RepairAdvisoryStatement::all() {
+        assert!(
+            plans
+                .iter()
+                .any(|plan| advisory_statement(plan.sql()) == Some(statement)),
+            "the census reached no {statement:?} advisory statement"
+        );
+    }
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.sql().contains("fv.raw") && plan.sql().contains("fs.container =") }),
+        "the synonym pass reached no shaped raw membership seek"
+    );
+    let excluding: Vec<_> = plans
+        .iter()
+        .filter(|plan| {
+            plan.sql()
+                .contains("NOT EXISTS (SELECT 1 FROM documents AS dg")
+        })
+        .collect();
+    assert!(
+        !excluding.is_empty(),
+        "the advisory pass reached no excluding path filter"
+    );
+    for plan in excluding {
+        let probe = QueryPlan::new(
+            plan.sql(),
+            plan.rows()
+                .iter()
+                .filter(|row| row.searches() == Some("dg"))
+                .cloned()
+                .collect(),
+        );
+        probe.assert_searches_through("documents", Access::RowId);
+        probe.assert_search_constraint("documents", "(rowid=?)");
+    }
     let reached: BTreeSet<&str> = plans
         .iter()
         .flat_map(|plan| plan.rows().iter().filter_map(PlanRow::index))
@@ -365,6 +411,30 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     );
 }
 
+/// The advisory statement family the recorded SQL runs, held to all five families.
+fn advisory_statement(sql: &str) -> Option<RepairAdvisoryStatement> {
+    if sql.starts_with("SELECT key FROM document_fields INDEXED BY document_fields_presence") {
+        return Some(if sql.contains("key >=") {
+            RepairAdvisoryStatement::FirstKey
+        } else {
+            RepairAdvisoryStatement::NextKey
+        });
+    }
+    if sql.starts_with("SELECT value_type, document FROM document_fields") {
+        return Some(RepairAdvisoryStatement::ValueTypes);
+    }
+    if sql.starts_with(
+        "SELECT path, container FROM document_fields INDEXED BY document_fields_presence",
+    ) {
+        return Some(if sql.split(" UNION ALL ").count() == 3 {
+            RepairAdvisoryStatement::FieldPresence
+        } else {
+            RepairAdvisoryStatement::SpellingPresence
+        });
+    }
+    None
+}
+
 /// The indexes the census's selections reach, each named with the arm whose
 /// seek it is, any one of a group serving: the record is only a census of a
 /// repair's statements where it holds every arm's.
@@ -381,6 +451,8 @@ const REACHED: &[&[&str]] = &[
     // presence and a tag. A links-to part's link keys are the route's below.
     &["document_fields_raw"],
     &["document_fields_presence"],
+    // Parsed scalar types read by the first-batch advisory pass.
+    &["document_fields_value_type"],
     &["document_tags_folded_name"],
     // The stored link at a finding's ordinal, and a holder's held links.
     &["links_document_ordinal"],
@@ -643,7 +715,14 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
 
     let (parts, [narrow, wide]) = every_part();
     let named: BTreeSet<usize> = parts.iter().map(|part| part.shape.slot()).collect();
-    let enumerated: BTreeSet<usize> = ReadFilter::all().map(ReadFilter::slot).into();
+    // Excluding path globs are in-process schema selectors, with no wire
+    // predicate. The unnarrowed advisory pass reaches that filter below;
+    // batch narrowing compares only shapes a repair request can name.
+    let enumerated: BTreeSet<usize> = ReadFilter::all()
+        .into_iter()
+        .filter(|shape| !matches!(shape, ReadFilter::ExcludePathGlob(_)))
+        .map(ReadFilter::slot)
+        .collect();
     assert_eq!(
         named, enumerated,
         "the census narrows by other shapes than the store enumerates"
@@ -667,6 +746,7 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
     ];
     let drives: BTreeSet<(usize, Reach)> = ReadFilter::all()
         .into_iter()
+        .filter(|shape| !matches!(shape, ReadFilter::ExcludePathGlob(_)))
         .flat_map(|shape| {
             let reaches = match shape {
                 ReadFilter::PathGlob(_) | ReadFilter::Resolves(_) => vec![Reach::Unasked],

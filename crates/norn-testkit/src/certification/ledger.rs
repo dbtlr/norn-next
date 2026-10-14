@@ -493,6 +493,16 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "repair-advisory-fixed-vm-budget",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::REPAIR_ADVISORY_VM_BASE",
+        armed: true,
+    },
+    ExitBar {
+        name: "repair-advisory-input-vm-budget",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::REPAIR_ADVISORY_VM_PER_INPUT",
+        armed: true,
+    },
+    ExitBar {
         name: "apply-document-reads-per-replaced-target",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET",
         armed: true,

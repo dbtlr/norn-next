@@ -4985,8 +4985,17 @@ fn only_the_link_a_route_resolves_is_dropped_when_two_syntaxes_share_an_address(
     for plan in [&preview, &plan] {
         assert_eq!(
             provenance(plan).skipped,
-            vec![SkippedFinding::new(mark, SkipReason::NoDeclaredFix)],
-            "wikilink {wiki} resolves and the Markdown link does not"
+            vec![
+                SkippedFinding::new(mark, SkipReason::BelowThreshold)
+                    .with_proposed(Operation::new(OperationKind::rewrite_link(
+                        at("sub/h.md"),
+                        norn_wire::LinkFamily::Markdown,
+                        "tasks/zz-land.md",
+                        "../tasks/zz-land.md"
+                    )))
+                    .with_note("similarity 1.00 (trigram, cutoff 0.50)")
+            ],
+            "wikilink {wiki} resolves and the Markdown link receives a suggestion"
         );
     }
     // The validator agrees: of the two links, the Markdown one stands.
@@ -6422,4 +6431,419 @@ fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_
     assert_eq!(written(&vault, "zz-holder.md"), "See [x](tasks/new.md).\n");
     assert!(stands(&vault, "tasks/new.md"));
     assert!(!stands(&vault, "loose/new.md"));
+}
+
+/// **A broken wikilink suggests its best stem, guards both addresses and applies only when suggestions are admitted.**
+#[test]
+fn a_broken_wikilink_suggests_its_most_similar_stem_through_preview_then_apply() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-similarity",
+        "version: 1\n",
+        &[
+            ("abcdefghij.md", b"# Target\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let strict = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    let skipped = &provenance(&strict).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::BelowThreshold);
+    assert_eq!(
+        skipped.note.as_deref(),
+        Some("similarity 0.69 (trigram, cutoff 0.50)")
+    );
+    let operation = skipped.proposed.as_ref().expect("suggested rewrite");
+    assert_eq!(
+        operation.kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "abcdefghix",
+            "abcdefghij"
+        )
+    );
+    assert!(operation.conditions.is_empty());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1);
+    let cited = &provenance(&plan).citations[0].findings[0];
+    assert_eq!(cited.confidence, Confidence::Suggested);
+    assert_eq!(cited.notes, vec!["similarity 0.69 (trigram, cutoff 0.50)"]);
+    for (address, after) in [
+        ("abcdefghix", norn_wire::Resolves::none()),
+        ("abcdefghij", norn_wire::Resolves::one(at("abcdefghij.md"))),
+    ] {
+        assert!(
+            plan.conditions
+                .contains(&norn_wire::PlanCondition::address_resolution(
+                    norn_wire::LinkKey::new(
+                        at("zz-holder.md"),
+                        norn_wire::LinkFamily::Wikilink,
+                        address
+                    ),
+                    after
+                ))
+        );
+    }
+    assert!(matches!(
+        planned(host.apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone())
+        ))),
+        ApplyReport::Applied { .. }
+    ));
+    assert_eq!(written(&vault, "zz-holder.md"), "See [[abcdefghij]].\n");
+}
+
+/// **Equal best stems skip as a tie carrying both documents and the score.**
+#[test]
+fn equal_best_stems_skip_as_a_tie_with_both_documents() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-tie",
+        "version: 1\n",
+        &[
+            ("abcdefghij.md", b"# J\n"),
+            ("abcdefghik.md", b"# K\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert!(plan.operations.is_empty());
+    let skipped = &provenance(&plan).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::Tie);
+    assert_eq!(
+        skipped.note.as_deref(),
+        Some("tie at similarity 0.69 (trigram, cutoff 0.50)")
+    );
+    let head = norn_wire::CandidateHead::new(
+        ["abcdefghij.md", "abcdefghik.md"]
+            .map(|name| norn_wire::Candidate::new(at(name), name.strip_suffix(".md").unwrap())),
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        skipped.candidates,
+        Some(norn_wire::SkippedCandidates::documents(head))
+    );
+}
+
+/// **The prefix filter retrieves equal best candidates sharing rare and common query trigrams.**
+#[test]
+fn rare_and_common_trigram_candidates_are_both_in_the_best_score_tie() {
+    let mut documents = vec![
+        ("ab.md".to_string(), b"# Short\n".to_vec()),
+        ("abcaa.md".to_string(), b"# Rare\n".to_vec()),
+        ("zz-holder.md".to_string(), b"See [[abcab]].\n".to_vec()),
+    ];
+    for n in 0..20 {
+        documents.push((format!("abzz{n:02}ab.md"), b"# Filler\n".to_vec()));
+    }
+    let borrowed: Vec<_> = documents
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let (_sandbox, vault, host) =
+        a_vault_under("host-similarity-prefix-tie", "version: 1\n", &borrowed);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    let skipped = &provenance(&plan).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::Tie);
+    assert_eq!(
+        skipped.note.as_deref(),
+        Some("tie at similarity 0.50 (trigram, cutoff 0.50)")
+    );
+    let head = norn_wire::CandidateHead::new(
+        ["ab.md", "abcaa.md"]
+            .map(|name| norn_wire::Candidate::new(at(name), name.strip_suffix(".md").unwrap())),
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        skipped.candidates,
+        Some(norn_wire::SkippedCandidates::documents(head))
+    );
+}
+
+/// **An over-cap query skips as too common with its stem, trigram and cap.**
+#[test]
+fn a_stem_past_the_postings_cap_skips_as_too_common() {
+    let mut documents = vec![("zz-holder.md".to_string(), b"See [[aaaaa]].\n".to_vec())];
+    for n in 0..257 {
+        documents.push((format!("p{n}/aaaa.md"), b"# Common\n".to_vec()));
+    }
+    let borrowed: Vec<_> = documents
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let (_sandbox, vault, host) =
+        a_vault_under("host-similarity-common", "version: 1\n", &borrowed);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    let skipped = &provenance(&plan).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::TooCommon);
+    assert_eq!(skipped.value, Some(norn_store::value_head("aaaaa")));
+    assert_eq!(
+        skipped.note.as_deref(),
+        Some("trigram `  a` exceeds the postings cap 256")
+    );
+}
+
+/// **A folded leaf stem shorter than three characters skips without reading the similarity index.**
+#[test]
+fn a_short_folded_leaf_stem_skips_without_reading_the_similarity_index() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-short",
+        "version: 1\n",
+        &[(
+            "zz-holder.md",
+            "See [[vault://folder/E\u{301}x.md]].\n".as_bytes(),
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = host.read_evidence();
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+    assert_eq!(
+        host.read_evidence().since(before).similar_stems,
+        norn_host::SimilarStemsCost::default()
+    );
+    let skipped = &provenance(&plan).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::TooShort);
+    assert_eq!(skipped.value, Some(norn_store::value_head("E\u{301}x")));
+    assert_eq!(
+        skipped.note.as_deref(),
+        Some("the shortest admitted query is 3 characters")
+    );
+}
+
+/// **A stem below the similarity cutoff keeps no_declared_fix without proposing an operation.**
+#[test]
+fn a_stem_below_the_cutoff_has_no_proposed_operation() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-cutoff",
+        "version: 1\n",
+        &[
+            ("abcdefghixqrstuvwxyz.md", b"# Low\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert!(plan.operations.is_empty());
+    let skipped = &provenance(&plan).skipped[0];
+    assert_eq!(skipped.reason, SkipReason::NoDeclaredFix);
+    assert!(skipped.proposed.is_none());
+}
+
+/// **A unique move follow wins over a similar stem without reading the similarity index.**
+#[test]
+fn a_unique_move_follow_outranks_a_similar_stem_without_reading_it() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-follow-first",
+        "version: 1\n",
+        &[
+            ("abcdefghix.md", b"# Moved\n"),
+            ("abcdefghij.md", b"# Similar\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "abcdefghix.md", "elsewhere.md");
+    let before = host.read_evidence();
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(host.read_evidence().since(before).similar_stems.reads, 0);
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "abcdefghix",
+            "elsewhere"
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Derived
+    );
+}
+
+/// **Recreating the old target refuses a suggestion through its replaced-address condition.**
+#[test]
+fn recreating_the_old_target_refuses_a_suggestion_through_the_replaced_address() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-recreated",
+        "version: 1\n",
+        &[
+            ("abcdefghij.md", b"# Target\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1);
+    std::fs::write(
+        vault.path().join(FOLDER).join("abcdefghix.md"),
+        b"# Recreated\n",
+    )
+    .unwrap();
+    wait_for_stored_path(&vault, "abcdefghix.md", false);
+    let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+    let replaced = norn_wire::PlanCondition::address_resolution(
+        norn_wire::LinkKey::new(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "abcdefghix",
+        ),
+        norn_wire::Resolves::none(),
+    );
+    assert!(fails(&checks, &replaced), "{checks:?}");
+    assert_eq!(written(&vault, "zz-holder.md"), "See [[abcdefghix]].\n");
+}
+
+/// **A Markdown query decodes its leaf and drops a document extension in any ASCII case.**
+/// The leaf differs from its target by more than case, so it is broken on a folding root too.
+#[test]
+fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_decoded_stem() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-decoded",
+        "version: 1\n",
+        &[
+            ("my note.md", b"# Target\n"),
+            ("zz-holder.md", b"See [x](My%20Notes.MD).\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_link(
+            at("zz-holder.md"),
+            norn_wire::LinkFamily::Markdown,
+            "My%20Notes.MD",
+            "my%20note.md"
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].confidence,
+        Confidence::Suggested
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].notes,
+        ["similarity 0.70 (trigram, cutoff 0.50)"]
+    );
+    assert!(
+        plan.conditions
+            .contains(&norn_wire::PlanCondition::address_resolution(
+                norn_wire::LinkKey::new(
+                    at("zz-holder.md"),
+                    norn_wire::LinkFamily::Markdown,
+                    "my%20note.md"
+                ),
+                norn_wire::Resolves::one(at("my note.md"))
+            ))
+    );
+}
+
+/// **A similarity suggestion excludes its own holder and chooses the next best document.**
+#[test]
+fn a_broken_link_never_suggests_its_own_holder() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-excludes-holder",
+        "version: 1\n",
+        &[
+            ("meeting-2025.md", b"See [[meeting-2024]].\n"),
+            ("meeting-2023.md", b"# Earlier\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    assert_eq!(
+        plan.operations[0].kind,
+        OperationKind::rewrite_link(
+            at("meeting-2025.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "meeting-2024",
+            "meeting-2023"
+        )
+    );
+    assert_eq!(
+        provenance(&plan).citations[0].findings[0].notes,
+        ["similarity 0.73 (trigram, cutoff 0.50)"]
+    );
+}
+
+/// **A no-holder tombstone keeps its move-following skip without consulting a similar live target.**
+#[test]
+fn a_broken_link_with_a_no_holder_tombstone_stays_broken_without_a_suggestion() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-similarity-tombstone",
+        "version: 1\n",
+        &[
+            ("abcdefghix.md", b"# Removed\n"),
+            ("abcdefghij.md", b"# Target\n"),
+            ("zz-holder.md", b"See [[abcdefghix]].\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    moved_on_disk(&host, &vault, "abcdefghix.md", "elsewhere.md");
+    std::fs::write(
+        vault.path().join(FOLDER).join("elsewhere.md"),
+        b"# Changed\n",
+    )
+    .expect("change the moved bytes");
+    wait_until(
+        "changed holder hash is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let held = store
+                .begin_request()
+                .stored_document(
+                    &norn_store::DocumentPath::new(at("elsewhere.md").as_str()).expect("a path"),
+                )
+                .expect("the moved document");
+            if held.as_ref().is_some_and(|doc| {
+                doc.content_hash == norn_fs::ContentHash::of(b"# Changed\n").to_hex()
+            }) {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{held:?}"))
+            }
+        },
+    )
+    .expect("the changed bytes are derived");
+    let before = host.read_evidence();
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(host.read_evidence().since(before).similar_stems.reads, 0);
+    assert!(plan.operations.is_empty(), "{plan:?}");
+    let skipped = &provenance(&plan).skipped;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].reason, SkipReason::NoHolder);
+    assert!(skipped[0].proposed.is_none());
+    assert_eq!(
+        skipped[0].note.as_deref(),
+        Some(
+            format!("no live document holds the hash recorded at `{FOLDER}abcdefghix.md`").as_str()
+        )
+    );
+    assert_eq!(written(&vault, "zz-holder.md"), "See [[abcdefghix]].\n");
 }
