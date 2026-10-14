@@ -265,6 +265,9 @@ pub(crate) fn apply(
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
         request::check_finding_paths(&finding.facts, store.path_order())?;
+        if finding.bytes_hash.is_some() {
+            request::check_content_finding(&finding.facts)?;
+        }
     }
 
     // The boundary between two acts: everything before this one has committed

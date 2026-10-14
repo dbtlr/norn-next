@@ -2566,3 +2566,61 @@ fn a_content_quarantine_hash_is_not_recorded_beside_a_document_row() {
         store.verify_integrity().unwrap();
     }
 }
+
+/// **A content-quarantine hash ends with its content finding and no other.**
+/// A place can hold a finding about its spelling beside the one about its
+/// bytes, and a re-derivation of the spelling side discards only its own: the
+/// hash the bytes were judged over stands.
+#[test]
+fn a_spelling_discard_leaves_the_content_quarantine_hash_standing() {
+    let scratch = Scratch::new("quarantined-hash-spelling-discard");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let mut spelling = violation("q.md");
+    spelling.kind = FindingKind::PathNamesNoDocument;
+    request
+        .record_finding(&spelling)
+        .expect("recording a spelling finding");
+    applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
+    request
+        .discard_findings_about(
+            &path("q.md"),
+            DiscardScope::Kinds(&[FindingKind::PathNamesNoDocument]),
+        )
+        .expect("a discard of the spelling side");
+    assert_eq!(
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
+        Some("hash-1")
+    );
+}
+
+/// **Only a content finding carries a bytes hash**, and a changeset handing
+/// one over on any other finding is refused before it takes its lock: nothing
+/// it carries lands.
+#[test]
+fn a_bytes_hash_on_another_finding_is_refused_before_anything_lands() {
+    let scratch = Scratch::new("bytes-hash-on-another-finding");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let mut other = violation("q.md");
+    other.kind = FindingKind::PathNamesNoDocument;
+    let refused = request.apply_increment(
+        IncrementProvenance::Derived,
+        [upsert("a.md", "hash-0", "a body\n")],
+        &[DerivedFinding {
+            facts: other,
+            replaces: None,
+            bytes_hash: Some("hash-1".to_string()),
+        }],
+        &norn_store::ContentModel::none(),
+    );
+    assert!(
+        matches!(refused, Err(StoreError::NotAContentFinding { .. })),
+        "{refused:?}"
+    );
+    assert!(request.stored_document(&path("a.md")).unwrap().is_none());
+    assert!(request.stored_findings(&path("q.md")).unwrap().is_empty());
+}

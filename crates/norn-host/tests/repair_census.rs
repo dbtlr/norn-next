@@ -280,20 +280,11 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     let host = vault.host();
     let lease = attach::attach_and_wait(&host, vault.name());
     let attached = induced_failure::statements_begun();
-    eprintln!(
-        "NORN405 {:?} attach_and_wait returned",
-        std::time::SystemTime::now()
-    );
 
     let ran = repairs_over_every_arm(&host, &VaultAddress::name(vault.name().clone()));
     // Whatever the store began after the last repair answered, while the
     // vault stayed attached: no repair's record holds it.
-    eprintln!(
-        "NORN405 {:?} last repair answered",
-        std::time::SystemTime::now()
-    );
     let after = induced_failure::statements_begun();
-    eprintln!("NORN405 after window holds {} statements", after.len());
     drop(lease);
     drop(host);
     induced_failure::stop_recording_statements();
@@ -725,11 +716,6 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
             .wait()
             .unwrap_or_else(|refused| panic!("{params:?} answered no report: {refused:?}"))
             .report;
-        eprintln!(
-            "NORN405 {:?} repair answered: {:?}",
-            std::time::SystemTime::now(),
-            params.mode
-        );
         (report, taken())
     };
 

@@ -1996,21 +1996,29 @@ pub(crate) fn write_finding(
     Ok(())
 }
 
+/// Refuse a bytes hash on any finding but a content finding
+/// ([`StoreError::NotAContentFinding`]): only a content finding's deletion
+/// ends a place's hash.
+pub(crate) fn check_content_finding(finding: &FindingFacts) -> Result<(), StoreError> {
+    if finding.kind == increment::CONTENT_FINDING_KIND {
+        Ok(())
+    } else {
+        Err(StoreError::NotAContentFinding {
+            kind: finding.kind.as_str(),
+        })
+    }
+}
+
 /// Record `hash` as the bytes the content finding `finding` was judged over,
 /// in place of the hash its place held, where no document row stands there.
 ///
-/// Refused for any other kind ([`StoreError::NotAContentFinding`]): only a
-/// content finding's deletion ends a place's hash.
+/// The finding is a content finding: the changeset checked it before its
+/// transaction ([`check_content_finding`]).
 pub(crate) fn record_content_quarantine(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
     hash: &str,
 ) -> Result<(), StoreError> {
-    if finding.kind != increment::CONTENT_FINDING_KIND {
-        return Err(StoreError::NotAContentFinding {
-            kind: finding.kind.as_str(),
-        });
-    }
     transaction
         .prepare_cached(WriteStatement::RecordContentQuarantine.sql())
         .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
