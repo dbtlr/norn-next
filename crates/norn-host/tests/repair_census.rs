@@ -337,6 +337,11 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         planned.contains("SELECT k, v FROM 'main'.'documents_fts_config'"),
         "the census planned no read of the full-text configuration: {planned:?}"
     );
+    assert!(
+        planned.contains("SELECT document FROM document_trigrams WHERE trigram = ?1 LIMIT ?2"),
+        "the census planned no stem rarity read"
+    );
+    assert!(planned.iter().any(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ") == "SELECT d.path FROM document_trigrams AS t JOIN documents AS d ON d.id = t.document WHERE t.trigram = ?1"), "the census planned no stem postings read");
     assert_eq!(
         begun.symmetric_difference(&planned).collect::<Vec<_>>(),
         Vec::<&String>::new(),

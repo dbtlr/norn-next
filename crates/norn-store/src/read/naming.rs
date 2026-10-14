@@ -59,6 +59,44 @@ struct Head {
 }
 
 impl Snapshot {
+    /// Name a tie's bounded, path-ordered head through the same minimal suffixes
+    /// and ambiguity-ignore rule as a resolution head, on this snapshot.
+    /// Paths are live candidates already read on this snapshot.
+    pub fn candidate_head(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<CandidateHead, StoreError> {
+        let mut record = Vec::new();
+        let mut rows = Vec::new();
+        for path in paths.iter().take(CANDIDATE_HEAD) {
+            let found = self
+                .run_statement(
+                    &mut record,
+                    Ran::new(
+                        super::ReadStatement::CandidateDocument,
+                        (
+                            "SELECT id, path FROM documents WHERE path = ?1".into(),
+                            vec![Value::Text(path.as_str().to_string())],
+                        ),
+                    ),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|problem| error::sql("reading a tied candidate's document id", problem))?;
+            rows.push(
+                found
+                    .into_iter()
+                    .next()
+                    .expect("a candidate from this snapshot"),
+            );
+        }
+        Ok(self
+            .candidate_heads(vec![Head { rows, total }], ignore, &mut record)?
+            .pop()
+            .expect("one head"))
+    }
+
     /// What the suffix address `address` names on this snapshot, its class
     /// compiled under the snapshot's path order and less the places `ignore`
     /// names. An address that is no suffix address names nothing.

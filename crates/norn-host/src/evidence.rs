@@ -1409,15 +1409,7 @@ impl ReadEvidence {
         self.repair_batches.add(cost);
     }
 
-    /// Count a similarity read from NORN-400's repair planning hold. No caller
-    /// reaches this dormant carrier until the broken-link suggestion lands.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "NORN-400 will count its similarity reads from the planning hold"
-        )
-    )]
+    /// Count the similarity reads made on a repair planning hold.
     pub(crate) fn count_similar_stems(&self, cost: SimilarStemsCost) {
         self.similar_stems.add(cost);
     }
@@ -1816,8 +1808,7 @@ impl RepairBatchAccount {
 }
 
 /// Logical rows spent retrieving similarity candidates, summed across reads.
-/// NORN-400's broken-link similarity suggestion will report these from its
-/// planning hold; no production caller reaches the account's writer yet.
+/// The broken-link similarity suggestion reports these from its planning hold.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SimilarStemsCost {
     pub reads: u64,
@@ -1859,10 +1850,6 @@ struct SimilarStemsAccount {
 }
 
 impl SimilarStemsAccount {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "NORN-400 will write the similarity account")
-    )]
     fn add(&self, cost: SimilarStemsCost) {
         for (field, value) in [
             (&self.reads, cost.reads),

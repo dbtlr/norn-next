@@ -438,6 +438,7 @@ impl Snapshot {
             | ReadStatement::HeldLinks(_)
             | ReadStatement::StemRarity
             | ReadStatement::StemPostings
+            | ReadStatement::CandidateDocument
             | ReadStatement::Moved(_)
             | ReadStatement::HeldFrontmatter(_)
             | ReadStatement::RepairAdvisory(_) => (false, 0),

@@ -74,7 +74,9 @@ use crate::address::registered_name;
 use crate::applier;
 use crate::clock::OneReading;
 use crate::derivation::Declared;
-use crate::evidence::{LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SnapshotWork};
+use crate::evidence::{
+    LinkJudgmentCost, PlanningHoldCost, RepairBatchCost, SimilarStemsCost, SnapshotWork,
+};
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadHold, ReadRefusal,
     ReadSource, ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
@@ -490,12 +492,14 @@ where
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
 /// every judgment of the resolution door it runs adds what the door reported
 /// and what its snapshot's counters moved by, so a preview's account holds
-/// what its planning and its check really ran.
+/// what its planning and its check really ran. Similarity retrieval also keeps
+/// its logical rows and read count for the planning hold's read account.
 pub(crate) struct PlanSnapshot<'a> {
     vault: VaultAddress,
     declared: &'a ContentModel,
     on: ReadOn<'a>,
     judged: Cell<LinkJudgmentCost>,
+    similar: Cell<SimilarStemsCost>,
 }
 
 /// Where a [`PlanSnapshot`] reads.
@@ -517,7 +521,7 @@ enum ReadOn<'a> {
 
 impl<'a> PlanSnapshot<'a> {
     /// Reading `vault`'s `snapshot`, which pins `declared`.
-    pub(crate) const fn held(
+    pub(crate) fn held(
         vault: VaultAddress,
         snapshot: &'a Snapshot,
         declared: &'a ContentModel,
@@ -527,12 +531,13 @@ impl<'a> PlanSnapshot<'a> {
             declared,
             on: ReadOn::Held(snapshot),
             judged: Cell::new(LinkJudgmentCost::NONE),
+            similar: Cell::new(SimilarStemsCost::default()),
         }
     }
 
     /// Reading the snapshot `mint` establishes for `vault`, once, when first
     /// asked; `declared` is what that snapshot pins.
-    pub(crate) const fn on_demand(
+    pub(crate) fn on_demand(
         vault: VaultAddress,
         mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         declared: &'a ContentModel,
@@ -546,6 +551,7 @@ impl<'a> PlanSnapshot<'a> {
                 released: Cell::new(SnapshotWork::NONE),
             },
             judged: Cell::new(LinkJudgmentCost::NONE),
+            similar: Cell::new(SimilarStemsCost::default()),
         }
     }
 
@@ -678,6 +684,31 @@ impl Matcher for PlanSnapshot<'_> {
 }
 
 impl repair::Following for PlanSnapshot<'_> {
+    fn candidate_head(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+    ) -> Result<norn_wire::CandidateHead, PageRefused> {
+        self.reading(|snapshot| {
+            snapshot.candidate_head(paths, total, self.declared.ambiguity_ignore())
+        })?
+        .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
+    fn similar_stems(&self, stem: &str) -> Result<norn_store::SimilarStems, PageRefused> {
+        let answer = self
+            .reading(|snapshot| snapshot.similar_stems(stem))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))?;
+        let cost = SimilarStemsCost::of(&answer.work);
+        let total = self.similar.get();
+        self.similar.set(SimilarStemsCost {
+            reads: total.reads + cost.reads,
+            rarity_rows_read: total.rarity_rows_read + cost.rarity_rows_read,
+            postings_rows_read: total.postings_rows_read + cost.postings_rows_read,
+        });
+        Ok(answer)
+    }
+
     fn tombstones(
         &self,
         link: &norn_wire::LinkKey,
@@ -1239,6 +1270,7 @@ where
         let (planned, clock_reads) =
             crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused));
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
+        self.count_similar_stems(snapshot.similar.get());
         self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
         self.count_clock_reads(clock_reads);
         Ok((reading, planned?))
