@@ -18,12 +18,12 @@
 //! into it: link health, judged in SQL and filed inside every changeset
 //! ([`Request::apply_increment`]). The other is the similarity measure
 //! ([`similarity`]): the stem fold, the padded trigram set, the Jaccard score,
-//! its cutoff and the least shared count the cutoff implies. The stem trigram
-//! index is written by it and the repair planner scores by it, so it lives in
-//! one module beside the index, and the two cannot disagree about what a
-//! trigram is. The store takes
-//! **typed facts rather than documents**: parsing is orchestration's job, so
-//! nothing here reads document text.
+//! its cutoff and the least shared count the cutoff implies, and the optimal
+//! string alignment distance. The stem trigram index is written by it, and the
+//! repair planner and `did_you_mean` score by it, so it lives in one module
+//! beside the index, and the index and the score cannot disagree about what a
+//! trigram is. The store takes **typed facts rather than documents**: parsing
+//! is orchestration's job, so nothing here reads document text.
 //!
 //! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 //!

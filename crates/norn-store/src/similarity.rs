@@ -1,7 +1,9 @@
 //! The one similarity module: the stem fold, the padded trigram set and the
 //! Jaccard score that the stem trigram index, its retrieval read and the
 //! repair planner's suggestions all compute by, so the index and the score
-//! cannot disagree about what a trigram is.
+//! cannot disagree about what a trigram is; and the bounded optimal string
+//! alignment distance that the planner's closest-member and declared-tag
+//! suggestions and the `did_you_mean` hint count edits by.
 //!
 //! **The fold is a suggestion's, never a resolution rule.** NFC then
 //! per-character lowercase decides which stems look alike; it decides nothing
@@ -10,7 +12,8 @@
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
-/// The Jaccard threshold the repair planner applies to stem suggestions.
+/// The Jaccard threshold the repair planner applies to stem and heading-anchor
+/// suggestions.
 pub const CUTOFF: f64 = 0.5;
 /// The most postings a selected query trigram may hold before the read answers
 /// too common. It bounds the postings a retrieval reads at

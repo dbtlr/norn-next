@@ -56,7 +56,7 @@
 //!   pair reads planted stems whose trigrams no generated stem carries, beside
 //!   a generated stem control whose rarity rows grow with the vault. Suggestion
 //!   candidate counters — closed-set members, declared tags and heading rows —
-//!   follow S, D and H, not the vault. A plan's
+//!   follow M, D and H, not the vault. A plan's
 //!   links are held the same way: judging the links a hub's delete reaches,
 //!   and generating the cascade a hub's move plans, each cost the hub's
 //!   in-links at both scales. A hub's write and the judgment of its delete
@@ -5946,7 +5946,7 @@ fn one_moved_lookup(label: &str, profile: &norn_fixtures::Profile) -> CounterSna
     counters
 }
 
-/// Preview the three suggestions on one holder with S members, D literal
+/// Preview the three suggestions on one holder with M members, D literal
 /// tags and H indexed headings, retaining only their logical candidate work.
 fn suggestion_reading(profile: &norn_fixtures::Profile, sizes: [usize; 3]) -> CounterSnapshot {
     let [members, tags, headings] = sizes;
