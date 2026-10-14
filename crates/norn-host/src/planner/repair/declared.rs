@@ -29,17 +29,28 @@
 //!   ([`routes`]). A misplaced finding no rule its row cites routes is
 //!   decided from the batch's rule sets ([`has_fix`]), its document unread.
 //!
-//! **Three kinds have derived fixes, four of them, made at
+//! **Three kinds have derived fixes, made at
 //! [`Confidence::Derived`]** ([`derived`]): a shape mismatch is wrapped or
 //! unwrapped; a type mismatch on a boolean field whose string spells a
 //! boolean but for its case is written as the boolean, and one on a link
 //! field whose bare value resolves to one document is written as that link
-//! ([`bare_link`]); and a value outside a closed set that differs from exactly
+//! ([`bare_link`]). An unquoted wikilink on a link field is written as the
+//! link it spells: exactly `[["s"]]` as a non-list field's whole value or
+//! a declared list's element becomes the string `"[[s]]"`.
+//! A value outside a closed set that differs from exactly
 //! one member only by case and white space is replaced by that member
-//! ([`closed_set`]). A link fix is the exception to finding order: its answer
-//! rests on the batch's settled routes, so a document's link fixes compose
+//! ([`closed_set`]). A bare-value link fix is the exception to finding order:
+//! its answer rests on the batch's settled routes, so a document's link fixes compose
 //! last, after the routes of the batch are settled ([`Decided::emit`]). A
-//! type mismatch on a `date`, `number` or `boolean` field no derived fix
+//! refused wrap or unwrap composes with the element fixes it exposes, judged
+//! afresh as one addition at the weakest level of the shape and element
+//! fixes, carrying the element notes. An exposed element whose proposal
+//! skips gives the shape finding its reason and decision data, unless the
+//! plain reshape brings in required fields or introduces another violation,
+//! which keeps the plain refusal ([`derived::reshape`]). An exposed link
+//! type mismatch waits for the link phase; an admitted plain link reshape
+//! stays in finding order.
+//! A type mismatch on a `date`, `number` or `boolean` field no derived fix
 //! answers is an excluded class. Every link any fix writes is recorded with
 //! what it resolves to once the plan has landed ([`Decided::emit`]).
 //!
@@ -123,7 +134,7 @@
 //!
 //! **A list's elements are fixed one by one into one change to the field**
 //! ([`elements`]). Every selected `field/not-one-of` finding of one field, and
-//! every selected `field/type-mismatch` finding of a boolean field, composes
+//! every selected `field/type-mismatch` finding of a boolean or link field, composes
 //! into one `set_frontmatter` of the whole list, each element's replacement
 //! judged on the state the earlier ones left; an element whose fix is skipped
 //! stands, and never blocks its neighbours'. The one operation cites every
@@ -385,8 +396,8 @@ impl Decided<'_> {
     /// Add to `written` every wikilink the document's fixes may write, by
     /// where the document stands once the plan has landed and the address
     /// written: what its operations set ([`written_links`]), and what its
-    /// link fixes may write — each bare value made a link, and every link
-    /// the field it writes already holds.
+    /// link fixes may write — bare values, unquoted wikilinks, and every link
+    /// the field it writes already holds, including a deferred shape fix.
     pub(super) fn written(&self, written: &mut BTreeSet<Written>) {
         let Deciding::Composed(composed) = &self.decided else {
             return;
@@ -397,7 +408,7 @@ impl Decided<'_> {
                 written.extend(operations.iter().flat_map(written_links));
             }
         }
-        reckoned.link_writes(&composed.state, written);
+        reckoned.link_writes(composed, written);
     }
 
     /// Add the document to `planned`: its link fixes composed last onto the
@@ -467,6 +478,8 @@ struct Composed {
     made: Vec<Made>,
     decided: Vec<Option<SkippedFinding>>,
     unresolved: BTreeSet<usize>,
+    /// Shape fixes whose exposed bare link awaits the settled routes.
+    link_shapes: Vec<usize>,
     state: State,
     /// The state the composition started from and the additions made
     /// before it: what it is composed again from at a lowered threshold.
@@ -582,6 +595,7 @@ impl<'d> Reckoned<'d> {
         // The rows whose fix reads a clock that gives no reading: neither
         // fixed nor skipped, and still held.
         let mut unresolved = BTreeSet::new();
+        let mut link_shapes = Vec::new();
         let order = &self.order;
         let mut next = 0;
         while let Some(&at) = order.get(next) {
@@ -596,7 +610,17 @@ impl<'d> Reckoned<'d> {
             }
             // A link fix's answer rests on the batch's settled routes, so
             // it is composed last, once they are settled ([`bare_link`]).
-            if bare_link::is_link_mismatch(self.document.schema(), row) {
+            let link_mismatch = bare_link::is_link_mismatch(composing.schema(), row);
+            let unquoted = row
+                .target
+                .as_deref()
+                .filter(|_| link_mismatch)
+                .and_then(|field| {
+                    field_of(&state.bytes, field).flatten().and_then(|value| {
+                        derived::unquoted_field(composing.schema(), field, &value)
+                    })
+                });
+            if link_mismatch && unquoted.is_none() {
                 continue;
             }
             if let Some(field) = row.target.as_deref()
@@ -647,7 +671,7 @@ impl<'d> Reckoned<'d> {
                     FindingKind::RequiredMissing
                         | FindingKind::Forbidden
                         | FindingKind::ShapeMismatch
-                ),
+                ) || (row.kind == FindingKind::TypeMismatch && unquoted.is_some()),
                 row.target.as_deref(),
             ) else {
                 decided[at] = Some(unfixed(row, composing.repairing));
@@ -660,9 +684,26 @@ impl<'d> Reckoned<'d> {
                         .map_err(Unmade::Skipped)
                 }
                 FindingKind::ShapeMismatch => {
-                    derived::reshape(composing, &state, row, finding, field)
-                        .map_err(Unmade::Skipped)
+                    match derived::reshape(composing, &state, row, finding, field, None, &|_| None)
+                    {
+                        Ok(derived::Reshaping::Fixed(fix)) => Ok(fix),
+                        Ok(derived::Reshaping::NeedsLinks) => {
+                            link_shapes.push(at);
+                            continue;
+                        }
+                        Err(skip) => Err(Unmade::Skipped(skip)),
+                    }
                 }
+                FindingKind::TypeMismatch => derived::fix_value(
+                    composing,
+                    &state,
+                    row,
+                    finding,
+                    field,
+                    derived::replacement(unquoted.expect("the whole unquoted link was recognized")),
+                    &|_| None,
+                )
+                .map_err(Unmade::Skipped),
                 _ => Composing {
                     document: composing,
                     state: &state,
@@ -687,6 +728,7 @@ impl<'d> Reckoned<'d> {
             made,
             decided,
             unresolved,
+            link_shapes,
             state,
             began,
         }
@@ -1099,11 +1141,18 @@ impl Document<'_> {
         fixing: Fixing<'_>,
         still: &str,
     ) -> Result<State, Box<SkippedFinding>> {
-        let Fixing {
-            row,
-            finding,
-            candidates,
-        } = fixing;
+        let (state, introduced) = self.assessed(from, at, composed);
+        self.admitted(state, &introduced, fixing, still)
+    }
+
+    /// The result's state and the violations it introduces, from the one
+    /// applier judgment, retained where a refused reshape exposes element fixes.
+    fn assessed(
+        &self,
+        from: &State,
+        at: &DocumentPath,
+        composed: Arc<[u8]>,
+    ) -> (State, Vec<SchemaViolation>) {
         let verdict = verdict(
             &self.before,
             &from.standing,
@@ -1112,8 +1161,26 @@ impl Document<'_> {
             self.repairing.declared,
             self.repairing.case,
         );
-        let state = State::of(at.clone(), composed, verdict.standing);
-        let brought = brought_in(&verdict.introduced);
+        (
+            State::of(at.clone(), composed, verdict.standing),
+            verdict.introduced,
+        )
+    }
+
+    /// Admit an already judged state, or the refusal of the finding it fixes.
+    fn admitted(
+        &self,
+        state: State,
+        introduced: &[SchemaViolation],
+        fixing: Fixing<'_>,
+        still: &str,
+    ) -> Result<State, Box<SkippedFinding>> {
+        let Fixing {
+            row,
+            finding,
+            candidates,
+        } = fixing;
+        let brought = brought_in(introduced);
         if !brought.is_empty() {
             let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
             let skipped =
@@ -1131,7 +1198,7 @@ impl Document<'_> {
                 ))
             }));
         }
-        if !verdict.introduced.is_empty() {
+        if !introduced.is_empty() {
             return Err(Box::new(
                 skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
             ));
@@ -3550,11 +3617,10 @@ mod tests {
         );
     }
 
-    /// **A wrap the judge refuses skips as one the judge would refuse, with
-    /// the value it would have written**: `abc` is no number, and the
-    /// one-item list holding it brings a type mismatch out.
+    /// **A wrap exposing a number type violation carries the excluded class
+    /// and its note**: `abc` is no number, so fixing it would coerce a number.
     #[test]
-    fn a_wrap_bringing_out_a_type_violation_skips_as_judge_would_refuse() {
+    fn a_wrap_bringing_out_a_number_type_violation_skips_as_an_excluded_class() {
         let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")]);
 
         let planned = vault.plan(&[judging(
@@ -3569,15 +3635,21 @@ mod tests {
         let [skipped] = planned.skipped.as_slice() else {
             panic!("one skip: {:?}", planned.skipped);
         };
-        assert_eq!(skipped.reason, SkipReason::JudgeWouldRefuse);
+        assert_eq!(skipped.reason, SkipReason::ExcludedClass);
+        assert!(
+            skipped
+                .note
+                .as_deref()
+                .expect("an excluded-class note")
+                .contains("number coercion")
+        );
         assert_eq!(skipped.value, Some(head(&AuthoredValue::string("abc"))));
     }
 
-    /// **A wrap bringing a value outside a closed set out skips as one the
-    /// judge would refuse**, and an unwrap does as well: `bogus` is outside
-    /// the set once it is an element.
+    /// **A wrap and an unwrap exposing a value outside a closed set carry
+    /// its no-declared-fix skip**: `bogus` has no synonym or fold in either set.
     #[test]
-    fn a_wrap_and_an_unwrap_bringing_out_a_one_of_violation_skip_as_judge_would_refuse() {
+    fn a_wrap_and_an_unwrap_bringing_out_a_one_of_violation_skip_as_no_declared_fix() {
         let schema = "version: 1\nfields:\n  tags_of: {type: text, shape: list}\n  status: {type: text, shape: single}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      tags_of: {values: [red, blue]}\n      status: {values: [todo, done]}\n";
         let vault = Vault::of(
             schema,
@@ -3600,10 +3672,12 @@ mod tests {
 
         assert!(planned.operations.is_empty());
         assert_eq!(
-            reasons(&planned),
+            planned.skipped,
             vec![
-                (1, SkipReason::JudgeWouldRefuse),
-                (2, SkipReason::JudgeWouldRefuse)
+                SkippedFinding::new(1, SkipReason::NoDeclaredFix)
+                    .with_value(head(&list(&["bogus"]))),
+                SkippedFinding::new(2, SkipReason::NoDeclaredFix)
+                    .with_value(head(&AuthoredValue::string("bogus"))),
             ]
         );
     }
@@ -4182,10 +4256,10 @@ mod tests {
         assert!(note.contains("`done`"), "{note}");
     }
 
-    /// **A below-threshold wrap the judge refuses skips as one the judge
-    /// would refuse**, not as below the threshold.
+    /// **A below-threshold wrap exposing a number type violation carries
+    /// the excluded-class skip**, including its number-coercion note.
     #[test]
-    fn a_below_threshold_wrap_the_judge_refuses_skips_as_judge_would_refuse() {
+    fn a_below_threshold_wrap_exposing_a_number_type_violation_skips_as_an_excluded_class() {
         let vault = Vault::of(PRIORITIES, &[("a.md", "---\npriority: abc\n---\n")])
             .at(Confidence::Declared);
 
@@ -4197,7 +4271,8 @@ mod tests {
             &AuthoredValue::string("abc"),
         )]);
 
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::JudgeWouldRefuse)]);
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::ExcludedClass)]);
+        assert!(note_of(&planned, 1).contains("number coercion"));
     }
 
     /// **A below-threshold fix the lowered composition refuses skips with
@@ -4264,16 +4339,12 @@ mod tests {
         );
     }
 
-    /// **A below-threshold re-shape the judge refuses where the document
-    /// stands skips with the judge's reason**, as a below-threshold fold does,
-    /// even where lowering the threshold would drop its finding: at a
-    /// `declared` threshold wrapping `priority: 3` as `[3]` brings in the
-    /// `others` rule's closed set over `priority`, which `[3]` is outside, so
-    /// it is refused where it stands, though the lowered composition, folding
-    /// `kind` to `task` first, leaves `others` unselected and drops the
-    /// finding.
+    /// **A below-threshold reshape exposing a closed-set value with no fix
+    /// keeps that element's skip**, even where lowering the threshold drops
+    /// its finding: `priority: [3]` is outside the `others` rule's set, while
+    /// folding `kind` to `task` leaves that rule unselected.
     #[test]
-    fn a_below_threshold_reshape_the_judge_refuses_where_it_stands_skips_with_its_reason() {
+    fn a_below_threshold_reshape_with_no_element_fix_keeps_the_elements_skip() {
         let schema = "version: 1\nfields:\n  priority: {type: number, shape: list}\nrules:\n  kinds:\n    match: {path: '**'}\n    one_of:\n      kind: {values: [task]}\n  others:\n    match: {frontmatter: {kind: Task}}\n    one_of:\n      priority: {values: [9]}\n";
         let docs = [("a.md", "---\nkind: Task\npriority: 3\n---\n")];
         let rows = [
@@ -4296,7 +4367,7 @@ mod tests {
             reasons(&planned),
             vec![
                 (1, SkipReason::BelowThreshold),
-                (2, SkipReason::JudgeWouldRefuse)
+                (2, SkipReason::NoDeclaredFix)
             ]
         );
     }

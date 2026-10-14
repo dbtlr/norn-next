@@ -3601,6 +3601,146 @@ fn previewed_then_applied(
     preview
 }
 
+/// Each repair probe previews and applies one derived operation, recording its written links.
+fn probe_repaired(
+    label: &str,
+    schema: &str,
+    document: &[u8],
+    field: &str,
+    kind: FindingKind,
+    value: AuthoredValue,
+    conditions: Vec<norn_wire::PlanCondition>,
+) {
+    let (_sandbox, vault, host) = a_vault_under(
+        label,
+        schema,
+        &[("zz-holder.md", document), ("zz-b.md", b"# B\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_of(&host, &vault, "zz-holder.md", kind, field);
+    let plan = previewed_then_applied(&host, &vault, |request| request);
+    assert_eq!(
+        plan.operations,
+        vec![setting_value(1, "zz-holder.md", field, value)]
+    );
+    assert_eq!(plan.conditions, conditions);
+    let citations = &provenance(&plan).citations;
+    assert_eq!(citations.len(), 1);
+    assert_eq!(citations[0].findings.len(), 1);
+    assert_eq!(
+        (
+            citations[0].findings[0].finding,
+            citations[0].findings[0].confidence
+        ),
+        (mismatch, Confidence::Derived)
+    );
+    assert!(provenance(&plan).skipped.is_empty());
+    assert!(standing(&host, &vault, |request| request).is_empty());
+}
+
+/// **An unquoted wikilink on a link field without a shape is written as one link string.**
+#[test]
+fn probe_p01_an_unquoted_wikilink_in_a_single_link_field_is_written_as_the_link_string() {
+    probe_repaired(
+        "host-repair-p01",
+        "version: 1\nfields:\n  up: {type: link}\n",
+        b"---\nup: [[zz-b]]\n---\n",
+        "up",
+        FindingKind::TypeMismatch,
+        AuthoredValue::string("[[zz-b]]"),
+        vec![norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("zz-holder.md"), norn_wire::LinkFamily::Wikilink, "zz-b"),
+            norn_wire::Resolves::one(at("zz-b.md")),
+        )],
+    );
+}
+
+/// **A one-string list on a list link field stays a finding with no declared fix.**
+#[test]
+fn probe_p02_a_one_string_list_in_a_list_link_field_stays_skipped_with_no_declared_fix() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-p02",
+        "version: 1\nfields:\n  ups: {type: link, shape: list}\n",
+        &[
+            ("zz-holder.md", b"---\nups: [[zz-b]]\n---\n"),
+            ("zz-b.md", b"# B\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mismatch = finding_of(
+        &host,
+        &vault,
+        "zz-holder.md",
+        FindingKind::TypeMismatch,
+        "ups",
+    );
+
+    let plan = previewed(host.repair(repairing(&vault, ApplyMode::Preview)));
+
+    assert!(plan.operations.is_empty());
+    assert!(plan.conditions.is_empty());
+    assert_eq!(skipped_ids(&plan), vec![mismatch]);
+    assert_eq!(
+        provenance(&plan).skipped[0].reason,
+        SkipReason::NoDeclaredFix
+    );
+    assert_eq!(
+        standing(&host, &vault, |request| request)
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![mismatch]
+    );
+}
+
+/// **An unquoted wikilink in a block list is written as its link element.**
+#[test]
+fn an_unquoted_wikilink_in_a_block_list_is_written_as_the_link_element() {
+    probe_repaired(
+        "host-repair-unquoted-block-list",
+        "version: 1\nfields:\n  ups: {type: link, shape: list}\n",
+        b"---\nups:\n  - [[zz-b]]\n---\n",
+        "ups",
+        FindingKind::TypeMismatch,
+        AuthoredValue::List(vec![AuthoredValue::string("[[zz-b]]")]),
+        vec![norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("zz-holder.md"), norn_wire::LinkFamily::Wikilink, "zz-b"),
+            norn_wire::Resolves::one(at("zz-b.md")),
+        )],
+    );
+}
+
+/// **A bare link value is wrapped and linked in one derived operation.**
+#[test]
+fn probe_p04_a_bare_value_in_a_list_link_field_is_wrapped_and_linked_in_one_operation() {
+    probe_repaired(
+        "host-repair-p04",
+        "version: 1\nfields:\n  ups: {type: link, shape: list}\n",
+        b"---\nups: zz-b\n---\n",
+        "ups",
+        FindingKind::ShapeMismatch,
+        AuthoredValue::List(vec![AuthoredValue::string("[[zz-b]]")]),
+        vec![norn_wire::PlanCondition::address_resolution(
+            norn_wire::LinkKey::new(at("zz-holder.md"), norn_wire::LinkFamily::Wikilink, "zz-b"),
+            norn_wire::Resolves::one(at("zz-b.md")),
+        )],
+    );
+}
+
+/// **A boolean case is wrapped and corrected in one derived operation.**
+#[test]
+fn probe_p10_a_boolean_case_in_a_list_field_is_wrapped_and_corrected_in_one_operation() {
+    probe_repaired(
+        "host-repair-p10",
+        "version: 1\nfields:\n  flags: {type: boolean, shape: list}\n",
+        b"---\nflags: \"True\"\n---\n",
+        "flags",
+        FindingKind::ShapeMismatch,
+        AuthoredValue::List(vec![AuthoredValue::Bool(true)]),
+        vec![],
+    );
+}
+
 /// **A scalar in a list field is wrapped as a one-item list, through preview
 /// then apply.** The plan sets the one-item list, its YAML type kept (`3` is
 /// the number in the list), cited at the derived level; the apply writes it
