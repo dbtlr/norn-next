@@ -36,6 +36,7 @@ mod moved;
 mod pillars;
 mod readers;
 mod redecision;
+mod repair_advisory;
 mod resolution;
 mod resolve;
 mod search;

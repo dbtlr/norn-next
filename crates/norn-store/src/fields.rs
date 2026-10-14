@@ -31,6 +31,10 @@
 //! matches. A null, and a float JSON cannot spell, is a scalar whose raw text is
 //! SQL `NULL`: the key is still present, and no equality matches it.
 //!
+//! Beside the raw text each value row records its parsed scalar type, so a
+//! repair advisory can count types without reading a frontmatter projection.
+//! The type is a parse fact, independent of the schema's typed ordering.
+//!
 //! # The typed value, and the least-value markers
 //!
 //! Beside the raw text a value row carries a **typed** sort key where the
@@ -126,6 +130,46 @@ impl FieldContainer {
     }
 }
 
+/// The parsed scalar type a value row carries, independent of schema typing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldValueType {
+    /// Text.
+    String,
+    /// A whole number.
+    Integer,
+    /// A floating-point number.
+    Real,
+    /// A boolean.
+    Boolean,
+    /// A null.
+    Null,
+}
+
+impl FieldValueType {
+    /// The type as the column holds it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Real => "real",
+            Self::Boolean => "boolean",
+            Self::Null => "null",
+        }
+    }
+
+    /// The scalar type a column value names, or nothing.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "string" => Some(Self::String),
+            "integer" => Some(Self::Integer),
+            "real" => Some(Self::Real),
+            "boolean" => Some(Self::Boolean),
+            "null" => Some(Self::Null),
+            _ => None,
+        }
+    }
+}
+
 /// One row of a document's field pillar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldRow {
@@ -149,6 +193,8 @@ pub enum FieldRow {
         /// The canonical text, or `None` for a null and a float JSON cannot
         /// spell.
         raw: Option<String>,
+        /// The scalar's type in the parsed frontmatter value.
+        value_type: FieldValueType,
         /// The declared type's sort key, or `None` where the key carries no
         /// typed order or the raw text does not read as the declared type.
         typed: Option<String>,
@@ -233,12 +279,12 @@ impl FieldRows {
             let (container, scalars) = match value {
                 FrontmatterValue::Sequence(items) => (
                     FieldContainer::Sequence,
-                    items.iter().filter_map(scalar_text).collect(),
+                    items.iter().filter_map(scalar_value).collect(),
                 ),
                 FrontmatterValue::Map(_) => (FieldContainer::Map, Vec::new()),
                 scalar => (
                     FieldContainer::Scalar,
-                    scalar_text(scalar).into_iter().collect(),
+                    scalar_value(scalar).into_iter().collect(),
                 ),
             };
             rows.push(FieldRow::Presence {
@@ -246,6 +292,7 @@ impl FieldRows {
                 container,
                 path: path.as_str().to_string(),
             });
+            let (value_types, scalars): (Vec<_>, Vec<_>) = scalars.into_iter().unzip();
             let order = declared.typed_order(key);
             let (typed, offsets): (Vec<Option<String>>, Vec<Option<OffsetSpelling>>) = scalars
                 .iter()
@@ -257,14 +304,19 @@ impl FieldRows {
                 .unzip();
             let least_raw = least(&scalars);
             let least_typed = least(&typed);
-            for (index, ((raw, typed), offset)) in
-                scalars.into_iter().zip(typed).zip(offsets).enumerate()
+            for (index, (((raw, typed), offset), value_type)) in scalars
+                .into_iter()
+                .zip(typed)
+                .zip(offsets)
+                .zip(value_types)
+                .enumerate()
             {
                 let folded = raw.as_deref().and_then(|raw| declared.fold(key, raw));
                 rows.push(FieldRow::Value {
                     key: key.to_string(),
                     ordinal: index as u32 + 1,
                     raw,
+                    value_type,
                     typed,
                     offset,
                     folded,
@@ -293,17 +345,17 @@ impl FieldRows {
     }
 }
 
-/// A scalar's raw text, or nothing where the value is a container.
+/// A scalar's parsed type and raw text, or nothing where the value is a container.
 ///
-/// The outer `Option` says whether the value is a scalar at all; the inner one
-/// is the raw text, which a null and a non-finite float do not have.
-fn scalar_text(value: &FrontmatterValue) -> Option<Option<String>> {
+/// The outer `Option` says whether the value is a scalar at all; the pair
+/// carries its parsed type and its raw text, which nulls and non-finite floats lack.
+fn scalar_value(value: &FrontmatterValue) -> Option<(FieldValueType, Option<String>)> {
     match value {
-        FrontmatterValue::Null => Some(None),
-        FrontmatterValue::Bool(flag) => Some(Some(flag.to_string())),
-        FrontmatterValue::Int(number) => Some(Some(number.to_string())),
-        FrontmatterValue::Float(number) => Some(float_text(*number)),
-        FrontmatterValue::String(text) => Some(Some(text.clone())),
+        FrontmatterValue::Null => Some((FieldValueType::Null, None)),
+        FrontmatterValue::Bool(flag) => Some((FieldValueType::Boolean, Some(flag.to_string()))),
+        FrontmatterValue::Int(number) => Some((FieldValueType::Integer, Some(number.to_string()))),
+        FrontmatterValue::Float(number) => Some((FieldValueType::Real, float_text(*number))),
+        FrontmatterValue::String(text) => Some((FieldValueType::String, Some(text.clone()))),
         FrontmatterValue::Sequence(_) | FrontmatterValue::Map(_) => None,
     }
 }
@@ -933,15 +985,18 @@ mod tests {
         }
         for (stored, authored) in pairs {
             assert_eq!(
-                scalar_text(&stored),
+                scalar_value(&stored).map(|(_, raw)| raw),
                 Some(authored.scalar_text()),
                 "{stored:?}"
             );
         }
         assert_eq!(
-            scalar_text(&FrontmatterValue::Float(1.0)),
+            scalar_value(&FrontmatterValue::Float(1.0)).map(|(_, raw)| raw),
             Some(Some("1.0".to_string()))
         );
-        assert_eq!(scalar_text(&FrontmatterValue::Float(f64::NAN)), Some(None));
+        assert_eq!(
+            scalar_value(&FrontmatterValue::Float(f64::NAN)).map(|(_, raw)| raw),
+            Some(None)
+        );
     }
 }

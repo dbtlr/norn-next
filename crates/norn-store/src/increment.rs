@@ -748,13 +748,15 @@ fn upsert(
     }
 
     for row in facts.fields().rows() {
-        let (container, raw, typed, least_raw, least_typed, offset, folded) = match row {
+        let (container, raw, typed, least_raw, least_typed, offset, folded, value_type) = match row
+        {
             FieldRow::Presence { container, .. } => (
                 Some(container.as_str()),
                 None,
                 None,
                 false,
                 false,
+                None,
                 None,
                 None,
             ),
@@ -765,6 +767,7 @@ fn upsert(
                 least_raw,
                 least_typed,
                 folded,
+                value_type,
                 ..
             } => (
                 None,
@@ -774,6 +777,7 @@ fn upsert(
                 *least_typed,
                 *offset,
                 folded.as_deref(),
+                Some(value_type.as_str()),
             ),
         };
         debug_assert_eq!(
@@ -795,6 +799,7 @@ fn upsert(
                 least_typed,
                 offset.map(OffsetSpelling::stated),
                 folded,
+                value_type,
             ])
             .map_err(|error| error::sql("writing a field row", error))?;
     }

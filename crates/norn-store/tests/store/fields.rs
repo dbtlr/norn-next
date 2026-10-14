@@ -10,8 +10,8 @@ use crate::common::{
 };
 use norn_store::{
     Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
-    FrontmatterValue, IncrementProvenance, LinkKey, OffsetSpelling, Provenance, StoreError,
-    TypedOrder, induced_failure,
+    FieldValueType, FrontmatterValue, IncrementProvenance, LinkKey, OffsetSpelling, Provenance,
+    StoreError, TypedOrder, induced_failure,
 };
 
 /// A presence row at `at`, as the rows are compared.
@@ -25,11 +25,19 @@ fn presence(at: &str, key: &str, container: FieldContainer) -> FieldRow {
 
 /// A value row at `at` carrying no typed value, marked least under the raw
 /// order where `least` says so.
-fn raw(at: &str, key: &str, ordinal: u32, text: Option<&str>, least: bool) -> FieldRow {
+fn raw(
+    at: &str,
+    key: &str,
+    ordinal: u32,
+    text: Option<&str>,
+    least: bool,
+    value_type: FieldValueType,
+) -> FieldRow {
     FieldRow::Value {
         key: key.to_string(),
         ordinal,
         raw: text.map(str::to_string),
+        value_type,
         typed: None,
         offset: None,
         least_raw: least,
@@ -46,6 +54,7 @@ fn folded(row: FieldRow, fold: &str) -> FieldRow {
             key,
             ordinal,
             raw,
+            value_type,
             typed,
             offset,
             least_raw,
@@ -56,6 +65,7 @@ fn folded(row: FieldRow, fold: &str) -> FieldRow {
             key,
             ordinal,
             raw,
+            value_type,
             typed,
             offset,
             least_raw,
@@ -306,23 +316,29 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
     let expected = vec![
         presence(at, "author", FieldContainer::Map),
         presence(at, "count", FieldContainer::Scalar),
-        raw(at, "count", 1, Some("42"), true),
+        raw(at, "count", 1, Some("42"), true, FieldValueType::Integer),
         presence(at, "draft", FieldContainer::Scalar),
-        raw(at, "draft", 1, Some("false"), true),
+        raw(at, "draft", 1, Some("false"), true, FieldValueType::Boolean),
         presence(at, "empty", FieldContainer::Scalar),
-        raw(at, "empty", 1, None, false),
+        raw(at, "empty", 1, None, false, FieldValueType::Null),
         presence(at, "infinite", FieldContainer::Scalar),
-        raw(at, "infinite", 1, None, false),
+        raw(at, "infinite", 1, None, false, FieldValueType::Real),
         presence(at, "none", FieldContainer::Sequence),
         presence(at, "nothing", FieldContainer::Map),
         presence(at, "ratio", FieldContainer::Scalar),
-        raw(at, "ratio", 1, Some("1.0"), true),
+        raw(at, "ratio", 1, Some("1.0"), true, FieldValueType::Real),
         presence(at, "tags", FieldContainer::Sequence),
-        folded(raw(at, "tags", 1, Some("b"), false), "b"),
-        folded(raw(at, "tags", 2, Some("a"), true), "a"),
-        raw(at, "tags", 3, None, false),
+        folded(
+            raw(at, "tags", 1, Some("b"), false, FieldValueType::String),
+            "b",
+        ),
+        folded(
+            raw(at, "tags", 2, Some("a"), true, FieldValueType::String),
+            "a",
+        ),
+        raw(at, "tags", 3, None, false, FieldValueType::Null),
         presence(at, "title", FieldContainer::Scalar),
-        raw(at, "title", 1, Some("second"), true),
+        raw(at, "title", 1, Some("second"), true, FieldValueType::String),
     ];
     let derived = FieldRows::derive(&path(at), Some(&value), &ContentModel::none());
     assert_eq!(derived.rows(), expected.as_slice());
@@ -1014,4 +1030,45 @@ fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
 #[should_panic(expected = "is declared on a declaration no schema makes")]
 fn a_field_declared_on_no_schema_panics() {
     let _ = ContentModel::none().declare_field("rank", FieldDeclaration::number(integer_order()));
+}
+
+/// The scalar type comes from the parsed value, including nulls and scalars inside sequences.
+#[test]
+fn a_value_rows_type_is_the_parsed_scalars_type() {
+    use norn_store::FieldValueType;
+    let declared = ContentModel::default();
+    let value = map(vec![(
+        "values",
+        FrontmatterValue::Sequence(vec![
+            string("42"),
+            FrontmatterValue::Int(42),
+            FrontmatterValue::Float(42.0),
+            FrontmatterValue::Bool(true),
+            FrontmatterValue::Null,
+        ]),
+    )]);
+    let facts = fielded("types.md", "types", value, &declared);
+    let scratch = Scratch::new("field-scalar-types");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_document(&mut request, &facts);
+    let rows = stored_fields(&mut request, "types.md");
+    let types: Vec<_> = rows
+        .rows()
+        .iter()
+        .filter_map(|row| match row {
+            FieldRow::Value { value_type, .. } => Some(*value_type),
+            FieldRow::Presence { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            FieldValueType::String,
+            FieldValueType::Integer,
+            FieldValueType::Real,
+            FieldValueType::Boolean,
+            FieldValueType::Null
+        ]
+    );
 }

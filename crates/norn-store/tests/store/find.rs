@@ -483,6 +483,9 @@ fn statement_barred_by(statement: FindStatement) -> &'static str {
 /// [`statement_barred_by`] is.
 fn filter_barred_by(filter: ReadFilter) -> &'static str {
     match filter {
+        ReadFilter::ExcludePathGlob(_) => {
+            "a_first_match_seeks_its_members_and_tests_excluded_paths_at_their_keys"
+        }
         ReadFilter::Equal(_)
         | ReadFilter::NotEqual(_)
         | ReadFilter::Member(_)
@@ -516,11 +519,17 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::LinksTo(_) => [SuffixKey::Raw, SuffixKey::Folded]
             .map(ReadFilter::LinksTo)
             .to_vec(),
-        ReadFilter::PathGlob(_) => [
+        ReadFilter::PathGlob(_) | ReadFilter::ExcludePathGlob(_) => [
             StoredPathOrder::Sensitive,
             StoredPathOrder::AsciiCaseInsensitive,
         ]
-        .map(ReadFilter::PathGlob)
+        .map(|order| {
+            if matches!(filter, ReadFilter::ExcludePathGlob(_)) {
+                ReadFilter::ExcludePathGlob(order)
+            } else {
+                ReadFilter::PathGlob(order)
+            }
+        })
         .to_vec(),
         ReadFilter::Present
         | ReadFilter::Absent
@@ -584,7 +593,11 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
         assert_eq!(statement.slot(), slot, "{statement:?} claims another slot");
     }
 
-    let filters: Vec<ReadFilter> = filter_bars().iter().map(|bar| bar.shape).collect();
+    let filters: Vec<ReadFilter> = filter_bars()
+        .iter()
+        .map(|bar| bar.shape)
+        .chain([ReadFilter::ExcludePathGlob(StoredPathOrder::Sensitive)])
+        .collect();
     let mut filter_slots: Vec<usize> = filters.iter().map(|filter| filter.slot()).collect();
     filter_slots.sort_unstable();
     assert_eq!(
@@ -621,6 +634,7 @@ fn the_find_bars_cover_every_statement_and_filter_once() {
             "a_bare_directory_probe_is_two_seeks_of_the_path_index",
             "a_date_keys_offset_spellings_are_two_seeks_of_the_offset_index",
             "a_field_sort_seeks_its_marker_rows_and_pages_its_missing_section_by_path",
+            "a_first_match_seeks_its_members_and_tests_excluded_paths_at_their_keys",
             "a_known_key_and_the_field_universe_read_the_presence_rows_alone",
             "a_match_probe_reads_the_full_text_index_through_its_selection",
             "a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling",
@@ -4165,4 +4179,92 @@ fn glob_corpus_agrees_under(order: StoredPathOrder) {
         matched > 0 && matched < pairs / 2,
         "the corpus matched {matched} of {pairs} pairs, which says little either way"
     );
+}
+
+/// A rule's selector stops at its first document through the find page drive.
+#[test]
+fn a_first_match_seeks_its_members_and_tests_excluded_paths_at_their_keys() {
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        let seeded = Seeded::under("find-first-match", order);
+        let predicates = [
+            Predicate::in_any("status", ["open".to_string(), "closed".to_string()]),
+            Predicate::path("notes/**"),
+        ];
+        let excluded = [
+            Pattern::parse("notes/a.md").expect("a glob"),
+            Pattern::parse("notes/c.md").expect("a glob"),
+        ];
+        let snapshot = seeded.snapshot();
+        let (matched, work) = snapshot
+            .first_match(&predicates, &excluded, &declared())
+            .expect("a first match");
+        assert!(matched);
+        assert_eq!(work.statements, 1);
+        assert_eq!(work.rows_read, 1);
+        assert_eq!(work.full_scan_steps, 0);
+        assert_eq!(work.sorts, 0);
+        let plans = snapshot
+            .first_match_plans(&predicates, &excluded, &declared())
+            .expect("the first-match plan");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].statement,
+            ReadStatement::Find(FindStatement::PathPage(PageDirection::Ascending))
+        );
+        assert_eq!(
+            plans[0].filters.last(),
+            Some(&ReadFilter::ExcludePathGlob(order))
+        );
+        let explained = plan(&plans[0]);
+        let judge = |explained: &QueryPlan| {
+            explained.assert_no_full_scan();
+            explained.assert_no_temp_btree();
+            rows_of(explained, "fv")
+                .assert_searches_through("document_fields", Access::Index("document_fields_raw"));
+            rows_of(explained, "dg").assert_searches_through("documents", Access::RowId);
+            rows_of(explained, "dg").assert_search_constraint("documents", "(rowid=?)");
+        };
+        judge(&explained);
+        let unbounded = QueryPlan::new(
+            explained.sql(),
+            explained
+                .rows()
+                .iter()
+                .map(|row| PlanRow::new(row.id, row.parent, row.detail.replace("(rowid=?)", "()")))
+                .collect(),
+        );
+        failure_of("an excluding glob without its document key", || {
+            judge(&unbounded)
+        });
+        let excluded = [Pattern::parse("notes/**").expect("a glob")];
+        assert!(
+            !snapshot
+                .first_match(&predicates, &excluded, &declared())
+                .expect("an excluded selector")
+                .0
+        );
+        let unknown = [Predicate::in_any("unobserved", ["unused".to_string()])];
+        let (matched, work) = snapshot
+            .first_match(&unknown, &[], &declared())
+            .expect("an absent selector key");
+        assert!(!matched);
+        assert_eq!(work.rows_read, 0);
+        let plans = snapshot
+            .first_match_plans(&unknown, &[], &declared())
+            .expect("the absent key probe");
+        assert!(
+            plans
+                .iter()
+                .all(|plan| plan.statement == ReadStatement::Find(FindStatement::KnownKey))
+        );
+        let (matched, work) = snapshot
+            .first_match(&[Predicate::path("")], &[], &declared())
+            .expect("a selector matching nothing");
+        assert!(!matched);
+        assert_eq!(work.statements, 0);
+        assert_eq!(work.rows_read, 0);
+    }
 }

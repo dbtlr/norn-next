@@ -69,7 +69,7 @@ pub(crate) enum ResolvesPart {
 }
 
 /// A compiled part of the conjunction.
-enum Part {
+pub(crate) enum Part {
     Filter(Filter),
     /// A part that cannot be applied as asked, so no document satisfies it:
     /// reported, and every section is empty.
@@ -227,7 +227,7 @@ impl Snapshot {
     /// wildcard probes whether it names a bare directory, and only a match
     /// part probes whether the full-text engine parses its query: the other
     /// parts bind nothing the snapshot has to be asked for.
-    fn compile_predicate(
+    pub(crate) fn compile_predicate(
         &self,
         predicate: &Predicate,
         declared: &ContentModel,
@@ -551,7 +551,7 @@ fn date_comparison(predicate: &Predicate, declared: &ContentModel) -> Option<Dat
 }
 
 /// The key a predicate names, where it names one.
-fn predicate_key(predicate: &Predicate) -> Option<&str> {
+pub(crate) fn predicate_key(predicate: &Predicate) -> Option<&str> {
     match predicate {
         Predicate::Eq { key, .. }
         | Predicate::NotEq { key, .. }
