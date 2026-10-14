@@ -4380,6 +4380,8 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         )],
         // The finding's key is read off the row just written, by its id.
         InsertFindingRule => &[("findings", Access::RowId, "(rowid=?)")],
+        // The record's probe for a row at the place it records a hash for.
+        RecordContentQuarantine => &[("documents", Access::Index("documents_path"), "(path=?)")],
         // The end a deleted content finding's trigger runs, by the place.
         EndContentQuarantine => &[("content_quarantines", Access::PrimaryKey, "(path=?)")],
         NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
@@ -4397,7 +4399,6 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertFindingClass
         | InsertFindingPath
         | InsertRuleSet
-        | RecordContentQuarantine
         | PutMeta => &[],
     };
     WriteBar { seeks }

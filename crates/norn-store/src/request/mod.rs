@@ -1997,7 +1997,7 @@ pub(crate) fn write_finding(
 }
 
 /// Record `hash` as the bytes the content finding `finding` was judged over,
-/// in place of the hash its place held.
+/// in place of the hash its place held, where no document row stands there.
 ///
 /// Refused for any other kind ([`StoreError::NotAContentFinding`]): only a
 /// content finding's deletion ends a place's hash.

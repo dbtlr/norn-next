@@ -743,8 +743,9 @@ the write statements no other explained statement names; the increment's remaini
 explained through their own variants, and the increment prepares its findings discards from a
 closed set rather than from text. Each is barred to scan no table, and each keyed one (the fact
 discards, the document delete and probe, the rule-set probe, the citation's read of its
-finding's key by row id, the rule-set collection, the end of a content-quarantined place's
-hash, the generation increment, the stale-finding
+finding's key by row id, the rule-set collection, the record of a content-quarantined place's
+hash, which probes for a document row at its place, and its end, the generation increment,
+the stale-finding
 discard as two open ranges over the fingerprint) to seek its table by the constraint it binds,
 with a negative control for each half. The first-level foreign-key actions a plan reports are searches
 of the child tables and sit under the no-scan bar, so a cascade that falls to reading a child

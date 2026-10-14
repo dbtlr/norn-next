@@ -116,7 +116,7 @@ registry! {
     /// the order a validate selecting by rule seeks.
     InsertFindingRule,
     /// The hash of the bytes a content finding was judged over, replacing the
-    /// one its place held.
+    /// one its place held, where no document row stands at the place.
     RecordContentQuarantine,
     /// The end of a place's hash, which the trigger
     /// `content_quarantines_end_with_their_finding` runs as a content finding about
@@ -271,8 +271,11 @@ impl WriteStatement {
                  SELECT id, ?2, vault_schema_fingerprint, kind, severity, path, position
                  FROM findings WHERE id = ?1"
             }
+            // Recorded only where no document row stands, so no hash ever says
+            // a place is unchanged beside the row that describes it.
             Self::RecordContentQuarantine => {
-                "INSERT INTO content_quarantines (path, content_hash) VALUES (?1, ?2)
+                "INSERT INTO content_quarantines (path, content_hash)
+                 SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM documents WHERE path = ?1)
                  ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash"
             }
             Self::EndContentQuarantine => "DELETE FROM content_quarantines WHERE path = ?1",

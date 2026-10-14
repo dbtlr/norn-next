@@ -2541,3 +2541,28 @@ fn a_content_quarantine_hash_ends_with_its_content_finding() {
         );
     }
 }
+
+/// **No hash stands beside a document row**, whatever a changeset hands
+/// over: a content finding's hash is recorded only where no row stands at its
+/// place, a row standing before the changeset or written by it.
+#[test]
+fn a_content_quarantine_hash_is_not_recorded_beside_a_document_row() {
+    for (arranged, earlier) in [("standing row", true), ("same-changeset row", false)] {
+        let scratch = Scratch::new(&format!("quarantined-hash-beside-row-{earlier}"));
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        let changes = if earlier {
+            write_document(&mut request, &document("q.md", "hash-0", "a body\n"));
+            vec![]
+        } else {
+            vec![upsert("q.md", "hash-0", "a body\n")]
+        };
+        applied(&mut request, changes, &[quarantined("q.md", "hash-1")]);
+        assert_eq!(
+            request.content_quarantine_hash(&path("q.md")).unwrap(),
+            None,
+            "a hash was recorded beside a {arranged}"
+        );
+        store.verify_integrity().unwrap();
+    }
+}

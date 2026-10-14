@@ -140,8 +140,9 @@ pub struct DerivedFinding<'a> {
     /// The content hash of the bytes a content finding was judged over, and
     /// `None` for every other finding and for one filed without its bytes.
     ///
-    /// It is recorded beside the finding, so a later reading of the same bytes
-    /// at a place no row stands at knows the place unchanged
+    /// It is recorded beside the finding where no document row stands at the
+    /// place, so a later reading of the same bytes there knows the place
+    /// unchanged
     /// ([`crate::Request::content_quarantine_hash`]), and it ends with the finding.
     /// A hash on any other kind is refused
     /// ([`crate::StoreError::NotAContentFinding`]): nothing would end it.
