@@ -2495,12 +2495,15 @@ fn a_content_finding_records_the_hash_of_the_bytes_it_was_judged_over() {
     assert_eq!(request.stored_findings(&path("q.md")).unwrap().len(), 1);
 }
 
+/// An act that ends the content finding standing at `q.md`.
+type Ending = fn(&mut Request<'_>);
+
 /// **A quarantined place's hash ends with its content finding**, by whichever
 /// act ends the finding: the place emptied, a document derived there, or a
 /// discard of the content side such as a walk's prune.
 #[test]
 fn a_quarantined_hash_ends_with_its_content_finding() {
-    let ends: [(&str, fn(&mut Request<'_>)); 3] = [
+    let ends: [(&str, Ending); 3] = [
         ("vacated", |request| {
             applied(request, vec![Change::Vacated { path: path("q.md") }], &[]);
         }),

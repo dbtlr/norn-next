@@ -1028,6 +1028,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::IndexedTrigramPage => "stem_statements_seek_without_scans_or_sorts",
         ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
+        | ExplainedStatement::QuarantinedHashPage
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTermPage
         | ExplainedStatement::StoredRuleSetPage => {
@@ -1080,12 +1081,13 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
     }
 }
 
-/// The five statements a caller drains end to end to account for everything
+/// The six statements a caller drains end to end to account for everything
 /// one pillar holds, named once so the bar and the cursor-spelling bar judge
 /// the same set.
 const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::StoredFindingPage,
     ExplainedStatement::StoredTombstonePage,
+    ExplainedStatement::QuarantinedHashPage,
     ExplainedStatement::StoredSuffixKeyPage,
     ExplainedStatement::IndexedTermPage,
     ExplainedStatement::StoredRuleSetPage,
@@ -1583,6 +1585,13 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     );
     tombstones.assert_searches("tombstones");
     tombstones.assert_searches_through("tombstones", Access::Index("tombstones_path"));
+    let quarantines = plan(
+        request
+            .emitted_plan(ExplainedStatement::QuarantinedHashPage)
+            .expect("a query plan"),
+    );
+    quarantines.assert_searches("quarantines");
+    quarantines.assert_searches_through("quarantines", Access::PrimaryKey);
     let suffix_keys = plan(
         request
             .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
@@ -1753,6 +1762,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::StoredDocumentPage(..)
         | ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
+        | ExplainedStatement::QuarantinedHashPage
         | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTrigramPage
         | ExplainedStatement::IndexedTermPage
@@ -2701,7 +2711,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
             }
         }
     }
-    // The five enumerations bind the same shape over their own column: the
+    // The six enumerations bind the same shape over their own column: the
     // cursor is `COALESCE`'s first argument, and the floor it falls back to is
     // below every key the column holds.
     for statement in ENUMERATIONS {
@@ -2747,7 +2757,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
         judged += 1;
     }
     assert_eq!(
-        judged, 19,
+        judged, 20,
         "a scope, an order, a pillar or a feed went unjudged"
     );
 }

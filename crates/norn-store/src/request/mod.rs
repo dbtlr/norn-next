@@ -810,6 +810,37 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page of quarantined places' hashes, in path order.
+    ///
+    /// [`Request::quarantined_hash`] answers about one place, which is the
+    /// question a reading of its bytes asks. This answers what the table
+    /// holds, which is the question a comparison of two stores asks.
+    ///
+    /// `after` is exclusive, and the order is bytewise over the key.
+    pub fn quarantined_hashes_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a quarantined-hash page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            QUARANTINE_PAGE_SQL,
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            |row| {
+                let path: String = row.get(0)?;
+                let hash: String = row.get(1)?;
+                Ok(DocumentPath::new(&path).map(|path| (path, hash)))
+            },
+            "reading the quarantined-hash page",
+        )
+    }
+
     /// The death recorded for one path, if any.
     pub fn stored_tombstone(
         &self,
@@ -2206,6 +2237,13 @@ pub(crate) fn folded_value_discard_sql() -> String {
 /// primary key.
 pub(crate) const QUARANTINED_HASH_SQL: &str =
     "SELECT content_hash FROM quarantines WHERE path = ?1";
+
+/// The statement [`Request::quarantined_hashes_after`] emits: a walk of the
+/// primary key from the cursor.
+pub(crate) const QUARANTINE_PAGE_SQL: &str = "SELECT path, content_hash FROM quarantines
+             WHERE path > COALESCE(?1, '')
+             ORDER BY path
+             LIMIT ?2";
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///

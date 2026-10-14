@@ -39,16 +39,16 @@ use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
     DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
     FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, INDEXED_TRIGRAM_PAGE_SQL, MAX_PAGE,
-    PATH_DISCARD_SQL, PathKey, QUARANTINED_HASH_SQL, Request, RuleSetCursor, STORED_TOMBSTONE_SQL,
-    SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixKey, SuffixProbe,
-    TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass, document_feed_sql,
-    document_page_parameters, document_page_sql, feed_page_parameters, finding_candidates_sql,
-    finding_classes_sql, finding_id_parameters, finding_page_parameters, finding_page_sql,
-    finding_paths_sql, finding_rules_sql, finding_subject_parameters, finding_subjects_sql,
-    findings_in_class_sql, folded_value_discard_sql, probe_parameters, rule_set_page_parameters,
-    rule_set_page_sql, stored_document_sql, stored_facts_document_sql, stored_findings_sql,
-    subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
-    tombstone_feed_sql,
+    PATH_DISCARD_SQL, PathKey, QUARANTINE_PAGE_SQL, QUARANTINED_HASH_SQL, Request, RuleSetCursor,
+    STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
+    SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
+    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
+    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
+    finding_page_sql, finding_paths_sql, finding_rules_sql, finding_subject_parameters,
+    finding_subjects_sql, findings_in_class_sql, folded_value_discard_sql, probe_parameters,
+    rule_set_page_parameters, rule_set_page_sql, stored_document_sql, stored_facts_document_sql,
+    stored_findings_sql, subject_discard_parameters, subject_discard_sql, suffix_candidates_sql,
+    text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -154,6 +154,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::DocumentFields => DOCUMENT_FIELDS_SQL.to_string(),
             ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
             ExplainedStatement::QuarantinedHash(_) => QUARANTINED_HASH_SQL.to_string(),
+            ExplainedStatement::QuarantinedHashPage => QUARANTINE_PAGE_SQL.to_string(),
             ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
             ExplainedStatement::VaultSchemaPin | ExplainedStatement::WriteGeneration => {
                 norn_db::meta::META_READ_SQL.to_string()
@@ -236,15 +237,15 @@ impl<'a> Request<'a> {
                     MAX_PAGE,
                 )),
             ),
-            ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
-                database.emitted_plan(
-                    &sql,
-                    params_from_iter(text_page_parameters(
-                        Some(EXPLAINED_PAGE_CURSOR_LEAF),
-                        MAX_PAGE,
-                    )),
-                )
-            }
+            ExplainedStatement::StoredTombstonePage
+            | ExplainedStatement::StoredSuffixKeyPage
+            | ExplainedStatement::QuarantinedHashPage => database.emitted_plan(
+                &sql,
+                params_from_iter(text_page_parameters(
+                    Some(EXPLAINED_PAGE_CURSOR_LEAF),
+                    MAX_PAGE,
+                )),
+            ),
             ExplainedStatement::IndexedTrigramPage => database.emitted_plan(
                 &sql,
                 params![
@@ -553,6 +554,9 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::quarantined_hash`], the bytes the content finding at one
     /// place was judged over.
     QuarantinedHash(&'a DocumentPath),
+    /// [`Request::quarantined_hashes_after`], the page a caller drains every
+    /// quarantined place's hash through.
+    QuarantinedHashPage,
     /// [`Request::stored_findings`], every finding recorded about one path.
     StoredFindings(&'a DocumentPath),
     /// The pinned-scalar read [`Request::vault_schema_pin`] runs once per key
@@ -669,7 +673,7 @@ pub const POINT_READS: usize = 13;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 46;
+pub const STATEMENTS: usize = 47;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -748,6 +752,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::FoldedValueDiscard,
             Self::IndexedTrigramPage,
             Self::QuarantinedHash(subject),
+            Self::QuarantinedHashPage,
         ]
     }
 
@@ -806,6 +811,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::FoldedValueDiscard => 43,
             Self::IndexedTrigramPage => 44,
             Self::QuarantinedHash(_) => 45,
+            Self::QuarantinedHashPage => 46,
         };
         assert!(
             slot < STATEMENTS,
@@ -871,6 +877,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::StoredDocumentPage(..)
             | Self::StoredFindingPage
             | Self::StoredTombstonePage
+            | Self::QuarantinedHashPage
             | Self::StoredSuffixKeyPage
             | Self::IndexedTrigramPage
             | Self::IndexedTermPage
