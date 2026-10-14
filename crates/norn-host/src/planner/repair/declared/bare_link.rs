@@ -401,6 +401,26 @@ pub(super) mod tests {
     impl<R: Reading> Reading for Unanswering<'_, R> {
         type Error = R::Error;
 
+        fn tombstones(
+            &self,
+            link: &norn_wire::LinkKey,
+        ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+            self.0.tombstones(link)
+        }
+        fn live_holders(&self, hash: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
+            self.0.live_holders(hash)
+        }
+        fn resolutions(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            links: &[norn_wire::LinkKey],
+        ) -> Result<
+            std::collections::BTreeMap<crate::planner::links::EntryKey, norn_wire::Resolves>,
+            Self::Error,
+        > {
+            self.0.resolutions(overlay, links)
+        }
+
         fn before(&self, path: &DocumentPath) -> Result<crate::planner::repair::Before, R::Error> {
             self.0.before(path)
         }
@@ -478,9 +498,19 @@ pub(super) mod tests {
             index: &index,
         };
         let planned = if unanswering {
-            plan(rows, &repairing, &Unanswering(&reading))
+            plan(
+                rows,
+                &std::collections::BTreeMap::new(),
+                &repairing,
+                &Unanswering(&reading),
+            )
         } else {
-            plan(rows, &repairing, &reading)
+            plan(
+                rows,
+                &std::collections::BTreeMap::new(),
+                &repairing,
+                &reading,
+            )
         };
         match planned {
             Ok(planned) => planned,

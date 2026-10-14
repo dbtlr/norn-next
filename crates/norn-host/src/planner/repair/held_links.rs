@@ -1,10 +1,9 @@
 //! Held links: which skipped link findings the plan's final state still
 //! holds.
 //!
-//! **A repair skips every link finding it selects, and then the plan may mend
-//! some of them.** No fix is declared for a broken link, a link naming a
-//! heading that is not there, or an ambiguous one, so planning skips them all
-//! from their rows alone. A route's move can still change what another
+//! **A repair settles every link finding its fixes leave skipped.** A broken
+//! link not followed through a move, a link naming a heading that is not there,
+//! or an ambiguous one is skipped from its row. A route's move can still change what another
 //! document's link resolves to, and a finding the final state no longer holds
 //! is **dropped** — neither fixed nor skipped — as a finding the judgment of
 //! a document's bytes concludes the composed document no longer holds is. This
@@ -16,7 +15,7 @@
 //! the finding's ordinal in its holder ([`FindingLink`]), so two links of one
 //! address and two syntaxes in one holder are two links with two verdicts. The link's key
 //! at the plan's after-state is its holder where the batch's routes leave it,
-//! its syntax as stored, and its address as the cascade that respells it
+//! its syntax as stored, and its address as the authored rewrite or cascade that respells it
 //! leaves it ([`Landing`]). The plan's resolution change set is keyed at the
 //! after-state and exact: it holds an entry for every link whose resolution
 //! the plan changes, every link whose text the plan writes, every link a
@@ -117,6 +116,15 @@ impl Landing {
         for operation in operations {
             if let OperationKind::MoveDocument { from, to } = &operation.kind {
                 routes.insert(from.clone(), to.clone());
+            }
+            if let OperationKind::RewriteLink {
+                path,
+                syntax,
+                from,
+                to,
+            } = &operation.kind
+            {
+                respelled.insert((path.clone(), *syntax, from.clone()), to.clone());
             }
             for rewrite in &operation.cascade {
                 respelled.insert(

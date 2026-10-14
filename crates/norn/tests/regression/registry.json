@@ -1940,10 +1940,18 @@
       "property": "Link repair can target text that does not resolve — that is the case repair exists for — and repair guidance is not gated on membership of the validation scope, so a document outside that scope still receives it.",
       "sources": ["norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "no link fix exists: the repair verb skips every broken and missing-anchor finding for want of a declared fix, and an ambiguous link with the documents it could name. No derived fix answers a broken link by normalizing its spelling (ADR 0039); a broken link's answers are Layer 5C's (NORN-352): move-following through the tombstone suffix lookup, which is derived, and the similarity suggestion, which is suggested. Both target unresolvable text, and the repair guidance outside the validation scope lands with them, pre-committed as the module crates/norn-host/src/planner/repair.rs::broken_links, which is where they can first be asserted.",
-        "grounds": [
-          { "symbol-absent": "crates/norn-host/src/planner/repair.rs::broken_links" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/repair.rs::a_broken_wikilink_follows_one_tombstone_to_one_live_holder",
+          "crates/norn-host/tests/repair.rs::a_broken_relative_markdown_link_follows_one_tombstone_to_one_live_holder",
+          "crates/norn-host/tests/repair.rs::a_broken_rooted_markdown_link_follows_one_tombstone_to_one_live_holder",
+          "crates/norn-host/tests/repair.rs::a_broken_vault_link_follows_one_tombstone_to_one_live_holder",
+          "crates/norn-host/tests/repair.rs::a_tombstone_no_live_document_holds_skips_as_no_holder",
+          "crates/norn-host/tests/repair.rs::a_tombstone_two_live_documents_hold_skips_as_several_holders",
+          "crates/norn-host/tests/repair.rs::a_broken_link_matching_two_tombstones_skips_as_several_tombstones",
+          "crates/norn-host/tests/repair.rs::a_follow_no_spelling_or_edit_can_write_skips_as_link_not_rewritable",
+          "crates/norn-host/tests/repair.rs::a_quarantine_tombstone_is_never_followed",
+          "crates/norn-host/src/planner/repair.rs::a_tombstone_with_no_recorded_hash_skips_as_no_recorded_hash"
         ]
       }
     },

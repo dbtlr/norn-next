@@ -787,7 +787,7 @@ pub(crate) fn moved_overlay<'m>(
 
 /// `link` as a link its holder's after-state writes, to be judged wherever it
 /// resolves; `None` for a syntax the store holds no link of.
-fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
+pub(crate) fn probe_of(link: &LinkKey) -> Option<ProbedLink> {
     let family = match link.syntax {
         LinkFamily::Wikilink => norn_store::LinkFamily::Wikilink,
         LinkFamily::Markdown => norn_store::LinkFamily::Markdown,
@@ -1688,7 +1688,7 @@ pub(crate) fn family_name(family: LinkFamily) -> Option<&'static str> {
 pub(crate) mod testing {
     use norn_store::{ContentModel, Snapshot, Store, StoredPathOrder};
     use norn_testkit::scratch::Scratch;
-    use norn_wire::{VaultAddress, VaultName};
+    use norn_wire::{DocumentPath, LinkKey, VaultAddress, VaultName};
 
     use super::LinkIndex;
     use crate::apply::PlanSnapshot;
@@ -1829,6 +1829,15 @@ pub(crate) mod testing {
                 .index()
                 .held_links(holder)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+    }
+
+    impl<E> crate::planner::repair::Following for (EmptyStore, std::marker::PhantomData<E>) {
+        fn tombstones(&self, _: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn live_holders(&self, _: &str) -> Result<Vec<DocumentPath>, Self::Error> {
+            Ok(Vec::new())
         }
     }
 

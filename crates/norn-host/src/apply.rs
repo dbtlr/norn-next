@@ -257,11 +257,12 @@ where
         view,
         index: snapshot,
     };
-    let planned =
-        repair::plan(batch.rows, &repairing, &reading).map_err(|unread| match unread {
+    let planned = repair::plan(batch.rows, batch.links, &repairing, &reading).map_err(
+        |unread| match unread {
             repair::Unread::View(error) => unreadable(name, error),
             repair::Unread::Index(refusal) => refused(refusal),
-        })?;
+        },
+    )?;
     let authored = AuthoredPlan::new(snapshot.vault.clone(), planned.operations);
     // The resolution reads the clock through the plan's one reading: no
     // repair plan reaches a clock read in expansion today, and the shared
@@ -673,6 +674,55 @@ impl Matcher for PlanSnapshot<'_> {
             Ok((_, Some(unsatisfied))) => Ok(Err(unsatisfied)),
             Err(refusal) => asked_amiss(refusal).map(Err).map_err(page_refusal),
         }
+    }
+}
+
+impl repair::Following for PlanSnapshot<'_> {
+    fn tombstones(
+        &self,
+        link: &norn_wire::LinkKey,
+    ) -> Result<Vec<norn_store::MovedTombstone>, PageRefused> {
+        let (protocol, target) = link.protocol_and_stem();
+        match norn_wire::LinkAddress::of(link.syntax, protocol, target) {
+            norn_wire::LinkAddress::Suffix(target) => {
+                if norn_store::suffix_probe(target).is_err() {
+                    return Ok(Vec::new());
+                }
+                self.reading(|snapshot| snapshot.tombstones_by_suffix(target))?
+                    .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+            }
+            norn_wire::LinkAddress::Relative(_)
+            | norn_wire::LinkAddress::Rooted(_)
+            | norn_wire::LinkAddress::RootedName(_) => {
+                let probe = crate::planner::links::probe_of(link).expect("a stored link syntax");
+                let paths = norn_store::named_paths(&probe.link, &probe.after_holder);
+                self.reading(|snapshot| {
+                    let mut tombstones = BTreeMap::new();
+                    for path in paths {
+                        let path = norn_store::DocumentPath::new(&path)
+                            .expect("the link names a document path");
+                        for tombstone in snapshot.tombstone_at_path(&path)? {
+                            tombstones.insert(tombstone.path.clone(), tombstone);
+                        }
+                    }
+                    Ok(tombstones.into_values().take(2).collect())
+                })?
+                .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+    fn live_holders(&self, hash: &str) -> Result<Vec<norn_wire::DocumentPath>, PageRefused> {
+        self.reading(|snapshot| snapshot.live_holders(hash))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        norn_wire::DocumentPath::new(path.as_str()).expect("a live document path")
+                    })
+                    .collect()
+            })
     }
 }
 

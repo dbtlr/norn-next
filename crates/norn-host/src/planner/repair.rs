@@ -1,7 +1,7 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **Four kinds of finding have a declared fix and three a derived one;
+//! **Four kinds of finding have a declared fix and four a derived one;
 //! every other is skipped.** A selected `field/required-missing` finding
 //! fills from the default the rules requiring the field declare; a
 //! `field/not-one-of` finding is replaced by the member a rule's synonym maps
@@ -17,10 +17,10 @@
 //! value resolves to one document at the plan's after-state is written as
 //! the link; and a `field/not-one-of` value differing from exactly one member
 //! only by case and white space is replaced by that member. Every link a fix
-//! writes is recorded with what it resolves to at the after-state; none
-//! replaces a link address, since a closed set never holds a wikilink, a
-//! rename moves a value without changing it, and a wrap, an unwrap or a bare
-//! value made a link writes an address without replacing one. All are
+//! writes is recorded with what it resolves to at the after-state. A
+//! `link/broken` follows one tombstone to one live holder of its recorded
+//! hash, composed last ([`broken_links`]), with both the written and replaced
+//! addresses recorded and the hash carried as an author condition. All are
 //! filled and judged by [`declared`], one operation per fix (a rename is
 //! two), numbered `repair-1`, `repair-2` and on in plan order, each cited at
 //! the [`Confidence`] of its fix with the findings it fixes. A fix below the
@@ -60,8 +60,8 @@
 //! is dropped: it is neither fixed nor skipped — a route out of a rule's area
 //! drops that rule's findings. **A link finding is settled by the resolved
 //! plan instead** ([`skipped_still_held`]): link health is no conclusion of
-//! that judgment, so planning skips every link finding from its row, and the
-//! step that follows the whole resolution drops those the plan's resolution
+//! that judgment, so planning skips every link finding it does not follow
+//! from its row, and the step that follows the whole resolution drops those the plan's resolution
 //! change set shows no longer hold. A broken link a route's move makes resolve, an
 //! ambiguous link it makes name one document or none, and a link naming a
 //! heading that is not there which the plan makes resolve to no document or
@@ -111,6 +111,7 @@
 //! (`crate::apply`) owns the hold, the view the bytes are read from, the
 //! resolution, the provenance around it and the backstop.
 
+mod broken_links;
 mod declared;
 mod held_links;
 
@@ -145,8 +146,8 @@ pub(crate) struct Planned {
     pub(crate) removed_fields: BTreeSet<(DocumentPath, String)>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
-    /// The findings left alone, in batch order: every link finding among
-    /// them, which the host settles against the resolved plan ([`skipped_still_held`]).
+    /// The findings left alone, in batch order, including link findings
+    /// the host settles against the resolved plan ([`skipped_still_held`]).
     pub(crate) skipped: Vec<SkippedFinding>,
     /// The operations a fix would have been that cannot be resolved because
     /// the clock gives no reading, numbered in the operations' sequence. The
@@ -270,12 +271,41 @@ pub(crate) enum Destination {
     Closed(String),
 }
 
+/// What the pinned snapshot reads to follow a broken link through a move:
+/// the deaths its address names and the live documents holding their hash.
+pub(crate) trait Following: LinkIndex {
+    /// At most two non-quarantine tombstones named by `link`, by its suffix
+    /// for a suffix wikilink or by each exact path it names for a Markdown
+    /// or `vault://` link, distinct by path and in path order.
+    fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+    /// At most two live documents holding `hash`, in path order.
+    fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error>;
+}
+
 /// What a repair reads of the vault it plans over: the view its plan
 /// resolves on, so what a fix was judged on is what the plan composes from,
 /// and the index its plan's links are judged on.
 pub(crate) trait Reading {
     /// Why the vault could not be read: a machine failure, never absence.
     type Error;
+
+    /// At most two non-quarantine tombstones named by `link`, by its
+    /// address grammar, distinct by path and in path order; no tombstone
+    /// where its address names no place the read applies to.
+    fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error>;
+
+    /// At most two live documents holding `hash`, in path order.
+    fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error>;
+
+    /// What each address of `links` resolves to at the after-state the
+    /// settled routes of `overlay` leave, by its holder, syntax and address:
+    /// the applier's `resolved_addresses` probe, in one judgment for every
+    /// followed link's candidates and replaced address.
+    fn resolutions(
+        &self,
+        overlay: &PathOverlay,
+        links: &[LinkKey],
+    ) -> Result<BTreeMap<crate::planner::links::EntryKey, Resolves>, Self::Error>;
 
     /// The bytes of the document at `path`, read whole.
     fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error>;
@@ -331,8 +361,22 @@ pub(crate) enum Unread<V, I> {
     Index(I),
 }
 
-impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
+impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     type Error = Unread<V::Error, I::Error>;
+
+    fn tombstones(&self, link: &LinkKey) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+        self.index.tombstones(link).map_err(Unread::Index)
+    }
+    fn live_holders(&self, hash: &str) -> Result<Vec<DocumentPath>, Self::Error> {
+        self.index.live_holders(hash).map_err(Unread::Index)
+    }
+    fn resolutions(
+        &self,
+        overlay: &PathOverlay,
+        links: &[LinkKey],
+    ) -> Result<BTreeMap<crate::planner::links::EntryKey, Resolves>, Self::Error> {
+        crate::planner::links::resolved_addresses(self.index, overlay, links).map_err(Unread::Index)
+    }
 
     /// The bytes of the document at `path` as the view reads it whole, or
     /// that no document whose bytes can be read stands there: what a repair
@@ -480,14 +524,16 @@ impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
 /// recorded.
 pub(crate) fn plan<R: Reading>(
     rows: &[FindingRow],
+    links: &BTreeMap<u64, norn_store::FindingLink>,
     repairing: &Repairing<'_>,
     vault: &R,
 ) -> Result<Planned, R::Error> {
+    let follows = broken_links::read(rows, links, vault)?;
     let mut drafts = Vec::new();
     // A batch never splits a document, and it reads in path order, so one
     // document's findings stand together.
     for document in rows.chunk_by(|left, right| left.path == right.path) {
-        drafts.push(declared::draft(document, repairing, vault)?);
+        drafts.push(declared::draft(document, repairing, vault, &follows)?);
     }
     let mut respelled = declared::respelling(&drafts, repairing, vault)?;
     let mut refused: BTreeMap<usize, SkippedFinding> = std::mem::take(&mut respelled.refused);
@@ -510,9 +556,26 @@ pub(crate) fn plan<R: Reading>(
     } else {
         vault.namings(&settled, &written)?
     };
+    let mut probes = Vec::new();
+    let mut following = BTreeMap::new();
+    for document in &decided {
+        document.follow_probes(&follows, &mut following, &mut probes);
+    }
+    let resolutions = if probes.is_empty() {
+        BTreeMap::new()
+    } else {
+        vault.resolutions(&settled, &probes)?
+    };
     let mut planned = Planned::default();
     for (at, document) in decided.into_iter().enumerate() {
-        document.emit(&mut planned, &namings, respellable.get(&at));
+        document.emit(
+            &mut planned,
+            &namings,
+            respellable.get(&at),
+            &follows,
+            &following,
+            &resolutions,
+        );
     }
     // One condition per link a plan writes, however many fixes write it.
     let mut recorded = BTreeSet::new();
@@ -635,6 +698,26 @@ mod tests {
     impl Reading for Unread {
         type Error = std::convert::Infallible;
 
+        fn tombstones(
+            &self,
+            _: &norn_wire::LinkKey,
+        ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn live_holders(&self, _: &str) -> Result<Vec<norn_wire::DocumentPath>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn resolutions(
+            &self,
+            _: &norn_store::PathOverlay,
+            _: &[norn_wire::LinkKey],
+        ) -> Result<
+            std::collections::BTreeMap<crate::planner::links::EntryKey, norn_wire::Resolves>,
+            Self::Error,
+        > {
+            Ok(std::collections::BTreeMap::new())
+        }
+
         fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
             panic!("`{path}` was read for a plan of no fix")
         }
@@ -678,7 +761,7 @@ mod tests {
             rule_sets: &[],
             threshold: Confidence::DEFAULT_THRESHOLD,
         };
-        match super::plan(rows, &repairing, &Unread) {
+        match super::plan(rows, &BTreeMap::new(), &repairing, &Unread) {
             Ok(planned) => planned,
         }
     }
@@ -814,5 +897,84 @@ mod tests {
         let expected = SkippedFinding::new(4, SkipReason::AmbiguousLink)
             .with_candidates(SkippedCandidates::documents(row.head));
         assert_eq!(planned.skipped, vec![expected]);
+    }
+    /// **A tombstone without a hash skips with its path and the judged value.**
+    #[test]
+    fn a_tombstone_with_no_recorded_hash_skips_as_no_recorded_hash() {
+        struct NoHash;
+        impl Reading for NoHash {
+            type Error = std::convert::Infallible;
+            fn tombstones(
+                &self,
+                _: &LinkKey,
+            ) -> Result<Vec<norn_store::MovedTombstone>, Self::Error> {
+                Ok(vec![norn_store::MovedTombstone {
+                    path: norn_store::DocumentPath::new("old.md").expect("path"),
+                    last_content_hash: None,
+                    provenance: norn_store::Provenance::WatcherRemoval,
+                }])
+            }
+            fn live_holders(&self, _: &str) -> Result<Vec<DocumentPath>, Self::Error> {
+                panic!("no hash to read")
+            }
+            fn before(&self, _: &DocumentPath) -> Result<Before, Self::Error> {
+                panic!("no fix to read bytes for")
+            }
+            fn destination(&self, _: &DocumentPath) -> Result<Destination, Self::Error> {
+                panic!("no route")
+            }
+            fn place(&self, _: &DocumentPath) -> Option<NormalizedPath> {
+                panic!("no place")
+            }
+            fn links(
+                &self,
+                _: &PathOverlay,
+                _: &[ProbedLink],
+                _: &mut dyn FnMut(LinkChange),
+            ) -> Result<(), Self::Error> {
+                panic!("no probes")
+            }
+            fn namings(
+                &self,
+                _: &PathOverlay,
+                _: &BTreeSet<Written>,
+            ) -> Result<Namings, Self::Error> {
+                panic!("no writes")
+            }
+            fn resolutions(
+                &self,
+                _: &PathOverlay,
+                _: &[LinkKey],
+            ) -> Result<BTreeMap<crate::planner::links::EntryKey, Resolves>, Self::Error>
+            {
+                panic!("no follows")
+            }
+        }
+        let row = row(1, FindingKind::Broken, "holder.md", Some("old"));
+        let links = BTreeMap::from([(
+            1,
+            norn_store::FindingLink {
+                field: None,
+                family: norn_store::LinkFamily::Wikilink,
+                address: "old".into(),
+            },
+        )]);
+        let declared = Declared::unpinned();
+        let clock = || panic!("no clock");
+        let clock = OneReading::of(&clock);
+        let repairing = Repairing {
+            declared: &declared,
+            case: CaseFold::Exact,
+            clock: &clock,
+            rule_sets: &[],
+            threshold: Confidence::Derived,
+        };
+        let planned =
+            super::plan(std::slice::from_ref(&row), &links, &repairing, &NoHash).expect("plan");
+        assert_eq!(planned.skipped.len(), 1);
+        let skipped = &planned.skipped[0];
+        assert_eq!(skipped.reason, SkipReason::NoRecordedHash);
+        assert_eq!(skipped.value, row.value);
+        assert!(skipped.note.as_ref().expect("note").contains("old.md"));
     }
 }
