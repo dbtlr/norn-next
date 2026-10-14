@@ -2900,12 +2900,35 @@ keeps the shape finding's id and value. A composed value the respell veto refuse
 value keeps the plain reshape's refusal. An exposed link-field type mismatch
 composes in the link phase with its respell veto, after the batch's routes settle; a plain
 link wrap or unwrap the judge admits keeps its place in finding order.
+**Three deterministic families propose at `suggested` confidence.** A missing heading
+anchor on a link resolving to one document takes the unique best heading at Jaccard score
+at least 0.50 over padded trigrams, comparing the written anchor and heading text under
+the shared NFC and lowercase fold; duplicate best texts tie. Its indexed headings are
+read by one document range seek, without its body, and `rewrite_anchor` writes heading
+text for a wikilink or the stored slug for a Markdown link, an anchor-only link naming
+its own holder included. The operation carries an author `content_hash` condition on the
+target with the snapshot's recorded hash, so changing that heading refuses apply and the
+fresh plan keeps the evidence on the unresolved operation. Block references have no such
+suggestion.
+A string value of a text-compared `one_of` field with no declared candidate and no derived
+fold match takes the uniquely nearest combined member by optimal string alignment under
+the derived fold plus NFC. A member of n folded characters admits at most max(1, n / 4)
+edits, with integer floor; equal best distances tie. It joins the field's one
+`set_frontmatter`, as derived element replacements do. An undeclared tag takes the unique
+literal declared tag exactly one OSA edit away under the whole-name tag fold, `/` included;
+names below three folded characters take no part, and patterns are not enumerated.
+`rewrite_tag` preserves the occurrence's marker convention and passes the document's
+ordinary judge; a refusal is `judge_would_refuse`. Every suggestion carries its score as
+note text on its citation or below-threshold skip, and below the threshold it carries the
+operation admitting suggestions would write. The read account counts closed-set members
+compared, declared tags compared and heading rows returned; these follow their candidates,
+not the size of the vault.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
-pooled for a finding and the strongest level present decides. A derived fix the threshold
+pooled for a finding and the strongest level present decides. A derived or suggested fix the threshold
 does not admit is skipped as `below_threshold` with the finding's value and `proposed`, the
 operation lowering the threshold writes for it, in preview and apply alike. One composition
-decides it: its document is composed again at the `derived` level, where the batch's routes
+decides it: its document is composed again at the fix's confidence level, where the batch's routes
 as the request's threshold settles them leave it, so each below-threshold element of a list
 proposes the one write of the field every admitted element composes into, and a fix that
 lowered composition refuses skips with the lowered composition's reason; a fix the judge
@@ -3038,8 +3061,10 @@ concludes — a rule's, an undeclared tag, one about the document whole — is d
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
 and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
-judgment, so planning skips every one from its row, and the resolved plan settles them after
-the whole resolution: the batch hands back, with each link finding, the family, address and
+judgment. A missing-anchor finding the closest-heading suggestion fixes is cited instead
+of skipped; planning skips the other link findings from their rows, and the resolved plan
+settles only those left skipped after the whole resolution: the batch hands back, with each
+skipped link finding, the family, address and
 frontmatter field of the link at the finding's ordinal in its holder (read beside the finding
 by two index seeks, no statement of its own), and the finding is dropped where the plan's resolution change set —
 keyed at the after-state, the holder as the batch's routes leave it and the address as the
@@ -3074,7 +3099,8 @@ and `judge_would_refuse` with its candidates where it introduces any other viola
 where a route fills to no folder a document can be moved into, `below_threshold` and
 `excluded_class` as above. A
 finding the rules conflict over is `rules_conflict`. The wire also names seven skip reasons
-for the link fixes of Layer 5C, which no repair emits yet. `too_common` and `too_short`
+for the link fixes of Layer 5C; the closest-heading suggestion emits
+`link_not_rewritable` when its text edit cannot read back. `too_common` and `too_short`
 skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
 `too_common` where the rarest trigrams the query needs exceed the postings cap (the note names
 the trigram past the cap) and `too_short` where the stem is below the shortest admitted query,
@@ -3085,9 +3111,9 @@ tombstones match; the last two read to two and stop, so the note names the two p
 "at least two" and the entry carries no candidate head. `link_not_rewritable` skips a link fix
 with one answer that cannot be written to it, because no spelling reads back to the
 destination uniquely from the holder or the text layer refuses the edit, its note carrying the
-reason. A suggestion's score is note text, never a field. The move-following fix (NORN-399),
-the similarity suggestion (NORN-400) and the closest-heading suggestion (NORN-401) produce
-these reasons. Any other
+reason. A suggestion's score is note text, never a field. The move-following fix
+(NORN-399) and the similarity suggestion (NORN-400) will produce the other reasons; the
+closest-heading suggestion produces `link_not_rewritable`. Any other
 finding the plan makes no fix for is skipped with its reason: a document that does not read
 — a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
 does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a

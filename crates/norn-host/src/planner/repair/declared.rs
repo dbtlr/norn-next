@@ -54,6 +54,15 @@
 //! answers is an excluded class. Every link any fix writes is recorded with
 //! what it resolves to once the plan has landed ([`Decided::emit`]).
 //!
+//! **Three families suggest deterministic best answers.** A missing heading
+//! anchor takes its uniquely closest indexed heading by trigram Jaccard and
+//! writes an anchor with the target's snapshot hash as an author condition
+//! ([`anchors`]). A text-compared closed-set value with no declared or
+//! derived answer takes its nearest member by bounded OSA ([`closed_set`]).
+//! An undeclared tag takes the one literal declared tag exactly one OSA edit
+//! away under the tag fold ([`tags`]). All are made at Suggested, each score
+//! carried as note text; equal best candidates tie only at an admitted level.
+//!
 //! **Every candidate at or above the request's threshold is pooled for a
 //! finding, and the strongest level present decides.** A declared fix counts
 //! even where it fails the combined constraint or the judge: it blocks the
@@ -62,7 +71,7 @@
 //! the derived answer. A derived fix the threshold does not admit is judged
 //! all the same, then skipped as [`SkipReason::BelowThreshold`], carrying the
 //! operation lowering the threshold writes for it: the document composed
-//! again at the derived level ([`Reckoned::propose_lowered`]), so each
+//! again at that fix's level ([`Reckoned::propose_lowered`]), so each
 //! element of a list proposes the one write of the field every admitted
 //! element composes into, and a fix that composition refuses skips with its
 //! reason.
@@ -140,6 +149,7 @@
 //! stands, and never blocks its neighbours'. The one operation cites every
 //! finding it fixes, each at the level of its own fix.
 
+mod anchors;
 mod bare_link;
 mod closed_set;
 mod derived;
@@ -147,6 +157,7 @@ mod elements;
 mod forbidden;
 mod respells;
 mod routes;
+mod tags;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -209,6 +220,21 @@ pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
             derived::is_boolean(repairing.declared.schema(), field)
                 || bare_link::is_link_mismatch(repairing.declared.schema(), row)
         }),
+        FindingKind::MissingAnchor => {
+            row.head.total() == 1
+                && row
+                    .target
+                    .as_deref()
+                    .and_then(|target| target.split_once('#'))
+                    .is_some_and(|(_, anchor)| !anchor.is_empty() && !anchor.starts_with('^'))
+        }
+        FindingKind::UndeclaredTag => repairing
+            .declared
+            .schema()
+            .tags()
+            .declared()
+            .next()
+            .is_some(),
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
     }
@@ -420,20 +446,22 @@ impl Decided<'_> {
     /// and what the plan claims of each finding. A link fix bringing the
     /// document under a rule reading by value a link of `respellable` — one
     /// a settled route may respell — is skipped ([`respells`]).
-    pub(super) fn emit(
+    pub(super) fn emit<R: Reading>(
         self,
         planned: &mut Planned,
         namings: &Namings,
         respellable: Option<&Respellable>,
-    ) {
+        vault: &R,
+    ) -> Result<(), R::Error> {
         let (reckoned, mut composed) = match self.decided {
             Deciding::Alone(decided) => {
                 planned.skipped.extend(decided);
-                return;
+                return Ok(());
             }
             Deciding::Composed(composed) => *composed,
         };
         reckoned.link_fixes(&reckoned.document, &mut composed, namings, respellable);
+        anchors::fixes(&reckoned, &mut composed, vault)?;
         let claims = reckoned.settle(&mut composed);
         reckoned.propose_lowered(&mut composed, namings, respellable);
         for made in composed.made {
@@ -443,6 +471,7 @@ impl Decided<'_> {
             .skipped
             .extend(composed.decided.into_iter().flatten());
         planned.claims.extend(claims);
+        Ok(())
     }
 }
 
@@ -492,6 +521,7 @@ enum Made {
     /// A fix: its operations, in order, each answering the findings `cited`.
     Fixed {
         operations: Vec<OperationKind>,
+        conditions: Vec<norn_wire::AuthorCondition>,
         cited: Vec<CitedFinding>,
         removed_field: Option<(DocumentPath, String)>,
     },
@@ -665,6 +695,13 @@ impl<'d> Reckoned<'d> {
             let Some(held) = state.holding(finding) else {
                 continue;
             };
+            if row.kind == FindingKind::UndeclaredTag {
+                match tags::fix(composing, &state, row, finding) {
+                    Ok(fix) => state = fix.made(&mut made),
+                    Err(skipped) => decided[at] = Some(*skipped),
+                }
+                continue;
+            }
             let (true, Some(field)) = (
                 matches!(
                     row.kind,
@@ -751,41 +788,71 @@ impl<'d> Reckoned<'d> {
         namings: &Namings,
         respellable: Option<&Respellable>,
     ) {
+        // An anchor proposal is already one complete operation with its
+        // evidence; field proposals need their grouped lowered composition.
         let below = |decision: &Option<SkippedFinding>| {
-            decision
-                .as_ref()
-                .is_some_and(|skipped| skipped.reason == SkipReason::BelowThreshold)
+            decision.as_ref().is_some_and(|skipped| {
+                skipped.reason == SkipReason::BelowThreshold
+                    && !matches!(
+                        skipped.proposed.as_ref().map(|operation| &operation.kind),
+                        Some(OperationKind::RewriteAnchor { .. })
+                    )
+            })
         };
         if !composed.decided.iter().any(below) {
             return;
         }
-        let lowered_document = self.document.lowered();
-        let (from, made) = composed.began.clone();
-        let mut lowered = self.compose(&lowered_document, from, made);
-        self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
-        self.settle(&mut lowered);
-        for (at, decision) in composed.decided.iter_mut().enumerate() {
-            if !below(decision) {
-                continue;
+        let mut pending: BTreeSet<usize> = composed
+            .decided
+            .iter()
+            .enumerate()
+            .filter(|(_, decision)| below(decision))
+            .map(|(at, _)| at)
+            .collect();
+        for level in [Confidence::Derived, Confidence::Suggested] {
+            if pending.is_empty() {
+                break;
             }
-            let id = self.rows[at].id;
-            let written = lowered.made.iter().find_map(|made| match made {
-                Made::Fixed {
-                    operations, cited, ..
-                } if cited.iter().any(|cited| cited.finding == id) => match operations.as_slice() {
-                    [operation] => Some(operation),
+            let lowered_document = self.document.lowered(level);
+            let (from, made) = composed.began.clone();
+            let mut lowered = self.compose(&lowered_document, from, made);
+            self.link_fixes(&lowered_document, &mut lowered, namings, respellable);
+            self.settle(&mut lowered);
+            for at in pending.clone() {
+                let id = self.rows[at].id;
+                let written = lowered.made.iter().find_map(|made| match made {
+                    Made::Fixed {
+                        operations,
+                        conditions,
+                        cited,
+                        ..
+                    } if cited.iter().any(|cited| cited.finding == id) => {
+                        match operations.as_slice() {
+                            [kind] => Some(
+                                Operation::new(kind.clone()).with_conditions(conditions.clone()),
+                            ),
+                            _ => None,
+                        }
+                    }
                     _ => None,
-                },
-                Made::Fixed { .. } | Made::Unresolved { .. } => None,
-            });
-            match (written, lowered.decided[at].take()) {
-                (Some(operation), _) => {
-                    if let Some(skipped) = decision.as_mut() {
-                        skipped.proposed = Some(Operation::new(operation.clone()));
+                });
+                match (written, lowered.decided[at].take()) {
+                    (Some(operation), _) => {
+                        composed.decided[at]
+                            .as_mut()
+                            .expect("a below-threshold skip")
+                            .proposed = Some(operation);
+                        pending.remove(&at);
+                    }
+                    (None, Some(skipped)) if skipped.reason == SkipReason::BelowThreshold => {}
+                    (None, Some(skipped)) => {
+                        composed.decided[at] = Some(skipped);
+                        pending.remove(&at);
+                    }
+                    (None, None) => {
+                        pending.remove(&at);
                     }
                 }
-                (None, Some(skipped)) => *decision = Some(skipped),
-                (None, None) => {}
             }
         }
     }
@@ -849,6 +916,7 @@ fn push(planned: &mut Planned, made: Made, namings: &Namings) {
     match made {
         Made::Fixed {
             operations,
+            conditions,
             cited,
             removed_field,
         } => {
@@ -865,7 +933,9 @@ fn push(planned: &mut Planned, made: Made, namings: &Namings) {
                         )
                     }));
                 let id = next_id(planned);
-                let operation = Operation::new(kind).with_id(id.clone());
+                let operation = Operation::new(kind)
+                    .with_conditions(conditions.clone())
+                    .with_id(id.clone());
                 planned.operations.push(match earlier.take() {
                     Some(earlier) => operation.with_requires(vec![earlier]),
                     None => operation,
@@ -1054,13 +1124,11 @@ impl Document<'_> {
         self.threshold.admits(level)
     }
 
-    /// The document composed at the threshold lowered to the derived level,
-    /// the level every fix the request's threshold may leave below it is
-    /// made at: what a fix below the threshold proposes is what composing
-    /// the document so writes.
-    fn lowered(&self) -> Self {
+    /// Compose at the confidence of a fix below the threshold, so its
+    /// proposal is the grouped write admitting that level makes.
+    fn lowered(&self, level: Confidence) -> Self {
         Document {
-            threshold: Confidence::Derived,
+            threshold: level,
             ..self.clone()
         }
     }
@@ -1109,7 +1177,13 @@ impl Document<'_> {
     ) -> Result<State, Box<SkippedFinding>> {
         let mut composed = Arc::clone(&from.bytes);
         for edit in edits {
-            composed = edited(edit, &composed).map_err(|detail| {
+            let changed = match edit {
+                OperationKind::RewriteTag { .. } => {
+                    crate::planner::edit::rewritten_names(edit, &composed)
+                }
+                _ => edited(edit, &composed),
+            };
+            composed = changed.map_err(|detail| {
                 Box::new(
                     skip(fixing.row, SkipReason::JudgeWouldRefuse)
                         .with_candidates(fixing.candidates.clone())
@@ -1248,6 +1322,7 @@ impl Fix {
     fn made(self, made: &mut Vec<Made>) -> State {
         made.push(Made::Fixed {
             operations: self.operations,
+            conditions: Vec::new(),
             cited: self.cited,
             removed_field: self.removed_field,
         });
@@ -1647,6 +1722,7 @@ mod tests {
         ) -> (Planned, Vec<String>) {
             let one = OneReading::of(clock);
             let repairing = Repairing {
+                work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
                 declared: &self.declared,
                 case: if self.files.normalizer().case_sensitivity()
                     == norn_fs::CaseSensitivity::Insensitive
@@ -1706,6 +1782,13 @@ mod tests {
 
     impl Reading for Read<'_> {
         type Error = Unread<std::convert::Infallible, std::convert::Infallible>;
+
+        fn headings(
+            &self,
+            path: &DocumentPath,
+        ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+            self.over.headings(path)
+        }
 
         fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
             self.reads.borrow_mut().push(path.as_str().to_string());
@@ -4022,7 +4105,7 @@ mod tests {
         let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "inprogress")]);
 
         assert!(planned.operations.is_empty());
-        assert_eq!(reasons(&planned), vec![(1, SkipReason::NoDeclaredFix)]);
+        assert_eq!(reasons(&planned), vec![(1, SkipReason::BelowThreshold)]);
     }
 
     /// **Only a field whose values compare as text folds**: `4.0` is the
@@ -4413,6 +4496,149 @@ mod tests {
                     .with_value(norn_store::value_head("Done"))
                     .with_candidates(candidates)
             ]
+        );
+    }
+    /// A unique adjacent transposition answer enters the field's one write.
+    #[test]
+    fn a_closest_member_is_written_and_cited_at_suggested() {
+        let vault = Vault::of(
+            MEMBERS,
+            &[("a.md", "---\ntype: task\nstatus: [dnoe, todo]\n---\n")],
+        )
+        .at(Confidence::Suggested);
+        let planned = vault.plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "dnoe")]);
+        assert_eq!(
+            planned.operations[0].kind,
+            OperationKind::set_frontmatter(
+                WriteTarget::path(DocumentPath::new("a.md").unwrap()),
+                "status",
+                list(&["done", "todo"])
+            )
+        );
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Suggested
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// Equal best OSA distances keep every candidate and choose none.
+    #[test]
+    fn equally_close_members_skip_as_a_suggested_tie() {
+        let schema = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    one_of:\n      status: {values: [cat, cut]}\n";
+        let planned = Vault::of(schema, &[("a.md", "---\ntype: task\nstatus: cot\n---\n")])
+            .at(Confidence::Suggested)
+            .plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "cot")]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(planned.skipped[0].reason, SkipReason::Tie);
+        let Some(SkippedCandidates::Values { head, .. }) = &planned.skipped[0].candidates else {
+            panic!("value candidates");
+        };
+        assert_eq!(head.total(), 2);
+    }
+
+    /// The member suggestion's score has one fixed human-readable spelling.
+    #[test]
+    fn a_closest_member_citation_carries_its_fixed_score_note() {
+        let planned = Vault::of(MEMBERS, &[("a.md", "---\ntype: task\nstatus: dnoe\n---\n")])
+            .at(Confidence::Suggested)
+            .plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "dnoe")]);
+        assert_eq!(
+            planned.citations[0].findings[0].notes,
+            [
+                "closest member `done` is 1 edit away by optimal string alignment, at most 1 for its 4 characters"
+            ]
+        );
+    }
+
+    /// The default threshold carries the suggested field write without admitting it.
+    #[test]
+    fn a_closest_member_below_the_default_threshold_carries_its_operation() {
+        let planned = Vault::of(MEMBERS, &[("a.md", "---\ntype: task\nstatus: dnoe\n---\n")])
+            .plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "dnoe")]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(planned.skipped[0].reason, SkipReason::BelowThreshold);
+        assert_eq!(
+            planned.skipped[0].proposed.as_ref().unwrap().kind,
+            set(1, "a.md", "status", "done").kind
+        );
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some(
+                "closest member `done` is 1 edit away by optimal string alignment, at most 1 for its 4 characters"
+            )
+        );
+    }
+
+    /// One declared whole tag at distance one respells all of the document's occurrences.
+    #[test]
+    fn a_near_declared_tag_is_written_and_cited_at_suggested() {
+        let schema = "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n";
+        let planned = Vault::of(schema, &[("a.md", "#darft\n")])
+            .at(Confidence::Suggested)
+            .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", "darft")]);
+        assert_eq!(
+            planned.operations[0].kind,
+            OperationKind::rewrite_tag(DocumentPath::new("a.md").unwrap(), "darft", "draft")
+        );
+        assert_eq!(
+            planned.citations[0].findings[0].confidence,
+            Confidence::Suggested
+        );
+        assert!(planned.skipped.is_empty());
+    }
+
+    /// Two declared tags one edit away remain a tie with both spellings.
+    #[test]
+    fn equally_close_declared_tags_skip_as_a_suggested_tie() {
+        let schema = "version: 1\ntags:\n  declared: [draft, graft]\n  undeclared: report\n";
+        let planned = Vault::of(schema, &[("a.md", "#craft\n")])
+            .at(Confidence::Suggested)
+            .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", "craft")]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(planned.skipped[0].reason, SkipReason::Tie);
+        let Some(SkippedCandidates::Values { head, .. }) = &planned.skipped[0].candidates else {
+            panic!("value candidates");
+        };
+        assert_eq!(head.total(), 2);
+    }
+
+    /// The tag suggestion's score has one fixed human-readable spelling.
+    #[test]
+    fn a_declared_tag_citation_carries_its_fixed_score_note() {
+        let schema = "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n";
+        let planned = Vault::of(schema, &[("a.md", "#darft\n")])
+            .at(Confidence::Suggested)
+            .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", "darft")]);
+        assert_eq!(
+            planned.citations[0].findings[0].notes,
+            [
+                "declared tag `draft` is one edit away by optimal string alignment under the tag fold"
+            ]
+        );
+    }
+
+    /// The default threshold carries the suggested tag write without admitting it.
+    #[test]
+    fn a_declared_tag_below_the_default_threshold_carries_its_operation() {
+        let schema = "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n";
+        let planned = Vault::of(schema, &[("a.md", "#darft\n")]).plan(&[finding(
+            1,
+            FindingKind::UndeclaredTag,
+            "a.md",
+            "darft",
+        )]);
+        assert!(planned.operations.is_empty());
+        assert_eq!(planned.skipped[0].reason, SkipReason::BelowThreshold);
+        assert_eq!(
+            planned.skipped[0].proposed.as_ref().unwrap().kind,
+            OperationKind::rewrite_tag(DocumentPath::new("a.md").unwrap(), "darft", "draft")
+        );
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some(
+                "declared tag `draft` is one edit away by optimal string alignment under the tag fold"
+            )
         );
     }
 }

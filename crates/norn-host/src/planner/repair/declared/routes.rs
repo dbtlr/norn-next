@@ -196,6 +196,7 @@ pub(super) fn route<R: Reading>(
     Ok(Routed::Passed(Box::new(Passed {
         from: state.at.clone(),
         moved: Made::Fixed {
+            conditions: Vec::new(),
             removed_field: None,
             operations: vec![OperationKind::move_document(state.at.clone(), to.clone())],
             cited: vec![cited(row, &to, clocked)],

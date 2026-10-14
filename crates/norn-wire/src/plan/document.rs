@@ -504,10 +504,10 @@ pub enum SkipReason {
     // `several_tombstones`, the similarity suggestion (NORN-400) emits
     // `too_common` and `too_short`, and each link fix — those two and the
     // closest-heading suggestion (NORN-401) — emits `link_not_rewritable`.
-    // No repair runs those fixes yet, so nothing in the
-    // current call graph reaches them and each is a dormant carrier until its
-    // producer lands; NORN-396 lands the vocabulary first. The notes live
-    // here rather than in the doc comments schemars lifts.
+    // The closest-heading suggestion (NORN-401) emits `link_not_rewritable`.
+    // The other six remain dormant carriers until NORN-399 and NORN-400 land:
+    // repair's current call graph does not yet reach their producers. The
+    // notes live here rather than in the doc comments schemars lifts.
     /// A similarity suggestion needs more of a broken link's rarest trigrams
     /// than the postings cap admits, so the stem is too common to suggest
     /// from. The entry's value is the query stem, and its note names the

@@ -401,6 +401,13 @@ pub(super) mod tests {
     impl<R: Reading> Reading for Unanswering<'_, R> {
         type Error = R::Error;
 
+        fn headings(
+            &self,
+            path: &DocumentPath,
+        ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+            self.0.headings(path)
+        }
+
         fn before(&self, path: &DocumentPath) -> Result<crate::planner::repair::Before, R::Error> {
             self.0.before(path)
         }
@@ -464,6 +471,7 @@ pub(super) mod tests {
         };
         let one = OneReading::of(&clock);
         let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
             declared: &declared,
             case: norn_wire::CaseFold::Exact,
             clock: &one,

@@ -179,7 +179,12 @@ pub(super) fn fix_field(
                 current = next;
                 cites.push(cited(row, replacement.level, replacement.notes));
             }
-            Err(skip) => skipped.push((at, *skip)),
+            Err(mut skip) => {
+                if skip.reason == SkipReason::BelowThreshold && !replacement.notes.is_empty() {
+                    skip.note = Some(replacement.notes.join("; "));
+                }
+                skipped.push((at, *skip));
+            }
         }
     }
     if cites.is_empty() {

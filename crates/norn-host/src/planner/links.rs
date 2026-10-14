@@ -206,6 +206,16 @@ pub(crate) trait LinkIndex {
         Ok(None)
     }
 
+    /// The indexed headings and recorded hash of one target, without its
+    /// body. An index holding no store has no heading evidence to offer.
+    fn held_headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+        let _ = path;
+        Ok(None)
+    }
+
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
     /// another.

@@ -351,7 +351,7 @@ pub(super) fn excluded(row: &FindingRow, schema: &VaultSchema) -> Option<Skipped
 /// characters that read as one. Two texts folding equal therefore both hold a
 /// wikilink or neither does, and since a closed set holds none, a value that
 /// folds equal to a member holds none.
-fn fold(text: &str) -> String {
+pub(super) fn fold(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()

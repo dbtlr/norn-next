@@ -212,6 +212,7 @@ pub(crate) struct Repaired {
     pub(crate) skipped: Vec<SkippedFinding>,
     pub(crate) citations: Vec<Citation>,
     pub(crate) claims: Vec<repair::Claim>,
+    pub(crate) work: crate::evidence::RepairSuggestionsCost,
 }
 
 /// The resolved plan of the repair of the batch `batch`, under
@@ -247,6 +248,7 @@ where
 {
     let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
     let repairing = repair::Repairing {
+        work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
         declared: &ground.declared,
         case,
         clock,
@@ -288,6 +290,7 @@ where
         skipped,
         citations: planned.citations,
         claims: planned.claims,
+        work: planned.work,
     })
 }
 
@@ -764,6 +767,15 @@ impl LinkIndex for PlanSnapshot<'_> {
             .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
     }
 
+    /// Read the target's heading projection on the repair's pinned snapshot.
+    fn held_headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, PageRefused> {
+        self.reading(|snapshot| snapshot.held_headings(&path.into()))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
     /// its read hold's, and stays.
     fn release(&self) {
@@ -1111,6 +1123,7 @@ where
                 &reading,
                 refused,
             )?;
+            self.count_repair_suggestions(repaired.work);
             let mut provenance = Provenance::new(batch.snapshot.generation, repaired.skipped)
                 .with_citations(repaired.citations.clone());
             if let Some(remaining) = batch.remaining {

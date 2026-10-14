@@ -1100,6 +1100,7 @@ pub(crate) struct ReadEvidence {
     preview_link_judgments: LinkJudgmentAccount,
     repair_batches: RepairBatchAccount,
     similar_stems: SimilarStemsAccount,
+    repair_suggestions: RepairSuggestionsAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
 }
@@ -1266,6 +1267,8 @@ pub struct ReadReading {
     pub repair_batches: RepairBatchCost,
     /// Work reported by similarity candidate reads.
     pub similar_stems: SimilarStemsCost,
+    /// Logical candidates the repair suggestions read.
+    pub repair_suggestions: RepairSuggestionsCost,
     /// What the read holds this host planned on ran on their snapshots, over
     /// every preview and repair.
     pub planning_holds: PlanningHoldCost,
@@ -1320,6 +1323,8 @@ pub struct ReadsSince {
     pub repair_batches: RepairBatchCost,
     /// Work reported by similarity candidate reads.
     pub similar_stems: SimilarStemsCost,
+    /// Logical candidates the repair suggestions read.
+    pub repair_suggestions: RepairSuggestionsCost,
     /// What this window's planning holds ran on their snapshots.
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
@@ -1355,6 +1360,7 @@ impl ReadReading {
                 .since(earlier.preview_link_judgments),
             repair_batches: self.repair_batches.since(earlier.repair_batches),
             similar_stems: self.similar_stems.since(earlier.similar_stems),
+            repair_suggestions: self.repair_suggestions.since(earlier.repair_suggestions),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
         }
@@ -1385,6 +1391,7 @@ impl ReadEvidence {
             preview_link_judgments: self.preview_link_judgments.read(),
             repair_batches: self.repair_batches.read(),
             similar_stems: self.similar_stems.read(),
+            repair_suggestions: self.repair_suggestions.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
         }
@@ -1400,6 +1407,11 @@ impl ReadEvidence {
     /// read answered.
     pub(crate) fn count_repair_batch(&self, cost: RepairBatchCost) {
         self.repair_batches.add(cost);
+    }
+
+    /// Record the candidate work a repair's planner reported.
+    pub(crate) fn count_repair_suggestions(&self, cost: RepairSuggestionsCost) {
+        self.repair_suggestions.add(cost);
     }
 
     /// Count a similarity read from NORN-400's repair planning hold. No caller
@@ -1799,6 +1811,59 @@ impl RepairBatchAccount {
             validate_full_scan_steps: get(&self.validate_full_scan_steps),
             validate_sorts: get(&self.validate_sorts),
             validate_vm_steps: get(&self.validate_vm_steps),
+        }
+    }
+}
+
+/// Candidate comparisons and heading rows spent by the three repair suggestions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RepairSuggestionsCost {
+    /// The closed-set members compared.
+    pub closed_set_members: u64,
+    /// The literal declared tags compared.
+    pub declared_tags: u64,
+    /// The rows the target-heading seeks returned.
+    pub headings: u64,
+}
+
+impl RepairSuggestionsCost {
+    /// Candidate work spent between an earlier total and this one.
+    #[must_use]
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            closed_set_members: self
+                .closed_set_members
+                .saturating_sub(earlier.closed_set_members),
+            declared_tags: self.declared_tags.saturating_sub(earlier.declared_tags),
+            headings: self.headings.saturating_sub(earlier.headings),
+        }
+    }
+}
+
+/// Running totals written when a repair's planner hands back its work.
+#[derive(Debug, Default)]
+struct RepairSuggestionsAccount {
+    closed_set_members: AtomicU64,
+    declared_tags: AtomicU64,
+    headings: AtomicU64,
+}
+
+impl RepairSuggestionsAccount {
+    /// Add one planner's candidate work.
+    fn add(&self, cost: RepairSuggestionsCost) {
+        self.closed_set_members
+            .fetch_add(cost.closed_set_members, Ordering::Relaxed);
+        self.declared_tags
+            .fetch_add(cost.declared_tags, Ordering::Relaxed);
+        self.headings.fetch_add(cost.headings, Ordering::Relaxed);
+    }
+
+    /// Read the lifetime totals.
+    fn read(&self) -> RepairSuggestionsCost {
+        RepairSuggestionsCost {
+            closed_set_members: self.closed_set_members.load(Ordering::Relaxed),
+            declared_tags: self.declared_tags.load(Ordering::Relaxed),
+            headings: self.headings.load(Ordering::Relaxed),
         }
     }
 }

@@ -1,9 +1,10 @@
 //! `repair`: the operations a batch of findings plans to, the findings each
 //! fixes, and the findings it leaves alone.
 //!
-//! **Four kinds of finding have a declared fix and three a derived one;
-//! every other is skipped.** A selected `field/required-missing` finding
-//! fills from the default the rules requiring the field declare; a
+//! **Four kinds of finding have a declared fix, three a derived one, and
+//! three deterministic families offer suggested answers; every other is
+//! skipped.** A selected `field/required-missing` finding fills from the
+//! default the rules requiring the field declare; a
 //! `field/not-one-of` finding is replaced by the member a rule's synonym maps
 //! its offending value to, a list field's elements fixed one by one into one
 //! `set_frontmatter` of the field; a `field/forbidden` finding is removed or
@@ -16,8 +17,14 @@
 //! for its case is written as the boolean, and one on a link field whose bare
 //! value resolves to one document at the plan's after-state is written as
 //! the link; and a `field/not-one-of` value differing from exactly one member
-//! only by case and white space is replaced by that member. Every link a fix
-//! writes is recorded with what it resolves to at the after-state; none
+//! only by case and white space is replaced by that member. Suggested fixes
+//! take a missing heading anchor's unique best indexed heading by trigram
+//! Jaccard (rewrite_anchor, guarded by the target's recorded hash), a string
+//! closed-set value's nearest member by optimal string alignment distance
+//! within max(1, n / 4) edits after the derived fold and NFC, or an undeclared
+//! tag's one literal declared tag exactly one OSA edit away under the tag
+//! fold (rewrite_tag). Their scores are note text. Every link a fix writes
+//! is recorded with what it resolves to at the after-state; none
 //! replaces a link address, since a closed set never holds a wikilink, a
 //! rename moves a value without changing it, and a wrap, an unwrap or a bare
 //! value made a link writes an address without replacing one. All are
@@ -60,9 +67,9 @@
 //! is dropped: it is neither fixed nor skipped — a route out of a rule's area
 //! drops that rule's findings. **A link finding is settled by the resolved
 //! plan instead** ([`skipped_still_held`]): link health is no conclusion of
-//! that judgment, so planning skips every link finding from its row, and the
-//! step that follows the whole resolution drops those the plan's resolution
-//! change set shows no longer hold. A broken link a route's move makes resolve, an
+//! that judgment, so planning skips link findings without an admitted anchor
+//! fix, and the step that follows the whole resolution drops those the plan's
+//! resolution change set shows no longer hold. A broken link a route's move makes resolve, an
 //! ambiguous link it makes name one document or none, and a link naming a
 //! heading that is not there which the plan makes resolve to no document or
 //! to several, are dropped, each judged by the link at the finding's ordinal
@@ -145,7 +152,7 @@ pub(crate) struct Planned {
     pub(crate) removed_fields: BTreeSet<(DocumentPath, String)>,
     /// The findings each operation fixes, keyed by the operation's id.
     pub(crate) citations: Vec<Citation>,
-    /// The findings left alone, in batch order: every link finding among
+    /// The findings left alone, in batch order: unfixed link findings among
     /// them, which the host settles against the resolved plan ([`skipped_still_held`]).
     pub(crate) skipped: Vec<SkippedFinding>,
     /// The operations a fix would have been that cannot be resolved because
@@ -163,6 +170,8 @@ pub(crate) struct Planned {
     /// once the plan lands, and whether the finding still stands there. The
     /// host holds the resolved plan to these claims ([`Claim`]).
     pub(crate) claims: Vec<Claim>,
+    /// The candidates this planner compared and the heading rows it read.
+    pub(crate) work: crate::evidence::RepairSuggestionsCost,
 }
 
 /// What a repair plan claims of one selected finding: the finding, where its
@@ -223,6 +232,8 @@ pub(super) fn naming_of<'n>(namings: &'n Namings, written: &Written) -> &'n Nami
 /// by, how that declaration's path globs compare letters, and the plan's one
 /// clock reading.
 pub(crate) struct Repairing<'a> {
+    /// Logical work, shared by the document compositions of this one plan.
+    pub(crate) work: std::cell::Cell<crate::evidence::RepairSuggestionsCost>,
     /// The declaration the entry's store pins.
     pub(crate) declared: &'a Declared,
     /// How the rules' path globs compare letters with a document's path, as
@@ -276,6 +287,13 @@ pub(crate) enum Destination {
 pub(crate) trait Reading {
     /// Why the vault could not be read: a machine failure, never absence.
     type Error;
+
+    /// The target's indexed headings beside its recorded hash, without
+    /// reading its file. The rows are returned by one heading range seek.
+    fn headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error>;
 
     /// The bytes of the document at `path`, read whole.
     fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error>;
@@ -333,6 +351,13 @@ pub(crate) enum Unread<V, I> {
 
 impl<V: VaultView, I: LinkIndex + ?Sized> Reading for Over<'_, V, I> {
     type Error = Unread<V::Error, I::Error>;
+
+    fn headings(
+        &self,
+        path: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+        self.index.held_headings(path).map_err(Unread::Index)
+    }
 
     /// The bytes of the document at `path` as the view reads it whole, or
     /// that no document whose bytes can be read stands there: what a repair
@@ -512,7 +537,7 @@ pub(crate) fn plan<R: Reading>(
     };
     let mut planned = Planned::default();
     for (at, document) in decided.into_iter().enumerate() {
-        document.emit(&mut planned, &namings, respellable.get(&at));
+        document.emit(&mut planned, &namings, respellable.get(&at), vault)?;
     }
     // One condition per link a plan writes, however many fixes write it.
     let mut recorded = BTreeSet::new();
@@ -522,6 +547,7 @@ pub(crate) fn plan<R: Reading>(
         }
         PlanCondition::ContentHash { .. } | PlanCondition::LinkResolution { .. } => true,
     });
+    planned.work = repairing.work.get();
     Ok(planned)
 }
 
@@ -635,6 +661,13 @@ mod tests {
     impl Reading for Unread {
         type Error = std::convert::Infallible;
 
+        fn headings(
+            &self,
+            _: &DocumentPath,
+        ) -> Result<Option<norn_store::HeldHeadings>, Self::Error> {
+            panic!("a plan without a fix reads no headings")
+        }
+
         fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
             panic!("`{path}` was read for a plan of no fix")
         }
@@ -672,6 +705,7 @@ mod tests {
         let clock = || panic!("a plan of no fix read the clock");
         let reading = OneReading::of(&clock);
         let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
             declared: &declared,
             case: CaseFold::Exact,
             clock: &reading,

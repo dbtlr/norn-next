@@ -5399,3 +5399,92 @@ fn a_repair_plan_previewed_before_a_reload_is_refused_where_the_new_declaration_
     assert_eq!(violation.target.as_deref(), Some("status"));
     assert_eq!(written(&vault, "a.md"), "---\ntype: task\n---\n# A\n");
 }
+
+/// A holder with a missing heading anchor and its indexed target.
+fn a_vault_with_a_missing_anchor(label: &str) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    a_vault_under(
+        label,
+        "version: 1\n",
+        &[
+            ("zz-holder.md", b"[[zz-target#Important Headinh]]\n"),
+            ("zz-target.md", b"# Important Heading\n"),
+        ],
+    )
+}
+
+/// A changed target heading invalidates the snapshot evidence of an anchor fix.
+#[test]
+fn a_previewed_anchor_suggestion_refuses_apply_when_the_target_heading_changes() {
+    {
+        let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-target-change");
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let plan =
+            previewed(host.repair(
+                repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested),
+            ));
+        assert_eq!(plan.operations.len(), 1);
+        assert!(
+            matches!(&plan.operations[0].conditions[0], norn_wire::AuthorCondition::ContentHash { path, .. } if path == &at("zz-target.md"))
+        );
+        std::fs::write(
+            vault.path().join(FOLDER).join("zz-target.md"),
+            "# Changed Heading\n",
+        )
+        .unwrap();
+        let (_, _, checks) = apply_refused(&host, ApplyMode::Apply, &plan);
+        assert!(!checks.is_empty());
+        assert_eq!(
+            written(&vault, "zz-holder.md"),
+            "[[zz-target#Important Headinh]]\n"
+        );
+    }
+
+    let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-target-unchanged");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let preview = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    let ApplyReport::Applied {
+        plan, changeset, ..
+    } = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(preview.clone()),
+    )))
+    else {
+        panic!("the unchanged target admits the previewed plan");
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(plan, preview);
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[[zz-target#Important Heading]]\n"
+    );
+}
+
+/// A fresh plan retains the operation's snapshot hash and names it unresolved.
+#[test]
+fn a_refused_anchor_suggestions_fresh_plan_keeps_its_hash_condition_and_unresolved_operation() {
+    let (_sandbox, vault, host) = a_vault_with_a_missing_anchor("repair-anchor-fresh-condition");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(Confidence::Suggested)),
+    );
+    assert_eq!(plan.operations.len(), 1);
+    let operation = plan.operations[0].clone();
+    std::fs::write(
+        vault.path().join(FOLDER).join("zz-target.md"),
+        "# Changed Heading\n",
+    )
+    .unwrap();
+    let (refusal, fresh, _) = apply_refused(&host, ApplyMode::Apply, &plan);
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("a refused plan");
+    };
+    assert!(fresh.operations.is_empty());
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].operation, operation);
+    assert!(matches!(
+        unresolved[0].operation.conditions[0],
+        norn_wire::AuthorCondition::ContentHash { .. }
+    ));
+}
