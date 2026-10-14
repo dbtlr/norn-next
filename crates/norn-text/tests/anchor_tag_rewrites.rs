@@ -75,6 +75,24 @@ fn a_flow_list_tag_and_its_body_tag_are_both_respelled() {
     assert_eq!(rewritten.text, "---\ntags: [draft, other]\n---\n#draft\n");
 }
 
+/// A tags entry with no literal place is rewritten whole only where the field
+/// reads back: a folded entry, and an escaped block item another entry follows,
+/// refuse the batch.
+#[test]
+fn a_folded_or_followed_escaped_tags_entry_refuses_the_rewrite() {
+    for source in [
+        "---\ntags:\n  - >-\n    darft\n  - other\n---\n#darft\n",
+        "---\ntags:\n  - \"darf\\u0074\"\n  - other\n---\n#darft\n",
+    ] {
+        assert_eq!(
+            Document::parse(source)
+                .rewrite_tags(&[TagRewrite::new("darft", "draft")], str::to_lowercase),
+            Err(RewriteSkip::Unrepresentable),
+            "{source:?}"
+        );
+    }
+}
+
 /// A plain scalar that reads as a boolean cannot carry the requested tag.
 #[test]
 fn a_tag_rewrite_that_cannot_read_back_is_refused_with_its_reason() {
