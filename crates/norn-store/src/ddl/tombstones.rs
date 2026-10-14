@@ -57,16 +57,39 @@
 //! stand live under one spelling and dead under another. The disjointness is a
 //! claim about stored paths, not about places.
 //!
-//! # The class outlives the document, and it is recomputed rather than stored
+//! # The class outlives the document, and the suffix keys are stored for a seek
 //!
 //! A deletion **changes an ambiguity class**, and the class has to stay
 //! reachable once the document row is gone: a path that was one of three
 //! candidates for `glossary` leaves two behind, and the findings that named that
 //! class are the ones a deletion has to revisit. See [`crate::ddl::findings`].
+//! That class comes from `path`, and [`crate::DocumentPath`] derives it on the
+//! way out.
 //!
-//! The class comes from `path`, which is the column a tombstone is read by, and
-//! [`crate::DocumentPath`] derives it on the way out. Storing the derived forms
-//! beside it would put one fact in two homes for a scan no statement performs.
+//! `suffix_key` and `folded_suffix_key` are stored anyway, because a statement
+//! seeks them: move-following reads the deaths a broken wikilink's suffix
+//! names ([`crate::Snapshot::tombstones_by_suffix`]), probing the one key the
+//! root decides as a document suffix probe does. Both are computed with `path`
+//! by [`crate::DocumentPath`] in the write that records the death, so they
+//! cannot disagree with it, and a re-death of the same path writes the same
+//! keys. `tombstones_suffix_key` and `tombstones_folded_suffix_key` are partial,
+//! holding no `quarantine` death: a quarantined file is still on disk, so it
+//! never moved, and a read that repeats the predicate stops at its two-row
+//! limit counting only deaths that mean the file is gone. Each index runs on
+//! to `path`, so where three or more deaths share one key the two a read
+//! returns are the first in path order, never an accident of row ids.
+//!
+//! # The exact place on a folding root has its own index
+//!
+//! On a root that folds ASCII case, a Markdown or `vault://` link names a
+//! place, and the deaths at it are every stored spelling folding to it.
+//! `tombstones_path_nocase` declares `path COLLATE NOCASE, path`, as
+//! `documents_path_nocase` does for the live resolution of the same
+//! addresses, so the exact-path read is one equality seek under `NOCASE` that
+//! walks only deaths at that place, in bytewise path order, and stops at two
+//! however many deaths share the place's directories and stem. It is partial
+//! on the same predicate as the suffix indexes. A root that tells spellings
+//! apart reads the unique `tombstones_path` instead.
 //!
 //! `last_content_hash` is nullable, because a death can be learned from a path
 //! that is already absent and there is nothing left to hash. A re-death of a
@@ -106,12 +129,17 @@ const STATEMENTS: &[&str] = &[
     "CREATE TABLE tombstones (
     id                INTEGER PRIMARY KEY,
     path              TEXT    NOT NULL,
+    suffix_key        TEXT    NOT NULL,
+    folded_suffix_key TEXT    NOT NULL,
     last_content_hash TEXT,
     provenance        TEXT    NOT NULL,
     generation        INTEGER NOT NULL,
     recorded_at       INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX tombstones_path ON tombstones(path)",
+    "CREATE INDEX tombstones_suffix_key ON tombstones(suffix_key, path) WHERE provenance <> 'quarantine'",
+    "CREATE INDEX tombstones_folded_suffix_key ON tombstones(folded_suffix_key, path) WHERE provenance <> 'quarantine'",
+    "CREATE INDEX tombstones_path_nocase ON tombstones(path COLLATE NOCASE, path) WHERE provenance <> 'quarantine'",
     "CREATE INDEX tombstones_change_feed ON tombstones(
     generation, path, last_content_hash
 )",

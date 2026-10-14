@@ -246,6 +246,8 @@ pub enum ReadStatement {
     /// A statement [`crate::HeldLinksStatement`] names: the links one
     /// document holds, read without its body.
     HeldLinks(crate::HeldLinksStatement),
+    /// A statement [`crate::MovedStatement`] names for move-following.
+    Moved(crate::MovedStatement),
     /// A statement [`crate::HeldFrontmatterStatement`] names: the frontmatter
     /// one document holds, read without its body.
     HeldFrontmatter(crate::HeldFrontmatterStatement),

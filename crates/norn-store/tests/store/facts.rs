@@ -739,12 +739,10 @@ fn a_derived_path_form_has_one_home() {
         .iter()
         .find(|statement| statement.contains("CREATE TABLE tombstones "))
         .expect("the tombstones table");
-    for absent in ["stem", "suffix_key"] {
-        assert!(
-            !declares_column(tombstones, absent),
-            "`tombstones` carries a `{absent}` column: {tombstones}"
-        );
-    }
+    assert!(
+        !declares_column(tombstones, "stem"),
+        "`tombstones` carries a `stem` column: {tombstones}"
+    );
     // And no index stands over a column no statement reads.
     for absent in [
         "documents_stem",

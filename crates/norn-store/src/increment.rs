@@ -842,6 +842,8 @@ fn record_death(
             provenance.as_str(),
             generation,
             recorded_at,
+            path.suffix_key(),
+            path.folded_suffix_key(),
         ])
         .map_err(|error| error::sql("recording a tombstone", error))?;
 
