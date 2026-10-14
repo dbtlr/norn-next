@@ -23,8 +23,9 @@
 //! stamped under another fingerprint. One registered
 //! statement is run by a trigger rather than prepared:
 //! [`WriteStatement::CollectRuleSet`] is the body of
-//! `findings_collect_rule_set`, which the DDL builds from this text, so its
-//! bar is a plan of what the trigger runs. The
+//! `findings_collect_rule_set`, and [`WriteStatement::EndContentQuarantine`] the body
+//! of `content_quarantines_end_with_their_finding`, which the DDL builds from this
+//! text, so each one's bar is a plan of what its trigger runs. The
 //! findings discards an increment runs are
 //! [`crate::ExplainedStatement::SubjectDiscard`] and
 //! [`crate::ExplainedStatement::PathDiscard`], which carry their own bars, and the
@@ -114,6 +115,14 @@ registry! {
     /// One rule a finding cites, with the finding's key copied beside it in
     /// the order a validate selecting by rule seeks.
     InsertFindingRule,
+    /// The hash of the bytes a content finding was judged over, replacing the
+    /// one its place held, where no document row stands at the place.
+    RecordContentQuarantine,
+    /// The end of a place's hash, which the trigger
+    /// `content_quarantines_end_with_their_finding` runs as a content finding about
+    /// the place is deleted, the deleted finding's subject bound in place of
+    /// `?1`.
+    EndContentQuarantine,
     /// The discard a schema pin runs over findings stamped under another
     /// fingerprint.
     DiscardStaleFindings,
@@ -262,6 +271,14 @@ impl WriteStatement {
                  SELECT id, ?2, vault_schema_fingerprint, kind, severity, path, position
                  FROM findings WHERE id = ?1"
             }
+            // Recorded only where no document row stands, so no hash ever says
+            // a place is unchanged beside the row that describes it.
+            Self::RecordContentQuarantine => {
+                "INSERT INTO content_quarantines (path, content_hash)
+                 SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM documents WHERE path = ?1)
+                 ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash"
+            }
+            Self::EndContentQuarantine => "DELETE FROM content_quarantines WHERE path = ?1",
             // Two open ranges rather than `<>`: an inequality is not a predicate
             // an index can answer, so it would read every finding in the table
             // on every pin — including the pins that discard nothing.

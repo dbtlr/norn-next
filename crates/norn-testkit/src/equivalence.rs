@@ -123,6 +123,9 @@ pub struct StoreProjection {
     /// Every rule set the store holds, by the fingerprint it is held under and
     /// its names, in that order.
     rule_sets: Vec<StoredRuleSet>,
+    /// Every content-quarantined place's hash — the bytes its content finding was
+    /// judged over — in path order.
+    content_quarantines: Vec<(DocumentPath, String)>,
 }
 
 /// One document row and everything derived from it.
@@ -338,6 +341,7 @@ impl StoreProjection {
             trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
+            content_quarantines: Vec::new(),
         };
         let mut request = store.begin_request();
 
@@ -464,6 +468,14 @@ impl StoreProjection {
         }
         projection.rule_sets.sort();
 
+        let mut place = None;
+        loop {
+            let page = request.content_quarantine_hashes_after(place.as_ref(), PAGE)?;
+            let Some((last, _)) = page.last() else { break };
+            place = Some(last.clone());
+            projection.content_quarantines.extend(page);
+        }
+
         projection.vault_schema = request.vault_schema_pin()?.map(|pin| ProjectedSchema {
             bytes: pin.bytes,
             fingerprint: pin.fingerprint,
@@ -500,6 +512,11 @@ impl StoreProjection {
     /// Every rule set the store holds, by fingerprint and then by names.
     pub fn rule_sets(&self) -> &[StoredRuleSet] {
         &self.rule_sets
+    }
+
+    /// Every content-quarantined place's hash, in path order.
+    pub fn content_quarantines(&self) -> &[(DocumentPath, String)] {
+        &self.content_quarantines
     }
 
     /// The document stored at `path`, and nothing where no row stands there.
@@ -744,6 +761,15 @@ impl StoreProjection {
                     names.join(", ")
                 ),
                 "held".to_string(),
+            ));
+        }
+        // A quarantined place's hash is the bytes its content finding was
+        // judged over, so two stores that judged the same bytes there hold the
+        // same one.
+        for (place, hash) in &self.content_quarantines {
+            entries.push((
+                format!("content quarantine[{}].content_hash", place.as_str()),
+                quoted(hash),
             ));
         }
         let rendered: BTreeMap<String, String> = entries.iter().cloned().collect();
@@ -1512,6 +1538,7 @@ mod tests {
             trigrams: Vec::new(),
             vault_schema: None,
             rule_sets: Vec::new(),
+            content_quarantines: Vec::new(),
         }
     }
 

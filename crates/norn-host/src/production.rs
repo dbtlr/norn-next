@@ -26,7 +26,7 @@ use crate::applier::Applier;
 use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
-    WALKED_KINDS, document_path, plan_document, plan_quarantine,
+    WALKED_KINDS, decodes, document_path, plan_document, plan_quarantine,
 };
 use crate::evidence::{
     JobEvidence, count_changeset, count_document_derived, count_increment_work, count_rule_work,
@@ -1992,9 +1992,10 @@ fn heal_documents(
 ///
 /// This is the one merge. The vault heal and every scoped subtree heal differ
 /// in what they walk and in which rows they page, and in nothing else: a walked
-/// file the store has no row for is derived, a row the walk no longer reaches is
-/// pruned, one whose content hash moved is re-derived, and a spelling the
-/// grammar refuses is quarantined wherever it appears.
+/// file the store has no row for is derived unless its bytes are the ones the
+/// content finding standing there was judged over, a row the walk no longer
+/// reaches is pruned, one whose content hash moved is re-derived, and a
+/// spelling the grammar refuses is quarantined wherever it appears.
 ///
 /// The walk arrives as an iterator of facts rather than as a [`norn_fs::Walk`],
 /// because enumeration and open are two observations of a tree other writers are
@@ -2077,7 +2078,7 @@ where
             }
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
                 if let Some(read) = open_enumerated(&mut files, &mut pending)? {
-                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string())?;
                 }
             }
             (_, Some(_)) => {
@@ -2091,7 +2092,7 @@ where
             }
             (Some(fp), None) => {
                 if let Some(read) = open_enumerated(&mut files, &mut pending)? {
-                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string())?;
                 }
             }
         }
@@ -2115,7 +2116,8 @@ where
 ///
 /// A heal is otherwise hash-authoritative: a path a row stands at is read again
 /// only when its bytes moved. That reaches a **place-scoped** finding whatever
-/// happened to it, because no row stands where one sits — but a
+/// happened to it, because the hash a place with no row is compared by ends
+/// with the finding standing there — but a
 /// **document-scoped** finding sits beside a row, so a heal that only compared
 /// hashes would never restore one that left the table. The other taker of one,
 /// a vault-schema re-pin, is converged by [`Declaration::judged`], which reads
@@ -2394,7 +2396,7 @@ fn scoped_increment(
                     .stored_document(&document_path)
                     .map_err(store_effect)?;
                 let stale = match standing.as_ref() {
-                    None => true,
+                    None => !pending.unchanged_content_quarantine(path, observed.bytes(), &hash)?,
                     Some(row) => {
                         row.content_hash != hash
                             || !pending.declared.judged(row.generation)
@@ -3724,6 +3726,9 @@ struct Pending<'s> {
 struct Queued {
     finding: FindingFacts,
     cause: Cause,
+    /// The hash of the bytes a content finding was judged over, recorded with
+    /// it so a later reading of the same bytes knows the place unchanged.
+    bytes_hash: Option<String>,
 }
 
 impl<'s> Pending<'s> {
@@ -3755,9 +3760,15 @@ impl<'s> Pending<'s> {
     }
 
     /// Derive a document the store holds no row for: its facts where the bytes
-    /// yield them, and a finding where they do not.
-    fn derive(&mut self, spelling: &str, bytes: &[u8], hash: String) {
-        self.rederive(Path::new(spelling), spelling, bytes, hash, None);
+    /// yield them, and a finding where they do not — unless they are the bytes
+    /// the finding standing there was judged over
+    /// ([`Pending::unchanged_content_quarantine`]).
+    fn derive(&mut self, spelling: &str, bytes: &[u8], hash: String) -> Result<(), JobFailure> {
+        let path = Path::new(spelling);
+        if !self.unchanged_content_quarantine(path, bytes, &hash)? {
+            self.rederive(path, spelling, bytes, hash, None);
+        }
+        Ok(())
     }
 
     /// Derive a document, taking with it the row it can no longer account for.
@@ -3776,6 +3787,7 @@ impl<'s> Pending<'s> {
         stored: Option<&DocumentPath>,
     ) {
         count_document_derived();
+        let judged = hash.clone();
         let Plan {
             change,
             findings,
@@ -3794,13 +3806,59 @@ impl<'s> Pending<'s> {
             self.push(change);
         }
         for finding in findings {
-            self.file(finding);
+            // A content finding is a judgment of these bytes, so it carries
+            // their hash.
+            let bytes_hash =
+                (finding.cause.kind() == norn_store::CONTENT_FINDING_KIND).then(|| judged.clone());
+            self.file(finding, bytes_hash);
         }
+    }
+
+    /// Whether the bytes hashed `hash` at `path`, where no document row
+    /// stands, are the ones the content finding standing there was judged
+    /// over.
+    ///
+    /// **A quarantined place's hash is its row hash.** A place whose bytes do
+    /// not decode holds no row to compare, so without this every reading of
+    /// it would re-derive it and file its finding again — a new generation,
+    /// and a new identity for a finding nothing changed. Where the hash
+    /// matches, the standing finding is the conclusion this reading would
+    /// file, and the job counts the place's content side as filed, so a walk
+    /// that read it does not prune that finding as unaccounted for.
+    ///
+    /// Only bytes that do not decode are ever judged into a content finding,
+    /// so bytes that do are answered here without reading the store: a heal
+    /// over a vault nothing quarantines asks it nothing.
+    fn unchanged_content_quarantine(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        hash: &str,
+    ) -> Result<bool, JobFailure> {
+        if decodes(bytes) {
+            return Ok(false);
+        }
+        // A content finding is filed only at a path the document grammar
+        // admits, since a refused spelling is quarantined before its bytes
+        // are read; a spelling it refuses has no content finding to compare.
+        let Ok(subject) = document_path(path) else {
+            return Ok(false);
+        };
+        let standing = self
+            .store
+            .begin_request()
+            .content_quarantine_hash(&subject)
+            .map_err(store_effect)?;
+        let unchanged = standing.as_deref() == Some(hash);
+        if unchanged {
+            self.account.filed.insert(&subject, Decided::ByBytes);
+        }
+        Ok(unchanged)
     }
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
-        self.file(plan_quarantine(path, quarantine));
+        self.file(plan_quarantine(path, quarantine), None);
     }
 
     /// Queue one planned finding.
@@ -3818,8 +3876,13 @@ impl<'s> Pending<'s> {
     /// a place this job read a document at, and a walk that took it for
     /// unaccounted would delete a true statement about the spelling standing
     /// there. A document-scoped finding accounts for nothing this way — the row
-    /// its act wrote at the same subject is what a walk reads it by.
-    fn file(&mut self, planned: PlannedFinding) {
+    /// its act wrote at the same subject is what a walk reads it by. The one
+    /// other account of a place is a reading that found its standing content
+    /// finding still true ([`Pending::unchanged_content_quarantine`]).
+    ///
+    /// `bytes_hash` is the hash of the bytes a content finding was judged
+    /// over, recorded beside it, and `None` for every other finding.
+    fn file(&mut self, planned: PlannedFinding, bytes_hash: Option<String>) {
         let PlannedFinding {
             subject,
             cause,
@@ -3861,6 +3924,7 @@ impl<'s> Pending<'s> {
                 value,
             },
             cause,
+            bytes_hash,
         });
     }
 
@@ -3981,7 +4045,12 @@ impl<'s> Pending<'s> {
         }
         let written = rows_the_changeset_leaves(&self.changes);
         let mut recordable = Vec::with_capacity(self.queued.len());
-        for Queued { finding, cause } in std::mem::take(&mut self.queued) {
+        for Queued {
+            finding,
+            cause,
+            bytes_hash,
+        } in std::mem::take(&mut self.queued)
+        {
             if cause.kind().scope() == FindingScope::Place {
                 let stands = match written.get(&finding.path) {
                     Some(alive) => *alive,
@@ -4021,6 +4090,7 @@ impl<'s> Pending<'s> {
             recordable.push(DerivedFinding {
                 facts: finding,
                 replaces,
+                bytes_hash,
             });
         }
         Ok(recordable)
@@ -11296,11 +11366,13 @@ mod tests {
             let mut account = Account::default();
             let mut pending =
                 Pending::new(&mut store, 64, root.as_path(), &[], &mut account).unwrap();
-            pending.derive(
-                "note.md",
-                bytes,
-                norn_fs::ContentHash::of(bytes).to_string(),
-            );
+            pending
+                .derive(
+                    "note.md",
+                    bytes,
+                    norn_fs::ContentHash::of(bytes).to_string(),
+                )
+                .unwrap();
             pending.flush().unwrap();
             let targets: Vec<Option<String>> = findings_at(&mut store, "note.md")
                 .into_iter()
@@ -13069,6 +13141,94 @@ mod tests {
 
         assert_eq!(findings_at(&mut attachment.store, "bad.md").len(), 1);
         assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// The generation each finding at `at` was written at, and the store's
+    /// write generation: a finding filed again takes a new one, and any write
+    /// moves the store's.
+    fn written_at(store: &mut Store, at: &str) -> (Vec<i64>, i64) {
+        let findings = findings_at(store, at)
+            .iter()
+            .map(|finding| finding.generation)
+            .collect();
+        (findings, store.begin_request().write_generation().unwrap())
+    }
+
+    /// The batch a watcher settles for one changed path.
+    fn changed(f: &Fixture, at: &str) -> norn_fs::Batch {
+        let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        norn_fs::Batch::vault_change(normalizer.normalize(Path::new(at)).unwrap())
+    }
+
+    /// **A reading of a quarantined place's unchanged bytes writes nothing**,
+    /// by a heal of the vault or by the dirty path a watcher reports for it:
+    /// the finding standing there is not filed again and the store takes no
+    /// generation, exactly as for a document whose row hash matches.
+    #[test]
+    fn a_reading_of_an_unchanged_content_quarantined_place_writes_nothing() {
+        let f = Fixture::new("quarantine-unchanged");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("ok.md"), "ok").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let attached = written_at(&mut attachment.store, "bad.md");
+        assert_eq!(attached.0.len(), 1);
+
+        for (reading, batch) in [
+            ("heal", norn_fs::Batch::rescan(RescanScope::Vault)),
+            ("dirty path", changed(&f, "bad.md")),
+        ] {
+            fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+            ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+                .unwrap();
+            assert_eq!(
+                written_at(&mut attachment.store, "bad.md"),
+                attached,
+                "a {reading} over unchanged bytes wrote"
+            );
+        }
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    /// **A quarantined place whose bytes changed is judged again**, over the
+    /// new bytes: its finding is filed again, and a later reading of those
+    /// bytes writes nothing.
+    #[test]
+    fn a_quarantined_place_whose_bytes_changed_is_judged_again() {
+        const CHANGED: &[u8] = b"still \xff not utf8\n";
+        let f = Fixture::new("quarantine-changed");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let attached = written_at(&mut attachment.store, "bad.md");
+
+        fs::write(f.vault().join("bad.md"), CHANGED).unwrap();
+        let batch = changed(&f, "bad.md");
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        let judged = written_at(&mut attachment.store, "bad.md");
+        assert_eq!(judged.0.len(), 1);
+        assert!(
+            judged.0[0] > attached.0[0],
+            "the changed bytes were not judged"
+        );
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .content_quarantine_hash(&DocumentPath::new("bad.md").unwrap())
+                .unwrap(),
+            Some(norn_fs::ContentHash::of(CHANGED).to_string())
+        );
+
+        let batch = changed(&f, "bad.md");
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert_eq!(written_at(&mut attachment.store, "bad.md"), judged);
         ops.detach(&name, attachment);
     }
 

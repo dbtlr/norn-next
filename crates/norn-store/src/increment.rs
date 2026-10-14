@@ -137,6 +137,16 @@ pub struct DerivedFinding<'a> {
     /// refused ([`crate::StoreError::StoreJudged`]) before the changeset takes
     /// its lock, as [`crate::Request::discard_findings_about`] refuses it.
     pub replaces: Option<DiscardScope<'a>>,
+    /// The content hash of the bytes a content finding was judged over, and
+    /// `None` for every other finding and for one filed without its bytes.
+    ///
+    /// It is recorded beside the finding where no document row stands at the
+    /// place, so a later reading of the same bytes there knows the place
+    /// unchanged
+    /// ([`crate::Request::content_quarantine_hash`]), and it ends with the finding.
+    /// A hash on any other kind is refused
+    /// ([`crate::StoreError::NotAContentFinding`]): nothing would end it.
+    pub bytes_hash: Option<String>,
 }
 
 /// Where a changeset's post-state came from.
@@ -255,6 +265,9 @@ pub(crate) fn apply(
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
         request::check_finding_paths(&finding.facts, store.path_order())?;
+        if finding.bytes_hash.is_some() {
+            request::check_content_finding(&finding.facts)?;
+        }
     }
 
     // The boundary between two acts: everything before this one has committed
@@ -360,12 +373,20 @@ pub(crate) fn apply(
     // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
-    for DerivedFinding { facts, replaces } in findings {
+    for DerivedFinding {
+        facts,
+        replaces,
+        bytes_hash,
+    } in findings
+    {
         if let Some(scope) = replaces {
             tally.findings_discarded +=
                 request::discard_about_in(&transaction, &facts.path, *scope)?;
         }
         request::write_finding(&transaction, facts)?;
+        if let Some(hash) = bytes_hash {
+            request::record_content_quarantine(&transaction, facts, hash)?;
+        }
     }
 
     // Link health, re-decided last, so every fact it reads is the one this
@@ -975,8 +996,13 @@ fn discard_the_subject(
 /// left, and no finding about the path's spelling ([`Change::Vacated`]). It is
 /// the subject discard narrowed by kind, so it is the statement
 /// [`crate::ExplainedStatement::SubjectDiscard`] reads back for this scope.
-const VACATED_DISCARD: DiscardScope<'static> =
-    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]);
+const VACATED_DISCARD: DiscardScope<'static> = DiscardScope::Kinds(&[CONTENT_FINDING_KIND]);
+
+/// The kind of a **content finding**: the finding a place's own bytes produce
+/// where they do not decode as a document. It is what a vacated place's
+/// discard takes, and the one kind a quarantined place's bytes hash stands
+/// beside ([`DerivedFinding::bytes_hash`]).
+pub const CONTENT_FINDING_KIND: FindingKind = FindingKind::BodyBytesNotUtf8;
 
 /// End the content findings at a place the changeset empties, and report how
 /// many went.

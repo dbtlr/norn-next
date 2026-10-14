@@ -17,11 +17,12 @@ use crate::common::{
     keyed_by_paths, path, path_key, path_names_no_document_in_class, snapshot, unread_block,
     violation, write_document, write_documents,
 };
-use norn_wire::{CaseFold, Pattern};
+use norn_wire::{CaseFold, FindingKind, Pattern};
 
 use norn_store::{
-    Change, DerivedFinding, DirectoryPrefix, DocumentPath, ExplainedStatement, IncrementProvenance,
-    OpenOutcome, PathKey, Provenance, Request, Store, StoreError, StoredPathOrder, SubjectScope,
+    Change, DerivedFinding, DirectoryPrefix, DiscardScope, DocumentPath, ExplainedStatement,
+    IncrementProvenance, OpenOutcome, PathKey, Provenance, Request, Store, StoreError,
+    StoredPathOrder, SubjectScope,
 };
 
 /// One upsert entry, from a document and a hash.
@@ -1526,6 +1527,7 @@ fn a_path_key_from_the_other_key_space_is_refused() {
         &[DerivedFinding {
             facts: raw,
             replaces: None,
+            bytes_hash: None,
         }],
         &norn_store::ContentModel::none(),
     );
@@ -1593,6 +1595,7 @@ fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
             &[DerivedFinding {
                 facts: keyed_by_paths("about.md", &["dir/t.md"]),
                 replaces: None,
+                bytes_hash: None,
             }],
             &norn_store::ContentModel::none(),
         )
@@ -2444,4 +2447,180 @@ fn a_torn_changeset_holding_a_vacated_place_leaves_its_finding_standing() {
     );
     assert_eq!(request.write_generation().expect("a generation"), before);
     assert_eq!(request.pillars().expect("a pillar report").documents, 0);
+}
+
+/// A content finding at `at`, filed with the hash of the bytes it was judged
+/// over, replacing what the content side concluded there before.
+fn quarantined(at: &str, hash: &str) -> DerivedFinding<'static> {
+    DerivedFinding {
+        facts: violation(at),
+        replaces: Some(DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8])),
+        bytes_hash: Some(hash.to_string()),
+    }
+}
+
+/// Apply `changes` and `findings` as one changeset.
+fn applied(request: &mut Request<'_>, changes: Vec<Change>, findings: &[DerivedFinding<'_>]) {
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            changes,
+            findings,
+            &norn_store::ContentModel::none(),
+        )
+        .expect("applying a changeset");
+}
+
+/// **A content finding filed with its bytes' hash records the hash**, and a
+/// later filing at the same place replaces it: the hash is what a reading of
+/// the same bytes compares to know the place unchanged.
+#[test]
+fn a_content_finding_records_the_hash_of_the_bytes_it_was_judged_over() {
+    let scratch = Scratch::new("quarantined-hash-recorded");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    assert_eq!(
+        request.content_quarantine_hash(&path("q.md")).unwrap(),
+        None
+    );
+
+    applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
+    assert_eq!(
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
+        Some("hash-1")
+    );
+
+    applied(&mut request, vec![], &[quarantined("q.md", "hash-2")]);
+    assert_eq!(
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
+        Some("hash-2")
+    );
+    assert_eq!(request.stored_findings(&path("q.md")).unwrap().len(), 1);
+}
+
+/// An act that ends the content finding standing at `q.md`.
+type Ending = fn(&mut Request<'_>);
+
+/// **A quarantined place's hash ends with its content finding**, by whichever
+/// act ends the finding: the place emptied, a document derived there, or a
+/// discard of the content side such as a walk's prune.
+#[test]
+fn a_content_quarantine_hash_ends_with_its_content_finding() {
+    let ends: [(&str, Ending); 3] = [
+        ("vacated", |request| {
+            applied(request, vec![Change::Vacated { path: path("q.md") }], &[]);
+        }),
+        ("derived", |request| {
+            applied(request, vec![upsert("q.md", "hash-2", "a body\n")], &[]);
+        }),
+        ("discarded", |request| {
+            request
+                .discard_findings_about(
+                    &path("q.md"),
+                    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]),
+                )
+                .expect("a discard");
+        }),
+    ];
+    for (end, act) in ends {
+        let scratch = Scratch::new(&format!("quarantined-hash-ends-{end}"));
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
+        act(&mut request);
+        assert_eq!(
+            request.content_quarantine_hash(&path("q.md")).unwrap(),
+            None,
+            "the hash outlived its finding where the place was {end}"
+        );
+    }
+}
+
+/// **No hash stands beside a document row**, whatever a changeset hands
+/// over: a content finding's hash is recorded only where no row stands at its
+/// place, a row standing before the changeset or written by it.
+#[test]
+fn a_content_quarantine_hash_is_not_recorded_beside_a_document_row() {
+    for (arranged, earlier) in [("standing row", true), ("same-changeset row", false)] {
+        let scratch = Scratch::new(&format!("quarantined-hash-beside-row-{earlier}"));
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        let changes = if earlier {
+            write_document(&mut request, &document("q.md", "hash-0", "a body\n"));
+            vec![]
+        } else {
+            vec![upsert("q.md", "hash-0", "a body\n")]
+        };
+        applied(&mut request, changes, &[quarantined("q.md", "hash-1")]);
+        assert_eq!(
+            request.content_quarantine_hash(&path("q.md")).unwrap(),
+            None,
+            "a hash was recorded beside a {arranged}"
+        );
+        store.verify_integrity().unwrap();
+    }
+}
+
+/// **A content-quarantine hash ends with its content finding and no other.**
+/// A place can hold a finding about its spelling beside the one about its
+/// bytes, and a re-derivation of the spelling side discards only its own: the
+/// hash the bytes were judged over stands.
+#[test]
+fn a_spelling_discard_leaves_the_content_quarantine_hash_standing() {
+    let scratch = Scratch::new("quarantined-hash-spelling-discard");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let mut spelling = violation("q.md");
+    spelling.kind = FindingKind::PathNamesNoDocument;
+    request
+        .record_finding(&spelling)
+        .expect("recording a spelling finding");
+    applied(&mut request, vec![], &[quarantined("q.md", "hash-1")]);
+    request
+        .discard_findings_about(
+            &path("q.md"),
+            DiscardScope::Kinds(&[FindingKind::PathNamesNoDocument]),
+        )
+        .expect("a discard of the spelling side");
+    assert_eq!(
+        request
+            .content_quarantine_hash(&path("q.md"))
+            .unwrap()
+            .as_deref(),
+        Some("hash-1")
+    );
+}
+
+/// **Only a content finding carries a bytes hash**, and a changeset handing
+/// one over on any other finding is refused before it takes its lock: nothing
+/// it carries lands.
+#[test]
+fn a_bytes_hash_on_another_finding_is_refused_before_anything_lands() {
+    let scratch = Scratch::new("bytes-hash-on-another-finding");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let mut other = violation("q.md");
+    other.kind = FindingKind::PathNamesNoDocument;
+    let refused = request.apply_increment(
+        IncrementProvenance::Derived,
+        [upsert("a.md", "hash-0", "a body\n")],
+        &[DerivedFinding {
+            facts: other,
+            replaces: None,
+            bytes_hash: Some("hash-1".to_string()),
+        }],
+        &norn_store::ContentModel::none(),
+    );
+    assert!(
+        matches!(refused, Err(StoreError::NotAContentFinding { .. })),
+        "{refused:?}"
+    );
+    assert!(request.stored_document(&path("a.md")).unwrap().is_none());
+    assert!(request.stored_findings(&path("q.md")).unwrap().is_empty());
 }

@@ -313,6 +313,7 @@ fn a_callers_door_refuses_a_finding_only_the_store_files() {
                 &[DerivedFinding {
                     facts: finding.clone(),
                     replaces: None,
+                    bytes_hash: None,
                 }],
                 &declared(),
             ),
@@ -349,6 +350,7 @@ fn a_callers_door_refuses_a_finding_only_the_store_files() {
             &[DerivedFinding {
                 facts: unread_block("b.md"),
                 replaces: None,
+                bytes_hash: None,
             }],
             &declared(),
         )
@@ -427,6 +429,7 @@ fn a_changesets_replacement_refuses_a_scope_reaching_link_health() {
                 &[DerivedFinding {
                     facts: unread_block("a.md"),
                     replaces: Some(scope),
+                    bytes_hash: None,
                 }],
                 &declared(),
             ),

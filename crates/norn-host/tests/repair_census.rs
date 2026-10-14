@@ -269,6 +269,12 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         std::fs::create_dir_all(at.parent().expect("a parent folder")).expect("make the folder");
         std::fs::write(at, bytes).expect("write a document");
     }
+    // The folder the route moves documents into stands before the vault is
+    // attached. A create that makes a folder is reported back by the watcher
+    // as a change of its own and reconciled after the repair answers, and the
+    // statements that reconcile begins are no repair's.
+    std::fs::create_dir_all(vault.path().join(FOLDER).join("tasks"))
+        .expect("make the route's folder");
     std::fs::write(vault.path().join(CUT_DOCUMENT.0), CUT_DOCUMENT.1)
         .expect("write the cut document");
     let host = vault.host();
