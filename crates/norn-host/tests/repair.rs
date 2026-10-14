@@ -5488,3 +5488,47 @@ fn a_refused_anchor_suggestions_fresh_plan_keeps_its_hash_condition_and_unresolv
         norn_wire::AuthorCondition::ContentHash { .. }
     ));
 }
+
+/// Snapshot headings are not suggested when the same plan rewrites the target's tags.
+#[test]
+fn a_closest_heading_is_not_proposed_when_the_plan_rewrites_tags_in_its_target() {
+    for own in [false, true] {
+        let documents: &[(&str, &[u8])] = if own {
+            &[("zz-holder.md", b"# Notes #darft\n[[#Notes darft]]\n")]
+        } else {
+            &[
+                ("zz-holder.md", b"[[zz-target#Notes darft]]\n"),
+                ("zz-target.md", b"# Notes #darft\n"),
+            ]
+        };
+        let (_sandbox, vault, host) = a_vault_under(
+            "repair-anchor-target-tag-rewrite",
+            "version: 1\ntags:\n  declared: [draft]\n  undeclared: report\n",
+            documents,
+        );
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        for threshold in [Confidence::Suggested, Confidence::DEFAULT_THRESHOLD] {
+            let plan = previewed(
+                host.repair(repairing(&vault, ApplyMode::Preview).with_threshold(threshold)),
+            );
+            if threshold == Confidence::Suggested {
+                assert!(
+                    plan.operations.iter().any(|operation| matches!(
+                        operation.kind,
+                        OperationKind::RewriteTag { .. }
+                    ))
+                );
+            }
+            assert!(
+                !plan
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::RewriteAnchor { .. }))
+            );
+            assert!(provenance(&plan).skipped.iter().all(|skip| !matches!(
+                skip.proposed.as_ref().map(|operation| &operation.kind),
+                Some(OperationKind::RewriteAnchor { .. })
+            )));
+        }
+    }
+}

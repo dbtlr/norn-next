@@ -2908,8 +2908,14 @@ read by one document range seek, without its body, and `rewrite_anchor` writes h
 text for a wikilink or the stored slug for a Markdown link, an anchor-only link naming
 its own holder included. The operation carries an author `content_hash` condition on the
 target with the snapshot's recorded hash, so changing that heading refuses apply and the
-fresh plan keeps the evidence on the unresolved operation. Block references have no such
-suggestion.
+fresh plan keeps the evidence on the unresolved operation. Block references and headings
+whose syntax's written form is empty or starts with `^` have no such suggestion. A target
+whose body the batch changes with `rewrite_tag`, its holder included, is not scored from
+its snapshot headings; a below-threshold tag proposal excludes it too. Each holder matches
+anchor rows through one map of written targets and offsets, reads each distinct target's
+headings once and builds each heading's trigram set once. Anchor edits pass the ordinary
+judge: introducing required fields skips as `brings_in_required_fields`, before any other
+`judge_would_refuse` refusal.
 A string value of a text-compared `one_of` field with no declared candidate and no derived
 fold match takes the uniquely nearest combined member by optimal string alignment under
 the derived fold plus NFC. A member of n folded characters admits at most max(1, n / 4)
@@ -2918,11 +2924,19 @@ edits, with integer floor; equal best distances tie. It joins the field's one
 literal declared tag exactly one OSA edit away under the whole-name tag fold, `/` included;
 names below three folded characters take no part, and patterns are not enumerated.
 `rewrite_tag` preserves the occurrence's marker convention and passes the document's
-ordinary judge; a refusal is `judge_would_refuse`. Every suggestion carries its score as
+ordinary judge; introducing required fields skips as `brings_in_required_fields`, before
+any other `judge_would_refuse` refusal. Every suggestion carries its score as
 note text on its citation or below-threshold skip, and below the threshold it carries the
 operation admitting suggestions would write. The read account counts closed-set members
 compared, declared tags compared and heading rows returned; these follow their candidates,
-not the size of the vault.
+not the size of the vault. It also counts whole-document suggestion compositions. A
+holder's anchor proposals compose in one name batch, and its tag proposals in another,
+each matching the original document with one parse, one read-back proof and one ordinary
+judgment. Scan refusals belong to their respelling. A refused proof or judgment splits the
+set in halves, each half composed onto the state accepted predecessors left, until each
+refused fix takes its own reason. With no refusals the whole-document passes are constant;
+for k refused fixes of N they grow as k log N. Every tag fix is checked to no longer hold
+its own finding after the composed judgment.
 **The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
 or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
 pooled for a finding and the strongest level present decides. A derived or suggested fix the threshold
@@ -3050,14 +3064,16 @@ with a note naming the repair defect. A judgment another check stops first — d
 planning, a failed condition, a vault that does not read — answers as the applier answers
 it, and so does a plan the schema passed that the write kernel's judgment of its targets
 then stops, or whose forecast does not read: the judgment is held to the claims only beside
-the preview it completes. A document's fixes compose in finding order (link fixes last) —
-kind, field, offending value — onto the bytes the earlier ones left, each judged
+the preview it completes. A document's field fixes compose in finding order (link fixes
+last) — kind, field, offending value — onto the bytes the earlier ones left, each judged
 there by the applier's own schema check, the one judge, against the document's before-state,
 judged once, and against the state it composes onto, whose judgment is the previous fix's
-own: a fix the applier would refuse, or one bringing back a violation an earlier fix took
-away, is skipped and the next composes without it, and a fix after which the document still
-holds its finding is no fix. Every selected finding the judgment of a document's bytes
-concludes — a rule's, an undeclared tag, one about the document whole — is decided against
+own. Tag fixes follow as one name batch, and anchor fixes compose last over the settled
+routes as another; refused sets are halved as above. A fix the applier would refuse, or
+one bringing back a violation an earlier fix took away, is skipped and the next composes
+without it, and a fix after which the document still holds its finding is no fix. Every
+selected finding the judgment of a document's bytes concludes — a rule's, an undeclared
+tag, one about the document whole — is decided against
 the composed document at the end: one it no longer holds is dropped, neither fixed nor
 skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
 and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
@@ -3369,10 +3385,13 @@ recovery reads it.
 A `rewrite_anchor` respells every heading anchor written `from` on links of its syntax at
 exactly its written address in one document where the plan leaves it, preserving the
 address, title and embed marker; block references never match, and matching none leaves
-it unresolved. A `rewrite_tag` respells every body token and frontmatter tags entry whose
+it unresolved. It authors no address, so move cascades still respell that address.
+A `rewrite_tag` respells every body token and frontmatter tags entry whose
 whole name equals `from` under the tag fold to exactly `to`, preserving each marker's
 spelling convention; matching none leaves it unresolved, and both kinds prove their edits
-by reading the document back.
+by reading the document back. All acted name operations of one holder compose in one
+batch per kind, after its document-local operations and before address cascades. A shared
+proof refusal is searched by halving, with each operation's own position and detail kept.
 A plan also carries document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,
@@ -3594,9 +3613,9 @@ holds, lands, its document found, and the forecast advises on what the text laye
 
 **The resolution change set runs for every plan.**
 Planning records the set: every link whose resolution the plan changes, and every link a
-rewrite of the plan writes — a `rewrite_link`'s or one of a cascade's — each with what its
-key resolves to from its holder's lineage source before the plan and from its holder
-after it. Both sides are read on the request's one snapshot, the
+rewrite of the plan writes — a `rewrite_link`'s, a `rewrite_anchor`'s or one of a cascade's —
+each with what its key resolves to from its holder's lineage source before the plan and
+from its holder after it. Both sides are read on the request's one snapshot, the
 store's documents with every target of the plan overlaid both ways — present before where a
 document stands there before, present after where one stands after — so a store that has
 already taken in a target the plan landed reads the same two vaults. A document stands

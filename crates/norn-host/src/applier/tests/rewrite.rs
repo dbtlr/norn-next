@@ -842,3 +842,113 @@ fn an_authored_rewrite_advises_a_key_left_for_several_reasons_by_the_first_ranke
     assert_eq!(fixture.read("h.md").as_deref(), Some(holder));
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// An anchor rewrite keeps its address subject to a target or holder move's cascade.
+#[test]
+fn an_anchor_rewrite_follows_target_and_holder_moves_without_authoring_its_address() {
+    let fixture = Fixture::new(&[("t.md", "# old\n# new\n"), ("h.md", "[x](t.md#old)\n")]);
+    let anchor_only = fixture.resolution(vec![Operation::new(OperationKind::rewrite_anchor(
+        path("h.md"),
+        LinkFamily::Markdown,
+        "t.md",
+        "old",
+        "new",
+    ))]);
+    assert!(
+        anchor_only
+            .plan
+            .conditions
+            .iter()
+            .any(|condition| matches!(condition,
+                PlanCondition::LinkResolution { link, .. } if link.address == "t.md"
+            ))
+    );
+    for (documents, moved, holder, address, landed, expected) in [
+        (
+            vec![("t.md", "# old\n# new\n"), ("h.md", "[x](t.md#old)\n")],
+            super::moving("t.md", "sub/t.md"),
+            "h.md",
+            "t.md",
+            "h.md",
+            "[x](sub/t.md#new)\n",
+        ),
+        (
+            vec![("t.md", "# old\n# new\n"), ("a/h.md", "[x](../t.md#old)\n")],
+            super::moving("a/h.md", "b/c/h.md"),
+            "b/c/h.md",
+            "../t.md",
+            "b/c/h.md",
+            "[x](../../t.md#new)\n",
+        ),
+    ] {
+        let mut fixture = Fixture::new(&documents);
+        let resolution = fixture.resolution(vec![
+            moved,
+            Operation::new(OperationKind::rewrite_anchor(
+                path(holder),
+                LinkFamily::Markdown,
+                address,
+                "old",
+                "new",
+            )),
+        ]);
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(fixture.read(landed).as_deref(), Some(expected));
+    }
+}
+
+/// Name batches match original names and leave each refused operation unresolved.
+#[test]
+fn name_rewrite_batches_match_original_names_and_isolate_refused_operations() {
+    for tags in [false, true] {
+        for refused in [false, true] {
+            let source = if tags {
+                "---\ntags: bad\n---\n#old #other\n"
+            } else {
+                "[[t#old]] [[t#other]] [[t#bad]]\n"
+            };
+            let from = if refused { "other" } else { "new" };
+            let source = source.replace("other", from);
+            let mut fixture = Fixture::new(&[("h.md", &source), ("t.md", "# new\n# done\n")]);
+            let make = |from: &str, to: &str| {
+                Operation::new(if tags {
+                    OperationKind::rewrite_tag(path("h.md"), from, to)
+                } else {
+                    OperationKind::rewrite_anchor(path("h.md"), LinkFamily::Wikilink, "t", from, to)
+                })
+            };
+            let mut operations = vec![make("old", "new"), make(from, "done")];
+            if refused {
+                operations.push(make("bad", if tags { "true" } else { "new|alias" }));
+            }
+            let view = crate::planner::view::TreeView::open(
+                &fixture.vault,
+                &fixture.exclusions,
+                &fixture.schema,
+            )
+            .unwrap();
+            let order: Vec<_> = (0..operations.len()).collect();
+            let composition = crate::planner::compose::compose(&operations, &order, &view).unwrap();
+            assert_eq!(composition.unresolvable.len(), usize::from(refused));
+            if refused {
+                assert_eq!(composition.unresolvable[0].position, 2);
+            }
+            let expected = if tags {
+                "---\ntags: bad\n---\n#new #done\n"
+            } else {
+                "[[t#new]] [[t#done]] [[t#bad]]\n"
+            };
+            let crate::planner::compose::After::Bytes(bytes) =
+                &composition.targets[&path("h.md")].after
+            else {
+                panic!("composed name bytes");
+            };
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), expected);
+            if !refused {
+                let plan = fixture.plan(operations);
+                applied(fixture.apply(plan));
+                assert_eq!(fixture.read("h.md").as_deref(), Some(expected));
+            }
+        }
+    }
+}

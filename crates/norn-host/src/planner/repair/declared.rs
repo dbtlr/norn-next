@@ -155,6 +155,7 @@ mod closed_set;
 mod derived;
 mod elements;
 mod forbidden;
+mod names;
 mod respells;
 mod routes;
 mod tags;
@@ -208,8 +209,10 @@ pub(super) fn settled(
 /// Whether `row` is a finding a fix may answer, so its document's bytes are
 /// read: a missing required field, a value outside a closed set, a forbidden
 /// field, a shape mismatch, a type mismatch on a boolean or link field, or a
-/// misplaced document a rule its row cites declares a route for. A document
-/// holding only findings without a fix is not read.
+/// misplaced document a rule its row cites declares a route for, a missing
+/// heading anchor resolving to one document, or an undeclared tag one edit
+/// from a literal declared tag when both pass the three-character floor.
+/// A document holding only findings without a fix is not read.
 pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
     match row.kind {
         FindingKind::RequiredMissing
@@ -228,13 +231,14 @@ pub(super) fn has_fix(row: &FindingRow, repairing: &Repairing<'_>) -> bool {
                     .and_then(|target| target.split_once('#'))
                     .is_some_and(|(_, anchor)| !anchor.is_empty() && !anchor.starts_with('^'))
         }
-        FindingKind::UndeclaredTag => repairing
-            .declared
-            .schema()
-            .tags()
-            .declared()
-            .next()
-            .is_some(),
+        FindingKind::UndeclaredTag => row.target.as_deref().is_some_and(|from| {
+            repairing
+                .declared
+                .schema()
+                .tags()
+                .declared()
+                .any(|tag| tags::one_edit(from, tag))
+        }),
         FindingKind::Misplaced => super::routes_declared(row, repairing),
         _ => false,
     }
@@ -437,6 +441,30 @@ impl Decided<'_> {
         reckoned.link_writes(composed, written);
     }
 
+    /// Record snapshot documents whose admitted or proposed tag rewrite changes
+    /// body text, so anchor suggestions match what lowering the threshold writes.
+    pub(super) fn tagged(&self, tagged: &mut BTreeSet<DocumentPath>) {
+        if let Deciding::Composed(composed) = &self.decided {
+            let (reckoned, composed) = &**composed;
+            let admitted = composed.made.iter().any(|made| match made {
+                Made::Fixed { operations, .. } => operations
+                    .iter()
+                    .any(|kind| matches!(kind, OperationKind::RewriteTag { .. })),
+                Made::Unresolved { .. } => false,
+            });
+            let proposed = composed.decided.iter().flatten().any(|skip| {
+                skip.reason == SkipReason::BelowThreshold
+                    && matches!(
+                        skip.proposed.as_ref().map(|operation| &operation.kind),
+                        Some(OperationKind::RewriteTag { .. })
+                    )
+            });
+            if admitted || proposed {
+                tagged.insert(reckoned.start.at.clone());
+            }
+        }
+    }
+
     /// Add the document to `planned`: its link fixes composed last onto the
     /// composition its route's fate decided, each resolved as `namings`
     /// answers ([`Reckoned::link_fixes`]); the operations of that
@@ -452,6 +480,7 @@ impl Decided<'_> {
         namings: &Namings,
         respellable: Option<&Respellable>,
         vault: &R,
+        tagged: &BTreeSet<DocumentPath>,
     ) -> Result<(), R::Error> {
         let (reckoned, mut composed) = match self.decided {
             Deciding::Alone(decided) => {
@@ -461,7 +490,7 @@ impl Decided<'_> {
             Deciding::Composed(composed) => *composed,
         };
         reckoned.link_fixes(&reckoned.document, &mut composed, namings, respellable);
-        anchors::fixes(&reckoned, &mut composed, vault)?;
+        anchors::fixes(&reckoned, &mut composed, vault, tagged)?;
         let claims = reckoned.settle(&mut composed);
         reckoned.propose_lowered(&mut composed, namings, respellable);
         for made in composed.made {
@@ -549,7 +578,22 @@ impl<'d> Reckoned<'d> {
             .iter()
             .map(|row| {
                 judged_by_bytes(row.kind)
-                    .then(|| holding(row, &start.holds).cloned())
+                    .then(|| {
+                        if row.kind == FindingKind::UndeclaredTag {
+                            row.target
+                                .as_deref()
+                                .and_then(|tag| start.tags.get(&norn_wire::fold_tag(tag)))
+                                .map(|&at| &start.holds[at])
+                                .filter(|held| {
+                                    held.field == row.target
+                                        && held.value.as_deref().map(norn_store::value_head)
+                                            == row.value
+                                })
+                                .cloned()
+                        } else {
+                            holding(row, &start.holds).cloned()
+                        }
+                    })
                     .flatten()
             })
             .collect();
@@ -687,21 +731,36 @@ impl<'d> Reckoned<'d> {
                 }
                 continue;
             }
-            // A row whose finding the composed document no longer holds is
-            // dropped.
+            if row.kind == FindingKind::UndeclaredTag {
+                let rows: Vec<_> = order[next - 1..]
+                    .iter()
+                    .copied()
+                    .take_while(|&at| document[at].kind == FindingKind::UndeclaredTag)
+                    .collect();
+                next += rows.len() - 1;
+                let mut batch = Composed {
+                    made,
+                    decided,
+                    unresolved,
+                    state,
+                    began: began.clone(),
+                    link_shapes,
+                };
+                tags::fixes(self, composing, &mut batch, &rows);
+                made = batch.made;
+                decided = batch.decided;
+                unresolved = batch.unresolved;
+                state = batch.state;
+                link_shapes = batch.link_shapes;
+                continue;
+            }
+            // A row whose finding the composed document no longer holds is dropped.
             let Some(finding) = &self.found[at] else {
                 continue;
             };
             let Some(held) = state.holding(finding) else {
                 continue;
             };
-            if row.kind == FindingKind::UndeclaredTag {
-                match tags::fix(composing, &state, row, finding) {
-                    Ok(fix) => state = fix.made(&mut made),
-                    Err(skipped) => decided[at] = Some(*skipped),
-                }
-                continue;
-            }
             let (true, Some(field)) = (
                 matches!(
                     row.kind,
@@ -810,6 +869,9 @@ impl<'d> Reckoned<'d> {
             .map(|(at, _)| at)
             .collect();
         for level in [Confidence::Derived, Confidence::Suggested] {
+            if self.document.admits(level) {
+                continue;
+            }
             if pending.is_empty() {
                 break;
             }
@@ -1092,16 +1154,30 @@ struct State {
     bytes: Arc<[u8]>,
     standing: Standing,
     holds: Vec<Held>,
+    /// Tag identities indexed once for the holder's batched name decisions.
+    tags: std::collections::HashMap<String, usize>,
 }
 
 impl State {
     /// The document standing at `at` holding `bytes`, judged as `standing`.
     fn of(at: DocumentPath, bytes: Arc<[u8]>, standing: Standing) -> Self {
+        let holds = standing.holds();
+        let tags = holds
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| held.kind == FindingKind::UndeclaredTag)
+            .filter_map(|(at, held)| {
+                held.field
+                    .as_deref()
+                    .map(|tag| (norn_wire::fold_tag(tag), at))
+            })
+            .collect();
         State {
             at,
             bytes,
-            holds: standing.holds(),
+            holds,
             standing,
+            tags,
         }
     }
 
@@ -1109,6 +1185,14 @@ impl State {
     /// whatever rules state it here; `None` where the state no longer holds
     /// it.
     fn holding(&self, finding: &Held) -> Option<&Held> {
+        if finding.kind == FindingKind::UndeclaredTag {
+            return finding
+                .field
+                .as_deref()
+                .and_then(|tag| self.tags.get(&norn_wire::fold_tag(tag)))
+                .map(|&at| &self.holds[at])
+                .filter(|held| held.is(finding));
+        }
         self.holds.iter().find(|held| held.is(finding))
     }
 }
@@ -1179,7 +1263,16 @@ impl Document<'_> {
         for edit in edits {
             let changed = match edit {
                 OperationKind::RewriteTag { .. } => {
-                    crate::planner::edit::rewritten_names(edit, &composed)
+                    crate::planner::edit::rewritten_names(&[edit], &composed)
+                        .map_err(|reason| reason.detail(edit))
+                        .and_then(|(bytes, outcomes)| {
+                            outcomes
+                                .into_iter()
+                                .next()
+                                .expect("one name edit")
+                                .map(|()| bytes)
+                                .map_err(|reason| reason.detail(edit))
+                        })
                 }
                 _ => edited(edit, &composed),
             };
@@ -1241,6 +1334,20 @@ impl Document<'_> {
         )
     }
 
+    /// Judge a composed change with required-field refusals before other
+    /// introduced violations, shared by byte-judged fixes and name edits.
+    fn judged_change(
+        &self,
+        from: &State,
+        at: &DocumentPath,
+        composed: Arc<[u8]>,
+        row: &FindingRow,
+        candidates: &SkippedCandidates,
+    ) -> Result<State, Box<SkippedFinding>> {
+        let (state, introduced) = self.assessed(from, at, composed);
+        self.introducing(state, &introduced, row, candidates)
+    }
+
     /// Admit an already judged state, or the refusal of the finding it fixes.
     fn admitted(
         &self,
@@ -1254,6 +1361,27 @@ impl Document<'_> {
             finding,
             candidates,
         } = fixing;
+        let state = self.introducing(state, introduced, row, candidates)?;
+        // A fix is cited only for a finding the result no longer holds.
+        if state.holding(finding).is_some() {
+            return Err(Box::new(
+                skip(row, SkipReason::JudgeWouldRefuse)
+                    .with_candidates(candidates.clone())
+                    .with_note(still.to_string()),
+            ));
+        }
+        Ok(state)
+    }
+
+    /// The judged state, or the refusal its introduced violations give:
+    /// required fields brought in first, then any other violation.
+    fn introducing(
+        &self,
+        state: State,
+        introduced: &[SchemaViolation],
+        row: &FindingRow,
+        candidates: &SkippedCandidates,
+    ) -> Result<State, Box<SkippedFinding>> {
         let brought = brought_in(introduced);
         if !brought.is_empty() {
             let (fields, differing) = required_fields(&brought, &state.holds, self.schema());
@@ -1275,14 +1403,6 @@ impl Document<'_> {
         if !introduced.is_empty() {
             return Err(Box::new(
                 skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
-            ));
-        }
-        // A fix is cited only for a finding the result no longer holds.
-        if state.holding(finding).is_some() {
-            return Err(Box::new(
-                skip(row, SkipReason::JudgeWouldRefuse)
-                    .with_candidates(candidates.clone())
-                    .with_note(still.to_string()),
             ));
         }
         Ok(state)
@@ -4586,6 +4706,20 @@ mod tests {
             Confidence::Suggested
         );
         assert!(planned.skipped.is_empty());
+    }
+
+    /// Both the undeclared and declared names must have at least three folded characters.
+    #[test]
+    fn tags_below_three_folded_characters_take_no_part_in_suggestions() {
+        for (from, to) in [("ct", "cat"), ("cat", "ct")] {
+            let schema = format!("version: 1\ntags:\n  declared: [{to}]\n  undeclared: report\n");
+            let text = format!("#{from}\n");
+            let planned = Vault::of(&schema, &[("a.md", &text)])
+                .at(Confidence::Suggested)
+                .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", from)]);
+            assert!(planned.operations.is_empty());
+            assert_eq!(planned.skipped[0].reason, SkipReason::NoDeclaredFix);
+        }
     }
 
     /// Two declared tags one edit away remain a tie with both spellings.

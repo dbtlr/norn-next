@@ -1815,9 +1815,11 @@ impl RepairBatchAccount {
     }
 }
 
-/// Candidate comparisons and heading rows spent by the three repair suggestions.
+/// Candidate reads and whole-document compositions spent by the three suggestions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RepairSuggestionsCost {
+    /// Whole-document suggestion compositions, including refused attempts.
+    pub compositions: u64,
     /// The closed-set members compared.
     pub closed_set_members: u64,
     /// The literal declared tags compared.
@@ -1827,10 +1829,11 @@ pub struct RepairSuggestionsCost {
 }
 
 impl RepairSuggestionsCost {
-    /// Candidate work spent between an earlier total and this one.
+    /// Suggestion work spent between an earlier total and this one.
     #[must_use]
     pub fn since(self, earlier: Self) -> Self {
         Self {
+            compositions: self.compositions.saturating_sub(earlier.compositions),
             closed_set_members: self
                 .closed_set_members
                 .saturating_sub(earlier.closed_set_members),
@@ -1843,14 +1846,17 @@ impl RepairSuggestionsCost {
 /// Running totals written when a repair's planner hands back its work.
 #[derive(Debug, Default)]
 struct RepairSuggestionsAccount {
+    compositions: AtomicU64,
     closed_set_members: AtomicU64,
     declared_tags: AtomicU64,
     headings: AtomicU64,
 }
 
 impl RepairSuggestionsAccount {
-    /// Add one planner's candidate work.
+    /// Add one planner's suggestion work.
     fn add(&self, cost: RepairSuggestionsCost) {
+        self.compositions
+            .fetch_add(cost.compositions, Ordering::Relaxed);
         self.closed_set_members
             .fetch_add(cost.closed_set_members, Ordering::Relaxed);
         self.declared_tags
@@ -1861,6 +1867,7 @@ impl RepairSuggestionsAccount {
     /// Read the lifetime totals.
     fn read(&self) -> RepairSuggestionsCost {
         RepairSuggestionsCost {
+            compositions: self.compositions.load(Ordering::Relaxed),
             closed_set_members: self.closed_set_members.load(Ordering::Relaxed),
             declared_tags: self.declared_tags.load(Ordering::Relaxed),
             headings: self.headings.load(Ordering::Relaxed),

@@ -173,6 +173,10 @@ pub(crate) struct Unresolvable {
 /// text does not occur is, rather than landing as a change of nothing. One
 /// matching a link the text layer leaves as written, or respelling a link to
 /// what it already holds, acts, and its document may land found.
+/// **Name rewrites precede address cascades.** All acted anchor operations
+/// of one holder share one parse and proof, and so do its tag operations.
+/// A refused proof is searched by halving the set onto the state accepted
+/// predecessors left, recording each refused operation's position and detail.
 pub(crate) fn compose<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -194,24 +198,53 @@ pub(crate) fn compose<V: VaultView>(
     let acted = || order.iter().filter(|position| !failed.contains(position));
     // Name rewrites edit holders where the plan leaves them, before address
     // cascades match those holders' final text.
+    let mut names: BTreeMap<(DocumentPath, &'static str), Vec<usize>> = BTreeMap::new();
     for &position in acted() {
-        if let OperationKind::RewriteAnchor { path, .. } | OperationKind::RewriteTag { path, .. } =
-            &operations[position].kind
-        {
-            let result = match vault.standing(path)? {
-                Err(detail) => Err(detail),
-                Ok(spelling) => match vault.held(&spelling) {
-                    Err(detail) => Err(detail),
-                    Ok(bytes) => {
-                        edit::rewritten_names(&operations[position].kind, &bytes).map(|rewritten| {
-                            vault.target(&spelling).after = After::Bytes(rewritten);
-                        })
-                    }
-                },
-            };
-            if let Err(detail) = result {
-                unresolvable.push(Unresolvable { position, detail });
+        let kind = &operations[position].kind;
+        let path = match kind {
+            OperationKind::RewriteAnchor { path, .. } | OperationKind::RewriteTag { path, .. } => {
+                path
             }
+            _ => continue,
+        };
+        match vault.standing(path)? {
+            Ok(spelling) => names
+                .entry((spelling, kind.name()))
+                .or_default()
+                .push(position),
+            Err(detail) => unresolvable.push(Unresolvable { position, detail }),
+        }
+    }
+    for ((spelling, _), positions) in names {
+        let mut bytes = match vault.held(&spelling) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                unresolvable.extend(positions.into_iter().map(|position| Unresolvable {
+                    position,
+                    detail: detail.clone(),
+                }));
+                continue;
+            }
+        };
+        let outcomes = edit::compose_set(&mut bytes, &positions, &mut |bytes, positions| {
+            let kinds: Vec<_> = positions
+                .iter()
+                .map(|&position| &operations[position].kind)
+                .collect();
+            edit::rewritten_names(&kinds, bytes)
+        });
+        let acted = outcomes.iter().any(Result::is_ok);
+        for (position, outcome) in positions.into_iter().zip(outcomes) {
+            if let Err(reason) = outcome {
+                unresolvable.push(Unresolvable {
+                    position,
+                    detail: reason.detail(&operations[position].kind),
+                });
+            }
+        }
+        // A holder none of whose name rewrites acts keeps its target as it was.
+        if acted {
+            vault.target(&spelling).after = After::Bytes(bytes);
         }
     }
     // Each authored link rewrite, as the rewrite it writes into its holder's

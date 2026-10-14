@@ -527,8 +527,10 @@ pub(crate) fn plan<R: Reading>(
         .map(|(at, draft)| draft.decide(refused.remove(&at)))
         .collect();
     let mut written = BTreeSet::new();
+    let mut tagged = BTreeSet::new();
     for document in &decided {
         document.written(&mut written);
+        document.tagged(&mut tagged);
     }
     let namings = if written.is_empty() {
         Namings::new()
@@ -537,7 +539,7 @@ pub(crate) fn plan<R: Reading>(
     };
     let mut planned = Planned::default();
     for (at, document) in decided.into_iter().enumerate() {
-        document.emit(&mut planned, &namings, respellable.get(&at), vault)?;
+        document.emit(&mut planned, &namings, respellable.get(&at), vault, &tagged)?;
     }
     // One condition per link a plan writes, however many fixes write it.
     let mut recorded = BTreeSet::new();

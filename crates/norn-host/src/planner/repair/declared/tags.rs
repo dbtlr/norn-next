@@ -1,6 +1,7 @@
 //! One-edit suggestions from the literal declared tag vocabulary.
 
-use super::{Document, Fix, Fixing, State, cited, skip};
+use super::names::{self, NameFix};
+use super::{Composed, Document, Reckoned, State, skip};
 use norn_wire::{Confidence, FindingRow, OperationKind, SkipReason};
 
 /// The fixed score wording of a declared-tag suggestion.
@@ -8,32 +9,33 @@ fn score_note(tag: &str) -> String {
     format!("declared tag `{tag}` is one edit away by optimal string alignment under the tag fold")
 }
 
+/// The ruled whole-name tag measure, shared by the read gate and the fix.
+pub(super) fn one_edit(from: &str, tag: &str) -> bool {
+    let from: Vec<_> = norn_wire::fold_tag(from).chars().collect();
+    let candidate: Vec<_> = norn_wire::fold_tag(tag).chars().collect();
+    from.len() >= 3
+        && candidate.len() >= 3
+        && norn_store::similarity::osa_distance(&from, &candidate, 1) == Some(1)
+}
+
 /// Rewrite a whole undeclared name only when exactly one declared name is
 /// one edit away; the document's ordinary judge admits its composed result.
-pub(super) fn fix(
+fn propose(
     document: &Document<'_>,
     state: &State,
     row: &FindingRow,
-    finding: &crate::applier::Held,
-) -> Result<Fix, Box<norn_wire::SkippedFinding>> {
+    at: usize,
+) -> Result<NameFix, Box<norn_wire::SkippedFinding>> {
     let from = row
         .target
         .as_deref()
         .expect("an undeclared tag names its tag");
-    let folded: Vec<_> = norn_wire::fold_tag(from).chars().collect();
-    if folded.len() < 3 {
-        return Err(Box::new(crate::planner::repair::skipped(row)));
-    }
     let mut winners = Vec::new();
     for tag in document.schema().tags().declared() {
         let mut work = document.repairing.work.get();
         work.declared_tags += 1;
         document.repairing.work.set(work);
-        let candidate: Vec<_> = norn_wire::fold_tag(tag).chars().collect();
-        if candidate.len() < 3 {
-            continue;
-        }
-        if norn_store::similarity::osa_distance(&folded, &candidate, 1) == Some(1) {
+        if one_edit(from, tag) {
             winners.push(tag.to_string());
         }
     }
@@ -58,23 +60,35 @@ pub(super) fn fix(
         }));
     }
     let operation = OperationKind::rewrite_tag(state.at.clone(), from, first);
-    let next = document.admit(
-        state,
-        std::slice::from_ref(&operation),
-        Fixing {
-            row,
-            finding,
-            candidates: &candidates,
-        },
-    )?;
-    let note = score_note(first);
-    document
-        .within_threshold(Confidence::Suggested, row, &operation)
-        .map_err(|skipped| Box::new(skipped.with_note(note.clone())))?;
-    Ok(Fix {
-        operations: vec![operation],
-        cited: vec![cited(row, Confidence::Suggested, vec![note])],
-        state: next,
-        removed_field: None,
+    Ok(NameFix {
+        operation,
+        rows: vec![at],
+        conditions: Vec::new(),
+        candidates,
+        note: score_note(first),
     })
+}
+
+/// Decide all of the holder's undeclared tags before composing their name batch.
+pub(super) fn fixes(
+    reckoned: &Reckoned<'_>,
+    document: &Document<'_>,
+    composed: &mut Composed,
+    rows: &[usize],
+) {
+    let mut fixes = Vec::new();
+    for &at in rows {
+        let row = &reckoned.rows[at];
+        let Some(finding) = &reckoned.found[at] else {
+            continue;
+        };
+        if composed.state.holding(finding).is_none() {
+            continue;
+        }
+        match propose(document, &composed.state, row, at) {
+            Ok(fix) => fixes.push(fix),
+            Err(skip) => composed.decided[at] = Some(*skip),
+        }
+    }
+    names::compose(reckoned, document, composed, fixes);
 }

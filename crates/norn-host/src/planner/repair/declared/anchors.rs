@@ -1,11 +1,10 @@
 //! Closest-heading suggestions, composed after the batch's routes settle.
 
-use super::{Composed, Made, Reckoned, State, cited, skip};
+use super::names::{self, NameFix};
+use super::{Composed, Reckoned, skip};
 use crate::planner::repair::Reading;
 use norn_store::similarity;
-use norn_wire::{
-    AuthorCondition, Confidence, ContentHash, FindingKind, Operation, OperationKind, SkipReason,
-};
+use norn_wire::{AuthorCondition, Confidence, ContentHash, FindingKind, OperationKind, SkipReason};
 
 /// The fixed score wording of a closest-heading suggestion.
 fn score_note(heading: &str, score: f64) -> String {
@@ -18,33 +17,45 @@ pub(super) fn fixes<R: Reading>(
     reckoned: &Reckoned<'_>,
     composed: &mut Composed,
     vault: &R,
+    tagged: &std::collections::BTreeSet<norn_wire::DocumentPath>,
 ) -> Result<(), R::Error> {
     let document = &reckoned.document;
+    if !reckoned.rows.iter().any(|row| {
+        row.kind == FindingKind::MissingAnchor && super::has_fix(row, document.repairing)
+    }) {
+        return Ok(());
+    }
     let original = norn_text::Document::parse(
         std::str::from_utf8(&reckoned.start.bytes).expect("a read document"),
     );
-    let links: Vec<_> = original
+    let mut links = std::collections::HashMap::new();
+    for link in original
         .frontmatter_wikilinks()
         .into_iter()
         .chain(original.scan_body().links())
-        .collect();
+    {
+        let address = match &link.protocol {
+            Some(protocol) => format!("{protocol}://{}", link.target),
+            None => link.target.clone(),
+        };
+        if let Some(anchor) = &link.anchor {
+            let key = (
+                format!("{address}#{anchor}"),
+                link.span.map(|span| span.byte_offset as u64),
+            );
+            links.entry(key).or_insert(link);
+        }
+    }
     let mut groups = Vec::new();
     let mut by_link = std::collections::HashMap::new();
     for (at, row) in reckoned.rows.iter().enumerate().filter(|(_, row)| {
         row.kind == FindingKind::MissingAnchor && super::has_fix(row, document.repairing)
     }) {
-        let Some(link) = links.iter().find(|link| {
-            let address = match &link.protocol {
-                Some(protocol) => format!("{protocol}://{}", link.target),
-                None => link.target.clone(),
-            };
-            let target = link
-                .anchor
-                .as_ref()
-                .map(|anchor| format!("{address}#{anchor}"));
-            target == row.target
-                && link.span.map(|span| span.byte_offset as u64)
-                    == row.span.as_ref().map(|span| span.byte_offset)
+        let Some(link) = row.target.as_ref().and_then(|target| {
+            links.get(&(
+                target.clone(),
+                row.span.as_ref().map(|span| span.byte_offset),
+            ))
         }) else {
             continue;
         };
@@ -63,20 +74,43 @@ pub(super) fn fixes<R: Reading>(
             });
         groups[group].3.push((at, row));
     }
+    let mut headings = std::collections::HashMap::new();
+    let mut fixes = Vec::new();
     for (link, address, from, rows) in groups {
         let (_, row) = rows[0];
         let target = &row.head.candidates()[0].path;
-        let Some(held) = vault.headings(target)? else {
+        if tagged.contains(target) {
+            continue;
+        }
+        if !headings.contains_key(target) {
+            let held = vault.headings(target)?.map(|held| {
+                let mut work = document.repairing.work.get();
+                work.headings += held.headings.len() as u64;
+                document.repairing.work.set(work);
+                let trigrams: Vec<_> = held
+                    .headings
+                    .iter()
+                    .map(|heading| similarity::trigrams(&heading.text))
+                    .collect();
+                (held, trigrams)
+            });
+            headings.insert(target.clone(), held);
+        }
+        let Some((held, trigrams)) = &headings[target] else {
             continue;
         };
-        let mut work = document.repairing.work.get();
-        work.headings += held.headings.len() as u64;
-        document.repairing.work.set(work);
         let query = similarity::trigrams(from);
         let mut best = similarity::CUTOFF;
         let mut winners = Vec::new();
-        for heading in &held.headings {
-            let score = similarity::jaccard(&query, &similarity::trigrams(&heading.text));
+        for (heading, trigrams) in held.headings.iter().zip(trigrams) {
+            let written = match link.family {
+                norn_text::LinkFamily::Wikilink => &heading.text,
+                norn_text::LinkFamily::Markdown => &heading.slug,
+            };
+            if written.is_empty() || written.starts_with('^') {
+                continue;
+            }
+            let score = similarity::jaccard(&query, trigrams);
             if score > best {
                 best = score;
                 winners.clear();
@@ -127,67 +161,15 @@ pub(super) fn fixes<R: Reading>(
             ContentHash::new(format!("sha256:{}", held.content_hash))
                 .expect("an indexed document hash"),
         );
-        let parsed = norn_text::Document::parse(
-            std::str::from_utf8(&composed.state.bytes).expect("a read document"),
-        );
-        let edited = parsed.rewrite_anchors(link.family, &address, from, to);
-        let rewritten = match edited {
-            Ok(rewritten) if rewritten.rewritten > 0 => rewritten,
-            result => {
-                let reason = match result {
-                    Err(reason) => format!("{reason:?}"),
-                    _ => "no matching link remains".to_string(),
-                };
-                for (at, row) in &rows {
-                    composed.decided[*at] =
-                        Some(skip(row, SkipReason::LinkNotRewritable).with_note(reason.clone()));
-                }
-                continue;
-            }
-        };
-        let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(rewritten.text.into_bytes());
-        let verdict = crate::applier::verdict(
-            &document.before,
-            &composed.state.standing,
-            &composed.state.at,
-            &bytes,
-            document.repairing.declared,
-            document.repairing.case,
-        );
-        if !verdict.introduced.is_empty() {
-            for (at, row) in &rows {
-                composed.decided[*at] = Some(
-                    skip(row, SkipReason::JudgeWouldRefuse).with_candidates(candidates.clone()),
-                );
-            }
-            continue;
-        }
-        let note = score_note(&heading.text, best);
-        if !document.admits(Confidence::Suggested) {
-            let proposed = Operation::new(operation).with_conditions(vec![condition]);
-            for (at, row) in &rows {
-                composed.decided[*at] = Some(
-                    skip(row, SkipReason::BelowThreshold)
-                        .with_proposed(proposed.clone())
-                        .with_note(note.clone()),
-                );
-            }
-            continue;
-        }
-        composed.state = State::of(composed.state.at.clone(), bytes, verdict.standing);
-        for (at, _) in &rows {
-            composed.decided[*at] = None;
-        }
-        composed.made.push(Made::Fixed {
-            operations: vec![operation],
+        fixes.push(NameFix {
+            operation,
+            rows: rows.iter().map(|(at, _)| *at).collect(),
             conditions: vec![condition],
-            cited: rows
-                .iter()
-                .map(|(_, row)| cited(row, Confidence::Suggested, vec![note.clone()]))
-                .collect(),
-            removed_field: None,
+            candidates,
+            note: score_note(&heading.text, best),
         });
     }
+    names::compose(reckoned, document, composed, fixes);
     Ok(())
 }
 
@@ -207,6 +189,17 @@ mod tests {
 
     /// Plan the holder's missing-anchor rows over its indexed target.
     fn planned(source: &str, target: &str, threshold: Confidence, own: bool) -> Planned {
+        planned_under(source, target, threshold, own, "version: 1\n")
+    }
+
+    /// Plan missing anchors under the declaration that judges their holder.
+    fn planned_under(
+        source: &str,
+        target: &str,
+        threshold: Confidence,
+        own: bool,
+        schema: &str,
+    ) -> Planned {
         let scratch = norn_testkit::scratch::Scratch::new("repair-closest-heading");
         std::fs::write(scratch.join("holder.md"), source).unwrap();
         if !own {
@@ -214,9 +207,9 @@ mod tests {
         }
         let parsed = norn_text::Document::parse(source);
         let rows: Vec<_> = parsed
-            .scan_body()
-            .links()
-            .iter()
+            .frontmatter_wikilinks()
+            .into_iter()
+            .chain(parsed.scan_body().links())
             .enumerate()
             .map(|(ordinal, link)| {
                 let span = link.span.unwrap();
@@ -246,7 +239,10 @@ mod tests {
                 )
             })
             .collect();
-        let declared = Declared::unpinned();
+        let declared = Declared::pinned(
+            norn_config::schema::VaultSchema::parse(schema.as_bytes()).unwrap(),
+            "a".repeat(64),
+        );
         let clock = || panic!("a heading suggestion reads no clock");
         let one = OneReading::of(&clock);
         let repairing = Repairing {
@@ -269,6 +265,47 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// Required fields introduced by an anchor edit take precedence over other refusals.
+    #[test]
+    fn an_anchor_fix_bringing_in_required_fields_skips_with_the_missing_field() {
+        let planned = planned_under(
+            "---\nsee: '[[target#Important Headinh]]'\n---\n",
+            "# Important Heading\n",
+            Confidence::Suggested,
+            false,
+            "version: 1\nrules:\n  linked:\n    match: {frontmatter: {see: '[[target#Important Heading]]'}}\n    required: {status: null}\n",
+        );
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped[0].reason,
+            SkipReason::BringsInRequiredFields
+        );
+        assert_eq!(
+            planned.skipped[0]
+                .required_fields
+                .as_ref()
+                .unwrap()
+                .fields()[0]
+                .field,
+            "status"
+        );
+    }
+
+    /// A Markdown heading with an empty slug cannot be a wire-valid proposal.
+    #[test]
+    fn a_heading_with_no_written_anchor_is_not_proposed() {
+        for threshold in [Confidence::Suggested, Confidence::DEFAULT_THRESHOLD] {
+            let planned = planned("[x](target#!!!!)\n", "# !!!\n", threshold, false);
+            assert!(
+                !planned
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.kind, OperationKind::RewriteAnchor { .. }))
+            );
+            assert!(planned.skipped.iter().all(|skip| skip.proposed.is_none()));
+        }
     }
 
     /// The closest heading is written in its syntax's form, including self-links.
