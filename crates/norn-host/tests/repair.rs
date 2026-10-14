@@ -6558,6 +6558,7 @@ fn failed_move_following_keeps_its_reason_and_the_similarity_outcome() {
 }
 
 /// **A Markdown query decodes its leaf and drops a document extension in any ASCII case.**
+/// The leaf differs from its target by more than case, so it is broken on a folding root too.
 #[test]
 fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_decoded_stem() {
     let (_sandbox, vault, host) = a_vault_under(
@@ -6565,7 +6566,7 @@ fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_deco
         "version: 1\n",
         &[
             ("my note.md", b"# Target\n"),
-            ("zz-holder.md", b"See [x](My%20Note.MD).\n"),
+            ("zz-holder.md", b"See [x](My%20Notes.MD).\n"),
         ],
     );
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -6578,7 +6579,7 @@ fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_deco
         OperationKind::rewrite_link(
             at("zz-holder.md"),
             norn_wire::LinkFamily::Markdown,
-            "My%20Note.MD",
+            "My%20Notes.MD",
             "my%20note.md"
         )
     );
@@ -6588,7 +6589,7 @@ fn a_percent_encoded_markdown_leaf_with_an_uppercase_extension_suggests_the_deco
     );
     assert_eq!(
         provenance(&plan).citations[0].findings[0].notes,
-        ["similarity 1.00 (trigram, cutoff 0.50)"]
+        ["similarity 0.70 (trigram, cutoff 0.50)"]
     );
     assert!(
         plan.conditions
