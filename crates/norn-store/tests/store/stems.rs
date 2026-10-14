@@ -4,6 +4,44 @@
 use super::common::*;
 use norn_store::similarity::trigrams;
 
+/// **A tied candidate's document read seeks the path index without a sort or
+/// unbounded step.**
+#[test]
+fn a_tied_candidates_document_read_seeks_the_path_index() {
+    use norn_testkit::explain::{Access, PlanRow, QueryPlan};
+    let scratch = Scratch::new("tied-candidate-plan");
+    let mut store = scratch.open();
+    write_document(
+        &mut store.begin_request(),
+        &document("alpha.md", "hash", "body"),
+    );
+    let reader = std::sync::Arc::new(store.open_reader().reader.unwrap());
+    let snapshot = reader.try_take().unwrap().establish().unwrap();
+    let plans = snapshot
+        .candidate_head_plans(
+            &[norn_wire::DocumentPath::new("alpha.md").unwrap()],
+            1,
+            &norn_store::AmbiguityIgnore::default(),
+        )
+        .unwrap();
+    let emitted = plans
+        .into_iter()
+        .find(|p| p.statement == norn_store::ReadStatement::CandidateDocument)
+        .expect("candidate document statement")
+        .plan;
+    let plan = QueryPlan::new(
+        emitted.sql,
+        emitted
+            .steps
+            .into_iter()
+            .map(|step| PlanRow::new(step.id, step.parent, step.detail))
+            .collect(),
+    );
+    plan.assert_searches_through("documents", Access::Index("documents_path"));
+    plan.assert_no_temp_btree();
+    assert!(plan.unbounded_steps().is_empty(), "{:?}", plan.rows());
+}
+
 /// A newly created path writes its distinct stem trigrams once. Changing the
 /// body at that same path writes no trigram rows.
 #[test]
