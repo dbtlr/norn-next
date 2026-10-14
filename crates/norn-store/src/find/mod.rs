@@ -539,7 +539,38 @@ impl Snapshot {
         exclude: &[Pattern],
         declared: &ContentModel,
     ) -> Result<(bool, ValidateWork), PageRefusal> {
-        self.run_first_match(predicates, exclude, declared, &mut Vec::new())
+        self.run_first_match(predicates, exclude, declared, false, &mut Vec::new())
+    }
+
+    /// Seek exact written member text through find while retaining the declared container.
+    pub fn first_match_written(
+        &self,
+        key: &str,
+        values: &[String],
+        declared: &ContentModel,
+    ) -> Result<(bool, ValidateWork), PageRefusal> {
+        self.run_first_match(
+            &[Predicate::in_any(key, values.iter().cloned())],
+            &[],
+            declared,
+            true,
+            &mut Vec::new(),
+        )
+    }
+
+    /// Explain the exact written-member statements the first-match drive ran.
+    pub fn first_match_written_plans(
+        &self,
+        key: &str,
+        values: &[String],
+        declared: &ContentModel,
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
+        self.first_match_reading_plans(
+            &[Predicate::in_any(key, values.iter().cloned())],
+            &[],
+            declared,
+            true,
+        )
     }
 
     /// The statements a selector's first-match read ran, explained with their bound values.
@@ -549,8 +580,18 @@ impl Snapshot {
         exclude: &[Pattern],
         declared: &ContentModel,
     ) -> Result<Vec<FindPlan>, PageRefusal> {
+        self.first_match_reading_plans(predicates, exclude, declared, false)
+    }
+
+    fn first_match_reading_plans(
+        &self,
+        predicates: &[Predicate],
+        exclude: &[Pattern],
+        declared: &ContentModel,
+        written: bool,
+    ) -> Result<Vec<FindPlan>, PageRefusal> {
         let mut record = Vec::new();
-        self.run_first_match(predicates, exclude, declared, &mut record)?;
+        self.run_first_match(predicates, exclude, declared, written, &mut record)?;
         let mut stepped = record
             .iter()
             .map(|ran| ran.stepped.vm_steps)
@@ -570,6 +611,7 @@ impl Snapshot {
         predicates: &[Predicate],
         exclude: &[Pattern],
         declared: &ContentModel,
+        written: bool,
         record: &mut Vec<Ran>,
     ) -> Result<(bool, ValidateWork), PageRefusal> {
         let mut lookups = Lookups::default();
@@ -587,7 +629,7 @@ impl Snapshot {
                 compiled.matches_nothing = true;
                 break;
             }
-            match self.compile_predicate(predicate, declared, &mut lookups)? {
+            match self.compile_predicate_reading(predicate, declared, &mut lookups, written)? {
                 Part::Filter(filter) => compiled.filters.push(filter),
                 Part::MatchesNothing(_) => {
                     compiled.matches_nothing = true;

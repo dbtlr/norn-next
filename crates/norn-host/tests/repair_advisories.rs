@@ -127,6 +127,43 @@ fn mixed_shapes_count_documents_in_each_container() {
 }
 
 #[test]
+fn list_containers_count_as_types_without_a_uniform_scalar_declaration() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-list-containers",
+        "version: 1\n",
+        &[
+            (
+                "zz-advisory/a.md",
+                "---\nzz_n: [{k: v}, {k: w}]\nzz_map: [{k: v}, {k: w}]\n---\n",
+            ),
+            ("zz-advisory/b.md", "---\nzz_n: [x]\nzz_map: x\n---\n"),
+            ("zz-advisory/c.md", "---\nzz_list: [[x], [y], z]\n---\n"),
+            ("zz-advisory/d.md", "---\nzz_map: {k: v}\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    assert_eq!(
+        item(&found, "mixed_types", "zz_n")["types"],
+        json!([{"type":"map","documents":1}, {"type":"string","documents":1}])
+    );
+    assert_eq!(
+        item(&found, "mixed_types", "zz_list")["types"],
+        json!([{"type":"sequence","documents":1}, {"type":"string","documents":1}])
+    );
+    assert_eq!(
+        item(&found, "mixed_types", "zz_map")["types"],
+        json!([{"type":"map","documents":2}, {"type":"string","documents":1}])
+    );
+    assert!(
+        !found["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["kind"] == "undeclared_uniform" && item["key"] == "zz_n")
+    );
+}
+
+#[test]
 fn undeclared_uniform_fields_render_a_declaration_that_removes_the_advisory() {
     let key = "zz: \"owner\"\u{7f}\u{85}\u{fffe}";
     let (_sandbox, vault, host) = a_vault_under(
@@ -336,6 +373,28 @@ fn two_repairs_over_the_same_vault_are_byte_identical() {
 }
 
 #[test]
+fn a_synonym_written_outside_the_declared_type_counts_as_a_used_member() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-written-synonym",
+        "version: 1\nfields:\n  zz_n: {type: number, shape: single}\nrules:\n  numbered:\n    one_of:\n      zz_n: {values: ['1', '2'], synonyms: {one: '1'}}\n",
+        &[("a.md", "---\nzz_n: one\n---\n")],
+    );
+    let found = advisories(&host, &vault);
+    let unused: Vec<_> = found["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["hygiene"]["case"] == "unused_one_of_value")
+        .collect();
+    assert_eq!(
+        unused,
+        vec![
+            &json!({"kind":"schema_hygiene","hygiene":{"case":"unused_one_of_value","rule":"numbered","field":"zz_n","value":"2"}})
+        ]
+    );
+}
+
+#[test]
 fn the_entry_ceiling_keeps_the_first_sixty_four_items_and_the_exact_total() {
     let text = format!(
         "---\n{}---\n",
@@ -392,6 +451,77 @@ fn the_byte_ceiling_keeps_the_longest_prefix_and_the_exact_total() {
     for (at, item) in items.iter().enumerate() {
         assert_eq!(item["key"], keys[at]);
     }
+}
+
+#[test]
+fn a_byte_truncated_kind_keeps_its_prefix_before_smaller_and_later_items() {
+    let keys: Vec<_> = (0..12)
+        .map(|at| format!("key{at:02}{}", "x".repeat(2000)))
+        .collect();
+    let mut documents: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .map(|(at, key)| {
+            (
+                format!("a{at:02}.md"),
+                format!("---\n? {key}\n: value\n---\n"),
+            )
+        })
+        .collect();
+    documents.extend([
+        ("z1.md".to_string(), "---\nzz_a: small\n---\n".to_string()),
+        ("z2.md".to_string(), "---\nzz-a: small\n---\n".to_string()),
+    ]);
+    let borrowed: Vec<_> = documents
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-prefix-after-byte-limit",
+        "version: 1\n",
+        &borrowed,
+    );
+    let found = advisories(&host, &vault);
+    let expected: Vec<_> = keys[..7]
+        .iter()
+        .enumerate()
+        .map(|(at, key)| {
+            json!({"kind":"undeclared_uniform","key":key,"type":"string","documents":1,"sample":{"paths":[format!("a{at:02}.md")],"total":1},"yaml":format!("fields:\n  ? \"{key}\"\n  : {{type: text, shape: single}}\n")})
+        })
+        .collect();
+    assert_eq!(found["total"], 15);
+    assert_eq!(found["items"], json!(expected));
+}
+
+#[test]
+fn near_duplicates_choose_the_smallest_tied_spelling_and_order_groups_by_first_key() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "advisory-spelling-order",
+        "version: 1\n",
+        &[
+            ("a.md", "---\nA-b: 1\nab: 2\nAa: 3\naa: 4\n---\n"),
+            ("b.md", "---\nZZ B: 5\n---\n"),
+            ("c.md", "---\nzz_b: 6\n---\n"),
+        ],
+    );
+    let found = advisories(&host, &vault);
+    let groups: Vec<_> = found["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["kind"] == "near_duplicate_fields")
+        .collect();
+    assert_eq!(
+        groups
+            .iter()
+            .map(|item| &item["spellings"][0]["key"])
+            .collect::<Vec<_>>(),
+        vec![&json!("A-b"), &json!("Aa"), &json!("ZZ B")]
+    );
+    assert_eq!(
+        groups[2]["yaml"],
+        "rules:\n  near_duplicate_3:\n    forbidden:\n      ? \"zz_b\"\n      : {rename_to: \"ZZ B\"}\n"
+    );
 }
 
 #[test]

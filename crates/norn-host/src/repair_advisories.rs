@@ -25,6 +25,13 @@ struct Collected {
 }
 
 impl Collected {
+    /// Whether the next item may extend this kind's bounded prefix.
+    fn taking(&self) -> bool {
+        self.total == self.items.len() as u64
+            && self.items.len() < ADVISORY_ITEMS
+            && self.bytes + 2 < ADVISORY_BYTES
+    }
+
     fn add(&mut self, item: RepairAdvisory) {
         self.total += 1;
         if self.total != self.items.len() as u64 + 1 {
@@ -178,6 +185,10 @@ fn near_duplicates(
     let mut duplicates = Collected::default();
     let mut next_rule = 1;
     for group in groups {
+        if !duplicates.taking() {
+            duplicates.total += 1;
+            continue;
+        }
         let keys: Vec<_> = group.iter().map(|spelling| spelling.key.clone()).collect();
         let tally = snapshot.repair_spelling_tally(&keys)?;
         cost.absorb(tally.work);
@@ -289,21 +300,39 @@ fn unused_members(
     unused: &mut Collected,
 ) -> Result<(), PageRefusal> {
     for (field, set) in rule.one_of() {
+        let mut synonyms: BTreeMap<_, (Vec<String>, Vec<String>)> = BTreeMap::new();
+        for (written, target) in set.synonyms() {
+            cost.selector_parts += 1;
+            let group = synonyms
+                .entry(schema.equality_key(field, target))
+                .or_default();
+            if schema.equality_key(field, written).is_some() {
+                group.0.push(written.to_string());
+            } else {
+                group.1.push(written.to_string());
+            }
+        }
         let mut members = set.values().to_vec();
         members.sort();
         for member in members {
             cost.selector_parts += 1;
             let equality = schema.equality_key(field, &member);
+            let group = synonyms.get(&equality);
             let mut values = vec![member.clone()];
-            for (written, target) in set.synonyms() {
-                cost.selector_parts += 1;
-                if schema.equality_key(field, target) == equality {
-                    values.push(written.to_string());
-                }
+            if let Some((readable, _)) = group {
+                values.extend(readable.iter().cloned());
             }
-            let (used, work) =
+            let (mut used, work) =
                 snapshot.first_match(&[Predicate::in_any(field, values)], &[], declared)?;
             cost.absorb(work);
+            if !used
+                && let Some((_, written)) = group
+                && !written.is_empty()
+            {
+                let (found, work) = snapshot.first_match_written(field, written, declared)?;
+                used = found;
+                cost.absorb(work);
+            }
             if !used {
                 unused.add(RepairAdvisory::schema_hygiene(
                     SchemaHygiene::unused_one_of_value(rule.name(), field, member),

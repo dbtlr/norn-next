@@ -107,7 +107,8 @@ use norn_wire::{
 /// The schema the census vault pins: a task rule with a default, a synonym
 /// and a route, at `error`; a hub rule reading `up` by value, at `warning`;
 /// and a `link` field a bare value is a type mismatch of.
-const SCHEMA: &str = "version: 1\nfields:\n  ref: {type: link}\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  hubs:\n    severity: warning\n    match: {frontmatter: {type: hub}}\n    exclude: {path: ['archive/**']}\n    max_length:\n      up: 40\n";
+/// A number field's unreadable synonym reaches a shaped raw membership seek.
+const SCHEMA: &str = "version: 1\nfields:\n  ref: {type: link}\n  zz_syn: {type: number, shape: single}\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done], synonyms: {complete: done}}\n    allowed_paths: {paths: ['zz-repair/tasks/**'], route: 'zz-repair/tasks/'}\n  numbers:\n    one_of:\n      zz_syn: {values: ['1', '2'], synonyms: {one: '1'}}\n  hubs:\n    severity: warning\n    match: {frontmatter: {type: hub}}\n    exclude: {path: ['archive/**']}\n    max_length:\n      up: 40\n";
 
 /// Where every document the census arranges stands.
 const FOLDER: &str = "zz-repair/";
@@ -155,7 +156,10 @@ const DOCUMENTS: [(&str, &[u8]); 7] = [
         "hub.md",
         b"---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\nzz-M: marker\n---\n",
     ),
-    ("zz-holder.md", b"---\nref: zz-target\n---\n# Holder\n"),
+    (
+        "zz-holder.md",
+        b"---\nref: zz-target\nzz_syn: one\n---\n# Holder\n",
+    ),
     ("zz-target.md", b"---\nzz-M: marker\n---\n# Target\n"),
 ];
 
@@ -353,6 +357,12 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
             "the census reached no {statement:?} advisory statement"
         );
     }
+    assert!(
+        plans
+            .iter()
+            .any(|plan| { plan.sql().contains("fv.raw") && plan.sql().contains("fs.container =") }),
+        "the synonym pass reached no shaped raw membership seek"
+    );
     let excluding: Vec<_> = plans
         .iter()
         .filter(|plan| {

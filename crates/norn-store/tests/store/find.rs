@@ -4266,5 +4266,33 @@ fn a_first_match_seeks_its_members_and_tests_excluded_paths_at_their_keys() {
         assert!(!matched);
         assert_eq!(work.statements, 0);
         assert_eq!(work.rows_read, 0);
+        let numbered = declared().declare_field(
+            "status",
+            FieldDeclaration::number(integer_order()).with_shape(Some(FieldShape::Single)),
+        );
+        let written = ["open".to_string()];
+        assert!(
+            snapshot
+                .first_match_written("status", &written, &numbered)
+                .expect("a written member")
+                .0
+        );
+        let plans = snapshot
+            .first_match_written_plans("status", &written, &numbered)
+            .expect("the written-member plans");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].filters,
+            vec![ReadFilter::Member(FieldMatch {
+                column: MatchedColumn::Raw,
+                shaped: true,
+            })]
+        );
+        let explained = plan(&plans[0]);
+        explained.assert_no_full_scan();
+        explained.assert_no_temp_btree();
+        rows_of(&explained, "fv")
+            .assert_searches_through("document_fields", Access::Index("document_fields_raw"));
+        assert!(explained.sql().contains("fs.container ="));
     }
 }

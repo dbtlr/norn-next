@@ -233,6 +233,17 @@ impl Snapshot {
         declared: &ContentModel,
         lookups: &mut Lookups,
     ) -> Result<Part, PageRefusal> {
+        self.compile_predicate_reading(predicate, declared, lookups, false)
+    }
+
+    /// Compile a part with its declared reading or an exact written membership.
+    pub(crate) fn compile_predicate_reading(
+        &self,
+        predicate: &Predicate,
+        declared: &ContentModel,
+        lookups: &mut Lookups,
+        written: bool,
+    ) -> Result<Part, PageRefusal> {
         let text = |value: &str| Value::Text(value.to_string());
         let filter = |shape: ReadFilter, values: Vec<Value>| {
             Ok(Part::Filter(Filter::Bound {
@@ -263,7 +274,9 @@ impl Snapshot {
         // written; and only the values standing in the container a declared
         // shape holds.
         let matched = |key: &str| FieldMatch {
-            column: if declared.folds(key) {
+            column: if written {
+                MatchedColumn::Raw
+            } else if declared.folds(key) {
                 MatchedColumn::Folded
             } else if declared.typed_order(key).is_some() {
                 MatchedColumn::Typed
@@ -287,6 +300,7 @@ impl Snapshot {
                         value: value.clone(),
                     })
             }
+            MatchedColumn::Raw if written => Ok(value.clone()),
             MatchedColumn::Raw | MatchedColumn::Typed => compared(key, value),
         };
         // The values a reading binds after the key and the compared value:
