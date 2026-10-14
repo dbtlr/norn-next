@@ -7417,6 +7417,8 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::delete_document(path("notes/b.md")),
         OperationKind::move_folder(folder("notes"), folder("archive/notes")),
         OperationKind::rewrite_link(path("notes/c.md"), LinkFamily::Wikilink, "a", "archive/a"),
+        OperationKind::rewrite_anchor(path("notes/c.md"), LinkFamily::Wikilink, "a", "Old", "New"),
+        OperationKind::rewrite_tag(path("notes/c.md"), "work", "Place"),
         OperationKind::rewrite_wikilink(target("a"), target("archive/a")),
         OperationKind::set_frontmatter(
             WriteTarget::path(path("notes/a.md")),
@@ -7770,6 +7772,8 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
         r#"{"kind":"move_folder","fields":{"from":"notes","to":"archive/notes"}}"#,
         r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}}"#,
+        r#"{"kind":"rewrite_anchor","fields":{"path":"notes/c.md","syntax":"wikilink","address":"a","from":"Old","to":"New"}}"#,
+        r#"{"kind":"rewrite_tag","fields":{"path":"notes/c.md","from":"work","to":"Place"}}"#,
         r#"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"archive/a"}}"#,
         r#"{"kind":"set_frontmatter","fields":{"path":"notes/a.md","field":"status","value":"done"}}"#,
         r#"{"kind":"remove_frontmatter","fields":{"where":[{"op":"eq","key":"status","value":"draft"}],"field":"due"}}"#,
@@ -9592,6 +9596,14 @@ fn applier_decision(operation: &Operation) -> String {
             from,
             to,
         } => format!("in {path}, {syntax:?} {from} to {to}"),
+        OperationKind::RewriteAnchor {
+            path,
+            syntax,
+            address,
+            from,
+            to,
+        } => format!("in {path}, {syntax:?} {address} anchor {from} to {to}"),
+        OperationKind::RewriteTag { path, from, to } => format!("in {path}, tag {from} to {to}"),
         OperationKind::RewriteWikilink { old, new } => format!("wikilinks to {old} to {new}"),
         OperationKind::CreateByRule { rule, .. } => format!("create by rule {rule:?}"),
         OperationKind::SetFrontmatter {
@@ -9910,15 +9922,17 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         "create by rule Some(\"meeting\") as -, after [], noting -; "
     );
     assert_eq!(
-        decisions[5..8],
+        decisions[5..10],
         [
             "move folder notes to archive/notes as -, after [], noting -; ",
             "in notes/c.md, Wikilink a to archive/a as -, after [], noting -; ",
+            "in notes/c.md, Wikilink a anchor Old to New as -, after [], noting -; ",
+            "in notes/c.md, tag work to Place as -, after [], noting -; ",
             "wikilinks to a to archive/a as -, after [], noting -; ",
         ]
     );
     assert_eq!(
-        decisions[8..12],
+        decisions[10..14],
         [
             "set status of notes/a.md to string done as -, after [], noting -; ",
             "remove due of 1 predicates' matches as -, after [], noting -; ",
@@ -12266,4 +12280,46 @@ fn the_heads_a_provenance_embeds_still_drop_an_unknown_key_in_an_answer() {
             row.head
         );
     }
+}
+
+/// An anchor rewrite keeps its written address and both anchor spellings on the wire.
+#[test]
+fn a_rewrite_anchor_round_trips_with_its_fields() {
+    let operation = Operation::new(OperationKind::rewrite_anchor(
+        path("h.md"),
+        LinkFamily::Wikilink,
+        "vault://a",
+        "Old",
+        "New",
+    ));
+    let json = serde_json::to_value(&operation).expect("JSON");
+    assert_eq!(json["kind"], "rewrite_anchor");
+    assert_eq!(
+        json["fields"],
+        serde_json::json!({"path":"h.md", "syntax":"wikilink", "address":"vault://a", "from":"Old", "to":"New"})
+    );
+    assert_eq!(
+        serde_json::from_value::<Operation>(json).expect("an operation"),
+        operation
+    );
+}
+
+/// A tag rewrite keeps the marker-free names on the wire.
+#[test]
+fn a_rewrite_tag_round_trips_with_its_fields() {
+    let operation = Operation::new(OperationKind::rewrite_tag(
+        path("h.md"),
+        "Work",
+        "workplace",
+    ));
+    let json = serde_json::to_value(&operation).expect("JSON");
+    assert_eq!(json["kind"], "rewrite_tag");
+    assert_eq!(
+        json["fields"],
+        serde_json::json!({"path":"h.md", "from":"Work", "to":"workplace"})
+    );
+    assert_eq!(
+        serde_json::from_value::<Operation>(json).expect("an operation"),
+        operation
+    );
 }

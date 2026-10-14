@@ -70,6 +70,8 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteDocument { .. }
         | OperationKind::MoveFolder { .. }
         | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::RewriteWikilink { .. } => return None,
     };
     Some(match target {
@@ -150,6 +152,8 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         | OperationKind::DeleteDocument { .. }
         | OperationKind::MoveFolder { .. }
         | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::RewriteWikilink { .. }
         | OperationKind::WriteControlFile { .. } => {
             unreachable!("only a document-local kind is edited here")
@@ -158,6 +162,44 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
     result
         .map(|edited| Arc::from(edited.into_bytes()))
         .map_err(|error| refusal(&error))
+}
+
+/// Compose an anchor or tag respelling on the holder's final bytes. A
+/// matching occurrence must exist and the text layer must prove the whole edit.
+pub(crate) fn rewritten_names(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Unresolved> {
+    let text = document_source(bytes).map_err(|_| {
+        "the document is not UTF-8 text, so its names cannot be rewritten".to_string()
+    })?;
+    let document = Document::parse(text);
+    let result = match kind {
+        OperationKind::RewriteAnchor {
+            syntax,
+            address,
+            from,
+            to,
+            ..
+        } => {
+            let family = match syntax {
+                LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
+                LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
+                _ => return Err("no link of this syntax can match an anchor rewrite".to_string()),
+            };
+            document.rewrite_anchors(family, address, from, to)
+        }
+        OperationKind::RewriteTag { from, to, .. } => {
+            document.rewrite_tags(from, to, norn_wire::fold_tag)
+        }
+        _ => unreachable!("only name rewrites compose here"),
+    };
+    let rewritten = result
+        .map_err(|reason| format!("the `{}` edit cannot read back: {reason:?}", kind.name()))?;
+    if rewritten.rewritten == 0 {
+        return Err(format!(
+            "no occurrence matches `{}`, so the rewrite changes nothing",
+            kind.name()
+        ));
+    }
+    Ok(Arc::from(rewritten.text.into_bytes()))
 }
 
 /// `bytes` with every one of `rewrites` composed at once — each link of a

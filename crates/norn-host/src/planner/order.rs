@@ -266,6 +266,8 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         // A document-local kind edits a document where it stands, putting
         // none at a name.
         OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::SetFrontmatter { .. }
         | OperationKind::RemoveFrontmatter { .. }
         | OperationKind::PushFrontmatter { .. }
@@ -297,6 +299,8 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         // A document-local kind edits a document where it stands, leaving no
         // name empty.
         OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. }
         | OperationKind::SetFrontmatter { .. }
         | OperationKind::RemoveFrontmatter { .. }
         | OperationKind::PushFrontmatter { .. }

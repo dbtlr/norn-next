@@ -3033,6 +3033,11 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("move_document", vec!["from", "to"]),
         ("move_folder", vec!["from", "to"]),
         ("rewrite_link", vec!["path", "syntax", "from", "to"]),
+        (
+            "rewrite_anchor",
+            vec!["path", "syntax", "address", "from", "to"],
+        ),
+        ("rewrite_tag", vec!["path", "from", "to"]),
         ("rewrite_wikilink", vec!["old", "new"]),
         ("replace_body", vec!["path", "content"]),
         ("replace_section", vec!["path", "heading", "content"]),
@@ -4546,4 +4551,36 @@ fn the_repair_advisories_advertise_the_shapes_they_are_read_through() {
     let combination = branch(&hygiene, "case", "empty_combination");
     assert_eq!(combination["properties"]["rules"]["minItems"], 2);
     assert_eq!(combination["properties"]["rules"]["maxItems"], 2);
+}
+
+/// The plan schema advertises the anchor rewrite's own fields.
+#[test]
+fn a_rewrite_anchor_appears_in_the_plan_schema() {
+    let schema = schema_of::<AuthoredPlan>();
+    let operation = definition(&schema, "Operation");
+    let fields = &branch(operation, "kind", "rewrite_anchor")["properties"]["fields"];
+    let names = ["path", "syntax", "address", "from", "to"]
+        .into_iter()
+        .collect();
+    assert_eq!(property_names(fields), names);
+    assert_eq!(required_names(fields), names);
+    assert!(refuses_unknown_keys(fields));
+    for name in ["from", "to"] {
+        assert_eq!(fields["properties"][name]["minLength"], 1);
+    }
+}
+
+/// The plan schema advertises the tag rewrite's own fields.
+#[test]
+fn a_rewrite_tag_appears_in_the_plan_schema() {
+    let schema = schema_of::<AuthoredPlan>();
+    let operation = definition(&schema, "Operation");
+    let fields = &branch(operation, "kind", "rewrite_tag")["properties"]["fields"];
+    let names = ["path", "from", "to"].into_iter().collect();
+    assert_eq!(property_names(fields), names);
+    assert_eq!(required_names(fields), names);
+    assert!(refuses_unknown_keys(fields));
+    for name in ["from", "to"] {
+        assert_eq!(fields["properties"][name]["minLength"], 1);
+    }
 }

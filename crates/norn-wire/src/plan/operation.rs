@@ -114,8 +114,8 @@
 //! link's target text and keeps the anchor the link was written with, so an
 //! anchor on `new` or `rewrite_to` would write a second anchor into every
 //! link already carrying one, and an anchor on `old` would ask for a narrower
-//! rewrite — only the links naming that heading or block — that no kind
-//! offers.
+//! rewrite — only the links naming that heading or block — rather than
+//! the whole-document retargeting these fields describe.
 //!
 //! **An expected value is the author's condition on one field.** It is
 //! checked at planning and becomes the document's before-state, as a content
@@ -311,6 +311,39 @@ pub enum OperationKind {
         /// The address it is written with after, protocol prefix included. A
         /// rewrite never changes a link's protocol, so a `to` whose protocol
         /// differs from `from`'s is refused.
+        to: String,
+    },
+    /// In one document, respell every heading anchor written `from` on a
+    /// link of `syntax` at `address` to `to`, keeping the address, title and
+    /// embed marker. Block references never match; matching none does not resolve.
+    RewriteAnchor {
+        /// The document holding the links, where the plan leaves it.
+        path: DocumentPath,
+        /// The syntax of the links rewritten.
+        syntax: LinkFamily,
+        /// The address a rewritten link is written with, exactly as written,
+        /// its protocol prefix included.
+        address: String,
+        /// The heading anchor as written, marker excluded. Never empty.
+        #[schemars(length(min = 1))]
+        from: String,
+        /// The heading anchor written after, marker excluded. Never empty
+        /// and never a block reference.
+        #[schemars(length(min = 1))]
+        to: String,
+    },
+    /// In one document, respell every body tag and frontmatter tags entry
+    /// whose whole name equals `from` under the tag fold to exactly `to`.
+    /// Markers keep their spelling convention; matching none does not resolve.
+    RewriteTag {
+        /// The document holding the tags, where the plan leaves it.
+        path: DocumentPath,
+        /// The whole tag name compared under the tag fold, without `#`.
+        /// Never empty.
+        #[schemars(length(min = 1))]
+        from: String,
+        /// The whole tag name written after, without `#`. Never empty.
+        #[schemars(length(min = 1))]
         to: String,
     },
     /// Respell every wikilink in the vault naming one document to name
@@ -539,6 +572,32 @@ impl OperationKind {
         }
     }
 
+    /// In `path`, respell heading anchors written `from` at `address` to `to`.
+    pub fn rewrite_anchor(
+        path: DocumentPath,
+        syntax: LinkFamily,
+        address: impl Into<String>,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        OperationKind::RewriteAnchor {
+            path,
+            syntax,
+            address: address.into(),
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// In `path`, respell tags whose whole folded name is `from` to `to`.
+    pub fn rewrite_tag(path: DocumentPath, from: impl Into<String>, to: impl Into<String>) -> Self {
+        OperationKind::RewriteTag {
+            path,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
     /// Respell every wikilink naming `old` to name `new`.
     pub const fn rewrite_wikilink(old: ResolutionTarget, new: ResolutionTarget) -> Self {
         OperationKind::RewriteWikilink { old, new }
@@ -699,6 +758,8 @@ impl OperationKind {
             // expands it into, and a link rewrite is a cascade's own unit.
             OperationKind::MoveFolder { .. }
             | OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteAnchor { .. }
+            | OperationKind::RewriteTag { .. }
             | OperationKind::CreateDocument { .. }
             | OperationKind::CreateByRule { .. }
             | OperationKind::StrReplace { .. }
@@ -731,6 +792,8 @@ impl OperationKind {
             OperationKind::DeleteDocument { .. } => KindName::DeleteDocument,
             OperationKind::MoveFolder { .. } => KindName::MoveFolder,
             OperationKind::RewriteLink { .. } => KindName::RewriteLink,
+            OperationKind::RewriteAnchor { .. } => KindName::RewriteAnchor,
+            OperationKind::RewriteTag { .. } => KindName::RewriteTag,
             OperationKind::RewriteWikilink { .. } => KindName::RewriteWikilink,
             OperationKind::SetFrontmatter { .. } => KindName::SetFrontmatter,
             OperationKind::RemoveFrontmatter { .. } => KindName::RemoveFrontmatter,
@@ -761,6 +824,8 @@ impl OperationKind {
             | OperationKind::DeleteDocument { .. }
             | OperationKind::MoveFolder { .. }
             | OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteAnchor { .. }
+            | OperationKind::RewriteTag { .. }
             | OperationKind::RewriteWikilink { .. }
             | OperationKind::ReplaceBody { .. }
             | OperationKind::ReplaceSection { .. }
@@ -1089,6 +1154,8 @@ enum KindName {
     DeleteDocument,
     MoveFolder,
     RewriteLink,
+    RewriteAnchor,
+    RewriteTag,
     RewriteWikilink,
     SetFrontmatter,
     RemoveFrontmatter,
@@ -1114,6 +1181,8 @@ impl KindName {
             KindName::DeleteDocument => "delete_document",
             KindName::MoveFolder => "move_folder",
             KindName::RewriteLink => "rewrite_link",
+            KindName::RewriteAnchor => "rewrite_anchor",
+            KindName::RewriteTag => "rewrite_tag",
             KindName::RewriteWikilink => "rewrite_wikilink",
             KindName::SetFrontmatter => "set_frontmatter",
             KindName::RemoveFrontmatter => "remove_frontmatter",
@@ -1141,6 +1210,8 @@ impl KindName {
             KindName::MoveDocument | KindName::MoveFolder => &["from", "to"],
             KindName::DeleteDocument => &["path", "rewrite_to", "allow_broken_links"],
             KindName::RewriteLink => &["path", "syntax", "from", "to"],
+            KindName::RewriteAnchor => &["path", "syntax", "address", "from", "to"],
+            KindName::RewriteTag => &["path", "from", "to"],
             KindName::RewriteWikilink => &["old", "new"],
             KindName::SetFrontmatter | KindName::PushFrontmatter | KindName::PopFrontmatter => {
                 &["path", "where", "field", "value"]
@@ -1189,6 +1260,8 @@ struct KindFields {
     heading: Option<String>,
     #[serde(default, deserialize_with = "written")]
     syntax: Option<LinkFamily>,
+    #[serde(default, deserialize_with = "written")]
+    address: Option<String>,
     #[serde(default, deserialize_with = "written")]
     old: Option<ResolutionTarget>,
     #[serde(default, deserialize_with = "written")]
@@ -1337,7 +1410,7 @@ fn target<E: serde::de::Error>(
 
 impl KindFields {
     /// Each field any kind names, and whether it was written.
-    const fn written_names(&self) -> [(&'static str, bool); 20] {
+    const fn written_names(&self) -> [(&'static str, bool); 21] {
         [
             ("path", self.path.is_some()),
             ("where", self.predicates.is_some()),
@@ -1350,6 +1423,7 @@ impl KindFields {
             ("value", self.value.is_some()),
             ("heading", self.heading.is_some()),
             ("syntax", self.syntax.is_some()),
+            ("address", self.address.is_some()),
             ("old", self.old.is_some()),
             ("new", self.new.is_some()),
             ("rewrite_to", self.rewrite_to.is_some()),
@@ -1385,6 +1459,7 @@ impl KindFields {
             value,
             heading,
             syntax,
+            address,
             old,
             new,
             rewrite_to,
@@ -1451,6 +1526,37 @@ impl KindFields {
                 OperationKind::RewriteLink {
                     path,
                     syntax,
+                    from,
+                    to,
+                }
+            }
+            KindName::RewriteAnchor => {
+                let from: String = required(kind, "from", from)?;
+                let to: String = required(kind, "to", to)?;
+                if from.is_empty() || to.is_empty() || to.starts_with('^') {
+                    return Err(E::custom(
+                        "an anchor rewrite needs non-empty heading anchors and cannot write a block reference",
+                    ));
+                }
+                OperationKind::RewriteAnchor {
+                    path: required(kind, "path", path)?,
+                    syntax: required(kind, "syntax", syntax)?,
+                    address: required(kind, "address", address)?,
+                    from,
+                    to,
+                }
+            }
+            KindName::RewriteTag => {
+                let from: String = required(kind, "from", from)?;
+                let to: String = required(kind, "to", to)?;
+                if from.is_empty() || to.is_empty() || from.starts_with('#') || to.starts_with('#')
+                {
+                    return Err(E::custom(
+                        "a tag rewrite needs non-empty tag names without a marker",
+                    ));
+                }
+                OperationKind::RewriteTag {
+                    path: required(kind, "path", path)?,
                     from,
                     to,
                 }

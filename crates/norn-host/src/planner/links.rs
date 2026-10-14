@@ -234,6 +234,7 @@ fn reads_links_over<'o>(
             matches!(
                 operation.kind,
                 OperationKind::RewriteLink { .. }
+                    | OperationKind::RewriteAnchor { .. }
                     | OperationKind::RewriteWikilink { .. }
                     | OperationKind::DeleteDocument { .. }
             ) || !operation.cascade.is_empty()
@@ -1559,6 +1560,8 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
     rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,
+    /// Heading fragments the plan writes without changing their address.
+    anchors: BTreeSet<(NormalizedPath, &'static str, String, String)>,
 }
 
 impl WrittenLinks {
@@ -1570,7 +1573,22 @@ impl WrittenLinks {
         normalizer: &PathNormalizer,
     ) -> Self {
         let mut rewritten: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
+        let mut anchors = BTreeSet::new();
         for operation in operations {
+            if let OperationKind::RewriteAnchor {
+                path,
+                syntax,
+                address,
+                to,
+                ..
+            } = &operation.kind
+                && let (Ok(file), Some(syntax)) = (
+                    normalizer.normalize(Path::new(path.as_str())),
+                    family_name(*syntax),
+                )
+            {
+                anchors.insert((file, syntax, address.clone(), to.clone()));
+            }
             let authored = match &operation.kind {
                 OperationKind::RewriteLink {
                     path,
@@ -1596,15 +1614,28 @@ impl WrittenLinks {
                 }
             }
         }
-        WrittenLinks { rewritten }
+        WrittenLinks { rewritten, anchors }
     }
 
     /// Whether the plan writes `link`, as its after-state holds it in the
     /// document `holder`: the one predicate "a link whose text the plan
     /// writes" is read by.
     pub(crate) fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
-        self.rewritten
+        if self
+            .rewritten
             .contains_key(&(holder.clone(), link.family.as_str(), address(link)))
+        {
+            return true;
+        }
+        match &link.anchor {
+            Some(norn_store::LinkAnchor::Heading { written, .. }) => self.anchors.contains(&(
+                holder.clone(),
+                link.family.as_str(),
+                address(link),
+                written.clone(),
+            )),
+            _ => false,
+        }
     }
 
     /// `link`, which the plan writes in the document `holder`, as it was

@@ -3340,6 +3340,13 @@ operation is `request/plan-invalid` (`control_file_beside_documents`), which is 
 into service: the watcher's control-file facts are discarded, so the vault keeps serving the
 declaration it pinned and reports the authored file as a reload pending until a reload or a
 recovery reads it.
+A `rewrite_anchor` respells every heading anchor written `from` on links of its syntax at
+exactly its written address in one document where the plan leaves it, preserving the
+address, title and embed marker; block references never match, and matching none leaves
+it unresolved. A `rewrite_tag` respells every body token and frontmatter tags entry whose
+whole name equals `from` under the tag fold to exactly `to`, preserving each marker's
+spelling convention; matching none leaves it unresolved, and both kinds prove their edits
+by reading the document back.
 A plan also carries document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,

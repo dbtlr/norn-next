@@ -192,6 +192,28 @@ pub(crate) fn compose<V: VaultView>(
         .map(|unresolvable: &Unresolvable| unresolvable.position)
         .collect();
     let acted = || order.iter().filter(|position| !failed.contains(position));
+    // Name rewrites edit holders where the plan leaves them, before address
+    // cascades match those holders' final text.
+    for &position in acted() {
+        if let OperationKind::RewriteAnchor { path, .. } | OperationKind::RewriteTag { path, .. } =
+            &operations[position].kind
+        {
+            let result = match vault.standing(path)? {
+                Err(detail) => Err(detail),
+                Ok(spelling) => match vault.held(&spelling) {
+                    Err(detail) => Err(detail),
+                    Ok(bytes) => {
+                        edit::rewritten_names(&operations[position].kind, &bytes).map(|rewritten| {
+                            vault.target(&spelling).after = After::Bytes(rewritten);
+                        })
+                    }
+                },
+            };
+            if let Err(detail) = result {
+                unresolvable.push(Unresolvable { position, detail });
+            }
+        }
+    }
     // Each authored link rewrite, as the rewrite it writes into its holder's
     // batch.
     let authored: Vec<(usize, LinkRewrite)> = acted()
@@ -622,7 +644,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             // An authored link rewrite composes with its holder's batch,
             // after every operation, where the plan leaves its document
             // ([`compose`]).
-            OperationKind::RewriteLink { .. } => Ok(()),
+            OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteAnchor { .. }
+            | OperationKind::RewriteTag { .. } => Ok(()),
             // Planning expands a folder move into the document moves it
             // makes before anything composes (`super::expand`), so only a
             // plan resolved without expansion meets one here, which the
@@ -982,7 +1006,10 @@ fn spelled_as_asked(identity: &NormalizedPath) -> String {
 /// no name it fills or empties and carries no content from another file.
 pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
     match kind {
-        OperationKind::StrReplace { .. } | OperationKind::RewriteLink { .. } => true,
+        OperationKind::StrReplace { .. }
+        | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteAnchor { .. }
+        | OperationKind::RewriteTag { .. } => true,
         other => edit::local_target(other).is_some(),
     }
 }
@@ -999,6 +1026,8 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         | OperationKind::StrReplace { path, .. }
         | OperationKind::DeleteDocument { path, .. }
         | OperationKind::RewriteLink { path, .. }
+        | OperationKind::RewriteAnchor { path, .. }
+        | OperationKind::RewriteTag { path, .. }
         | OperationKind::ReplaceBody { path, .. }
         | OperationKind::ReplaceSection { path, .. }
         | OperationKind::AppendToSection { path, .. }
@@ -1113,6 +1142,84 @@ mod tests {
 
     fn in_order(operations: &[Operation]) -> Vec<usize> {
         (0..operations.len()).collect()
+    }
+
+    /// The anchor rewrite edits the document where the plan leaves it.
+    #[test]
+    fn a_rewrite_anchor_composes_into_the_expected_after_state() {
+        let vault = MemoryVault::with(&[("a.md", "[[a#Old|Shown]]")]);
+        let operations = [
+            Operation::new(OperationKind::rewrite_anchor(
+                path("h.md"),
+                norn_wire::LinkFamily::Wikilink,
+                "a",
+                "Old",
+                "New",
+            )),
+            Operation::new(OperationKind::move_document(path("a.md"), path("h.md"))),
+        ];
+        let composition = compose(&operations, &in_order(&operations), &vault).expect("a view");
+        assert!(
+            composition.unresolvable.is_empty(),
+            "{:?}",
+            composition.unresolvable
+        );
+        assert_eq!(
+            after_text(&composition, "h.md").as_deref(),
+            Some("[[a#New|Shown]]")
+        );
+    }
+
+    /// An anchor rewrite with no occurrence cannot resolve into a change.
+    #[test]
+    fn a_rewrite_anchor_matching_nothing_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("h.md", "plain")]);
+        let operations = [Operation::new(OperationKind::rewrite_anchor(
+            path("h.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "a",
+            "Old",
+            "New",
+        ))];
+        let composition = compose(&operations, &in_order(&operations), &vault).expect("a view");
+        assert_eq!(composition.unresolvable.len(), 1);
+        assert_eq!(composition.unresolvable[0].position, 0);
+        assert_eq!(after_text(&composition, "h.md").as_deref(), Some("plain"));
+    }
+
+    /// The tag rewrite edits the document where the plan leaves it.
+    #[test]
+    fn a_rewrite_tag_composes_into_the_expected_after_state() {
+        let vault = MemoryVault::with(&[("a.md", "#ΟΔΟΣ #οδοσ #οδος")]);
+        let operations = [
+            Operation::new(OperationKind::rewrite_tag(path("h.md"), "οδοσ", "Place")),
+            Operation::new(OperationKind::move_document(path("a.md"), path("h.md"))),
+        ];
+        let composition = compose(&operations, &in_order(&operations), &vault).expect("a view");
+        assert!(
+            composition.unresolvable.is_empty(),
+            "{:?}",
+            composition.unresolvable
+        );
+        assert_eq!(
+            after_text(&composition, "h.md").as_deref(),
+            Some("#Place #Place #οδος")
+        );
+    }
+
+    /// A tag rewrite with no occurrence cannot resolve into a change.
+    #[test]
+    fn a_rewrite_tag_matching_nothing_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("h.md", "plain")]);
+        let operations = [Operation::new(OperationKind::rewrite_tag(
+            path("h.md"),
+            "work",
+            "Place",
+        ))];
+        let composition = compose(&operations, &in_order(&operations), &vault).expect("a view");
+        assert_eq!(composition.unresolvable.len(), 1);
+        assert_eq!(composition.unresolvable[0].position, 0);
+        assert_eq!(after_text(&composition, "h.md").as_deref(), Some("plain"));
     }
 
     #[test]
