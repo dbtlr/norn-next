@@ -1820,12 +1820,12 @@ pub const REPAIR_ADVISORY_VM_BASE: u64 = 16;
 /// Find's driving seek and document tests may revisit value rows for different
 /// members or filters; rule pairs read the schema alone. The largest measured
 /// share is below 38 steps per unit; 48 leaves headroom over that share.
-/// Measured on Linux x86_64, 2026-10-14, after reusing find's page drive and
-/// taking samples from tally streams, at sizes 2, 4 and 8: rules [53, 95, 179],
+/// Measured on Linux x86_64, 2026-10-15, with one presence statement per
+/// spelling merged on the host, at sizes 2, 4 and 8: rules [53, 95, 179],
 /// documents holding two fixed scalar keys [286, 416, 676], selector complexity
 /// [118, 196, 352], keys [160, 310, 610], values [100, 110, 130] and documents
-/// per spelling at width two [389, 565, 917]. Spelling widths 2, 4, 8 and 16,
-/// each holding two documents per spelling, read [389, 827, 1759, 3767]: the
-/// merge's per-row work grows with its width. The lane pins each reading and
+/// per spelling at width two [356, 500, 788]. Spelling widths 2, 4, 8 and 16,
+/// each holding two documents per spelling, read [356, 704, 1400, 2792]: each
+/// spelling runs a fixed three-container merge. The lane pins each reading and
 /// the affine slopes of the parameters other than the spelling width.
 pub const REPAIR_ADVISORY_VM_PER_INPUT: u64 = 48;

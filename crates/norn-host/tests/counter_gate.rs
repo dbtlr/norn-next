@@ -6192,8 +6192,7 @@ fn undeclared_tag_batches_keep_holder_compositions_flat() {
     }
 }
 
-/// Each advisory parameter moves its own logical work, including the spelling merge
-/// whose per-row SQLite work grows with its width.
+/// Each advisory parameter moves its own logical work, including the spelling merge.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn repair_advisory_cost_varies_each_declared_parameter_alone() {
@@ -6221,8 +6220,8 @@ fn repair_advisory_cost_varies_each_declared_parameter_alone() {
             "selector" => vec![118, 196, 352],
             "keys" => vec![160, 310, 610],
             "values" => vec![100, 110, 130],
-            "spellings" => vec![389, 827, 1759, 3767],
-            "spelling_documents" => vec![389, 565, 917],
+            "spellings" => vec![356, 704, 1400, 2792],
+            "spelling_documents" => vec![356, 500, 788],
             _ => unreachable!("the declared parameters"),
         };
         for ((&size, &(reading, documents)), steps) in
@@ -6234,8 +6233,8 @@ fn repair_advisory_cost_varies_each_declared_parameter_alone() {
                 "selector" => [1, 0, 0, 1, size * 2 + 1, 0, size + 2, 0, 0, 0],
                 "keys" => [1, size, 0, 0, 0, 0, size * 3 + 1, size * 2, 0, 0],
                 "values" => [1, 1, size, 0, 0, 0, 4, size + 2, 0, 0],
-                "spellings" => [1, size, 2 * size, 0, 0, 0, 3 * size + 2, 7 * size, 0, 0],
-                "spelling_documents" => [1, 2, 2 * size, 0, 0, 0, 8, 2 + 6 * size, 0, 0],
+                "spellings" => [1, size, 2 * size, 0, 0, 0, 4 * size + 1, 7 * size, 0, 0],
+                "spelling_documents" => [1, 2, 2 * size, 0, 0, 0, 9, 2 + 6 * size, 0, 0],
                 _ => unreachable!("the declared parameters"),
             };
             assert_eq!(
