@@ -6891,7 +6891,7 @@ fn an_apply_plans_what_its_preview_did_with_every_5c_fix_present() {
     }
 }
 
-/// **A resolved 5C preview lands through apply with the same bytes as an apply-mode repair.**
+/// **A resolved 5C preview and an apply-mode repair write every expected fix identically.**
 #[test]
 fn a_5c_previews_plan_lands_through_apply() {
     let (_first_box, first, first_host, first_lease) =
@@ -6916,6 +6916,10 @@ fn a_5c_previews_plan_lands_through_apply() {
     assert_eq!(
         std::fs::read(second.path().join(FOLDER).join("zz-holder.md")).expect("resolved holder"),
         std::fs::read(first.path().join(FOLDER).join("zz-holder.md")).expect("direct holder"),
+    );
+    assert_eq!(
+        std::fs::read(second.path().join(FOLDER).join("zz-holder.md")).expect("repaired holder"),
+        b"---\ntype: task\nstatus: todo\n---\n[[new]] [[abcdefghij]] [[zz-target#Important Heading]] #draft\n",
     );
 }
 

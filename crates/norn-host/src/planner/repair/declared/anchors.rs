@@ -412,6 +412,12 @@ mod tests {
         );
         assert!(planned.operations.is_empty());
         assert_eq!(planned.skipped[0].reason, SkipReason::Tie);
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some(
+                "closest heading `Important Heading` scores 0.80 by trigram Jaccard, cutoff 0.50; closest heading `Important Heading` scores 0.80 by trigram Jaccard, cutoff 0.50"
+            ),
+        );
         let Some(SkippedCandidates::Values { head, .. }) = &planned.skipped[0].candidates else {
             panic!("heading candidates");
         };
