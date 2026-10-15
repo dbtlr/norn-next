@@ -77,6 +77,8 @@
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
 use std::cell::Cell;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
@@ -539,12 +541,14 @@ impl Snapshot {
     /// a statement would otherwise reach around it with.
     ///
     /// **Private to this module, on purpose.** A statement run here and not
-    /// through [`Snapshot::run_statement_staged`] escapes
+    /// through [`Snapshot::run_statement_staged`] or
+    /// [`Snapshot::run_statements_merged`] escapes
     /// [`Snapshot::counters`] — a read's cost would no longer be what
     /// [`Snapshot::count_statement`] and [`Snapshot::count_steps`] counted —
     /// so nothing outside this file reaches it: every read builder runs its
     /// statements through [`Snapshot::run_statement`] or
-    /// [`Snapshot::run_statement_staged`], which count as they run, and
+    /// [`Snapshot::run_statement_staged`] or [`Snapshot::run_statements_merged`],
+    /// which count as they run, and
     /// [`Snapshot::explained`] reaches [`Snapshot::database`] to explain a
     /// statement already run rather than to run one. The application-defined
     /// functions a statement calls are registered on this connection when its
@@ -613,8 +617,7 @@ impl Snapshot {
     /// Run `ran`, counted on this snapshot and recorded at the end of `record`
     /// before it is prepared, and read each row it answers through `read`.
     ///
-    /// Every statement a read runs is run here, and what is prepared is the
-    /// text the record holds, bound to the values it holds:
+    /// What is prepared is the text the record holds, bound to the values it holds:
     /// [`Snapshot::explained`] explains the record, so the plan of a
     /// statement is the plan of what ran. Once every row is read, or the
     /// stepping failed, the record takes what SQLite counted stepping it
@@ -633,11 +636,9 @@ impl Snapshot {
     /// failed before it was stepped — preparing its text or binding its
     /// values — or while it was stepped.
     ///
-    /// **This, and no other function, prepares and steps a statement on this
-    /// snapshot's connection.** It is the one place [`Snapshot::connection`]
-    /// is reached to run something rather than to explain or establish, so
-    /// every statement a read runs is counted here and nowhere else can run
-    /// one uncounted.
+    /// **This and [`Snapshot::run_statements_merged`] are the only functions
+    /// that prepare and step statements on this snapshot's connection.**
+    /// Both count every statement they run, so none can run uncounted.
     pub(crate) fn run_statement_staged<T>(
         &self,
         record: &mut Vec<Ran>,
@@ -658,6 +659,55 @@ impl Snapshot {
         ran.stepped = Stepped::of(&statement);
         self.count_steps(ran.stepped);
         rows.map_err(StatementFailure::Stepping)
+    }
+
+    /// Merge path-only streams in answer order, retaining one head per stream.
+    ///
+    /// Every statement is counted and recorded before preparation. Counters
+    /// are collected for all streams after exhaustion or the first failure.
+    pub(crate) fn run_statements_merged(
+        &self,
+        record: &mut Vec<Ran>,
+        runs: impl IntoIterator<Item = Ran>,
+        mut read: impl FnMut(String),
+    ) -> rusqlite::Result<()> {
+        let start = record.len();
+        let mut statements = Vec::new();
+        let result = (|| {
+            for ran in runs {
+                self.count_statement();
+                record.push(ran);
+                let ran = record.last().expect("the statement was just recorded");
+                statements.push(self.connection().prepare(ran.sql())?);
+            }
+            let mut streams = statements
+                .iter_mut()
+                .zip(&record[start..])
+                .map(|(statement, ran)| statement.query(params_from_iter(ran.values().iter())))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut heads = BinaryHeap::new();
+            for (at, stream) in streams.iter_mut().enumerate() {
+                if let Some(row) = stream.next()? {
+                    let path: String = row.get(0)?;
+                    heads.push(Reverse((crate::read::answer_place(&path), at)));
+                }
+            }
+            while let Some(Reverse(((_, path), at))) = heads.pop() {
+                read(path);
+                if let Some(row) = streams[at].next()? {
+                    let path: String = row.get(0)?;
+                    heads.push(Reverse((crate::read::answer_place(&path), at)));
+                }
+            }
+            Ok(())
+        })();
+        for (ran, statement) in record[start..].iter_mut().zip(&statements) {
+            ran.stepped = Stepped::of(statement);
+        }
+        for ran in &record[start..] {
+            self.count_steps(ran.stepped);
+        }
+        result
     }
 
     /// Run one yes-or-no probe, which answers exactly one row.

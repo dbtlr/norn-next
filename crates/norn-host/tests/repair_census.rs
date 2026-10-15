@@ -524,12 +524,12 @@ fn advisory_statement(sql: &str) -> Option<RepairAdvisoryStatement> {
     }
     if sql.starts_with(
         "SELECT path, container FROM document_fields INDEXED BY document_fields_presence",
-    ) {
-        return Some(if sql.split(" UNION ALL ").count() == 3 {
-            RepairAdvisoryStatement::FieldPresence
-        } else {
-            RepairAdvisoryStatement::SpellingPresence
-        });
+    ) && sql.split(" UNION ALL ").count() == 3
+    {
+        return Some(RepairAdvisoryStatement::FieldPresence);
+    }
+    if sql.starts_with("SELECT path FROM document_fields INDEXED BY document_fields_presence") {
+        return Some(RepairAdvisoryStatement::SpellingPresence);
     }
     None
 }

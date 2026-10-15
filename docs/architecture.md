@@ -821,9 +821,10 @@ link through an out-of-band move.
 
 The repair advisory reads name five statement shapes: the first and the next distinct
 key, seeks of `document_fields_presence` from a key bound; one key's value types, a seek
-of `document_fields_value_type` at the key; and one key's containers and a
-near-duplicate group's documents, each a merge in path order of three container seeks
-of `document_fields_presence` for every key it reads. Each carries a plan bar against a
+of `document_fields_value_type` at the key; and one key's containers, an ordered merge
+of three container seeks of `document_fields_presence`. A near-duplicate group's
+documents use one such ordered merge per spelling, merged in path order on the host
+so no statement grows with the group. Each carries a plan bar against a
 full scan of `document_fields` and a temporary B-tree, naming the index it searches, and
 the repair census holds every statement an unnarrowed `Host::repair` runs to its bar. A
 rule's first match runs find's own statements.
