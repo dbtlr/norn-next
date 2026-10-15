@@ -2823,229 +2823,214 @@ sequenceDiagram
   S-->>C: HTTP response
 ```
 
-A write verb compiles to a plan of its operations, one per change or edit it names, and
-enters the one `apply` path: `Host::set` (frontmatter changes to a path or a `where`
-target), `Host::edit` (section, body and text edits to one document),
-`Host::new_document` (a document created at a path, its folders made, or by a
-creation rule or into the inbox, which compiles to a `create_by_rule`),
-`Host::move_path` (`move`: a document or every document a folder holds, with the link
-cascade that follows), `Host::delete` (one document, the links naming it forbidden,
-rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming one
-document, or every broken one naming one place, retargeted to another) each compile
-their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
-and report, so a verb previews and applies exactly as its operations sent as a plan do.
-`Host::repair` is the one write verb that plans from findings rather than from a request's
-own changes, described below.
-`Host::init` writes a starter schema for a registered vault that declares none, through
-the same seam: a registration naming a `schema_source`, inside the vault or out, is answered
-`schema_elsewhere` with the source and nothing planned, and a schema standing at
-`.norn/schema.yaml` is answered `already_set_up`, both before the vault's fields are read.
-Otherwise the starter — `version: 1` and one comment per field the vault's documents carry,
-with how many carry it and the shapes its values take, read through the describe and count
-builders in process on one held snapshot — is previewed as one `write_control_file`. The
+A write verb compiles to a plan of its operations, one per change or edit it names, and enters
+the one `apply` path: `Host::set` (frontmatter changes to a path or a `where` target),
+`Host::edit` (section, body and text edits to one document), `Host::new_document` (a document
+created at a path, its folders made, or by a creation rule or into the inbox, which compiles to
+a `create_by_rule`), `Host::move_path` (`move`: a document or every document a folder holds,
+with the link cascade that follows), `Host::delete` (one document, the links naming it
+forbidden, rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming one
+document, or every broken one naming one place, retargeted to another) each compile their
+request to an authored plan and answer through `Host::apply`, with the same `PendingApply` and
+report, so a verb previews and applies exactly as its operations sent as a plan do.
+`Host::repair` is the one write verb that plans from findings rather than from a request's own
+changes, described below. `Host::init` writes a starter schema for a registered vault that
+declares none, through the same seam: a registration naming a `schema_source`, inside the vault
+or out, is answered `schema_elsewhere` with the source and nothing planned, and a schema
+standing at `.norn/schema.yaml` is answered `already_set_up`, both before the vault's fields
+are read. Otherwise the starter — `version: 1` and one comment per field the vault's documents
+carry, with how many carry it and the shapes its values take, read through the describe and
+count builders in process on one held snapshot — is previewed as one `write_control_file`. The
 starter is a pure function of the observed keys, so two previews of an unchanged vault write
 the same bytes. An apply takes no preview from its caller: within the one call it plans the
 starter afresh and sends its own resolved plan to the applier, so a schema another writer
 creates between that planning and the apply refuses it by create exclusivity, and `init`
 answers `already_set_up` rather than a fresh plan that would replace that schema. Once the
-write lands, `init` reloads the vault as `vault reload` does, since the watcher's
-control-file facts are discarded and init is the caller's explicit act on the schema; a
-reload that refuses is answered beside the landing, so the caller still learns the write
-landed. The starter declares nothing, so the findings after the reload are those the vault
-holds under the empty declaration; where a served schema was deleted while attached, init's
-reload is what activates that deletion, and the deleted schema's findings go. Init costs
-every page of the describe builder's observed-field facets plus one count per observed key,
-on one held snapshot, and then the reload's re-pin: the starter's fingerprint is not the
-empty schema's, so the schema-keyed rows are discarded and the whole vault is walked again.
-Unlike the other write verbs, `Host::init` answers synchronously rather than with a
-`PendingApply`, and a vault whose standing schema cannot be read answers the entry's
-untrusted refusal.
-**`repair` plans a batch of findings into one resolved plan.** `Host::repair` reads the
-next batch of the findings its request selects — validate's predicates, kinds, severity and
-rule — as whole documents in path order (the builder's repair batch), under one read hold.
-`limit` is a soft target, and a batch is never cut inside a document, so the limit bounds
-neither the findings a batch consumes nor its plan. Two batch parameters are declared beside
-it: the selected findings of the batch's boundary document, which the batch carries whole, so
-one document holding more than the host's page ceiling makes a batch past that ceiling; and
-the provenance block's bytes, which grow with the decision data of the findings it skips. A
-route is priced as a move is, by the links its cascade touches. The same hold plans the
-batch's findings into operations, resolves them on its snapshot as a preview does, and
-judges the resolved plan by the applier's own preview judgment, once: a preview answers
-that judgment on the hold, as a preview of the same resolved plan sent to `Host::apply`
-answers it, and an apply gives the hold back and enters `Host::apply` with the resolved
-plan, so the applier judges and writes a repair as it does any plan and is not told it is
-one. A
-selected finding has a declared fix where a rule the composed document's judgment cites
-declares one for it. A `field/required-missing` finding fills from the default the rules
+write lands, `init` reloads the vault as `vault reload` does, since the watcher's control-file
+facts are discarded and init is the caller's explicit act on the schema; a reload that refuses
+is answered beside the landing, so the caller still learns the write landed. The starter
+declares nothing, so the findings after the reload are those the vault holds under the empty
+declaration; where a served schema was deleted while attached, init's reload is what activates
+that deletion, and the deleted schema's findings go. Init costs every page of the describe
+builder's observed-field facets plus one count per observed key, on one held snapshot, and then
+the reload's re-pin: the starter's fingerprint is not the empty schema's, so the schema-keyed
+rows are discarded and the whole vault is walked again. Unlike the other write verbs,
+`Host::init` answers synchronously rather than with a `PendingApply`, and a vault whose
+standing schema cannot be read answers the entry's untrusted refusal. **`repair` plans a batch
+of findings into one resolved plan.** `Host::repair` reads the next batch of the findings its
+request selects — validate's predicates, kinds, severity and rule — as whole documents in path
+order (the builder's repair batch), under one read hold. `limit` is a soft target, and a batch
+is never cut inside a document, so the limit bounds neither the findings a batch consumes nor
+its plan. Two batch parameters are declared beside it: the selected findings of the batch's
+boundary document, which the batch carries whole, so one document holding more than the host's
+page ceiling makes a batch past that ceiling; and the provenance block's bytes, which grow with
+the decision data of the findings it skips. A route is priced as a move is, by the links its
+cascade touches. The same hold plans the batch's findings into operations, resolves them on its
+snapshot as a preview does, and judges the resolved plan by the applier's own preview judgment,
+once: a preview answers that judgment on the hold, as a preview of the same resolved plan sent
+to `Host::apply` answers it, and an apply gives the hold back and enters `Host::apply` with the
+resolved plan, so the applier judges and writes a repair as it does any plan and is not told it
+is one. A selected finding has a declared fix where a rule the composed document's judgment
+cites declares one for it. A `field/required-missing` finding fills from the default the rules
 requiring the field declare, filled from the rule's own captures and the plan's one clock
 reading: one `set_frontmatter`. Candidates agree only as one written value, and a repair fills
 that one field and cascades no default. A `field/not-one-of` finding is replaced by the member
-a rule's synonym maps its offending value to, compared by the field's typed equality, and written as the schema wrote the member: rules whose members agree by that equality but are spelled differently write the member as the first of them in rule name order spells it; a list
+a rule's synonym maps its offending value to, compared by the field's typed equality, and
+written as the schema wrote the member: rules whose members agree by that equality but are
+spelled differently write the member as the first of them in rule name order spells it; a list
 field's offending elements are fixed one by one into one `set_frontmatter` of the whole list,
 each replacing every occurrence of its value, and an element whose fix is skipped stands. A
-`field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter`
-of the new field to the old one's whole value, then a `remove_frontmatter` of the old field
-requiring it) as a rule declares. Each operation is numbered
-`repair-1`, `repair-2` and on in plan order and cited at the confidence of its fix with the
-findings it fixes, and one writing a clock-filled value notes that it is the repair's time.
-**Derived fixes are built-in answers provably unique from the document, the declaration
-and the vault, made at the `derived` confidence.** A `field/shape-mismatch` finding is wrapped or
-unwrapped: a field declared a list holding a scalar is set to the one-item list of that
-scalar, its YAML type kept, and a field declared single holding a one-item list is set to its
-item; a list of any other length under single has no derived fix. A `field/type-mismatch`
-finding on a `boolean` field, for an element that is a string whose trimmed text lower-cases
-to exactly `true` or `false`, is written as the YAML boolean. A `field/not-one-of` finding on
-a field whose values compare as text, every element it names a string (a YAML boolean or
-number is never re-typed), is replaced by the one member of the combined closed set that
-folds equal to the offending value, a fold being Unicode lower case, the ends trimmed and
-each internal run of white space collapsed to one space: members that fold equal tie, and a
-word join or split (`inprogress` for `in progress`) is not a fold. A fold never re-cases a
-wikilink, with no guard needed: a closed set holds no wikilink (the schema refuses one at
-load), and the fold keeps whether a text holds one, so a value that folds equal to a member
-holds none. A list's boolean or
-closed-set elements are fixed one by one into the same single `set_frontmatter` of the whole
-list as its synonyms are. Every derived fix is composed and judged on the composed state as a
-declared one is, so a wrap that brings in required fields is `brings_in_required_fields`.
-A plain wrap or unwrap the judge admits stands alone. **A wrap or unwrap the judge refuses
-follows one composition table.** The composed value is always built with the field's own
-element fixes for the violations the reshape exposes — boolean case, a closed-set synonym,
-fold or closest member, or a bare value made a link — and judged afresh as one
-`set_frontmatter` from the state the shape fix composes onto, whatever refused the plain
-reshape. A composed value the judge admits is the fix: it cites the shape finding at the
-weaker confidence of the shape and every element fix, carrying the element fixes' notes,
-and one below the threshold is `below_threshold` with the combined operation as `proposed`.
-A composed value the judge refuses, or one that cannot be built because an exposed element
-has no answer or its fix skips, reports the first reason that applies:
-`brings_in_required_fields` where the change brings in required fields, naming those its
-own value brings in; then `judge_would_refuse`
-where it introduces any violation beyond its exposed elements' findings, a refused composed
-value carried as the candidate; then the exposed element's own skip with its reason and
-decision data — `ambiguous_link` with its documents, `no_declared_fix` with its note where it
-has one, a tie with its candidates, or an excluded class with its note. Where the composed
-value cannot be built, the change those reasons are read from is the plain reshape. The skip
-keeps the shape finding's id and value. A composed value the respell veto refuses is
-`judge_would_refuse`, and a reshape whose exposed element cannot be matched in the reshaped
-value keeps the plain reshape's refusal. An exposed link-field type mismatch
-composes in the link phase with its respell veto, after the batch's routes settle; a plain
-link wrap or unwrap the judge admits keeps its place in finding order.
+`field/forbidden` finding is removed (`remove_frontmatter`) or renamed (a `set_frontmatter` of
+the new field to the old one's whole value, then a `remove_frontmatter` of the old field
+requiring it) as a rule declares. Each operation is numbered `repair-1`, `repair-2` and on in
+plan order and cited at the confidence of its fix with the findings it fixes, and one writing a
+clock-filled value notes that it is the repair's time. **Derived fixes are built-in answers
+provably unique from the document, the declaration and the vault, made at the `derived`
+confidence.** A `field/shape-mismatch` finding is wrapped or unwrapped: a field declared a list
+holding a scalar is set to the one-item list of that scalar, its YAML type kept, and a field
+declared single holding a one-item list is set to its item; a list of any other length under
+single has no derived fix. A `field/type-mismatch` finding on a `boolean` field, for an element
+that is a string whose trimmed text lower-cases to exactly `true` or `false`, is written as the
+YAML boolean. A `field/not-one-of` finding on a field whose values compare as text, every
+element it names a string (a YAML boolean or number is never re-typed), is replaced by the one
+member of the combined closed set that folds equal to the offending value, a fold being Unicode
+lower case, the ends trimmed and each internal run of white space collapsed to one space:
+members that fold equal tie, and a word join or split (`inprogress` for `in progress`) is not a
+fold. A fold never re-cases a wikilink, with no guard needed: a closed set holds no wikilink
+(the schema refuses one at load), and the fold keeps whether a text holds one, so a value that
+folds equal to a member holds none. A list's boolean or closed-set elements are fixed one by
+one into the same single `set_frontmatter` of the whole list as its synonyms are. Every derived
+fix is composed and judged on the composed state as a declared one is, so a wrap that brings in
+required fields is `brings_in_required_fields`. A plain wrap or unwrap the judge admits stands
+alone. **A wrap or unwrap the judge refuses follows one composition table.** The composed value
+is always built with the field's own element fixes for the violations the reshape exposes —
+boolean case, a closed-set synonym, fold or closest member, or a bare value made a link — and
+judged afresh as one `set_frontmatter` from the state the shape fix composes onto, whatever
+refused the plain reshape. A composed value the judge admits is the fix: it cites the shape
+finding at the weaker confidence of the shape and every element fix, carrying the element
+fixes' notes, and one below the threshold is `below_threshold` with the combined operation as
+`proposed`. A composed value the judge refuses, or one that cannot be built because an exposed
+element has no answer or its fix skips, reports the first reason that applies:
+`brings_in_required_fields` where the change brings in required fields, naming those its own
+value brings in; then `judge_would_refuse` where it introduces any violation beyond its exposed
+elements' findings, a refused composed value carried as the candidate; then the exposed
+element's own skip with its reason and decision data — `ambiguous_link` with its documents,
+`no_declared_fix` with its note where it has one, a tie with its candidates, or an excluded
+class with its note. Where the composed value cannot be built, the change those reasons are
+read from is the plain reshape. The skip keeps the shape finding's id and value. A composed
+value the respell veto refuses is `judge_would_refuse`, and a reshape whose exposed element
+cannot be matched in the reshaped value keeps the plain reshape's refusal. An exposed
+link-field type mismatch composes in the link phase with its respell veto, after the batch's
+routes settle; a plain link wrap or unwrap the judge admits keeps its place in finding order.
 **Four deterministic families propose at `suggested` confidence.** The broken-link similarity
 suggestion is stated with move-following below; the other three are these. A missing heading
-anchor on a link resolving to one document takes the unique best heading at Jaccard score
-at least 0.50 over padded trigrams, comparing the anchor as the link reads it and heading
-text under the shared NFC and lowercase fold; duplicate best texts tie. A Markdown
-anchor is scored percent-decoded and rewritten by its exact written fragment. Indexed
-headings are read by one document range seek, without its body, and `rewrite_anchor`
-writes heading text for a wikilink or the stored slug for a Markdown link, an anchor-only
-link naming its own holder included. The operation carries an author `content_hash`
-condition on the target with the snapshot's recorded hash, so changing that heading refuses
-apply and the fresh plan keeps the evidence on the unresolved operation.
-Block references and headings
-whose syntax's written form is empty or starts with `^` have no such suggestion. A target
-whose body the batch changes with `rewrite_tag`, its holder included, is not scored from
-its snapshot headings; a below-threshold tag proposal excludes it too. Each holder matches
-anchor rows through one map of written targets and offsets, reads each distinct target's
-headings once and builds each heading's trigram set once. Anchor edits pass the ordinary
-judge: introducing required fields skips as `brings_in_required_fields`, before any other
-`judge_would_refuse` refusal.
-A string value of a text-compared `one_of` field with no declared candidate and no derived
-fold match takes the uniquely nearest combined member by optimal string alignment under
-the derived fold plus NFC. A member of n folded characters admits at most max(1, n / 4)
-edits, with integer floor; equal best distances tie. It joins the field's one
-`set_frontmatter`, as derived element replacements do. An undeclared tag takes the unique
-literal declared tag exactly one OSA edit away under the whole-name tag fold, `/` included;
-names below three folded characters take no part, and patterns are not enumerated.
-`rewrite_tag` preserves the occurrence's marker convention and passes the document's
-ordinary judge; introducing required fields skips as `brings_in_required_fields`, before
-any other `judge_would_refuse` refusal. Every suggestion carries its score as
-note text on its citation or below-threshold skip, and below the threshold it carries the
-operation admitting suggestions would write. The read account counts closed-set members
-compared, declared tags compared and heading rows returned; these follow their candidates,
-not the size of the vault. It also counts whole-document suggestion compositions. A
-holder's anchor proposals compose in one name batch, and its tag proposals in another,
-each matching the original document with one parse, one read-back proof and one ordinary
-judgment. Scan refusals belong to their respelling. A refused proof or judgment searches
-halves over the same starting state for individually refused fixes, each taking its own
-reason. The survivors compose again as one batch over that state, so names never chain.
-A refused set with no individual refusal is refused whole with the set's reason. With no
-refusals the whole-document passes are constant. Every tag fix is checked to no longer
-hold its own finding after the composed judgment.
-**The threshold and precedence decide among the fixes of a finding.** Every candidate fix at
-or above the request's threshold (default `derived`, admitting `declared` and `derived`) is
-pooled for a finding and the strongest level present decides. A derived or suggested fix the threshold
-does not admit is skipped as `below_threshold` with the finding's value and `proposed`, the
-operation lowering the threshold writes for it, in preview and apply alike. One composition
-decides it: its document is composed again at the proposed fix's confidence level, where the batch's routes
-as the request's threshold settles them leave it, so each below-threshold element of a list
-proposes the one write of the field every admitted element composes into, and a fix that
-lowered composition refuses skips with the lowered composition's reason; a fix the judge
-refuses where the document stands skips with the judge's reason first. A
-declared fix counts even where it fails the combined constraint or the judge: it blocks the
-derived answer, and the finding skips with every candidate, the derived answer among them. Where a
-declared fix is made and the derived answer differs, the citation notes the derived answer.
-A `field/type-mismatch` finding that no derived fix answers on a `date`, `number` or
-`boolean` field is `excluded_class`, its note naming the class: date reformatting and number
-or yes/no coercion are fixes a repair never makes. Any other unfixed type mismatch is
-`no_declared_fix`.
-**A bare value is made a link where it resolves to one document at the plan's
-after-state.** A `field/type-mismatch` finding on a field declared `link`, for an element
-that is a string such that `[[value]]` reads back as exactly one plain wikilink (non-empty,
-no surrounding white space, no `#` fragment, `|` alias, bracket or line break), every
-element of the field the finding names being a string (a YAML number, boolean or null is
+anchor on a link resolving to one document takes the unique best heading at Jaccard score at
+least 0.50 over padded trigrams, comparing the anchor as the link reads it and heading text
+under the shared NFC and lowercase fold; duplicate best texts tie. A Markdown anchor is scored
+percent-decoded and rewritten by its exact written fragment. Indexed headings are read by one
+document range seek, without its body, and `rewrite_anchor` writes heading text for a wikilink
+or the stored slug for a Markdown link, an anchor-only link naming its own holder included. The
+operation carries an author `content_hash` condition on the target with the snapshot's recorded
+hash, so changing that heading refuses apply and the fresh plan keeps the evidence on the
+unresolved operation. Block references and headings whose syntax's written form is empty or
+starts with `^` have no such suggestion. A target whose body the batch changes with
+`rewrite_tag`, its holder included, is not scored from its snapshot headings; a below-threshold
+tag proposal excludes it too. Each holder matches anchor rows through one map of written
+targets and offsets, reads each distinct target's headings once and builds each heading's
+trigram set once. Anchor edits pass the ordinary judge: introducing required fields skips as
+`brings_in_required_fields`, before any other `judge_would_refuse` refusal. A string value of a
+text-compared `one_of` field with no declared candidate and no derived fold match takes the
+uniquely nearest combined member by optimal string alignment under the derived fold plus NFC. A
+member of n folded characters admits at most max(1, n / 4) edits, with integer floor; equal
+best distances tie. It joins the field's one `set_frontmatter`, as derived element replacements
+do. An undeclared tag takes the unique literal declared tag exactly one OSA edit away under the
+whole-name tag fold, `/` included; names below three folded characters take no part, and
+patterns are not enumerated. `rewrite_tag` preserves the occurrence's marker convention and
+passes the document's ordinary judge; introducing required fields skips as
+`brings_in_required_fields`, before any other `judge_would_refuse` refusal. Every suggestion
+carries its score as note text on its citation or below-threshold skip, and below the threshold
+it carries the operation admitting suggestions would write. The read account counts closed-set
+members compared, declared tags compared and heading rows returned; these follow their
+candidates, not the size of the vault. It also counts whole-document suggestion compositions. A
+holder's anchor proposals compose in one name batch, and its tag proposals in another, each
+matching the original document with one parse, one read-back proof and one ordinary judgment.
+Scan refusals belong to their respelling. A refused proof or judgment searches halves over the
+same starting state for individually refused fixes, each taking its own reason. The survivors
+compose again as one batch over that state, so names never chain. A refused set with no
+individual refusal is refused whole with the set's reason. With no refusals the whole-document
+passes are constant. Every tag fix is checked to no longer hold its own finding after the
+composed judgment. **The threshold and precedence decide among the fixes of a finding.** Every
+candidate fix at or above the request's threshold (default `derived`, admitting `declared` and
+`derived`) is pooled for a finding and the strongest level present decides. A derived or
+suggested fix the threshold does not admit is skipped as `below_threshold` with the finding's
+value and `proposed`, the operation lowering the threshold writes for it, in preview and apply
+alike. One composition decides it: its document is composed again at the proposed fix's
+confidence level, where the batch's routes as the request's threshold settles them leave it, so
+each below-threshold element of a list proposes the one write of the field every admitted
+element composes into, and a fix that lowered composition refuses skips with the lowered
+composition's reason; a fix the judge refuses where the document stands skips with the judge's
+reason first. A declared fix counts even where it fails the combined constraint or the judge:
+it blocks the derived answer, and the finding skips with every candidate, the derived answer
+among them. Where a declared fix is made and the derived answer differs, the citation notes the
+derived answer. A `field/type-mismatch` finding that no derived fix answers on a `date`,
+`number` or `boolean` field is `excluded_class`, its note naming the class: date reformatting
+and number or yes/no coercion are fixes a repair never makes. Any other unfixed type mismatch
+is `no_declared_fix`. **A bare value is made a link where it resolves to one document at the
+plan's after-state.** A `field/type-mismatch` finding on a field declared `link`, for an
+element that is a string such that `[[value]]` reads back as exactly one plain wikilink
+(non-empty, no surrounding white space, no `#` fragment, `|` alias, bracket or line break),
+every element of the field the finding names being a string (a YAML number, boolean or null is
 never linked, nor a string sharing its text, which the finding names with it; a date is a
-string in the value model, so a bare date naming one document, a daily note say, is linked),
-is written as `[[value]]` where that link resolves to exactly one document; any other value
-is `no_declared_fix`, and a repair never respells a value to make it qualify. The answer rests
-on the batch's settled routes (a route moves its target, and a path-qualified address can
-break or gain a competitor), so it is the one exception to finding order: a document's link
-fixes compose last, after its other fixes and at its route's destination, once every route
-of the batch is settled (after the respell check and the destination claims); a link fix
-that would bring its holder under a rule reading by value a link a settled route's cascade
-may respell — a rule selecting by the link it writes, say — is `judge_would_refuse`, its
-note naming the field and the move, and the route stands. Each is
-resolved over the plan the settled routes make, as the moves of that plan, through the one
-index probe the applier makes again of an address resolution, so what the planner records
-is by construction what the applier computes. One document: the link is written, a derived
-fix. Several documents: `ambiguous_link` with the head of the candidates; none:
-`no_declared_fix`, the note saying the link would resolve to no document.
-**An unquoted frontmatter wikilink on a field declared `link` is written as the link it
-spells.** Obsidian's frontmatter link is a quoted string. YAML reads `[[s]]` as `[["s"]]`,
-a one-item list holding a one-string list, and only that exact value is answered where
-`[[s]]` reads as one wikilink spanning the whole text. A non-list link field holding that
-whole value is set to `"[[s]]"`; on a list-shaped link field each element of that value is
-replaced in the one write of the field, leaving its other elements alone. Flow
-`ups: [[[a]], [[b]]]` and block-list items `- [[a]]` both write link strings. On a list-shaped
-link field, any other nested element, including the one-string list `["s"]` in `ups: [[s]]`,
-`ups: [[a], [b]]` or block-list items `- [s]`, stays a finding with `no_declared_fix`.
-This fix answers no field of another type. The fix is derived whether the link resolves to
-one document, several or none, and records that resolution as every written link's is.
-**A fix that writes a link value records what the link resolves to.** For every wikilink a
-fix's `set_frontmatter` writes — a bare value made a link, an unquoted wikilink written as
-its link string, and as well a wrap, an unwrap, a
-default or a rename whose value is, or whose elements are, a wikilink (a closed set holds
-none, so no fold or synonym writes one) —
-the plan records an address resolution condition: the holder at its after-state path, the
-wikilink, the address written, and what it resolves to at the after-state (one document,
-several, or none), one condition per holder and address however many fixes write it. It
-rides the resolved plan in preview and apply alike and is checked at the after-state, so a
-target deleted, or a competitor of the same stem created, between preview and apply refuses
-the plan, and a refused plan's fresh plan carries the condition as recorded. A
-move-following or similarity fix also records the replaced address, so recreating the old target between
-preview and apply refuses the plan. Every link the batch's fixes write is resolved in one
-judgment of the link index over the settled routes, and the heads of those naming several
-in one more, so the cost follows the links written and the routes, never their product,
-and a batch writing no link reads nothing for it.
-**A broken link follows a recorded move where the answer is unique.** A selected
-`link/broken` finding's stored link is read against tombstones: a suffix wikilink by its
-suffix, a relative or rooted Markdown link by the exact path it names from its holder, and a
-`vault://` wikilink by both root paths its name can reduce to. The deaths are pooled,
-distinct by path and in path order, naming at most the first two. Quarantine tombstones are
-excluded, and ambiguity-ignore does not narrow this read. Exactly one tombstone with a
-recorded content hash and exactly one live document holding that hash gives a derived fix.
-No tombstone, or an address to which no read applies, leaves the finding to the similarity
-suggestion below, which keeps `no_declared_fix` where no stem reaches its cutoff. Two
-tombstones, no recorded hash, no live holder or two live holders skip with the
-move-following reasons below. Each read stops at two. The followed document need not lie
-within the repair's selection.
+string in the value model, so a bare date naming one document, a daily note say, is linked), is
+written as `[[value]]` where that link resolves to exactly one document; any other value is
+`no_declared_fix`, and a repair never respells a value to make it qualify. The answer rests on
+the batch's settled routes (a route moves its target, and a path-qualified address can break or
+gain a competitor), so it is the one exception to finding order: a document's link fixes
+compose last, after its other fixes and at its route's destination, once every route of the
+batch is settled (after the respell check and the destination claims); a link fix that would
+bring its holder under a rule reading by value a link a settled route's cascade may respell — a
+rule selecting by the link it writes, say — is `judge_would_refuse`, its note naming the field
+and the move, and the route stands. Each is resolved over the plan the settled routes make, as
+the moves of that plan, through the one index probe the applier makes again of an address
+resolution, so what the planner records is by construction what the applier computes. One
+document: the link is written, a derived fix. Several documents: `ambiguous_link` with the head
+of the candidates; none: `no_declared_fix`, the note saying the link would resolve to no
+document. **An unquoted frontmatter wikilink on a field declared `link` is written as the link
+it spells.** Obsidian's frontmatter link is a quoted string. YAML reads `[[s]]` as `[["s"]]`, a
+one-item list holding a one-string list, and only that exact value is answered where `[[s]]`
+reads as one wikilink spanning the whole text. A non-list link field holding that whole value
+is set to `"[[s]]"`; on a list-shaped link field each element of that value is replaced in the
+one write of the field, leaving its other elements alone. Flow `ups: [[[a]], [[b]]]` and
+block-list items `- [[a]]` both write link strings. On a list-shaped link field, any other
+nested element, including the one-string list `["s"]` in `ups: [[s]]`, `ups: [[a], [b]]` or
+block-list items `- [s]`, stays a finding with `no_declared_fix`. This fix answers no field of
+another type. The fix is derived whether the link resolves to one document, several or none,
+and records that resolution as every written link's is. **A fix that writes a link value
+records what the link resolves to.** For every wikilink a fix's `set_frontmatter` writes — a
+bare value made a link, an unquoted wikilink written as its link string, and as well a wrap, an
+unwrap, a default or a rename whose value is, or whose elements are, a wikilink (a closed set
+holds none, so no fold or synonym writes one) — the plan records an address resolution
+condition: the holder at its after-state path, the wikilink, the address written, and what it
+resolves to at the after-state (one document, several, or none), one condition per holder and
+address however many fixes write it. It rides the resolved plan in preview and apply alike and
+is checked at the after-state, so a target deleted, or a competitor of the same stem created,
+between preview and apply refuses the plan, and a refused plan's fresh plan carries the
+condition as recorded. A move-following or similarity fix also records the replaced address, so
+recreating the old target between preview and apply refuses the plan. Every link the batch's
+fixes write is resolved in one judgment of the link index over the settled routes, and the
+heads of those naming several in one more, so the cost follows the links written and the
+routes, never their product, and a batch writing no link reads nothing for it. **A broken link
+follows a recorded move where the answer is unique.** A selected `link/broken` finding's stored
+link is read against tombstones: a suffix wikilink by its suffix, a relative or rooted Markdown
+link by the exact path it names from its holder, and a `vault://` wikilink by both root paths
+its name can reduce to. The deaths are pooled, distinct by path and in path order, naming at
+most the first two. Quarantine tombstones are excluded, and ambiguity-ignore does not narrow
+this read. Exactly one tombstone with a recorded content hash and exactly one live document
+holding that hash gives a derived fix. No tombstone, or an address to which no read applies,
+leaves the finding to the similarity suggestion below, which keeps `no_declared_fix` where no
+stem reaches its cutoff. Two tombstones, no recorded hash, no live holder or two live holders
+skip with the move-following reasons below. Each read stops at two. The followed document need
+not lie within the repair's selection.
 
 The fix is one `rewrite_link` per holder, syntax and old address, citing every selected
 broken finding it answers at `derived`. It respells every matching link, preserving the
@@ -3075,17 +3060,17 @@ where the hash changed.
 norn move whose cascade rewrote the moved document's own links changed its hash, so no live
 document may hold the tombstone's recorded bytes; that follow skips as `no_holder`.
 
-**A broken link without a tombstone suggests its most similar leaf stem.** The query
-removes the protocol prefix, takes the last `/` segment, percent-decodes it for Markdown
-and drops the document extension in any ASCII case. A segment whose decoding fails stays as written.
-The stored address already excludes the anchor. Similarity folds stems to NFC and applies
-per-character lowercase, then takes distinct trigrams padded with two leading spaces and
-one trailing space. The fold is only a suggestion's, never a resolution rule
-([ADR 0039](decisions/0039-an-unquoted-frontmatter-wikilink-is-the-link-it-spells.md)).
-Jaccard is the shared trigram count divided by the union count, with a fixed cutoff of
-0.5. Scores are compared exactly by integer cross-multiplication. A candidate below the
-cutoff is never proposed. A query needs at least three folded Unicode scalars; shorter
-queries skip `too_short` without reading the index.
+**A broken link without a tombstone suggests its most similar leaf stem.** The query removes
+the protocol prefix, takes the last `/` segment, percent-decodes it for Markdown and drops the
+document extension in any ASCII case. A segment whose decoding fails stays as written. The
+stored address already excludes the anchor. Similarity folds stems to NFC and applies
+per-character lowercase, then takes distinct trigrams padded with two leading spaces and one
+trailing space. The fold is only a suggestion's, never a resolution rule ([ADR
+0039](decisions/0039-an-unquoted-frontmatter-wikilink-is-the-link-it-spells.md)). Jaccard is
+the shared trigram count divided by the union count, with a fixed cutoff of 0.5. Scores are
+compared exactly by integer cross-multiplication. A candidate below the cutoff is never
+proposed. A query needs at least three folded Unicode scalars; shorter queries skip `too_short`
+without reading the index.
 
 For T query trigrams, k = ceil(T/2) is the least shared count implied by the cutoff.
 The read probes every trigram's rarity with at most cap+1 rows, then reads full postings
@@ -3108,206 +3093,194 @@ score. A route of the batch moves a candidate's spelling toward where it lands.
 Both written and replaced addresses carry the same conditions as a follow; the suggestion
 carries no content-hash author condition on its candidate.
 
-Move-following outranks similarity: a unique follow never consults it, even where
-composition later skips that follow. Similarity reads only for a broken link whose address
-finds no tombstone. A quarantine tombstone is not read, so it counts as none. A tombstone
-is knowledge that the target was deleted, so `several_tombstones`, `no_recorded_hash`,
-`no_holder` or `several_holders` stands with its move-following note alone, and the link
-stays broken. A later repair without that tombstone may suggest a similar target. With no tombstone, a
-similarity skip stands on its own.
+Move-following outranks similarity: a unique follow never consults it, even where composition
+later skips that follow. A tombstone is knowledge that the target was deleted, so
+`several_tombstones`, `no_recorded_hash`, `no_holder` or `several_holders` stands with its
+move-following note alone, and the link stays broken. A later repair without that tombstone may
+suggest a similar target. With no tombstone, a similarity skip stands on its own.
 
-**A `document/misplaced` finding is moved along its rules' route.** The placement rules
-its finding cites each propose their `allowed_paths` route, filled as a default is — the
-rule's own captures where the document stands and the plan's one clock reading — with the
-document's file name after it, as a document made there is spelled, each folder above it
-that stands spelled as its parent lists it. Candidates agree as one place under the root's
-case rule. The route composes first: one `move_document`, judged where the document lands by
-the applier's one judge against its before-state, so `match.path`, `exclude.path` and
-`allowed_paths` read the destination; then the document's other fixes compose after it
-there, addressed at the destination, so a route out of a rule's area drops that rule's
-selected findings. The document's fixes are composed where it stands too, and a route
-skipped later leaves the document with those. A misplaced finding no rule its row's rule set
-cites routes is `no_declared_fix`, decided from the batch's rule sets, so the document is
-not read for it. **A route's link cascade is judged by construction.** The move carries the
-cascade the one planner generates for any move, written by the plan's one resolution: every
-link the text layer can respell is rewritten, and every other is listed on the forecast with
-the reason a Layer 4 move's forecast gives it, so an unrespellable link never holds a route
-back. That holds however many links a route leaves broken: a holder whose frontmatter block
-stands near the 16 KiB bound the text layer reads may take only some of its respellings
-before the block would pass the bound, and every link past that point is left as written,
-broken once its document moves, and advised on — a repair moving 888 documents a hub lists in
-a frontmatter block that close to the bound respells 22 of its links and leaves 866 broken. The cascade rewrites documents no judgment of the moved document sees, but the schema
-judge reads a document's path, its frontmatter and its body's tags, a body link's rewrite
-never changes a tag (the text layer proves each rewrite by reading it back), and a
-frontmatter Markdown link is no link; so a cascade changes a judgment only where it
-respells a frontmatter wikilink in a field a rule reads by value — a `match.frontmatter`
-key of any rule, the tags field, a field declared a type other than text or link, or a
-field whose combined constraint holds a closed set, a length limit or a forbiddance, or on
-which a finding stands, at any state its holder may end in: its before-state, its fixes
-composed where it stands, and its route and fixes composed where that route lands. A
-frontmatter wikilink may be respelled where it resolves before the plan to exactly a routed
-document and is not a bare single-segment stem, which keeps naming the document since a
-route keeps its file name, unless a route of the batch carries a document of that stem
-across the ambiguity-ignore set, as the store's own rule reads it; and where the text layer
-can place it, since a link with no bytes a rewrite can write over is left as written by
-every cascade. A placed link for which no spelling of the destination reads back still
-counts as one that may be respelled, which keeps the check local. A route whose cascade may so respell a link is skipped as
-`respells_a_judged_link`, naming the holder and the field; no other route's cascade is
-judged in planning. The batch's routes are read together, through one batched read of the
-resolution door over an overlay of every route and the routed documents' own frontmatter
-links probed beside the links the store holds, and each holder of such a link read and
-judged once, so the check costs the links under the routed documents' keys and is the same
-whatever order the routes are made in. That cost, and the plan's one resolution's, rests on
-the resolution door reading what each key could name once per judgment, however many links
+**A `document/misplaced` finding is moved along its rules' route.** The placement rules its
+finding cites each propose their `allowed_paths` route, filled as a default is — the rule's own
+captures where the document stands and the plan's one clock reading — with the document's file
+name after it, as a document made there is spelled, each folder above it that stands spelled as
+its parent lists it. Candidates agree as one place under the root's case rule. The route
+composes first: one `move_document`, judged where the document lands by the applier's one judge
+against its before-state, so `match.path`, `exclude.path` and `allowed_paths` read the
+destination; then the document's other fixes compose after it there, addressed at the
+destination, so a route out of a rule's area drops that rule's selected findings. The
+document's fixes are composed where it stands too, and a route skipped later leaves the
+document with those. A misplaced finding no rule its row's rule set cites routes is
+`no_declared_fix`, decided from the batch's rule sets, so the document is not read for it. **A
+route's link cascade is judged by construction.** The move carries the cascade the one planner
+generates for any move, written by the plan's one resolution: every link the text layer can
+respell is rewritten, and every other is listed on the forecast with the reason a Layer 4
+move's forecast gives it, so an unrespellable link never holds a route back. That holds however
+many links a route leaves broken: a holder whose frontmatter block stands near the 16 KiB bound
+the text layer reads may take only some of its respellings before the block would pass the
+bound, and every link past that point is left as written, broken once its document moves, and
+advised on — a repair moving 888 documents a hub lists in a frontmatter block that close to the
+bound respells 22 of its links and leaves 866 broken. The cascade rewrites documents no
+judgment of the moved document sees, but the schema judge reads a document's path, its
+frontmatter and its body's tags, a body link's rewrite never changes a tag (the text layer
+proves each rewrite by reading it back), and a frontmatter Markdown link is no link; so a
+cascade changes a judgment only where it respells a frontmatter wikilink in a field a rule
+reads by value — a `match.frontmatter` key of any rule, the tags field, a field declared a type
+other than text or link, or a field whose combined constraint holds a closed set, a length
+limit or a forbiddance, or on which a finding stands, at any state its holder may end in: its
+before-state, its fixes composed where it stands, and its route and fixes composed where that
+route lands. A frontmatter wikilink may be respelled where it resolves before the plan to
+exactly a routed document and is not a bare single-segment stem, which keeps naming the
+document since a route keeps its file name, unless a route of the batch carries a document of
+that stem across the ambiguity-ignore set, as the store's own rule reads it; and where the text
+layer can place it, since a link with no bytes a rewrite can write over is left as written by
+every cascade. A placed link for which no spelling of the destination reads back still counts
+as one that may be respelled, which keeps the check local. A route whose cascade may so respell
+a link is skipped as `respells_a_judged_link`, naming the holder and the field; no other
+route's cascade is judged in planning. The batch's routes are read together, through one
+batched read of the resolution door over an overlay of every route and the routed documents'
+own frontmatter links probed beside the links the store holds, and each holder of such a link
+read and judged once, so the check costs the links under the routed documents' keys and is the
+same whatever order the routes are made in. That cost, and the plan's one resolution's, rests
+on the resolution door reading what each key could name once per judgment, however many links
 hold the key and however they interleave with other keys' links, and on each chunk of links
 paying upkeep for its own keys only, never for the keys the overlay names (below). So routes
 cost what their links touch: where their documents share one class — a stem, a dotted stem,
-links written with the extension — not the class once per link, and where each names a class
-of its own, not every route's keys once per chunk. Destinations are then claimed in batch order: a
+links written with the extension — not the class once per link, and where each names a class of
+its own, not every route's keys once per chunk. Destinations are then claimed in batch order: a
 destination something stands at — a document a route of the batch moves away included — or
 beneath a document that stands, or at, above or beneath an earlier route's destination, is
-`destination_taken`; a skipped route claims none. **The resolved plan is held to its
-planning's claims.** What the planning claims of every selected finding its document's
-judgment names — fixed, dropped, or still standing where the document ends — is compared
-with the applier's judgment of the resolved plan, cascades and all; a plan that introduces
-a violation, still holds a finding an operation cites or the planning dropped, or no longer
-holds one it left standing on a document it writes, is refused as `vault/plan-refused`
-with a note naming the repair defect. A judgment another check stops first — drift since
-planning, a failed condition, a vault that does not read — answers as the applier answers
-it, and so does a plan the schema passed that the write kernel's judgment of its targets
-then stops, or whose forecast does not read: the judgment is held to the claims only beside
-the preview it completes. A document's field fixes compose in finding order (link fixes
-last) — kind, field, offending value — onto the bytes the earlier ones left, each judged
-there by the applier's own schema check, the one judge, against the document's before-state,
-judged once, and against the state it composes onto, whose judgment is the previous fix's
-own. Tag fixes follow as one name batch, and anchor fixes compose last over the settled
-routes as another; refused sets are halved as above. A fix the applier would refuse, or
-one bringing back a violation an earlier fix took away, is skipped and the next composes
-without it, and a fix after which the document still holds its finding is no fix. Every
-selected finding the judgment of a document's bytes concludes — a rule's, an undeclared
-tag, one about the document whole — is decided against
-the composed document at the end: one it no longer holds is dropped, neither fixed nor
-skipped, so a fix taking a document out of a rule's area drops that rule's selected findings
-and a removal taking a tag with it drops the tag's. A link finding is no conclusion of that
-judgment. A missing-anchor finding the closest-heading suggestion fixes is cited instead
-of skipped; planning skips the other link findings it does not follow from their rows, and
-the resolved plan settles only those left skipped after the whole resolution: the batch hands
-back, with each skipped link finding, the family, address and
-frontmatter field of the link at the finding's ordinal in its holder (read beside the finding
-by two index seeks, no statement of its own), and the finding is dropped where the plan's resolution change set —
-keyed at the after-state, the holder as the batch's routes leave it and the address as an authored rewrite or
-cascade respells it — shows that link no longer holds it: a broken link that now resolves,
-an ambiguous link that now names one document or none, a missing-anchor link that now names
-none or several. A link with no entry in that set keeps its finding unless a declared
-forbidden removal deletes its field. Derivation records the top-level frontmatter field
-on each frontmatter link. Planning records each admitted declared `field/forbidden` removal
-whose operations enter the plan, keyed by the finding row's holder path and field before any
-route. Settling drops a link finding whose stored field that removal deletes from its holder,
-even though the resolution change set has no entry for the removed link. A rename keeps
-the link in its new field and records no removal. A body link has no field and is judged
-by the resolution change set alone. A
-missing-anchor link that now names another single document stands, as a declared limit:
-judging it would need the store's anchor predicate asked of the new document. A holder whose cascade respells some links of an address and leaves others as written
-is a declared limit too: the plan names a link by holder, syntax and address and never by ordinal, so where the
-forecast advises on a link of the old address the finding is read both ways, respelled and as
-written, and dropped only where neither holds it; one may stay listed though it no longer
-holds, and none is dropped that holds. Each fix is judged where its document
-ends, so a plan is resolved once and judged once more, whole, as the backstop above. A fix
-is skipped with its decision data, and every skip of a finding that judged a value carries
-that value: `no_declared_fix` where no rule declares a fix, `conflicting_defaults` where
-defaults disagree and `tie` where synonyms, forbidden fixes or routes do, each with every
-candidate and its rule (members of a closed set that fold together tie with no rule), `ambiguous_capture` where a default or a route reads a capture its
-rule's `match.path` binds several ways, `destination_taken` and `respells_a_judged_link`
-for a route as above, `rename_onto_occupied_field` where a rename's field
-is already held, `brings_in_required_fields` naming each field
-and its declared default where the fix brings in a rule requiring a field the document lacks
-(a field whose rules declare differing defaults is named with none, and the skip's note says
-so),
-and `judge_would_refuse` with its candidates where it introduces any other violation, or
-where a route fills to no folder a document can be moved into, `below_threshold` and
-`excluded_class` as above. A
-finding the rules conflict over is `rules_conflict`. Move-following emits five link-fix skip
-reasons. The similarity suggestion emits `too_common` and `too_short`.
-They skip a similarity suggestion for a broken link and carry the query stem as the entry's value:
-`too_common` where the rarest trigrams the query needs exceed the postings cap (the note names
-the trigram past the cap) and `too_short` where the stem is below the shortest admitted query,
-three characters (the note gives it). `no_recorded_hash`, `no_holder`, `several_holders` and
-`several_tombstones` skip a move-following fix: the one tombstone found recorded no content
-hash, no live document holds the hash, at least two live documents hold it, or at least two
-tombstones match. The first two name the tombstone's path in their note; the last two read
-to two and stop, so the note names the two paths and says
-"at least two" and the entry carries no candidate head. `link_not_rewritable` skips a link fix
-with one answer that cannot be written to it, because no spelling reads back to the
-destination uniquely from the holder or the text layer refuses the edit, its note carrying the
-reason. The similarity suggestion also emits `link_not_rewritable`, and so does the
-closest-heading suggestion when its text edit cannot read back. A suggestion's score is note
-text, never a field. Any other
-finding the plan makes no fix for is skipped with its reason: a document that does not read
-— a path derived state cannot hold (not UTF-8, or spelling no document path), a body that
-does not decode, or a frontmatter block nothing read — is `unreadable`, as is every finding a
-fix would answer of a document the planning view finds no bytes for; an ambiguous link
-is `ambiguous_link`, with the candidate head its finding is filed with, which is the class
-at the snapshot the repair reads because link health is re-decided in every changeset;
-and a finding no rule declares a fix for is `no_declared_fix`,
+`destination_taken`; a skipped route claims none. **The resolved plan is held to its planning's
+claims.** What the planning claims of every selected finding its document's judgment names —
+fixed, dropped, or still standing where the document ends — is compared with the applier's
+judgment of the resolved plan, cascades and all; a plan that introduces a violation, still
+holds a finding an operation cites or the planning dropped, or no longer holds one it left
+standing on a document it writes, is refused as `vault/plan-refused` with a note naming the
+repair defect. A judgment another check stops first — drift since planning, a failed condition,
+a vault that does not read — answers as the applier answers it, and so does a plan the schema
+passed that the write kernel's judgment of its targets then stops, or whose forecast does not
+read: the judgment is held to the claims only beside the preview it completes. A document's
+field fixes compose in finding order (link fixes last) — kind, field, offending value — onto
+the bytes the earlier ones left, each judged there by the applier's own schema check, the one
+judge, against the document's before-state, judged once, and against the state it composes
+onto, whose judgment is the previous fix's own. Tag fixes follow as one name batch, and anchor
+fixes compose last over the settled routes as another; refused sets are halved as above. A fix
+the applier would refuse, or one bringing back a violation an earlier fix took away, is skipped
+and the next composes without it, and a fix after which the document still holds its finding is
+no fix. Every selected finding the judgment of a document's bytes concludes — a rule's, an
+undeclared tag, one about the document whole — is decided against the composed document at the
+end: one it no longer holds is dropped, neither fixed nor skipped, so a fix taking a document
+out of a rule's area drops that rule's selected findings and a removal taking a tag with it
+drops the tag's. A link finding is no conclusion of that judgment. A missing-anchor finding the
+closest-heading suggestion fixes is cited instead of skipped; planning skips the other link
+findings it does not follow from their rows, and the resolved plan settles only those left
+skipped after the whole resolution: the batch hands back, with each skipped link finding, the
+family, address and frontmatter field of the link at the finding's ordinal in its holder (read
+beside the finding by two index seeks, no statement of its own), and the finding is dropped
+where the plan's resolution change set — keyed at the after-state, the holder as the batch's
+routes leave it and the address as an authored rewrite or cascade respells it — shows that link
+no longer holds it: a broken link that now resolves, an ambiguous link that now names one
+document or none, a missing-anchor link that now names none or several. A link with no entry in
+that set keeps its finding unless a declared forbidden removal deletes its field. Derivation
+records the top-level frontmatter field on each frontmatter link. Planning records each
+admitted declared `field/forbidden` removal whose operations enter the plan, keyed by the
+finding row's holder path and field before any route. Settling drops a link finding whose
+stored field that removal deletes from its holder, even though the resolution change set has no
+entry for the removed link. A rename keeps the link in its new field and records no removal. A
+body link has no field and is judged by the resolution change set alone. A missing-anchor link
+that now names another single document stands, as a declared limit: judging it would need the
+store's anchor predicate asked of the new document. A holder whose cascade respells some links
+of an address and leaves others as written is a declared limit too: the plan names a link by
+holder, syntax and address and never by ordinal, so where the forecast advises on a link of the
+old address the finding is read both ways, respelled and as written, and dropped only where
+neither holds it; one may stay listed though it no longer holds, and none is dropped that
+holds. Each fix is judged where its document ends, so a plan is resolved once and judged once
+more, whole, as the backstop above. A fix is skipped with its decision data, and every skip of
+a finding that judged a value carries that value: `no_declared_fix` where no rule declares a
+fix, `conflicting_defaults` where defaults disagree and `tie` where synonyms, forbidden fixes
+or routes do, each with every candidate and its rule (members of a closed set that fold
+together tie with no rule), `ambiguous_capture` where a default or a route reads a capture its
+rule's `match.path` binds several ways, `destination_taken` and `respells_a_judged_link` for a
+route as above, `rename_onto_occupied_field` where a rename's field is already held,
+`brings_in_required_fields` naming each field and its declared default where the fix brings in
+a rule requiring a field the document lacks (a field whose rules declare differing defaults is
+named with none, and the skip's note says so), and `judge_would_refuse` with its candidates
+where it introduces any other violation, or where a route fills to no folder a document can be
+moved into, `below_threshold` and `excluded_class` as above. A finding the rules conflict over
+is `rules_conflict`. Move-following emits five link-fix skip reasons. The similarity suggestion
+emits `too_common` and `too_short`. They skip a similarity suggestion for a broken link and
+carry the query stem as the entry's value: `too_common` where the rarest trigrams the query
+needs exceed the postings cap (the note names the trigram past the cap) and `too_short` where
+the stem is below the shortest admitted query, three characters (the note gives it).
+`no_recorded_hash`, `no_holder`, `several_holders` and `several_tombstones` skip a
+move-following fix: the one tombstone found recorded no content hash, no live document holds
+the hash, at least two live documents hold it, or at least two tombstones match. The first two
+name the tombstone's path in their note; the last two read to two and stop, so the note names
+the two paths and says "at least two" and the entry carries no candidate head.
+`link_not_rewritable` skips a link fix with one answer that cannot be written to it, because no
+spelling reads back to the destination uniquely from the holder or the text layer refuses the
+edit, its note carrying the reason. The similarity suggestion also emits `link_not_rewritable`,
+and so does the closest-heading suggestion when its text edit cannot read back. A suggestion's
+score is note text, never a field. Any other finding the plan makes no fix for is skipped with
+its reason: a document that does not read — a path derived state cannot hold (not UTF-8, or
+spelling no document path), a body that does not decode, or a frontmatter block nothing read —
+is `unreadable`, as is every finding a fix would answer of a document the planning view finds
+no bytes for; an ambiguous link is `ambiguous_link`, with the candidate head its finding is
+filed with, which is the class at the snapshot the repair reads because link health is
+re-decided in every changeset; and a finding no rule declares a fix for is `no_declared_fix`,
 with the value it judged where it has one. **Judging on bytes is a declared cost of repair
 planning.** One view of the vault, remembering each name it reads, serves the fixes and the
-resolution: each document holding a finding a fix may answer is read whole once,
-beside resolution and never a second time, and so is each document holding a link a
-route's cascade may respell, since the cascade composes its rewrite from those bytes, which
-also tell whether its frontmatter holds that link, judged only where it does; a document holding no such finding or link is not read. Those bytes stay held for the batch's
-planning, so the planning heap grows with the bytes of the batch's fixed documents and of
-those holders. The plan carries a provenance block recording
-what it was planned from: the write generation of the snapshot it read, the findings each
-operation fixes, the findings it skipped in batch order, and `cursor`, the position after the last document the
-batch covered, present exactly when more findings remain. A first batch, one request
-carrying no `after`, also carries `remaining`, the exact number of selected findings left
-after it. The store's batch read takes that count in the same call, as one more statement
-a validate's summary reads — the selection's tally less the findings the batch holds — so
-it is counted into the batch's work and explained with its plans, costs the findings the
-selection admits, and describes the batch's own snapshot; a continuation carries none and
-runs no such statement. The block has a slot for
-repair advisories, which a repair notices about the vault's fields and schema and no single
-finding states, in one of three states: absent, `omitted` with the reason `narrowed`, and
-`computed` with its `items` and `total`, truncated exactly when it holds fewer items than
-its total. A repair advisory is a record that names fields, rules and a bounded sample of
-documents (at most five, with their exact total) and carries no operation; its kinds are
-`mixed_types`, `mixed_shapes`, `undeclared_uniform` and `near_duplicate_fields`, the last two
-with a `yaml` fragment, and `schema_hygiene` for a rule that matches nothing, a closed-set
-value no document holds, or two rules whose combination admits no document.
-`Host::repair` computes the catalogue on the first batch without a path or document
-predicate, in preview and apply. A narrowed first batch carries `omitted: narrowed`;
-a continuation carries no slot. Kind, severity and rule narrow findings and do not
-narrow this pass. Advisories stand in catalogue order, then by key or rule name
-bytewise, with hygiene ordered as rules matching nothing, unused closed-set values
-and empty combinations. The longest prefix fitting 64 items and 32 KiB of serialized
-JSON items is kept, YAML included, with `total` exact and samples bounded to five
-paths. YAML declares uniform fields by `fields` type and shape, and renames each
-alternate spelling it may move through its own selectorless `forbidden`/`rename_to`
-rule. An undeclared uniform key is reported only where its declaration loads beside
-the current schema. The schema-only judgment runs once per key named by a selector,
-`required` or `one_of` statement:
-selector values, closed-set members or synonym targets that do not read as the
-observed type, required defaults that do not read as that type or shape, or two
-selector values whose distinct readings become equal leave it unreported.
-A spelling the config names for use is never renamed away or forbidden by that
-YAML: a declared field, a key a rule's selector, `required`, `one_of` or `max_length`
-reads, a `rename_to` target, a `frontmatter_defaults` key of a `creatable` rule, and
-the tag carrier `tags`. A spelling a rule forbids is never the target and does not
-count as named when the target is chosen. The target is the one named spelling when
-exactly one is named, and otherwise the most-used spelling neither named nor
-forbidden, ties bytewise smallest. A spelling forbidden with a declared fix (`remove`
-or `rename_to`) is left to that fix, because a second, different fix on it ties and
-repair skips both; one forbidden with no fix and not named renames like an unnamed
-spelling. Where no YAML that loads can clear a group, the YAML renames what it may and
-the advisory stays, naming the group: a document holding two spellings keeps both,
-since repair skips each rename onto it with `rename_onto_occupied_field`, naming the
-document, for the caller to merge; a document whose value the target's declaration
-refuses keeps its spelling, since repair skips that rename with `judge_would_refuse`,
-naming the document; two or more named spellings stay apart; a named spelling that a
-rule also forbids stays apart from the target, since it is never renamed away and
-never the target; a group whose every remaining spelling is forbidden has no target;
-and a spelling left to a forbidden fix stays in the documents its rule's selector does
-not match.
+resolution: each document holding a finding a fix may answer is read whole once, beside
+resolution and never a second time, and so is each document holding a link a route's cascade
+may respell, since the cascade composes its rewrite from those bytes, which also tell whether
+its frontmatter holds that link, judged only where it does; a document holding no such finding
+or link is not read. Those bytes stay held for the batch's planning, so the planning heap grows
+with the bytes of the batch's fixed documents and of those holders. The plan carries a
+provenance block recording what it was planned from: the write generation of the snapshot it
+read, the findings each operation fixes, the findings it skipped in batch order, and `cursor`,
+the position after the last document the batch covered, present exactly when more findings
+remain. A first batch, one request carrying no `after`, also carries `remaining`, the exact
+number of selected findings left after it. The store's batch read takes that count in the same
+call, as one more statement a validate's summary reads — the selection's tally less the
+findings the batch holds — so it is counted into the batch's work and explained with its plans,
+costs the findings the selection admits, and describes the batch's own snapshot; a continuation
+carries none and runs no such statement. The block has a slot for repair advisories, which a
+repair notices about the vault's fields and schema and no single finding states, in one of
+three states: absent, `omitted` with the reason `narrowed`, and `computed` with its `items` and
+`total`, truncated exactly when it holds fewer items than its total. A repair advisory is a
+record that names fields, rules and a bounded sample of documents (at most five, with their
+exact total) and carries no operation; its kinds are `mixed_types`, `mixed_shapes`,
+`undeclared_uniform` and `near_duplicate_fields`, the last two with a `yaml` fragment, and
+`schema_hygiene` for a rule that matches nothing, a closed-set value no document holds, or two
+rules whose combination admits no document. `Host::repair` computes the catalogue on the first
+batch without a path or document predicate, in preview and apply. A narrowed first batch
+carries `omitted: narrowed`; a continuation carries no slot. Kind, severity and rule narrow
+findings and do not narrow this pass. Advisories stand in catalogue order, then by key or rule
+name bytewise, with hygiene ordered as rules matching nothing, unused closed-set values and
+empty combinations. The longest prefix fitting 64 items and 32 KiB of serialized JSON items is
+kept, YAML included, with `total` exact and samples bounded to five paths. YAML declares
+uniform fields by `fields` type and shape, and renames each alternate spelling it may move
+through its own selectorless `forbidden`/`rename_to` rule. An undeclared uniform key is
+reported only where its declaration loads beside the current schema. The schema-only judgment
+runs once per key named by a selector, `required` or `one_of` statement: selector values,
+closed-set members or synonym targets that do not read as the observed type, required defaults
+that do not read as that type or shape, or two selector values whose distinct readings become
+equal leave it unreported. A spelling the config names for use is never renamed away or
+forbidden by that YAML: a declared field, a key a rule's selector, `required`, `one_of` or
+`max_length` reads, a `rename_to` target, a `frontmatter_defaults` key of a `creatable` rule,
+and the tag carrier `tags`. A spelling a rule forbids is never the target and does not count as
+named when the target is chosen. The target is the one named spelling when exactly one is
+named, and otherwise the most-used spelling neither named nor forbidden, ties bytewise
+smallest. A spelling forbidden with a declared fix (`remove` or `rename_to`) is left to that
+fix, because a second, different fix on it ties and repair skips both; one forbidden with no
+fix and not named renames like an unnamed spelling. Where no YAML that loads can clear a group,
+the YAML renames what it may and the advisory stays, naming the group: a document holding two
+spellings keeps both, since repair skips each rename onto it with `rename_onto_occupied_field`,
+naming the document, for the caller to merge; a document whose value the target's declaration
+refuses keeps its spelling, since repair skips that rename with `judge_would_refuse`, naming
+the document; two or more named spellings stay apart; a named spelling that a rule also forbids
+stays apart from the target, since it is never renamed away and never the target; a group whose
+every remaining spelling is forbidden has no target; and a spelling left to a forbidden fix
+stays in the documents its rule's selector does not match.
 
 **The pass has a declared cost on the host's `repair_advisories` read account.**
 With R rules, N documents, selector complexity S, K distinct keys and V value rows,
@@ -3338,39 +3311,39 @@ fresh plan a refusal answers carries none, since it is planned from the operatio
 vault still owes, not from findings. A caller refused a repair plan runs the repair again
 with the `after` it sent. The batch's `moved` reading is not carried: a repair cursor names
 a path and the batch reads the state that stands now, so nothing in it is the caller's to
-act on, and the apply seam carries no such field. The batch read's in-band advisories are dropped as a `where`
-target's expansion drops the find's.
-`Host::vault_migrate` brings a registered vault's control files up to the versions this
-build reads, through the same seam. It reads the schema where the registration reads it —
-the default `.norn/schema.yaml` or the `schema_source`, inside the vault or out, where its
-rewrite lands too (ADR 0034) — and the config, each as it stands on disk, and walks each up its ladder (`norn-config`): a version reader and one step per
-version, each step a text transform that edits only what its version change touches, so no
-normalizer re-renders the file. A rewrite whose output does not hold every comment of its
-input is refused, naming the comment, rather than the comment lost. A file at the version
-this build reads plans nothing, a file that is not there is never created, and where no file
-is behind the vault is `already_current`. Each file behind is one `write_control_file` of its
-rewritten text, the rewrites of both files are one plan, and an apply plans it afresh within
-the one call, sends its own resolved plan and reloads the vault under what landed, as `init`
-does, answering a refused reload beside the landing. A file whose version cannot be read, one
-ahead of this build or with no step from its version, a rewrite that loses a comment, and a
-file another writer changed between the migration's read and its plan — or between its plan
-and its apply, whose drift refusal is not passed on with its fresh plan, since that plan's
-whole-file content was composed from the bytes that drifted — are refused
-`vault/migration-refused`, naming the file. Both shipped ladders are empty: the schema has
-had one grammar version and the config one shape, so today every vault that attaches is
+act on, and the apply seam carries no such field. The batch read's in-band advisories are
+dropped as a `where` target's expansion drops the find's.
+`Host::vault_migrate` brings a registered vault's control files up to the versions this build
+reads, through the same seam. It reads the schema where the registration reads it — the default
+`.norn/schema.yaml` or the `schema_source`, inside the vault or out, where its rewrite lands
+too (ADR 0034) — and the config, each as it stands on disk, and walks each up its ladder
+(`norn-config`): a version reader and one step per version, each step a text transform that
+edits only what its version change touches, so no normalizer re-renders the file. A rewrite
+whose output does not hold every comment of its input is refused, naming the comment, rather
+than the comment lost. A file at the version this build reads plans nothing, a file that is not
+there is never created, and where no file is behind the vault is `already_current`. Each file
+behind is one `write_control_file` of its rewritten text, the rewrites of both files are one
+plan, and an apply plans it afresh within the one call, sends its own resolved plan and reloads
+the vault under what landed, as `init` does, answering a refused reload beside the landing. A
+file whose version cannot be read, one ahead of this build or with no step from its version, a
+rewrite that loses a comment, and a file another writer changed between the migration's read
+and its plan — or between its plan and its apply, whose drift refusal is not passed on with its
+fresh plan, since that plan's whole-file content was composed from the bytes that drifted — are
+refused `vault/migration-refused`, naming the file. Both shipped ladders are empty: the schema
+has had one grammar version and the config one shape, so today every vault that attaches is
 `already_current`, and a suite reaches a real rewrite only over ladders of its own, behind
 `induced-failure`. The ladders are a dormant carrier whose consuming layer is the first
 versioned change to either grammar; a change made in place at the version a file already
 states, such as the schema rules at schema version 1, consumes neither, and a schema in the
-earlier shape refuses at read as an unknown key does. The first step also owes a reader of
-the older version, since a vault attaches only under a schema the build can read and the
-migration plans over an attached vault.
-`apply` is the same flow entered with an externally supplied plan, either operations or a
-resolved plan from a preview. Repair is a planner over
-the findings table feeding the identical applier; its plans cite the finding generation they
-were planned against, the findings each operation fixes and the findings it skipped, in a
-provenance block that is a record and never checked at apply, and repair reads the live ambiguity class rather than a finding's
-snapshot. A request states whether it previews or applies; the wire has no default mode.
+earlier shape refuses at read as an unknown key does. The first step also owes a reader of the
+older version, since a vault attaches only under a schema the build can read and the migration
+plans over an attached vault. `apply` is the same flow entered with an externally supplied
+plan, either operations or a resolved plan from a preview. Repair is a planner over the
+findings table feeding the identical applier; its plans cite the finding generation they were
+planned against, the findings each operation fixes and the findings it skipped, in a provenance
+block that is a record and never checked at apply, and repair reads the live ambiguity class
+rather than a finding's snapshot. A request states whether it previews or applies; the wire has
+no default mode.
 
 A plan is a self-contained value naming its vault by address and carrying the vault's root
 identity: the host holds no plan between requests. A resolved plan carries its operations,
