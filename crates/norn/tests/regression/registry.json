@@ -1929,7 +1929,10 @@
           "crates/norn-host/src/planner/repair/declared.rs::fixes_compose_in_finding_order_and_a_fix_the_judge_refuses_skips_while_earlier_ones_stand",
           "crates/norn-host/src/planner/repair/declared.rs::a_route_the_judge_refuses_at_its_destination_skips_as_judge_would_refuse",
           "crates/norn-host/src/planner/repair/declared/respells.rs::a_route_respelling_a_frontmatter_link_in_a_field_read_by_value_skips",
-          "crates/norn-host/src/apply.rs::the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect"
+          "crates/norn-host/src/apply.rs::the_guard_refuses_a_plan_its_local_judgment_got_wrong_as_a_repair_defect",
+          "crates/norn-host/src/planner/repair/declared.rs::a_synonym_the_judge_refuses_skips_while_an_earlier_fix_stands",
+          "crates/norn-host/src/planner/repair/declared.rs::a_rename_the_judge_refuses_is_skipped_as_one_the_judge_would_refuse",
+          "crates/norn-host/tests/repair.rs::a_default_fill_bringing_a_document_under_a_forbidding_rule_skips_as_judge_would_refuse"
         ]
       }
     },
