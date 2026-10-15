@@ -2496,6 +2496,67 @@ mod tests {
         assert_eq!(*reading.reads.borrow(), vec!["gone.md"]);
     }
 
+    /// **A similarity suggestion on an unreadable holder skips as unreadable.**
+    #[test]
+    fn a_broken_finding_with_a_similar_target_on_an_unreadable_holder_skips_as_unreadable() {
+        let vault = Vault::of("version: 1\n", &[]);
+        let clock = || panic!("the suggestion reads no clock");
+        let clock = OneReading::of(&clock);
+        let repairing = Repairing {
+            work: std::cell::Cell::new(crate::evidence::RepairSuggestionsCost::default()),
+            declared: &vault.declared,
+            case: norn_wire::CaseFold::Exact,
+            clock: &clock,
+            rule_sets: &vault.rule_sets,
+            threshold: Confidence::Suggested,
+        };
+        let index = (EmptyStore::new(), std::marker::PhantomData);
+        let reading = Read {
+            vault: &vault,
+            over: Over {
+                view: &vault.files,
+                index: &index,
+            },
+            reads: RefCell::new(Vec::new()),
+        };
+        let rows = [finding(1, FindingKind::Broken, "gone.md", "old")];
+        let destination = DocumentPath::new("new.md").expect("a document path");
+        let follows = super::super::broken_links::Answers::from([(
+            1,
+            Ok(super::super::broken_links::Answer {
+                link: LinkKey::new(rows[0].path.clone(), LinkFamily::Wikilink, "old"),
+                before: destination.clone(),
+                to: destination,
+                evidence: super::super::broken_links::Evidence::Similar {
+                    note: "similarity 0.69 (trigram, cutoff 0.50)".to_string(),
+                },
+            }),
+        )]);
+
+        let drafted = draft(&rows, &repairing, &reading, &follows).expect("a draft");
+        let mut planned = Planned::default();
+        drafted
+            .decide(None)
+            .emit(
+                &mut planned,
+                &Namings::new(),
+                None,
+                &follows,
+                &super::super::broken_links::Asked::new(),
+                &BTreeMap::new(),
+                &reading,
+                &BTreeSet::new(),
+            )
+            .expect("an infallible read");
+
+        assert!(planned.operations.is_empty());
+        assert_eq!(
+            planned.skipped,
+            vec![SkippedFinding::new(1, SkipReason::Unreadable)]
+        );
+        assert_eq!(*reading.reads.borrow(), vec!["gone.md"]);
+    }
+
     /// **Only a document a fix may be made to is read, and once**, however
     /// many of its findings the batch holds; a document holding a misplaced
     /// finding and nothing a fix may answer is not read, its skip's note being

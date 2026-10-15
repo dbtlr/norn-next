@@ -42,7 +42,10 @@
 //!   moves; a route whose cascade may respell a frontmatter link a rule reads
 //!   by value, so the holder's frontmatter is read; a link finding the route
 //!   resolves, judged by the stored link at its ordinal; and a bare value made
-//!   a link, so its address is resolved;
+//!   a link, so its address is resolved; move-following through suffix and
+//!   exact-path tombstones and live hash holders; a closest-heading anchor
+//!   through the held-links holder and document headings; and a similarity
+//!   tie through candidate document reads;
 //! - each previewed, and batches applied under each drive a part keeping no
 //!   path order takes and under a path part, so the applier's own judgment, its
 //!   read of the pinned declaration and the changeset it commits are in the
@@ -99,9 +102,10 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::process::Sandbox;
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
-    ApplyMode, ApplyReport, FindingKind, Predicate, Provenance, ReasonCode, RepairParams,
-    ResolutionTarget, ResolvedPlan, Severity, VaultAddress,
+    ApplyMode, ApplyReport, Confidence, FindingKind, Predicate, Provenance, ReasonCode,
+    RepairParams, ResolutionTarget, ResolvedPlan, Severity, VaultAddress,
 };
 
 /// The schema the census vault pins: a task rule with a default, a synonym
@@ -137,8 +141,11 @@ const CUT_DOCUMENT: (&str, &[u8]) = (
 /// - `hub.md` is a hub whose `up` links `loose/a.md`, so the route that would
 ///   respell it is judged by the hub's frontmatter;
 /// - `zz-holder.md` holds a bare value in a `link` field, naming
-///   `zz-target.md`.
-const DOCUMENTS: [(&str, &[u8]); 7] = [
+///   `zz-target.md`;
+/// - `zzz-5c/` stands after the existing census subjects, holding a moved
+///   document linked by both grammars, a closest-heading anchor and a
+///   similarity tie.
+const DOCUMENTS: [(&str, &[u8]); 15] = [
     ("loose/a.md", b"---\ntype: task\n---\n# A\n"),
     (
         "loose/b.md",
@@ -161,6 +168,17 @@ const DOCUMENTS: [(&str, &[u8]); 7] = [
         b"---\nref: zz-target\nzz_syn: one\n---\n# Holder\n",
     ),
     ("zz-target.md", b"---\nzz-M: marker\n---\n# Target\n"),
+    ("zzz-5c/old.md", b"# Unique census followed document\n"),
+    ("zzz-5c/holder-wiki.md", b"[[zz-repair/zzz-5c/old]]\n"),
+    ("zzz-5c/holder-markdown.md", b"[old](old.md)\n"),
+    ("zzz-5c/heading-target.md", b"# Important Heading\n"),
+    (
+        "zzz-5c/heading-holder.md",
+        b"[[zz-repair/zzz-5c/heading-target#Important Headinh]]\n",
+    ),
+    ("zzz-5c/abcdefghij.md", b"# Census J\n"),
+    ("zzz-5c/abcdefghik.md", b"# Census K\n"),
+    ("zzz-5c/tie-holder.md", b"[[abcdefghix]]\n"),
 ];
 
 /// How many documents the census stands under `n/`, each a task holding four
@@ -279,6 +297,35 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         .expect("write the cut document");
     let host = vault.host();
     let lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::rename(
+        vault.path().join(FOLDER).join("zzz-5c/old.md"),
+        vault.path().join(FOLDER).join("zzz-5c/new.md"),
+    )
+    .expect("move outside norn");
+    wait_until(
+        "the census move is derived before recording repairs",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let snapshot = store.begin_request();
+            let dead = snapshot
+                .stored_tombstone(
+                    &norn_store::DocumentPath::new("zz-repair/zzz-5c/old.md").expect("path"),
+                )
+                .expect("death");
+            let live = snapshot
+                .stored_document(
+                    &norn_store::DocumentPath::new("zz-repair/zzz-5c/new.md").expect("path"),
+                )
+                .expect("live document");
+            if dead.is_some() && live.is_some() {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{dead:?} {live:?}"))
+            }
+        },
+    )
+    .expect("the move settles");
     let attached = induced_failure::statements_begun();
 
     let ran = repairs_over_every_arm(&host, &VaultAddress::name(vault.name().clone()));
@@ -348,6 +395,52 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         "the census planned no stem rarity read"
     );
     assert!(planned.iter().any(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ") == "SELECT d.path FROM document_trigrams AS t JOIN documents AS d ON d.id = t.document WHERE t.trigram = ?1"), "the census planned no stem postings read");
+    let normalized: BTreeSet<String> = planned
+        .iter()
+        .map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let (suffix_range, tombstone_at_path) = match store.path_order() {
+        StoredPathOrder::Sensitive => (
+            "suffix_key >= ?1 AND suffix_key < ?2",
+            "SELECT path, last_content_hash, provenance FROM tombstones WHERE path = ?1 AND provenance <> 'quarantine'",
+        ),
+        StoredPathOrder::AsciiCaseInsensitive => (
+            "folded_suffix_key >= ?1 AND folded_suffix_key < ?2",
+            "SELECT path, last_content_hash, provenance FROM tombstones WHERE path = ?1 COLLATE NOCASE AND provenance <> 'quarantine' ORDER BY path LIMIT 2",
+        ),
+    };
+    assert!(
+        normalized.iter().any(|sql| sql
+            .starts_with("SELECT path, last_content_hash, provenance FROM tombstones WHERE ")
+            && sql.contains(suffix_range)
+            && sql.contains("provenance <> 'quarantine'")
+            && sql.ends_with("LIMIT 2")),
+        "the census planned no TombstonesBySuffix read"
+    );
+    for (statement, sql) in [
+        ("TombstoneAtPath", tombstone_at_path),
+        (
+            "LiveHolders",
+            "SELECT path FROM documents WHERE content_hash = ?1 ORDER BY path LIMIT 2",
+        ),
+        (
+            "held-links holder",
+            "SELECT d.id, d.content_hash FROM documents AS d WHERE d.path = ?1",
+        ),
+        (
+            "DocumentHeadings",
+            "SELECT text, slug, level, span_line, span_column, span_offset, body_offset, inside_container, reading FROM headings WHERE document = ?1 ORDER BY ordinal",
+        ),
+        (
+            "CandidateDocument",
+            "SELECT id, path FROM documents WHERE path = ?1",
+        ),
+    ] {
+        assert!(
+            normalized.contains(sql),
+            "the census planned no {statement} read"
+        );
+    }
     assert_eq!(
         begun.symmetric_difference(&planned).collect::<Vec<_>>(),
         Vec::<&String>::new(),
@@ -845,6 +938,14 @@ fn repairs_over_every_arm(host: &attach::ServingHost, address: &VaultAddress) ->
             .with_predicates([Predicate::path(format!("{FOLDER}**"))]),
     ] {
         repair(params);
+    }
+
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        repair(
+            repairing(mode)
+                .with_predicates([Predicate::path(format!("{FOLDER}zzz-5c/**"))])
+                .with_threshold(Confidence::Suggested),
+        );
     }
 
     // A batch of one applied under each drive a part keeping no path order

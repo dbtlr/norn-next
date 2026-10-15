@@ -5,7 +5,9 @@
 //! the applier's convergence rule finishes it. This suite binds that to a plan a
 //! real repair preview produced, rather than one written by hand: two fields
 //! fixed in two documents, and a misplaced document routed into its rule's
-//! folder with a holder whose link the move's cascade respells.
+//! folder with a holder whose link the move's cascade respells. One more holder
+//! carries a followed link, a similarity suggestion, a closest-heading anchor
+//! and a one-edit tag fix.
 //!
 //! **The apply runs in a child.** `norn-fs` reads its fault arms once per
 //! process and a process that dies cannot report on itself, so the parent plans
@@ -23,9 +25,10 @@ use std::time::Duration;
 
 use norn_testkit::equivalence::StoreProjection;
 use norn_testkit::process::{Run, RunStatus, Sandbox};
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, ChangesetOutcome, PlanDocument, Predicate, RepairParams,
-    ResolvedPlan, VaultAddress,
+    ApplyMode, ApplyParams, ApplyReport, ChangesetOutcome, Confidence, PlanDocument, Predicate,
+    RepairParams, ResolvedPlan, VaultAddress,
 };
 
 const CHILD: &str = "NORN_REPAIR_CRASH_CHILD";
@@ -35,16 +38,24 @@ const PROFILE: &str = "tiny";
 
 /// One rule: a task holds a `status` (defaulting to `todo`) and belongs in
 /// `tasks/` or `filed/`; a misplaced one is routed to `filed/`, a folder the
-/// vault does not yet hold, so the route makes it.
-const SCHEMA: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**', 'zz-repair/filed/**'], route: 'zz-repair/filed/'}\n";
+/// vault does not yet hold, so the route makes it. The tag facet declares `draft`.
+const SCHEMA: &str = "version: 1\ntags: {declared: [draft], undeclared: report}\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    allowed_paths: {paths: ['zz-repair/tasks/**', 'zz-repair/filed/**'], route: 'zz-repair/filed/'}\n";
 
 /// The documents the repair works on: two tasks missing their `status`, a task
-/// outside both folders, and a holder linking to it that is no task.
-const DOCUMENTS: [(&str, &str); 4] = [
+/// outside both folders, and its link holder; three 5C targets and one holder
+/// needing move-following, similarity, closest-heading and tag rewrites.
+const DOCUMENTS: [(&str, &str); 8] = [
     ("tasks/a.md", "---\ntype: task\n---\n# A\n"),
     ("tasks/b.md", "---\ntype: task\n---\n# B\n"),
     ("loose/m.md", "---\ntype: task\nstatus: todo\n---\n# M\n"),
     ("h.md", "Up: [m](loose/m.md)\n"),
+    ("old.md", "# Unique followed document\n"),
+    ("abcdefghij.md", "# Similar target\n"),
+    ("zz-target.md", "# Important Heading\n"),
+    (
+        "zz-holder.md",
+        "[[old]] [[abcdefghix]] [[zz-target#Important Headinh]] #darft\n",
+    ),
 ];
 
 /// A sandbox and a vault in it holding [`DOCUMENTS`] under [`SCHEMA`].
@@ -63,6 +74,7 @@ fn a_vault(label: &str) -> (Sandbox, attach::Vault) {
 fn repairing(vault: &attach::Vault, mode: ApplyMode) -> RepairParams {
     RepairParams::new(VaultAddress::name(vault.name().clone()), mode)
         .with_predicates([Predicate::path("zz-repair/**")])
+        .with_threshold(Confidence::Suggested)
 }
 
 /// The resolved plan a repair preview of the vault answers, the host that
@@ -70,6 +82,31 @@ fn repairing(vault: &attach::Vault, mode: ApplyMode) -> RepairParams {
 fn planned(vault: &attach::Vault) -> ResolvedPlan {
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::rename(
+        vault.path().join("zz-repair/old.md"),
+        vault.path().join("zz-repair/new.md"),
+    )
+    .expect("move outside norn");
+    wait_until(
+        "the move is derived",
+        attach::state_budget(attach::READY_LIMIT),
+        || {
+            let mut store = vault.store();
+            let snapshot = store.begin_request();
+            let dead = snapshot
+                .stored_tombstone(&norn_store::DocumentPath::new("zz-repair/old.md").expect("path"))
+                .expect("death");
+            let live = snapshot
+                .stored_document(&norn_store::DocumentPath::new("zz-repair/new.md").expect("path"))
+                .expect("live document");
+            if dead.is_some() && live.is_some() {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{dead:?} {live:?}"))
+            }
+        },
+    )
+    .expect("the move settles");
     let answered = host
         .repair(repairing(vault, ApplyMode::Preview))
         .expect("the repair is answered")
@@ -194,8 +231,9 @@ const COUNTED_STAGES: [&str; 6] = [
 ];
 
 /// **A crash at any publication of a repair plan, then a re-send.** The repair
-/// plans five publications: two field fixes, and a routed move that creates the
-/// document in `filed/` (making the folder), respells the holder's link and
+/// plans six publications: two field fixes, one holder with four 5C fixes,
+/// and a routed move that creates the document in `filed/` (making the folder),
+/// respells the holder's link and
 /// removes the original. For each, every counted stage the publication passes
 /// ends the process there, before the publication lands and after it lands;
 /// sending the same resolved plan then answers it applied, leaves the vault
@@ -211,13 +249,18 @@ fn a_repair_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_
     };
     let publications = targets.len();
     assert_eq!(
-        publications, 5,
-        "two fixes and a route's three: {targets:?}"
+        publications, 6,
+        "two field fixes, a 5C holder and a route's three: {targets:?}"
     );
     let wanted = tree_bytes(baseline.path());
     assert_eq!(
         wanted["zz-repair/h.md"], b"Up: [m](filed/m.md)\n",
         "the cascade respelled the holder"
+    );
+    assert_eq!(
+        wanted["zz-repair/zz-holder.md"],
+        b"[[new]] [[abcdefghij]] [[zz-target#Important Heading]] #draft\n",
+        "all four 5C rewrites landed in the holder"
     );
     assert_store_is_a_build_from_zero(&baseline_box, &baseline, "the uninterrupted apply");
 
@@ -256,7 +299,7 @@ fn a_repair_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_
     // this plan reaches are the swaps and the unlink, the folder made for the
     // routed document, and the folder sync after each.
     let fired = |stage: &str| reached.iter().filter(|a| a.starts_with(stage)).count();
-    assert_eq!(fired("swap@"), 4, "{reached:?}");
+    assert_eq!(fired("swap@"), 5, "{reached:?}");
     assert_eq!(fired("unlink@"), 1, "{reached:?}");
     assert_eq!(fired("mkdir@"), 1, "{reached:?}");
     assert_eq!(fired("parent-sync@"), publications, "{reached:?}");

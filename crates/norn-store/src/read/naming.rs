@@ -68,12 +68,36 @@ impl Snapshot {
         total: u64,
         ignore: &AmbiguityIgnore,
     ) -> Result<CandidateHead, StoreError> {
+        self.read_candidate_head(paths, total, ignore, &mut Vec::new())
+    }
+
+    /// Explain the statements used to name a tied candidate head.
+    pub fn candidate_head_plans(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<Vec<super::SimilarStemsPlan>, StoreError> {
         let mut record = Vec::new();
+        self.read_candidate_head(paths, total, ignore, &mut record)?;
+        self.explained(record, |statement, _, plan| super::SimilarStemsPlan {
+            statement,
+            plan,
+        })
+    }
+
+    fn read_candidate_head(
+        &self,
+        paths: &[norn_wire::DocumentPath],
+        total: u64,
+        ignore: &AmbiguityIgnore,
+        record: &mut Vec<Ran>,
+    ) -> Result<CandidateHead, StoreError> {
         let mut rows = Vec::new();
         for path in paths.iter().take(CANDIDATE_HEAD) {
             let found = self
                 .run_statement(
-                    &mut record,
+                    record,
                     Ran::new(
                         super::ReadStatement::CandidateDocument,
                         (
@@ -92,7 +116,7 @@ impl Snapshot {
             );
         }
         Ok(self
-            .candidate_heads(vec![Head { rows, total }], ignore, &mut record)?
+            .candidate_heads(vec![Head { rows, total }], ignore, record)?
             .pop()
             .expect("one head"))
     }
