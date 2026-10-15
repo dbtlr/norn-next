@@ -4989,6 +4989,12 @@ mod tests {
             .plan(&[offending(1, NOT_ONE_OF, "a.md", "status", "cot")]);
         assert!(planned.operations.is_empty());
         assert_eq!(planned.skipped[0].reason, SkipReason::Tie);
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some(
+                "closest member `cat` is 1 edit away by optimal string alignment, at most 1 for its 3 characters; closest member `cut` is 1 edit away by optimal string alignment, at most 1 for its 3 characters"
+            ),
+        );
         let Some(SkippedCandidates::Values { head, .. }) = &planned.skipped[0].candidates else {
             panic!("value candidates");
         };
@@ -5088,6 +5094,12 @@ mod tests {
             .plan(&[finding(1, FindingKind::UndeclaredTag, "a.md", "craft")]);
         assert!(planned.operations.is_empty());
         assert_eq!(planned.skipped[0].reason, SkipReason::Tie);
+        assert_eq!(
+            planned.skipped[0].note.as_deref(),
+            Some(
+                "declared tag `draft` is one edit away by optimal string alignment under the tag fold; declared tag `graft` is one edit away by optimal string alignment under the tag fold"
+            ),
+        );
         let Some(SkippedCandidates::Values { head, .. }) = &planned.skipped[0].candidates else {
             panic!("value candidates");
         };

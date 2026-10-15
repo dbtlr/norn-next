@@ -749,7 +749,8 @@ impl Citation {
 // `Host::repair` (Layer 5B, NORN-373) emits this block: a repair plan cites
 // the finding generation it read, the findings each operation fixes and the
 // findings it skipped, and carries the cursor that continues a batch that
-// leaves more. It does not yet set `advisories`; see that field. Its
+// leaves more. Its first batch computes `advisories` when unnarrowed and
+// states their omission when narrowed; see that field. Its
 // published description stays wire-facing, so the note lives here rather
 // than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when

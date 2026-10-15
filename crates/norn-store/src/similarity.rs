@@ -183,8 +183,12 @@ mod tests {
         assert_eq!(score, jaccard_counts(1, 1, 2));
     }
 
+    /// No leaf-stem length ceiling exists, so the premise, not the sampled range, carries
+    /// the claim: CUTOFF.shared >= 1 makes t * shared >= 1 for t >= 1, so its ceiling quotient
+    /// is at least 1.
     #[test]
     fn required_shared_is_positive_for_nonempty_sets() {
+        const { assert!(CUTOFF.shared >= 1) };
         for t in 1..=100 {
             assert!(required_shared(t) >= 1);
         }
