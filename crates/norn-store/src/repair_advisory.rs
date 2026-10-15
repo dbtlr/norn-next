@@ -2,6 +2,7 @@
 //!
 //! Presence rows supply containers and maps; value rows supply parsed element
 //! types. These reads derive no stored advisory and hold no document payload.
+//! Spelling groups merge one ordered presence stream per spelling on the host.
 
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::types::Value;
@@ -24,7 +25,7 @@ pub enum RepairAdvisoryStatement {
     ValueTypes,
     /// One key's presence rows, merged in path order.
     FieldPresence,
-    /// The union of spellings' documents, merged in path order.
+    /// One spelling's documents, merged from three containers in path order.
     SpellingPresence,
 }
 
@@ -196,7 +197,7 @@ impl Snapshot {
         let mut counts = [0_u64; 3];
         let mut documents = 0;
         let mut sample_paths = Vec::new();
-        let (sql, values) = presence_merge(&[key.to_string()]);
+        let (sql, values) = presence_merge(key, "path, container");
         self.run_statement(
             ran,
             Ran::new(RepairAdvisoryStatement::FieldPresence, (sql, values)),
@@ -249,6 +250,8 @@ impl Snapshot {
     }
 
     /// The exact union count of documents holding any of `keys`.
+    ///
+    /// One ordered statement per spelling is merged on the host, holding one head each.
     pub fn repair_spelling_tally(
         &self,
         keys: &[String],
@@ -256,7 +259,7 @@ impl Snapshot {
         self.run_repair_spelling_tally(keys, &mut Vec::new())
     }
 
-    /// The plan of the ordered presence searches the spelling tally merges.
+    /// One plan per spelling, for the ordered presence searches merged on the host.
     pub fn repair_spelling_tally_plans(
         &self,
         keys: &[String],
@@ -275,12 +278,15 @@ impl Snapshot {
         let mut rows_read = 0;
         let mut documents = 0;
         let mut sample_paths = Vec::new();
-        let composed = presence_merge(keys);
-        self.run_statement(
+        self.run_statements_merged(
             ran,
-            Ran::new(RepairAdvisoryStatement::SpellingPresence, composed),
-            |row| {
-                let path: String = row.get(0)?;
+            keys.iter().map(|key| {
+                Ran::new(
+                    RepairAdvisoryStatement::SpellingPresence,
+                    presence_merge(key, "path"),
+                )
+            }),
+            |path| {
                 rows_read += 1;
                 if previous.as_ref() != Some(&path) {
                     if documents < crate::CANDIDATE_HEAD as u64 {
@@ -289,7 +295,6 @@ impl Snapshot {
                     documents += 1;
                     previous = Some(path);
                 }
-                Ok(())
             },
         )
         .map_err(|problem| error::sql("tallying repair advisory spellings", problem))?;
@@ -310,16 +315,16 @@ impl Snapshot {
     }
 }
 
-/// Merge each spelling and container's ordered presence seek without sorting rows.
-fn presence_merge(keys: &[String]) -> (String, Vec<Value>) {
+/// Merge one key's ordered container seeks without sorting rows.
+fn presence_merge(key: &str, columns: &str) -> (String, Vec<Value>) {
     let mut values = Vec::new();
-    let arms = keys.iter().flat_map(|key| FieldContainer::ALL.into_iter().map(move |container| (key, container)))
-        .map(|(key, container)| {
+    let arms = FieldContainer::ALL.into_iter()
+        .map(|container| {
             let key_at = values.len() + 1;
-            values.push(Value::Text(key.clone()));
+            values.push(Value::Text(key.to_string()));
             let container_at = values.len() + 1;
             values.push(Value::Text(container.as_str().to_string()));
-            format!("SELECT path, container FROM document_fields INDEXED BY document_fields_presence WHERE ordinal = 0 AND key = ?{key_at} AND container = ?{container_at}")
+            format!("SELECT {columns} FROM document_fields INDEXED BY document_fields_presence WHERE ordinal = 0 AND key = ?{key_at} AND container = ?{container_at}")
         }).collect::<Vec<_>>();
     (
         format!(

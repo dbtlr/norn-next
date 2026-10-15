@@ -191,11 +191,86 @@ fn a_repair_sample_has_five_paths_and_an_exact_distinct_total() {
         .expect("the spelling union tally");
     assert_eq!(tally.documents, 7);
     assert_eq!(tally.sample, sample.sample);
-    assert_eq!(tally.work.statements, 1);
+    assert_eq!(tally.work.statements, 2);
     bounded(tally.work);
     judge(
         &snapshot
             .repair_spelling_tally_plans(&keys)
             .expect("the spelling tally plan"),
     );
+}
+
+#[test]
+fn a_spelling_group_beyond_sqlites_compound_limit_has_an_exact_ordered_union() {
+    let keys: Vec<String> = (0..170)
+        .map(|variant| {
+            let mut key = String::new();
+            let mut separators = variant / 16;
+            for (at, letter) in "abcd".chars().enumerate() {
+                if at > 0 {
+                    key.push(['-', '_', ' ', '.'][separators % 4]);
+                    separators /= 4;
+                }
+                key.push(if variant & (1 << at) == 0 {
+                    letter
+                } else {
+                    letter.to_ascii_uppercase()
+                });
+            }
+            key
+        })
+        .collect();
+    let scratch = Scratch::new("repair-advisory-many-spellings");
+    let mut store = scratch.open();
+    let declared = ContentModel::none();
+    let facts: Vec<_> = [
+        "Z.md", "B.md", "a.md", "c.md", "D.md", "e.md", "f.md", "g.md",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(at, path)| {
+        let fields = keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 8 == at || *index == 0)
+            .map(|(_, key)| {
+                let value = match at % 3 {
+                    0 => string("value"),
+                    1 => FrontmatterValue::Sequence(vec![string("value")]),
+                    _ => map(vec![("nested", string("value"))]),
+                };
+                (key.as_str(), value)
+            })
+            .collect();
+        document(path, path, "body").with_frontmatter(Some(map(fields)), &declared)
+    })
+    .collect();
+    write_documents(&mut store.begin_request(), &facts);
+    let reader = Arc::new(store.open_reader().reader.expect("a live reader"));
+    let snapshot = reader
+        .try_take()
+        .expect("a reader")
+        .establish()
+        .expect("a snapshot");
+    let tally = snapshot
+        .repair_spelling_tally(&keys)
+        .expect("the spelling union tally");
+    assert_eq!(tally.documents, 8);
+    assert_eq!(
+        tally
+            .sample
+            .paths()
+            .iter()
+            .map(|path| path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.md", "B.md", "c.md", "D.md", "e.md"]
+    );
+    assert_eq!(tally.sample.total(), 8);
+    assert_eq!(tally.work.statements, 170);
+    bounded(tally.work);
+    let plans = snapshot
+        .repair_spelling_tally_plans(&keys)
+        .expect("one spelling tally plan per key");
+    assert_eq!(plans.len(), 170);
+    judge(&plans);
 }
