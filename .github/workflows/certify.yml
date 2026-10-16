@@ -1,6 +1,7 @@
 # **This lane is dormant.** It stays dormant until the first 1.0 release candidate,
 # when it is re-enabled or retired under a decision superseding the soak clause of
 # ADR 0004 (docs/decisions/0004-two-tier-measurement-and-authored-baselines.md).
+#
 # The certification run: two lanes over one pinned candidate.
 #
 # The second tier of the two-tier CI posture: counters gate per PR (ci.yml),
