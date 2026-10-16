@@ -10,8 +10,8 @@
 //! The one operation cites every finding it fixes, each at the level of its
 //! own fix.
 //!
-//! What each element is replaced by is a kind's own ([`closed_set`](super::closed_set)
-//! and [`derived`](super::derived)): they answer a [`Proposed`], and this
+//! What each element is replaced by is a kind's own ([`closed_set`]
+//! and [`derived`]): they answer a [`Proposed`], and this
 //! module composes, judges and writes it as one. A nested list element is
 //! matched by the finding's structured spelling, so an element exactly
 //! `[["s"]]`, read from `[[s]]`, can become the link string `"[[s]]"`;

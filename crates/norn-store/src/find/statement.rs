@@ -759,7 +759,7 @@ pub(crate) fn compose_offset_spellings(key: &str) -> (String, Vec<Value>) {
 }
 
 /// [`FindStatement::FieldUniverse`]: every key a document carries, once each,
-/// in key order: the whole [`key_walk`](crate::read::key_walk), from the first key.
+/// in key order: the whole [`key_walk`], from the first key.
 ///
 /// Every key is text, and every text sorts at or after the empty one, so the
 /// first step's bound excludes none.

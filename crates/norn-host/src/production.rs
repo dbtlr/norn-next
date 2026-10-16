@@ -5018,6 +5018,13 @@ mod tests {
         fn vault(&self) -> PathBuf {
             self.root.join("vault")
         }
+        /// Whether the volume under the vault folds case, standing `case` down
+        /// where it does not and failing it on macOS, whose volume folds.
+        #[track_caller]
+        fn runs_where_the_vault_folds(&self, case: &str) -> bool {
+            let folding = norn_testkit::churn::folding(&self.vault()).expect("the volume answers");
+            norn_testkit::churn::runs_where_the_volume_folds(folding, case)
+        }
         /// The registration every attach in these cases is handed.
         fn registration(&self) -> Registration {
             Registration::new(
@@ -9793,11 +9800,9 @@ mod tests {
     #[test]
     fn a_vanished_root_reaches_the_places_the_vault_folds_onto_it() {
         let f = Fixture::watcherless("withheld-root-case");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
-        {
+        if !f.runs_where_the_vault_folds(
+            "a_vanished_root_reaches_the_places_the_vault_folds_onto_it",
+        ) {
             return;
         }
         fs::create_dir_all(f.vault().join("notes/Away")).unwrap();
@@ -14344,10 +14349,8 @@ mod tests {
     #[test]
     fn scoped_case_only_file_rename_replaces_the_stored_spelling() {
         let f = Fixture::new("case-only-file-rename");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
+        if !f
+            .runs_where_the_vault_folds("scoped_case_only_file_rename_replaces_the_stored_spelling")
         {
             return;
         }
@@ -14382,11 +14385,9 @@ mod tests {
     #[test]
     fn scoped_case_only_directory_rename_replaces_descendant_spellings() {
         let f = Fixture::new("case-only-directory-rename");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
-        {
+        if !f.runs_where_the_vault_folds(
+            "scoped_case_only_directory_rename_replaces_descendant_spellings",
+        ) {
             return;
         }
         fs::create_dir(f.vault().join("folder")).unwrap();
@@ -14435,11 +14436,7 @@ mod tests {
     fn a_batch_of_a_case_renamed_directory_and_its_descendant_lands_the_rendered_spelling() {
         for order in [["FOLDER", "folder/note.md"], ["folder/note.md", "FOLDER"]] {
             let f = Fixture::new("case-only-directory-rename-with-descendant");
-            if norn_fs::PathNormalizer::detect(&f.vault())
-                .unwrap()
-                .case_sensitivity()
-                != norn_fs::CaseSensitivity::Insensitive
-            {
+            if !f.runs_where_the_vault_folds("a_batch_of_a_case_renamed_directory_and_its_descendant_lands_the_rendered_spelling") {
                 return;
             }
             fs::create_dir(f.vault().join("folder")).unwrap();
@@ -14488,11 +14485,9 @@ mod tests {
             ["FOLDER", "folder"],
         ] {
             let f = Fixture::new("case-only-directory-rename-across-increments");
-            if norn_fs::PathNormalizer::detect(&f.vault())
-                .unwrap()
-                .case_sensitivity()
-                != norn_fs::CaseSensitivity::Insensitive
-            {
+            if !f.runs_where_the_vault_folds(
+                "a_case_renamed_directory_and_a_save_under_it_converge_in_either_increment_order",
+            ) {
                 return;
             }
             fs::create_dir(f.vault().join("folder")).unwrap();
@@ -14535,11 +14530,9 @@ mod tests {
     fn a_case_renamed_document_converges_in_either_increment_order() {
         for order in [["note.md", "NOTE.md"], ["NOTE.md", "note.md"]] {
             let f = Fixture::new("case-only-file-rename-across-increments");
-            if norn_fs::PathNormalizer::detect(&f.vault())
-                .unwrap()
-                .case_sensitivity()
-                != norn_fs::CaseSensitivity::Insensitive
-            {
+            if !f.runs_where_the_vault_folds(
+                "a_case_renamed_document_converges_in_either_increment_order",
+            ) {
                 return;
             }
             fs::write(f.vault().join("note.md"), "body").unwrap();
@@ -14582,11 +14575,9 @@ mod tests {
     #[test]
     fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_rendered_one() {
         let f = Fixture::new("dead-directory-spelling-with-descendant");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
-        {
+        if !f.runs_where_the_vault_folds(
+            "a_folded_batch_holding_a_dead_directory_spelling_lands_the_rendered_one",
+        ) {
             return;
         }
         fs::create_dir(f.vault().join("folder")).unwrap();
@@ -14641,11 +14632,9 @@ mod tests {
     #[test]
     fn a_batch_holding_a_spelling_only_the_volume_resolves_lands_the_rendered_one() {
         let f = Fixture::new("volume-only-file-spelling");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
-        {
+        if !f.runs_where_the_vault_folds(
+            "a_batch_holding_a_spelling_only_the_volume_resolves_lands_the_rendered_one",
+        ) {
             return;
         }
         let retired = "caf\u{e9}.md";
@@ -14699,11 +14688,9 @@ mod tests {
     #[test]
     fn a_batch_naming_a_directory_only_the_volume_resolves_lands_the_rendered_row() {
         let f = Fixture::new("volume-only-directory-spelling");
-        if norn_fs::PathNormalizer::detect(&f.vault())
-            .unwrap()
-            .case_sensitivity()
-            != norn_fs::CaseSensitivity::Insensitive
-        {
+        if !f.runs_where_the_vault_folds(
+            "a_batch_naming_a_directory_only_the_volume_resolves_lands_the_rendered_row",
+        ) {
             return;
         }
         let retired = "\u{e9}clair";

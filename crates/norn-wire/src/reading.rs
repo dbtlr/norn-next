@@ -36,7 +36,7 @@
 //!
 //! **A rung's declaration order is ladder order, and `Ord` is derived from
 //! it.** The floor is declared first and each rung after it is declared where
-//! it stands on the ladder, so the derived ordering a [`RungSet`](crate::RungSet)
+//! it stands on the ladder, so the derived ordering a [`RungSet`]
 //! sorts by is the order the ladder runs in rather than an alphabet. A rung
 //! added later is declared at its ladder position, not appended: appending it
 //! would leave the derived order saying it runs last whatever the ladder does.

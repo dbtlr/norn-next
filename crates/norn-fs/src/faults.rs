@@ -28,7 +28,7 @@
 //! [`stage`](crate::stage), [`publish`](crate::publish),
 //! [`confirm_landed`](crate::confirm_landed), [`discard`](crate::discard) and
 //! [`remove_empty_folders`](crate::remove_empty_folders) — arm themselves from this process's environment
-//! rather than passing [`Faults::NONE`]. That is what a lockdown suite's
+//! rather than passing `Faults::NONE`. That is what a lockdown suite's
 //! process-death bars need and what nothing else can give them — a stage whose
 //! required outcome is "this process does not survive here" cannot be reached
 //! by a caller that has to return to make its assertion, so the arm is read by
@@ -94,8 +94,8 @@
 //! what each answer does are its own; the grammar an arm is spelled in, the
 //! refusal of a spelling that cannot be read, the record file and the writing of
 //! a record are one discipline across all three, and a second copy of any of them
-//! is a copy that drifts. [`read_armed_pairs`], [`refuse_a_stage_armed_twice`],
-//! [`armed_hits`] and [`append_record`] are that discipline.
+//! is a copy that drifts. `read_armed_pairs`, `refuse_a_stage_armed_twice`,
+//! `armed_hits` and `append_record` are that discipline.
 
 use std::io;
 
@@ -370,7 +370,7 @@ impl Stage {
 /// each has a different required outcome: an error the protocol refuses on, a
 /// disk with no room left, and a machine that stops between two system calls.
 /// Naming them apart is what lets one arm say `ENOSPC` — which has no
-/// [`io::ErrorKind`](std::io::ErrorKind) of its own, and which a caller reads
+/// [`io::ErrorKind`] of its own, and which a caller reads
 /// off the refusal as an error number — and another say nothing at all,
 /// because the process it was armed in does not reach a return. The fourth is
 /// the foreign stage's alone.
@@ -576,7 +576,7 @@ impl Faults {
 
     /// What a public entry point outside a publication passes.
     ///
-    /// Without the `induced-failure` feature this is [`Faults::NONE`] and the
+    /// Without the `induced-failure` feature this is `Faults::NONE` and the
     /// entry point asks one comparison against an empty list. With it, the
     /// answer is whatever this process was started armed with — read once, and
     /// empty in every process that armed nothing, which is every process that
