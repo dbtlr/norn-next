@@ -12255,6 +12255,10 @@ mod tests {
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let _lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
+            // `Ready` is published before the attach leg ends, and a reload
+            // admitted while that leg stands is left to its end's dispatch,
+            // which the taken channel refuses with the reply still held.
+            wait_for_no_claim(&host, &name);
             host.shared.jobs.lock().unwrap().take();
             assert!(matches!(
                 host.vault_reload(&reload_params(&name, dry_run)),
@@ -13125,6 +13129,52 @@ mod tests {
         wait_for_state(&host, &a, TrustState::Ready);
     }
 
+    /// Wait until the leg registered against `name`'s entry ends. A leg
+    /// publishes its trust state before it ends, so a state seen is no
+    /// evidence the leg that published it has gone; what stands on the entry
+    /// once it has is what the case asserts.
+    fn wait_for_no_leg(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        wait_until("the entry's leg to end", lifecycle_wait_budget(), || {
+            if entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .leg()
+                .is_some()
+            {
+                Observed::pending("a leg stands on the entry")
+            } else {
+                Observed::Met(())
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// Wait for a job that lost `name`'s attachment to a poll to record itself
+    /// as the entry's marker and for its leg to end. The leg stays registered
+    /// past the marker it records, and nothing sends a marker beside a
+    /// registered leg, so a tick the case drives before that end sends nothing.
+    fn wait_for_the_lost_job_to_record_itself(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        wait_until(
+            "the job that lost the attachment to record itself for a later tick",
+            lifecycle_wait_budget(),
+            || {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if state.claim.marker().is_none() {
+                    Observed::pending("the entry has no job scheduled")
+                } else if state.claim.leg().is_some() {
+                    Observed::pending("the job's leg has not ended")
+                } else {
+                    Observed::Met(())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     /// Wait until no claim stands on `name`'s entry and no leg is registered
     /// against it, so a tick the case drives itself finds the entry free.
     fn wait_for_no_claim(host: &Host<Arc<FakeOps>>, name: &VaultName) {
@@ -13198,8 +13248,12 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
 
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        // The lease stands until `Ready` is seen: once it goes, `Ready` lasts
+        // only until the first reap tick past the idle bound, a window a slow
+        // attach can shrink below the wait's own polling.
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
@@ -17272,6 +17326,7 @@ mod tests {
         ops.damaged_attach.store(true, Ordering::SeqCst);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, awaiting.clone());
+        wait_for_no_leg(&host, &name);
         settle();
 
         assert_eq!(
@@ -24029,6 +24084,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_no_claim(&host, &name);
 
         // The claim the follow-up below loses: a poll holding the attachment
         // at the very epoch the follow-up was dispatched against.
@@ -24044,19 +24100,7 @@ mod tests {
         // already taken, because the leg takes it under its own claim.
         entry.gate.lock().unwrap().claim.take_slot(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
-        wait_until(
-            "the job that lost the attachment to record itself for a later tick",
-            lifecycle_wait_budget(),
-            || {
-                let state = entry.gate.lock().expect("entry gate poisoned");
-                if state.claim.marker().is_some() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the entry has no job scheduled".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_lost_job_to_record_itself(&host, &name);
 
         ops.poll_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
@@ -24094,8 +24138,10 @@ mod tests {
         // send this fixture refuses waits for a tick a minute away.
         let lease_a = host.demand(&a, AttachMode::Durable).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_no_claim(&host, &a);
         let lease_b = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
+        wait_for_no_claim(&host, &b);
 
         ops.block_poll.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -24109,19 +24155,7 @@ mod tests {
         // taken under the claim the leg is ending.
         entry.gate.lock().unwrap().claim.take_slot(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(a.clone(), epoch));
-        wait_until(
-            "the job that lost the attachment to record itself for a later tick",
-            lifecycle_wait_budget(),
-            || {
-                let state = entry.gate.lock().expect("entry gate poisoned");
-                if state.claim.marker().is_some() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the entry has no job scheduled".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_lost_job_to_record_itself(&host, &a);
 
         ops.poll_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
@@ -24165,6 +24199,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_no_claim(&host, &name);
 
         ops.block_poll.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -24176,19 +24211,7 @@ mod tests {
         // A leg's send, taking the entry's queue slot under the claim it ends.
         entry.gate.lock().unwrap().claim.take_slot(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
-        wait_until(
-            "the job that lost the attachment to record itself for a later tick",
-            lifecycle_wait_budget(),
-            || {
-                let state = entry.gate.lock().expect("entry gate poisoned");
-                if state.claim.marker().is_some() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the entry has no job scheduled".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_lost_job_to_record_itself(&host, &name);
 
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         ops.poll_release.store(true, Ordering::SeqCst);
@@ -24223,6 +24246,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_no_claim(&host, &name);
 
         ops.block_poll.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -24234,19 +24258,7 @@ mod tests {
         // A leg's send, taking the entry's queue slot under the claim it ends.
         entry.gate.lock().unwrap().claim.take_slot(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
-        wait_until(
-            "the job that lost the attachment to record itself for a later tick",
-            lifecycle_wait_budget(),
-            || {
-                let state = entry.gate.lock().expect("entry gate poisoned");
-                if state.claim.marker().is_some() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the entry has no job scheduled".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_lost_job_to_record_itself(&host, &name);
 
         ops.environmental_poll.store(true, Ordering::SeqCst);
         ops.poll_release.store(true, Ordering::SeqCst);
@@ -24284,6 +24296,7 @@ mod tests {
         // the whole of what this test reads.
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_no_claim(&host, &name);
 
         ops.block_poll.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -24295,19 +24308,7 @@ mod tests {
         // A leg's send, taking the entry's queue slot under the claim it ends.
         entry.gate.lock().unwrap().claim.take_slot(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
-        wait_until(
-            "the job that lost the attachment to record itself for a later tick",
-            lifecycle_wait_budget(),
-            || {
-                let state = entry.gate.lock().expect("entry gate poisoned");
-                if state.claim.marker().is_some() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the entry has no job scheduled".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_lost_job_to_record_itself(&host, &name);
 
         // The claim ends by giving the entry's resources back, which is the
         // teardown the marker above outlives.
@@ -24901,6 +24902,9 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        // `Ready` is published before the attach leg ends, so the case waits
+        // for that leg to end before it stands a marker alone on the entry.
+        wait_for_no_claim(&host, &name);
 
         let entry = host.shared.entries.get(&name).unwrap();
         let scheduled = {
@@ -26180,6 +26184,7 @@ mod tests {
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
+            wait_for_no_claim(&host, &name);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             // The coverage taken out of the entry's hand and no registration
             // beside it: the one shape that leaves out-with-a-leg as the whole
@@ -26618,8 +26623,14 @@ mod tests {
         /// Attach `name`, then let it idle out, so it has been served and
         /// holds nothing.
         fn attach_and_idle(host: &Host<Arc<FakeOps>>, name: &VaultName) {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
+            // The lease stands until `Ready` is seen: a demand that meets a
+            // release still in flight is honored by that release only while
+            // its lease stands.
+            let lease = host.demand(name, AttachMode::Durable).unwrap();
             wait_for_state(host, name, TrustState::Ready);
+            drop(lease);
+            // A reap passes over an entry a leg still stands on.
+            wait_for_no_claim(host, name);
             host.reap_idle(Instant::now() + Duration::from_secs(61))
                 .unwrap();
             wait_for_state(host, name, TrustState::Unattached);

@@ -109,3 +109,21 @@ signature: a_heal_refused_by_a_moved_root_leaves_a_subscription_that_drops
 class: confirmed root loss hidden by a backend error
 first-seen: 2026-10-01
 disposition: Seen repeatedly in the macOS filesystem lane, first on PR #265 run36888968258: FSEvents reported the moved root as a Backend ENOENT before the anchor confirmed its identity changed. Fixed 2026-10-16: an independently confirmed CoverageLost supersedes a Backend symptom in the heal, synchronization and delivery paths, including a Backend already queued before that confirmation. Restoring the root does not demote the confirmed terminal cause. An unchanged root preserves its Backend error, and unrelated terminal causes stand. A recurrence is a product classification defect, not runner starvation, and requires diagnosis rather than a clearing rerun.
+
+id: lifecycle-ready-before-the-leg-ends
+signature: a_tick_passes_over_an_entry_a_marker_holds
+class: harness reading a published state as the leg's end
+first-seen: 2026-10-01
+disposition: Opened 2026-10-01 off the hosted `build and test` job (run 36845533287, step 'Induced-failure recovery'), where the case's no-leg assertion found the attach leg still standing beside the marker it planted, and the poisoned gate buried the cause under follow-on panics. A job leg publishes `Ready` before it ends, so a case that reads `Ready` as no leg races that leg's teardown. Fixed 2026-10-16: the case waits for the entry's claim and leg to end before it schedules its marker, and the lifecycle cases that stand work on an entry, take its job channel, drive a tick or reap, or hand back its coverage right after a published state now wait for the leg that published it to end. A forced delay between a leg's work and its end, swept across the lifecycle suite, fails none of them. A recurrence is a defect rather than a flake.
+
+id: lifecycle-reload-stranded-behind-the-attach-leg
+signature: vault_reload_answers_a_stopped_host_with_no_code
+class: harness reading a published state as the leg's end
+first-seen: 2026-09-29
+disposition: Opened 2026-09-29 off local stress runs (3 hangs in 1000 on main), where the case took the job channel after `Ready` while the attach leg still stood, so the reload it admitted was left to that leg's end and its reply was never sent. Fixed 2026-10-16, with lifecycle-ready-before-the-leg-ends: the case waits for the leg to end before it takes the channel. A recurrence is a defect rather than a flake.
+
+id: lifecycle-reap-outruns-a-dropped-lease
+signature: a_reap_that_unwinds_leaves_the_dispatcher_reaping_on_later_ticks
+class: harness reading a published state as the leg's end
+first-seen: 2026-09-29
+disposition: Opened 2026-09-29 off a local run under CPU load, and seen again 2026-10-14 in a local workspace run: the case dropped its lease at once, so a slow attach left `Ready` standing only until the next reap tick, shorter than the wait's polling, and the wait breached its work bound reading `Unattached`. Fixed 2026-10-16: the lease stands until `Ready` is seen. A recurrence is a defect rather than a flake.
