@@ -8,8 +8,10 @@ members = ["crates/*"]
 exclude = ["vendor/notify"]
 
 # The macOS synchronization barrier needs an FSEvents event-history boundary
-# that the published `notify` release does not expose. `vendor/README.md`
-# states the release, the capability, and what removes the patch.
+# that the published `notify` release does not expose, and the poll backend
+# needs a stat gate so a tick does not read every watched file.
+# `vendor/README.md` states the release, both capabilities, and what removes
+# the patch.
 [patch.crates-io]
 notify = { path = "vendor/notify" }
 

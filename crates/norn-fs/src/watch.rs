@@ -1075,9 +1075,13 @@ fn establish(
                     .with_poll_interval(Duration::from_millis(250))
                     // Polling compares size, mtime, ctime and inode on each tick
                     // and reads content only for changed entries. An edit that
-                    // leaves all four unchanged is not reported by polling;
-                    // drift scans close that gap. The increment re-hashes every
-                    // reported path, preserving content-hash authority.
+                    // leaves all four unchanged is not reported by polling.
+                    // Drift scans are the mechanism the contract assigns to
+                    // close that gap; they are not built yet, so until then
+                    // such an edit waits for a later change to the same path
+                    // or for the next attach or recovery heal. The increment
+                    // re-hashes every reported path, preserving content-hash
+                    // authority.
                     .with_compare_contents(true),
             )
             .map_err(backend)?,
