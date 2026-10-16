@@ -1316,7 +1316,11 @@ mod tests {
         let scratch = Scratch::new("planner-view-folding");
         std::fs::write(scratch.join("Note.md"), "N").expect("a document");
         let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
-        if view.normalizer().case_sensitivity() != norn_fs::CaseSensitivity::Insensitive {
+        let folding = norn_testkit::churn::folding(scratch.root()).expect("the volume answers");
+        if !norn_testkit::churn::runs_where_the_volume_folds(
+            folding,
+            "on_a_folding_tree_another_spelling_reads_the_listed_document",
+        ) {
             return;
         }
         let Entry::Document { at, .. } = entry(&view, "note.md") else {
