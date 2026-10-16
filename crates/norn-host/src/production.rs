@@ -13061,13 +13061,14 @@ mod tests {
     }
 
     /// A stand-in for a child spawned while `lock` was held, which keeps a
-    /// copy of its descriptor until it execs: it holds the child gate as a
-    /// spawn does and a descriptor of the released `lock`, and lets the
-    /// descriptor go 300ms later and the gate after it. Returns once both are
-    /// held.
+    /// copy of its descriptor until it execs: once no real spawn in flight can
+    /// hold a copy of the released `lock`, it holds the child gate as a spawn
+    /// does and a descriptor of that lock, and lets the descriptor go 300ms
+    /// later and the gate after it. Returns once both are held.
     fn a_spawn_in_flight_holding(lock: PathBuf) -> thread::JoinHandle<()> {
         let (holds, held) = std::sync::mpsc::channel();
         let spawn = thread::spawn(move || {
+            crate::child_gate::await_spawns_in_flight();
             let _spawning = crate::child_gate::spawning();
             let norn_fs::Acquisition::Acquired(copy) = norn_fs::try_acquire(&lock).unwrap() else {
                 panic!("the lock was not released");
