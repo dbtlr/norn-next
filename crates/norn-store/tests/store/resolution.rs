@@ -325,7 +325,13 @@ fn a_written_link_is_handed_back_and_an_untouched_one_is_not() {
         assert_eq!(written, [judged("b.md", "a", "one:a.md", "one:a.md")]);
         let (untouched, work) = vault.judge(&plan, &[probed("b.md", "b.md", "[[a]]\n", false)]);
         assert_eq!(untouched, []);
-        assert_eq!(work, ResolutionWork::default());
+        assert_eq!(
+            work,
+            ResolutionWork {
+                overlay_targets_indexed: 1,
+                ..ResolutionWork::default()
+            }
+        );
     });
 }
 
@@ -620,6 +626,7 @@ fn a_link_free_mass_delete_costs_a_statement_per_chunk_of_its_keys() {
         work,
         ResolutionWork {
             ran: vec![ResolutionStatement::Occupied; keys.div_ceil(256) as usize],
+            overlay_targets_indexed: DEATHS as u64,
             ..ResolutionWork::default()
         }
     );

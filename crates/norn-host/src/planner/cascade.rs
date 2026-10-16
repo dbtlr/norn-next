@@ -686,6 +686,7 @@ struct Cascade<'a> {
     kept: BTreeSet<EntryKey>,
     /// What each wikilink rewrite's two ends name, by its position.
     namings: BTreeMap<usize, RetargetNaming>,
+    /// Which eligible rewrites select a link, keyed by its before-state.
     indexed: Retargets<'a>,
     /// The one document each delete rewriting the links naming its document
     /// names where the plan leaves the vault, and each wikilink rewrite's

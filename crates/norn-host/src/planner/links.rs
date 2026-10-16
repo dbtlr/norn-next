@@ -1040,16 +1040,20 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
     overlay: &PathOverlay,
     index: &I,
 ) -> Result<BTreeMap<usize, TargetNaming>, I::Error> {
-    let mut targets = BTreeMap::new();
-    for removal in lineage.removals() {
-        if let Some(address) = removal.rewrite_to() {
-            targets.insert(
-                removal.position,
-                index.target(overlay, address, PlanSide::After)?,
-            );
-        }
+    let requests: Vec<_> = lineage
+        .removals()
+        .filter_map(|removal| Some((removal.position, removal.rewrite_to()?)))
+        .collect();
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(targets)
+    let addresses: Vec<_> = requests.iter().map(|(_, address)| *address).collect();
+    let named = index.targets(overlay, &addresses, PlanSide::After)?;
+    Ok(requests
+        .into_iter()
+        .map(|(position, _)| position)
+        .zip(named)
+        .collect())
 }
 
 /// The one document the target `named` names where the plan leaves the
@@ -1162,17 +1166,26 @@ pub(crate) fn retarget_namings<I: LinkIndex + ?Sized>(
     overlay: &PathOverlay,
     index: &I,
 ) -> Result<BTreeMap<usize, RetargetNaming>, I::Error> {
-    let mut namings = BTreeMap::new();
-    for retarget in lineage.retargets() {
-        namings.insert(
-            retarget.position,
-            RetargetNaming {
-                old: index.target(overlay, &retarget.old, PlanSide::Before)?,
-                new: index.target(overlay, &retarget.new, PlanSide::After)?,
-            },
-        );
+    let retargets: Vec<_> = lineage.retargets().collect();
+    if retargets.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(namings)
+    let old: Vec<_> = retargets
+        .iter()
+        .map(|retarget| retarget.old.as_str())
+        .collect();
+    let new: Vec<_> = retargets
+        .iter()
+        .map(|retarget| retarget.new.as_str())
+        .collect();
+    let old = index.targets(overlay, &old, PlanSide::Before)?;
+    let new = index.targets(overlay, &new, PlanSide::After)?;
+    Ok(retargets
+        .into_iter()
+        .zip(old)
+        .zip(new)
+        .map(|((retarget, old), new)| (retarget.position, RetargetNaming { old, new }))
+        .collect())
 }
 
 /// `overlay`, reaching the wikilinks each wikilink rewrite of the plan could
@@ -1454,7 +1467,7 @@ pub(crate) fn decider<'l>(
 /// link resolving to `before` before the plan and `after` after it: never an
 /// authored link rewrite, which writes the link itself rather than through a
 /// cascade; a wikilink rewrite, where the link does not already name the one document
-/// its `new` names after the plan (`namings`); a delete, by its own rule
+/// its `new` names after the plan (`indexed`); a delete, by its own rule
 /// ([`rewritten_for`], its target named as `rewritten_to` says); the moves,
 /// by theirs ([`left_behind`]).
 ///
@@ -2360,6 +2373,111 @@ mod tests {
         .expect("an authored rewrite");
         assert!(matches!(by, super::Decider::Authored(_)));
         assert_eq!(by.owner(), 1);
+    }
+
+    /// Rewriting deletes share a judgment over the overlay, so doubling
+    /// deletes and overlay targets doubles the construction work.
+    #[test]
+    fn rewriting_delete_namings_index_the_overlay_once() {
+        fn run(size: usize) -> u64 {
+            use norn_store::PathOverlay;
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::delete_document_rewriting(
+                        path(&format!("old{at}.md")),
+                        ResolutionTarget::new("new").unwrap(),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+            let overlay = (0..size).fold(
+                PathOverlay::new().with(super::stored_path(&path("new.md")), false, true),
+                |overlay, at| {
+                    overlay.with(
+                        super::stored_path(&path(&format!("old{at}.md"))),
+                        true,
+                        false,
+                    )
+                },
+            );
+            let store = EmptyStore::new();
+            let index = store.index();
+            let named = super::rewrite_targets(&lineage, &overlay, &index).unwrap();
+            assert_eq!(named.len(), size);
+            for naming in named.values() {
+                assert_eq!(naming.before, Resolves::none());
+                assert_eq!(naming.after, Resolves::one(path("new.md")));
+                assert!(naming.candidates.is_none());
+            }
+            index.link_judgment_cost().overlay_targets_indexed
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling deletes and overlay targets: {small} -> {large}"
+        );
+    }
+
+    /// Retarget ends share two judgments. The old end's head belongs to
+    /// Before and the new end's to After even when the other side is ambiguous.
+    #[test]
+    fn retarget_namings_index_the_overlay_twice_with_heads_on_the_correct_sides() {
+        fn run(size: usize) -> u64 {
+            use norn_store::PathOverlay;
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::rewrite_wikilink(
+                        ResolutionTarget::new(format!("old{at}")).unwrap(),
+                        ResolutionTarget::new(format!("new{at}")).unwrap(),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+            let overlay = (0..size).fold(PathOverlay::new(), |overlay, at| {
+                [
+                    (format!("before/old{at}.md"), true, false),
+                    (format!("after-a/old{at}.md"), false, true),
+                    (format!("after-b/old{at}.md"), false, true),
+                    (format!("before-a/new{at}.md"), true, false),
+                    (format!("before-b/new{at}.md"), true, false),
+                    (format!("after/new{at}.md"), false, true),
+                ]
+                .into_iter()
+                .fold(overlay, |overlay, (at, before, after)| {
+                    overlay.with(super::stored_path(&path(&at)), before, after)
+                })
+            });
+            let store = EmptyStore::new();
+            let index = store.index();
+            let named = super::retarget_namings(&lineage, &overlay, &index).unwrap();
+            assert_eq!(named.len(), size);
+            for (at, ends) in named {
+                assert_eq!(
+                    ends.old.before,
+                    Resolves::one(path(&format!("before/old{at}.md")))
+                );
+                assert!(matches!(ends.old.after, Resolves::Several {}));
+                assert!(ends.old.candidates.is_none(), "old is unique on Before");
+                assert!(matches!(ends.new.before, Resolves::Several {}));
+                assert_eq!(
+                    ends.new.after,
+                    Resolves::one(path(&format!("after/new{at}.md")))
+                );
+                assert!(ends.new.candidates.is_none(), "new is unique on After");
+            }
+            index.link_judgment_cost().overlay_targets_indexed
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling retargets and overlay targets: {small} -> {large}"
+        );
     }
 
     /// An encoded Markdown rewrite is recognized by the anchor the store derives.

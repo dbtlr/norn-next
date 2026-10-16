@@ -1631,6 +1631,8 @@ pub struct LinkJudgmentCost {
     pub keys_resolved: u64,
     /// Rows the key resolutions read.
     pub head_rows: u64,
+    /// Overlay targets and reached places indexed when judgments began.
+    pub overlay_targets_indexed: u64,
     /// Statements the judgments ran on their snapshot.
     pub statements_executed: u64,
     /// Virtual-machine steps those statements took.
@@ -1646,6 +1648,7 @@ impl LinkJudgmentCost {
         links_evaluated: 0,
         keys_resolved: 0,
         head_rows: 0,
+        overlay_targets_indexed: 0,
         statements_executed: 0,
         vm_steps: 0,
         full_scan_steps: 0,
@@ -1663,6 +1666,7 @@ impl LinkJudgmentCost {
             links_evaluated: work.links_evaluated,
             keys_resolved: work.keys_resolved,
             head_rows: work.head_rows,
+            overlay_targets_indexed: work.overlay_targets_indexed,
             statements_executed: after
                 .statements_executed()
                 .saturating_sub(before.statements_executed()),
@@ -1681,6 +1685,7 @@ impl LinkJudgmentCost {
             links_evaluated: self.links_evaluated + other.links_evaluated,
             keys_resolved: self.keys_resolved + other.keys_resolved,
             head_rows: self.head_rows + other.head_rows,
+            overlay_targets_indexed: self.overlay_targets_indexed + other.overlay_targets_indexed,
             statements_executed: self.statements_executed + other.statements_executed,
             vm_steps: self.vm_steps + other.vm_steps,
             full_scan_steps: self.full_scan_steps + other.full_scan_steps,
@@ -1695,6 +1700,9 @@ impl LinkJudgmentCost {
             links_evaluated: self.links_evaluated.saturating_sub(earlier.links_evaluated),
             keys_resolved: self.keys_resolved.saturating_sub(earlier.keys_resolved),
             head_rows: self.head_rows.saturating_sub(earlier.head_rows),
+            overlay_targets_indexed: self
+                .overlay_targets_indexed
+                .saturating_sub(earlier.overlay_targets_indexed),
             statements_executed: self
                 .statements_executed
                 .saturating_sub(earlier.statements_executed),
@@ -1711,6 +1719,7 @@ struct LinkJudgmentAccount {
     links_evaluated: AtomicU64,
     keys_resolved: AtomicU64,
     head_rows: AtomicU64,
+    overlay_targets_indexed: AtomicU64,
     statements_executed: AtomicU64,
     vm_steps: AtomicU64,
     full_scan_steps: AtomicU64,
@@ -1723,6 +1732,7 @@ impl LinkJudgmentAccount {
             (&self.links_evaluated, cost.links_evaluated),
             (&self.keys_resolved, cost.keys_resolved),
             (&self.head_rows, cost.head_rows),
+            (&self.overlay_targets_indexed, cost.overlay_targets_indexed),
             (&self.statements_executed, cost.statements_executed),
             (&self.vm_steps, cost.vm_steps),
             (&self.full_scan_steps, cost.full_scan_steps),
@@ -1738,6 +1748,7 @@ impl LinkJudgmentAccount {
             links_evaluated: get(&self.links_evaluated),
             keys_resolved: get(&self.keys_resolved),
             head_rows: get(&self.head_rows),
+            overlay_targets_indexed: get(&self.overlay_targets_indexed),
             statements_executed: get(&self.statements_executed),
             vm_steps: get(&self.vm_steps),
             full_scan_steps: get(&self.full_scan_steps),

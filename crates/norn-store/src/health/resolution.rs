@@ -397,6 +397,10 @@ pub struct ResolutionWork {
     /// keys' targets without reading them again, however many targets a key
     /// could name; and those a target's naming reads for its head.
     pub targets_read: u64,
+    /// Targets and reached places visited while building the judgment's
+    /// overlay indexes, once per entry. Key-resolution reads are counted
+    /// separately by `targets_read`.
+    pub overlay_targets_indexed: u64,
 }
 
 /// What one target names on each side of a plan, read as a wikilink written
@@ -643,7 +647,9 @@ impl<'a, R: Runner> Judging<'a, R> {
         let key = SuffixKey::under(order);
         let mut naming: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut sought = BTreeSet::new();
+        let mut work = ResolutionWork::default();
         for (at, target) in overlay.targets.iter().enumerate() {
+            work.overlay_targets_indexed += 1;
             for named in keys_naming(&target.path, key) {
                 if target.changes() {
                     sought.insert(named.clone());
@@ -653,6 +659,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         }
         let mut reaching: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (at, document) in overlay.reached.iter().enumerate() {
+            work.overlay_targets_indexed += 1;
             for named in keys_naming(document, key) {
                 sought.insert(named.clone());
                 reaching.entry(named).or_default().push(at);
@@ -674,7 +681,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             reaching,
             kept: BTreeMap::new(),
             passing: BTreeMap::new(),
-            work: ResolutionWork::default(),
+            work,
             targets_read: std::cell::Cell::new(0),
         }
     }
