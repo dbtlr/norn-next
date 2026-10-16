@@ -81,6 +81,8 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
         "three unchanged ticks over 50 files must read no content"
     );
 
+    // Each edit below also moves ctime on a nanosecond-timestamp volume; the
+    // whole-second case holds size, mtime and inode to a change of their own.
     fs::write(&target, b"longer content").unwrap();
     assert!(tick(&watcher, &events, &clock, 4).contains(&target), "size");
     assert_eq!(watcher.content_reads() - before, 1);
@@ -196,14 +198,18 @@ fn start_of_a_second() {
 
 /// On a volume that keeps timestamps to the whole second, an edit made in the
 /// second its file was written can change size, mtime or inode while leaving
-/// ctime where it was. Each of those fields alone is a reported change.
+/// ctime where it was. Each of those fields alone is a reported change, and
+/// the one entry it changed is the one whose content polling reads again.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_change_to_size_mtime_or_inode_alone_is_reported_on_a_whole_second_volume() {
     let volume = norn_testkit::volume::Volume::provision("polling-stat")
         .unwrap_or_else(|reason| panic!("this case needs a whole-second volume: {reason}"));
+    // The clock stays on the scratch volume, whose nanosecond ctime moves on
+    // every tick, so a tick completes whatever this volume's stat reports.
+    let scratch = Scratch::new("norn-fs-polling-whole-second");
     let vault = volume.mount().join("vault");
-    let clock = volume.mount().join("clock");
+    let clock = scratch.join("clock");
     fs::create_dir(&vault).unwrap();
     fs::create_dir(&clock).unwrap();
     let (tx, events) = mpsc::channel();
@@ -221,12 +227,13 @@ fn a_change_to_size_mtime_or_inode_alone_is_reported_on_a_whole_second_volume() 
     for field in [Field::Size, Field::Mtime, Field::Inode] {
         // A second boundary crossed between the write and the edit moves ctime
         // too; such an attempt proves nothing about the field and is retried.
-        let reported = (0..5).find_map(|attempt| {
+        let observed = (0..5).find_map(|attempt| {
             let target = vault.join(format!("{field:?}-{attempt}.md"));
             start_of_a_second();
             fs::write(&target, b"aaaa").unwrap();
             tick(&watcher, &events, &clock, ticks.next().unwrap());
             let old = stat(&target);
+            let before = watcher.content_reads();
             match field {
                 Field::Size => {
                     use std::io::Write;
@@ -252,12 +259,14 @@ fn a_change_to_size_mtime_or_inode_alone_is_reported_on_a_whole_second_volume() 
             }
             let changed = differing(old, stat(&target));
             let paths = tick(&watcher, &events, &clock, ticks.next().unwrap());
-            (changed == [field.name()]).then(|| paths.contains(&target))
+            let reads = watcher.content_reads() - before;
+            (changed == [field.name()]).then(|| (paths.contains(&target), reads))
         });
         assert_eq!(
-            reported,
-            Some(true),
-            "a change to {} alone must be reported (None: no attempt changed it alone)",
+            observed,
+            Some((true, 1)),
+            "a change to {} alone must be reported and re-read once \
+             (None: no attempt changed it alone)",
             field.name()
         );
     }
