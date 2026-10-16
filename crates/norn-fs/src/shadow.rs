@@ -95,6 +95,11 @@
 //! touch vault mechanism files, so no other crate could implement one — and a
 //! bound that nothing can enforce is not a bound.
 //!
+//! Fallback creation and these sweeps reach `.norn` by path and can follow
+//! linked components. Host attachment refuses a linked `.norn` before serving,
+//! but these operations do not prevent a link swap. The write kernel descends
+//! without following links when it stages a shadow.
+//!
 //! **No sweep ever breaks a lock, and no lock has a timeout.** The kernel
 //! releases a `flock` when the holding process dies, so a lock still held is a
 //! process still alive. Taking a lock away on age grounds is what manufactures

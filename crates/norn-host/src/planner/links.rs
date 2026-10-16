@@ -1584,6 +1584,11 @@ pub(crate) fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory 
 /// one document's after-state, which a `rewrite_link` of the plan or a
 /// rewrite of one of its cascades writes — with each address a rewrite
 /// writing it there respelled it from.
+///
+/// Ordinary frontmatter sets and body edits record no resolution condition for
+/// links they write. A target can disappear or gain a competitor before apply
+/// without refusing that write. Repair's link-valued fixes record their own
+/// address-resolution conditions.
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
     rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,

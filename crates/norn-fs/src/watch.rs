@@ -1449,6 +1449,9 @@ fn canonical_parent_path(path: &Path) -> Result<PathBuf, WatchError> {
 /// path is spelled under the canonical root by its place below the registered
 /// one, which is all an in-vault schema's classification reads. A schema
 /// outside the vault is resolved as before: its parent must stand.
+///
+/// Parent resolution follows links, including `.norn`. Host attachment refuses
+/// a linked `.norn` before serving, so coverage through it cannot serve requests.
 fn canonical_schema_path(
     registered_root: &Path,
     root: &Path,
