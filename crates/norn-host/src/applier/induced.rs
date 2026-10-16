@@ -115,7 +115,7 @@ fn run_child_switched(
     for switch in switches {
         command.env(switch, "1");
     }
-    let output = command
+    command
         .args(["--exact", "applier::induced::applier_child", "--nocapture"])
         .env(CHILD, "1")
         .env(VAULT, &fixture.vault)
@@ -123,9 +123,8 @@ fn run_child_switched(
         .env(PLAN, &plan_file)
         .env(OUTCOME, &outcome_file)
         .env(ARMED, armed)
-        .env(HITS, &hits_file)
-        .output()
-        .expect("the child runs");
+        .env(HITS, &hits_file);
+    let output = crate::child_gate::output_of_test_binary(&mut command).expect("the child runs");
     let outcome = std::fs::read(&outcome_file)
         .ok()
         .map(|bytes| serde_json::from_slice(&bytes).expect("an outcome"));

@@ -909,6 +909,8 @@ impl ProductionEntryOps {
         write: impl FnOnce(&mut norn_config::registry::Registry),
     ) -> Result<(), RetireRefusal> {
         let name = &registration.name;
+        #[cfg(test)]
+        crate::child_gate::await_spawns_in_flight();
         let _maintainership = match try_acquire(&self.derived(name).join(MAINTAINER_LOCK_FILE)) {
             Ok(Acquisition::Acquired(guard)) => guard,
             Ok(Acquisition::Contended { incumbent }) => {
@@ -1422,6 +1424,8 @@ impl EntryOps for ProductionEntryOps {
         let _job = self.evidence.attributing();
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
+        #[cfg(test)]
+        crate::child_gate::await_spawns_in_flight();
         let maintainership =
             match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
                 Acquisition::Acquired(guard) => guard,
@@ -11288,7 +11292,7 @@ mod tests {
         ops.detach(&name, attachment);
         corrupt_the_document_pages(&f, &database);
 
-        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Created,
@@ -11465,7 +11469,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Reused,
@@ -11591,7 +11595,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Reused,
@@ -12402,7 +12406,8 @@ mod tests {
         // vault on rather than finding this run still holding it. That attach
         // creates the store the failed one could not, which is what says the
         // arm was one-shot and the refusal was the environment of that moment.
-        let mut attachment = reattach(&ops, &f.registration(), &progress)
+        let mut attachment = ops
+            .attach(&f.registration(), &progress)
             .expect("the failed rung 3 released the entry");
         assert_eq!(attachment.store.path(), database.as_path());
         assert_eq!(stored_paths(&mut attachment.store).len(), 4);
@@ -13045,68 +13050,90 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// Attach `registration` again in the process that detached it.
-    ///
-    /// Detaching closes the maintainer lock's descriptor, but a child another
-    /// case's thread forked while it was open holds a copy until that child
-    /// execs, and for that long the lock reads as held by this very process.
-    /// The lock leaves any wait to its caller, so a re-attach here waits out a
-    /// contention naming this process, and answers every other outcome as the
-    /// attach answered it.
-    fn reattach(
-        ops: &ProductionEntryOps,
-        registration: &Registration,
-        progress: &ProgressReporter<ProductionAttachment>,
-    ) -> Result<ProductionAttachment, JobFailure> {
-        wait_until(
-            "the re-attach to stop meeting the lock this process released",
-            lifecycle_budget(),
-            || match ops.attach(registration, progress) {
-                Err(JobFailure::MaintainerContended(MaintainerIdentity::Named { pid, .. }))
-                    if pid == std::process::id() =>
-                {
-                    Observed::pending(format!("the lock reads as held by this process ({pid})"))
-                }
-                answered => Observed::Met(answered),
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"))
+    /// Take `lock` beside the host, once no spawn in flight can hold a copy
+    /// of it.
+    fn another_holder_of(lock: &Path) -> norn_fs::Maintainership {
+        crate::child_gate::await_spawns_in_flight();
+        let norn_fs::Acquisition::Acquired(held) = norn_fs::try_acquire(lock).unwrap() else {
+            panic!("the idle vault's lock is held");
+        };
+        held
     }
 
-    /// **A re-attach waits out the lock this process still reads as holding.**
-    /// Another descriptor of the lock outlives the detach, as a child forked
-    /// while the lock was held keeps one until it execs, so the first attach
-    /// after the detach meets a contention naming this process; the re-attach
-    /// answers with the attachment once that descriptor goes.
+    /// A stand-in for a child spawned while `lock` was held, which keeps a
+    /// copy of its descriptor until it execs: it holds the child gate as a
+    /// spawn does and a descriptor of the released `lock`, and lets the
+    /// descriptor go 300ms later and the gate after it. Returns once both are
+    /// held.
+    fn a_spawn_in_flight_holding(lock: PathBuf) -> thread::JoinHandle<()> {
+        let (holds, held) = std::sync::mpsc::channel();
+        let spawn = thread::spawn(move || {
+            let _spawning = crate::child_gate::spawning();
+            let norn_fs::Acquisition::Acquired(copy) = norn_fs::try_acquire(&lock).unwrap() else {
+                panic!("the lock was not released");
+            };
+            holds.send(()).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            drop(copy);
+        });
+        held.recv()
+            .expect("the stand-in holds the gate and the lock");
+        spawn
+    }
+
+    /// Assert that `lock` reads as held by this process.
+    fn assert_held_by_this_process(lock: &Path) {
+        let read = norn_fs::try_acquire(lock).unwrap();
+        assert!(
+            matches!(
+                &read,
+                norn_fs::Acquisition::Contended {
+                    incumbent: norn_fs::Incumbent::Named { pid, .. }
+                } if *pid == std::process::id()
+            ),
+            "the stand-in's descriptor did not read as this process's: {read:?}"
+        );
+    }
+
+    /// **An attach waits out a spawn in flight over the lock it takes.** A
+    /// child forked while the lock was held keeps a descriptor of it until it
+    /// execs, so after the detach the lock reads as held by this process; the
+    /// attach takes it once the spawn lets the gate go.
     #[test]
-    fn a_re_attach_waits_out_the_lock_this_process_still_holds() {
-        let f = Fixture::new("reattach-own-holder");
+    fn an_attach_waits_out_a_spawn_in_flight_over_its_lock() {
+        let f = Fixture::new("attach-after-spawn");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let attachment = ops.attach(&f.registration(), &progress).unwrap();
         let lock = attachment.maintainership.path().to_path_buf();
         ops.detach(&name, attachment);
-        let norn_fs::Acquisition::Acquired(held) = norn_fs::try_acquire(&lock).unwrap() else {
-            panic!("the detach left the lock held");
-        };
-        let contended = ops.attach(&f.registration(), &progress).err();
-        assert!(
-            matches!(
-                contended,
-                Some(JobFailure::MaintainerContended(MaintainerIdentity::Named { pid, .. }))
-                    if pid == std::process::id()
-            ),
-            "the held lock did not read as this process's: {contended:?}"
-        );
-        let holder = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(300));
-            drop(held);
-        });
+        let spawn = a_spawn_in_flight_holding(lock.clone());
+        assert_held_by_this_process(&lock);
 
-        let attachment = reattach(&ops, &f.registration(), &progress)
-            .expect("the re-attach did not outlast the other descriptor");
-        holder.join().unwrap();
+        let attachment = ops
+            .attach(&f.registration(), &progress)
+            .expect("the attach did not wait out the spawn in flight");
+        spawn.join().unwrap();
         ops.detach(&name, attachment);
+    }
+
+    /// **A retirement waits out a spawn in flight over the lock it takes.**
+    /// A retirement takes the maintainer lock an attach takes, in the process
+    /// that may have just released it.
+    #[test]
+    fn a_retirement_waits_out_a_spawn_in_flight_over_its_lock() {
+        let f = Fixture::new("retire-after-spawn");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let lock = attachment.maintainership.path().to_path_buf();
+        ops.detach(&name, attachment);
+        let spawn = a_spawn_in_flight_holding(lock.clone());
+        assert_held_by_this_process(&lock);
+
+        ops.retire(&f.registration(), true, &[])
+            .expect("the retirement did not wait out the spawn in flight");
+        spawn.join().unwrap();
     }
 
     /// **A degraded row whose own finding is not beside it is re-derived.** The
@@ -13136,7 +13163,7 @@ mod tests {
         assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
 
-        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let recovered = findings_at(&mut attachment.store, "note.md");
         assert_eq!(
             recovered.len(),
@@ -13198,7 +13225,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let restored = findings_at(&mut attachment.store, "note.md");
         let recovered: Vec<&str> = restored
             .iter()
@@ -13234,7 +13261,7 @@ mod tests {
         assert_eq!(finding.len(), 1);
         ops.detach(&name, attachment);
 
-        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let again = attachment
             .store
             .begin_request()
@@ -13853,10 +13880,8 @@ mod tests {
         let f = Fixture::new("schema-pipe");
         let schema = f.vault().join(IN_VAULT_SCHEMA_PATH);
         fs::remove_file(&schema).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(&schema)
-            .status()
-            .unwrap();
+        let made =
+            crate::child_gate::status(std::process::Command::new("mkfifo").arg(&schema)).unwrap();
         assert!(made.success(), "mkfifo failed");
 
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -15030,10 +15055,10 @@ mod tests {
         fs::create_dir_all(f.vault().join("elsewhere")).unwrap();
         fs::write(f.vault().join("elsewhere/note.md"), "body").unwrap();
         symlink(f.vault().join("elsewhere"), f.vault().join("dir/link")).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(f.vault().join("dir/pipe.md"))
-            .status()
-            .unwrap();
+        let made = crate::child_gate::status(
+            std::process::Command::new("mkfifo").arg(f.vault().join("dir/pipe.md")),
+        )
+        .unwrap();
         assert!(made.success(), "mkfifo failed");
         fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
 
@@ -15243,10 +15268,10 @@ mod tests {
         let f = Fixture::new("increment-under-an-entry");
         fs::write(f.vault().join("note.md"), "body").unwrap();
         fs::write(f.vault().join("plain.md"), "body").unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(f.vault().join("pipe"))
-            .status()
-            .unwrap();
+        let made = crate::child_gate::status(
+            std::process::Command::new("mkfifo").arg(f.vault().join("pipe")),
+        )
+        .unwrap();
         assert!(made.success(), "mkfifo failed");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -17116,11 +17141,7 @@ mod tests {
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
 
@@ -17634,11 +17655,7 @@ mod tests {
                 .registration;
             attach_and_idle(&host);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let refusal =
                 set_once_idle(&host, &moving_to(&moved)).expect_err("a contended vault was moved");
@@ -17830,11 +17847,7 @@ mod tests {
                 .unwrap();
             wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let report = set_once_idle(
                 &host,

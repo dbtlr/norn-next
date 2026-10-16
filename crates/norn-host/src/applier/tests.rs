@@ -925,16 +925,16 @@ const BETWEEN_PHASES_CHILD: &str = "NORN_APPLIER_BETWEEN_PHASES_CHILD";
 #[test]
 fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() {
     if std::env::var_os(BETWEEN_PHASES_CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
-            .args([
+        let output = crate::child_gate::output_of_test_binary(
+            std::process::Command::new(std::env::current_exe().expect("this binary")).args([
                 "--exact",
                 "applier::tests::between_staging_and_publication_the_applier_holds_no_handle_and_no_content",
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env(BETWEEN_PHASES_CHILD, "1")
-            .output()
-            .expect("the child runs");
+            .env(BETWEEN_PHASES_CHILD, "1"),
+        )
+        .expect("the child runs");
         assert!(
             output.status.success(),
             "{}",
