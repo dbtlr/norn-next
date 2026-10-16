@@ -1257,6 +1257,92 @@ fn every_per_pr_suite_runs_through_the_tripwire_and_every_ledger_entry_can_match
     );
 }
 
+/// One job of the per-PR lane: its key, and the uncommented lines of its body.
+fn ci_job(workflow: &str, key: &str) -> Vec<String> {
+    let header = format!("  {key}:");
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| line.is_empty() || line.starts_with("    ") || line.starts_with("  #"))
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .peekable();
+    assert!(lines.peek().is_some(), "the per-PR lane has no `{key}` job");
+    lines.collect()
+}
+
+/// **The per-PR lane's job shape.** The induced-failure recovery suite runs in
+/// a job of its own beside the build job, each job's timeout is a loose runaway
+/// guard, and the macOS job runs the counter bars on its folding root.
+///
+/// The split is what keeps the longest job short; the pairing below keeps it
+/// from drifting back, and keeps the suite from being dropped in the move.
+/// Neither job, and no step of the macOS job, may carry `needs:`, `if:` or
+/// `continue-on-error:`: each would serialize the job behind the build, skip
+/// it, or let it fail without failing the PR.
+#[test]
+fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_macos() {
+    let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
+        .expect("reading the per-PR lane");
+    let recovery_run = "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure";
+
+    let build = ci_job(&gate, "build");
+    assert!(
+        build.contains(&"timeout-minutes: 30".to_string()),
+        "build: {build:?}"
+    );
+    assert!(
+        !build
+            .iter()
+            .any(|line| line.contains("--features induced-failure")
+                && line.starts_with("run:")
+                && line.contains("cargo test")),
+        "the build job runs the induced-failure recovery suite, which has a job of its own: {build:?}"
+    );
+
+    let recovery = ci_job(&gate, "induced-failure");
+    let platform = ci_job(&gate, "platform");
+    for (job, lines) in [("induced-failure", &recovery), ("platform", &platform)] {
+        for line in lines {
+            let key = line.trim_start_matches("- ");
+            assert!(
+                !["needs:", "if:", "continue-on-error:"]
+                    .iter()
+                    .any(|forbidden| key.starts_with(forbidden)),
+                "the `{job}` job holds `{line}`, which orders, skips or excuses it"
+            );
+        }
+    }
+    for required in [
+        "name: induced-failure recovery",
+        "runs-on: ubuntu-latest",
+        "timeout-minutes: 30",
+        "- uses: Swatinem/rust-cache@v2",
+        recovery_run,
+    ] {
+        assert!(
+            recovery.contains(&required.to_string()),
+            "the induced-failure job lacks `{required}`: {recovery:?}"
+        );
+    }
+
+    assert!(
+        platform.contains(&"timeout-minutes: 25".to_string()),
+        "the macOS job's timeout: {platform:?}"
+    );
+    assert!(
+        platform.iter().any(|line| line
+            .contains("lane-suite.sh norn-host counter_gate --nocapture --test-threads=1")),
+        "the macOS job runs no counter_gate step: {platform:?}"
+    );
+    assert!(
+        platform.contains(&"LANE_FEATURES: induced-failure".to_string()),
+        "the macOS counter step names no feature: {platform:?}"
+    );
+}
+
 /// The wrapper every per-PR suite step is run through.
 const TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
 

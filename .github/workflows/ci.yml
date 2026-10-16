@@ -63,7 +63,7 @@ jobs:
   build:
     name: build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -109,15 +109,26 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace
-      # Four crates declare an `induced-failure` feature, and the workspace test
-      # above reaches three of them. norn-fs and norn-store each turn their own
-      # on through a self dev-dependency, and norn-store forwards it to norn-db,
-      # so those crates' lockdown and environment suites run above already.
-      # norn-host's is a feature a caller asks for, and
-      # nothing above asks: its crash-convergence proof (kill_recovery.rs), its
-      # lockdown suite and its soak load (host_soak.rs, whose case the scheduled
-      # lane runs) are whole files behind it and compile to zero tests there.
-      # This step is scoped to that crate for that reason.
+
+  # Four crates declare an `induced-failure` feature, and the workspace test in
+  # the build job reaches three of them. norn-fs and norn-store each turn their
+  # own on through a self dev-dependency, and norn-store forwards it to norn-db,
+  # so those crates' lockdown and environment suites run there already.
+  # norn-host's is a feature a caller asks for, and nothing there asks: its
+  # crash-convergence proof (kill_recovery.rs), its lockdown suite and its soak
+  # load (host_soak.rs, whose case the scheduled lane runs) are whole files
+  # behind it and compile to zero tests without it. This job is scoped to that
+  # crate for that reason, and runs beside the build job rather than after its
+  # steps so the per-PR critical path is the longer of the two.
+  induced-failure:
+    name: induced-failure recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
       - name: Induced-failure recovery
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
@@ -139,7 +150,7 @@ jobs:
   platform:
     name: determinism and filesystem (macOS ARM64)
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
@@ -159,6 +170,14 @@ jobs:
           LANE_FEATURES: induced-failure
       - name: Host filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
+      # The counter bars on a folding root. Cases whose size-independence bar
+      # cannot hold while a folding root pays the listing confirmation stand
+      # down by name in the log (`stands_down_on_a_folding_root`); the rest
+      # measure what only this filesystem shows.
+      - name: Counter bars on a folding root
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
 
   # The architecture gate: it reads `cargo metadata` once per entry in the
   # pinned feature matrix and asserts the workspace normal-dependency graph
@@ -230,8 +249,8 @@ jobs:
   # read the account, and the lane table's own test holds this step to every feature
   # the suite puts a case or a helper behind.
   #
-  # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
-  # reason so the build job's workspace suite does not attach thousands of
+  # The cases live in this job and the macOS job's counter step, `#[ignore]`d
+  # with a `counter-lane case:` reason so the build job's workspace suite does not attach thousands of
   # documents beside every other test. The script is what makes the wholesale
   # `--ignored` run fail when it ran nothing.
   gates:
