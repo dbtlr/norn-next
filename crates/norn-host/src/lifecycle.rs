@@ -5867,6 +5867,11 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.count_clock_reads(reads);
     }
 
+    /// Record the logical rewrite selection work on one planning hold.
+    pub(crate) fn count_rewrite_selection_steps(&self, steps: u64) {
+        self.shared.reads.count_rewrite_selection_steps(steps);
+    }
+
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {

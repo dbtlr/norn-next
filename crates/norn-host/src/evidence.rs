@@ -103,6 +103,7 @@ pub struct JobEvidence {
     /// The readings the jobs' plans took of the host's clock, summed: folded
     /// whole when a job ends ([`EvidenceReading::clock_reads`]).
     clock_reads: AtomicU64,
+    rewrite_selection_steps: AtomicU64,
     /// The file each counted read of every job read, in the order the jobs
     /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
     /// ran: nothing is kept while none is.
@@ -267,6 +268,9 @@ pub struct EvidenceReading {
     /// plan, and none for a plan no template or rule default of which
     /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
     pub clock_reads: u64,
+    /// Rewrite entries processed while indexing, logical key probes, shared
+    /// candidate places examined and retarget matches accumulated.
+    pub rewrite_selection_steps: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -346,6 +350,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.apply_full_scan_steps),
             rule_work: rule_work_since(self.rule_work, earlier.rule_work),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
+            rewrite_selection_steps: self
+                .rewrite_selection_steps
+                .saturating_sub(earlier.rewrite_selection_steps),
         }
     }
 }
@@ -446,6 +453,7 @@ impl JobEvidence {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
             clock_reads: get(&self.clock_reads),
+            rewrite_selection_steps: get(&self.rewrite_selection_steps),
         }
     }
 
@@ -549,6 +557,8 @@ impl JobEvidence {
         drop(rule_work);
         self.clock_reads
             .fetch_add(take_clock_reads(), Ordering::Relaxed);
+        self.rewrite_selection_steps
+            .fetch_add(take_rewrite_selection_steps(), Ordering::Relaxed);
 
         let changesets = take_changeset_tally();
         self.changesets_applied
@@ -585,6 +595,7 @@ impl JobEvidence {
         let _ = take_documents_derived();
         let _ = take_rule_work();
         let _ = take_clock_reads();
+        let _ = take_rewrite_selection_steps();
         Attribution {
             account: Arc::clone(self),
             window: Some(window),
@@ -1104,6 +1115,7 @@ pub(crate) struct ReadEvidence {
     repair_advisories: RepairAdvisoryAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
+    rewrite_selection_steps: AtomicU64,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -1280,6 +1292,8 @@ pub struct ReadReading {
     /// none for a plan no template or rule default of which reads
     /// `{{now}}`, `{{date}}` or `{{time}}`.
     pub clock_reads: u64,
+    /// Logical rewrite selection work on planning holds.
+    pub rewrite_selection_steps: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -1334,6 +1348,8 @@ pub struct ReadsSince {
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
     pub clock_reads: u64,
+    /// Logical rewrite selection work on planning holds.
+    pub rewrite_selection_steps: u64,
 }
 
 impl ReadReading {
@@ -1369,6 +1385,9 @@ impl ReadReading {
             repair_advisories: self.repair_advisories.since(earlier.repair_advisories),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
+            rewrite_selection_steps: self
+                .rewrite_selection_steps
+                .saturating_sub(earlier.rewrite_selection_steps),
         }
     }
 }
@@ -1401,6 +1420,7 @@ impl ReadEvidence {
             repair_advisories: self.repair_advisories.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
+            rewrite_selection_steps: get(&self.rewrite_selection_steps),
         }
     }
 
@@ -1441,6 +1461,11 @@ impl ReadEvidence {
     /// where the hold is given back.
     pub(crate) fn count_clock_reads(&self, reads: u64) {
         self.clock_reads.fetch_add(reads, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_rewrite_selection_steps(&self, steps: u64) {
+        self.rewrite_selection_steps
+            .fetch_add(steps, Ordering::Relaxed);
     }
 
     /// Record what one read's mint ran under the entry gate.
@@ -1606,6 +1631,8 @@ pub struct LinkJudgmentCost {
     pub keys_resolved: u64,
     /// Rows the key resolutions read.
     pub head_rows: u64,
+    /// Overlay targets and reached places indexed when judgments began.
+    pub overlay_targets_indexed: u64,
     /// Statements the judgments ran on their snapshot.
     pub statements_executed: u64,
     /// Virtual-machine steps those statements took.
@@ -1621,6 +1648,7 @@ impl LinkJudgmentCost {
         links_evaluated: 0,
         keys_resolved: 0,
         head_rows: 0,
+        overlay_targets_indexed: 0,
         statements_executed: 0,
         vm_steps: 0,
         full_scan_steps: 0,
@@ -1638,6 +1666,7 @@ impl LinkJudgmentCost {
             links_evaluated: work.links_evaluated,
             keys_resolved: work.keys_resolved,
             head_rows: work.head_rows,
+            overlay_targets_indexed: work.overlay_targets_indexed,
             statements_executed: after
                 .statements_executed()
                 .saturating_sub(before.statements_executed()),
@@ -1656,6 +1685,7 @@ impl LinkJudgmentCost {
             links_evaluated: self.links_evaluated + other.links_evaluated,
             keys_resolved: self.keys_resolved + other.keys_resolved,
             head_rows: self.head_rows + other.head_rows,
+            overlay_targets_indexed: self.overlay_targets_indexed + other.overlay_targets_indexed,
             statements_executed: self.statements_executed + other.statements_executed,
             vm_steps: self.vm_steps + other.vm_steps,
             full_scan_steps: self.full_scan_steps + other.full_scan_steps,
@@ -1670,6 +1700,9 @@ impl LinkJudgmentCost {
             links_evaluated: self.links_evaluated.saturating_sub(earlier.links_evaluated),
             keys_resolved: self.keys_resolved.saturating_sub(earlier.keys_resolved),
             head_rows: self.head_rows.saturating_sub(earlier.head_rows),
+            overlay_targets_indexed: self
+                .overlay_targets_indexed
+                .saturating_sub(earlier.overlay_targets_indexed),
             statements_executed: self
                 .statements_executed
                 .saturating_sub(earlier.statements_executed),
@@ -1686,6 +1719,7 @@ struct LinkJudgmentAccount {
     links_evaluated: AtomicU64,
     keys_resolved: AtomicU64,
     head_rows: AtomicU64,
+    overlay_targets_indexed: AtomicU64,
     statements_executed: AtomicU64,
     vm_steps: AtomicU64,
     full_scan_steps: AtomicU64,
@@ -1698,6 +1732,7 @@ impl LinkJudgmentAccount {
             (&self.links_evaluated, cost.links_evaluated),
             (&self.keys_resolved, cost.keys_resolved),
             (&self.head_rows, cost.head_rows),
+            (&self.overlay_targets_indexed, cost.overlay_targets_indexed),
             (&self.statements_executed, cost.statements_executed),
             (&self.vm_steps, cost.vm_steps),
             (&self.full_scan_steps, cost.full_scan_steps),
@@ -1713,6 +1748,7 @@ impl LinkJudgmentAccount {
             links_evaluated: get(&self.links_evaluated),
             keys_resolved: get(&self.keys_resolved),
             head_rows: get(&self.head_rows),
+            overlay_targets_indexed: get(&self.overlay_targets_indexed),
             statements_executed: get(&self.statements_executed),
             vm_steps: get(&self.vm_steps),
             full_scan_steps: get(&self.full_scan_steps),
@@ -2126,4 +2162,28 @@ impl PlanningHoldAccount {
             full_scan_steps: get(&self.full_scan_steps),
         }
     }
+}
+
+thread_local! {
+    static REWRITE_SELECTION_STEPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Count rewrite entries processed while indexing, key probes, shared candidate
+/// places and retarget matches at their selection seams. Collection traversal
+/// inside a probe remains subject to source review.
+pub(crate) fn count_rewrite_selection_step() {
+    REWRITE_SELECTION_STEPS.with(|cell| cell.set(cell.get() + 1));
+}
+
+fn take_rewrite_selection_steps() -> u64 {
+    REWRITE_SELECTION_STEPS.with(|cell| cell.replace(0))
+}
+
+/// Read one planning window's selection work without attributing earlier
+/// work on the same thread to that plan.
+pub(crate) fn rewrite_selection_steps_of<T>(run: impl FnOnce() -> T) -> (T, u64) {
+    let standing = take_rewrite_selection_steps();
+    let ran = run();
+    let tallied = REWRITE_SELECTION_STEPS.with(|cell| cell.replace(standing));
+    (ran, tallied)
 }

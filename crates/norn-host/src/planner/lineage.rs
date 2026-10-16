@@ -33,7 +33,7 @@ use norn_wire::{
 
 use super::compose::touches;
 use super::control::role_at;
-use super::links::rewrite_destination;
+use super::links::{family_name, rewrite_destination};
 
 /// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,8 +87,9 @@ pub(crate) struct Lineage {
     removed: BTreeMap<NormalizedPath, usize>,
     /// Each wikilink rewrite of the plan, in the order it composes.
     retargets: Vec<Retarget>,
-    /// Each authored link rewrite of the plan, in the order it composes.
-    relinks: Vec<Relink>,
+    /// The first authored rewrite for each holder, syntax and address, in
+    /// composition order: an unrelated rewrite is never read per link.
+    relinks: BTreeMap<(NormalizedPath, Option<&'static str>, String), Relink>,
 }
 
 /// An authored link rewrite of the plan: the links it respells, named by
@@ -286,12 +287,16 @@ impl Lineage {
                     path, syntax, from, ..
                 } => {
                     if let Some(file) = identity(path.as_str()) {
-                        lineage.relinks.push(Relink {
-                            position,
-                            holder: file.clone(),
-                            syntax: *syntax,
-                            from: from.clone(),
-                        });
+                        crate::evidence::count_rewrite_selection_step();
+                        lineage
+                            .relinks
+                            .entry((file.clone(), family_name(*syntax), from.clone()))
+                            .or_insert(Relink {
+                                position,
+                                holder: file.clone(),
+                                syntax: *syntax,
+                                from: from.clone(),
+                            });
                         rewritten.push((position, file));
                     }
                 }
@@ -374,9 +379,16 @@ impl Lineage {
         self.retargets.iter()
     }
 
-    /// Every authored link rewrite of the plan, in the order it composes.
-    pub(crate) fn relinks(&self) -> impl Iterator<Item = &Relink> + '_ {
-        self.relinks.iter()
+    /// The first authored rewrite of this link in composition order.
+    pub(crate) fn relink(
+        &self,
+        holder: &NormalizedPath,
+        syntax: LinkFamily,
+        address: &str,
+    ) -> Option<&Relink> {
+        crate::evidence::count_rewrite_selection_step();
+        self.relinks
+            .get(&(holder.clone(), family_name(syntax), address.to_string()))
     }
 
     /// The source of what `file` holds at the end of the plan, where its

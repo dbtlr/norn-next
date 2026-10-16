@@ -504,6 +504,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     }
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
     let retargeted = retarget_namings(lineage, &overlay, index)?;
+    let indexed = Retargets::of(lineage, &retargeted, normalizer);
     let overlay = reaching(overlay, lineage, &retargeted);
     let named_by_old: BTreeSet<NormalizedPath> = retargeted
         .values()
@@ -573,7 +574,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                 &change.link,
                 Named::of(&change),
                 lineage,
-                &retargeted,
+                &indexed,
                 normalizer,
             )
             .is_some_and(|decider| {
@@ -583,7 +584,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                     &change.after,
                     lineage,
                     &rewritten_to,
-                    &retargeted,
+                    &indexed,
                     normalizer,
                 )
             });
@@ -640,7 +641,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                     &change.link,
                     Named::of(&change),
                     lineage,
-                    &retargeted,
+                    &indexed,
                     normalizer
                 ),
                 Some(Decider::Authored(_) | Decider::Retarget(_))
@@ -1039,16 +1040,20 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
     overlay: &PathOverlay,
     index: &I,
 ) -> Result<BTreeMap<usize, TargetNaming>, I::Error> {
-    let mut targets = BTreeMap::new();
-    for removal in lineage.removals() {
-        if let Some(address) = removal.rewrite_to() {
-            targets.insert(
-                removal.position,
-                index.target(overlay, address, PlanSide::After)?,
-            );
-        }
+    let requests: Vec<_> = lineage
+        .removals()
+        .filter_map(|removal| Some((removal.position, removal.rewrite_to()?)))
+        .collect();
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(targets)
+    let addresses: Vec<_> = requests.iter().map(|(_, address)| *address).collect();
+    let named = index.targets(overlay, &addresses, PlanSide::After)?;
+    Ok(requests
+        .into_iter()
+        .map(|(position, _)| position)
+        .zip(named)
+        .collect())
 }
 
 /// The one document the target `named` names where the plan leaves the
@@ -1161,17 +1166,26 @@ pub(crate) fn retarget_namings<I: LinkIndex + ?Sized>(
     overlay: &PathOverlay,
     index: &I,
 ) -> Result<BTreeMap<usize, RetargetNaming>, I::Error> {
-    let mut namings = BTreeMap::new();
-    for retarget in lineage.retargets() {
-        namings.insert(
-            retarget.position,
-            RetargetNaming {
-                old: index.target(overlay, &retarget.old, PlanSide::Before)?,
-                new: index.target(overlay, &retarget.new, PlanSide::After)?,
-            },
-        );
+    let retargets: Vec<_> = lineage.retargets().collect();
+    if retargets.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    Ok(namings)
+    let old: Vec<_> = retargets
+        .iter()
+        .map(|retarget| retarget.old.as_str())
+        .collect();
+    let new: Vec<_> = retargets
+        .iter()
+        .map(|retarget| retarget.new.as_str())
+        .collect();
+    let old = index.targets(overlay, &old, PlanSide::Before)?;
+    let new = index.targets(overlay, &new, PlanSide::After)?;
+    Ok(retargets
+        .into_iter()
+        .zip(old)
+        .zip(new)
+        .map(|((retarget, old), new)| (retarget.position, RetargetNaming { old, new }))
+        .collect())
 }
 
 /// `overlay`, reaching the wikilinks each wikilink rewrite of the plan could
@@ -1294,8 +1308,8 @@ impl Decider<'_> {
 }
 
 /// Every wikilink rewrite of the plan whose `old` names `link`, which named
-/// `named` before the plan, in plan order, its ends named as `namings`
-/// says: one whose `old` names exactly one document before the plan names a
+/// `named` before the plan, in operation position order, its ends named as
+/// `namings` says: one whose `old` names exactly one document before the plan names a
 /// wikilink resolving to exactly that document then, whatever its spelling;
 /// one whose `old` names no document names a broken wikilink that would
 /// resolve to a document standing at the place `old` spells
@@ -1309,50 +1323,108 @@ impl Decider<'_> {
 pub(crate) fn selecting<'l>(
     link: &LinkFact,
     named: Named<'_>,
-    lineage: &'l Lineage,
-    namings: &BTreeMap<usize, RetargetNaming>,
+    indexed: &Retargets<'l>,
     normalizer: &PathNormalizer,
 ) -> Vec<&'l Retarget> {
     if link.family != norn_store::LinkFamily::Wikilink {
         return Vec::new();
     }
-    let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
-    let mut selecting: Vec<&Retarget> = lineage
-        .retargets()
-        .filter(|retarget| {
-            let Some(ends) = namings
-                .get(&retarget.position)
-                .filter(|ends| ends.destination(lineage, normalizer).is_some())
-            else {
-                return false;
-            };
-            match (&ends.old.before, named) {
-                (Resolves::One { path: old }, Named::One(path)) => {
-                    identity(old.as_str()).is_some_and(|old| identity(path) == Some(old))
-                }
-                (Resolves::None {}, Named::Broken(could)) => {
-                    norn_store::spelled_place(&retarget.old)
-                        .and_then(|place| identity(place.as_str()))
-                        .is_some_and(|place| {
-                            could
-                                .iter()
-                                .any(|named| identity(named.as_str()).as_ref() == Some(&place))
-                        })
-                }
-                _ => false,
+    let mut selected = Vec::new();
+    match named {
+        Named::One(path) => {
+            crate::evidence::count_rewrite_selection_step();
+            if let Ok(file) = normalizer.normalize(Path::new(path)) {
+                selected.extend(indexed.resolved.get(&file).into_iter().flatten().copied());
             }
-        })
-        .collect();
-    selecting.sort_by_key(|retarget| retarget.position);
-    selecting
+        }
+        Named::Broken(could) => {
+            // Lists are shared by every link under a key in one judgment.
+            // Retain their allocations so their pointer identities cannot be reused.
+            let mut read = indexed.broken_lists.borrow_mut();
+            for list in could.lists() {
+                crate::evidence::count_rewrite_selection_step();
+                let at = Arc::as_ptr(list).cast::<norn_store::DocumentPath>() as usize;
+                let (_, matches) = read.entry(at).or_insert_with(|| {
+                    let mut matches = BTreeMap::new();
+                    for place in list.iter() {
+                        crate::evidence::count_rewrite_selection_step();
+                        if let Ok(file) = normalizer.normalize(Path::new(place.as_str())) {
+                            for retarget in indexed.broken.get(&file).into_iter().flatten() {
+                                matches.insert(retarget.position, *retarget);
+                            }
+                        }
+                    }
+                    (Arc::clone(list), matches.into_values().collect::<Vec<_>>())
+                });
+                selected.extend(matches.iter().copied());
+            }
+        }
+        Named::Other => {}
+    }
+    for _ in &selected {
+        crate::evidence::count_rewrite_selection_step();
+    }
+    // Dependencies can reverse composition order; link ownership still follows
+    // the rewrites' authored positions.
+    selected.sort_by_key(|retarget| retarget.position);
+    selected.dedup_by_key(|retarget| retarget.position);
+    selected
+}
+
+/// The eligible rewrites under the identity their `old` selects. Resolved
+/// documents and empty places are separate keys: a broken link selects only
+/// rewrites whose `old` names no document. Destinations are checked once per
+/// rewrite, before any link is selected.
+#[derive(Default)]
+pub(crate) struct Retargets<'l> {
+    resolved: BTreeMap<NormalizedPath, Vec<&'l Retarget>>,
+    broken: BTreeMap<NormalizedPath, Vec<&'l Retarget>>,
+    pub(crate) destinations: BTreeMap<usize, (NormalizedPath, norn_store::DocumentPath)>,
+    broken_lists: std::cell::RefCell<BTreeMap<usize, SelectedList<'l>>>,
+}
+
+type SelectedList<'l> = (Arc<[norn_store::DocumentPath]>, Vec<&'l Retarget>);
+
+impl<'l> Retargets<'l> {
+    pub(crate) fn of(
+        lineage: &'l Lineage,
+        namings: &BTreeMap<usize, RetargetNaming>,
+        normalizer: &PathNormalizer,
+    ) -> Self {
+        let mut indexed = Self::default();
+        for retarget in lineage.retargets() {
+            crate::evidence::count_rewrite_selection_step();
+            let Some(named) = namings.get(&retarget.position) else {
+                continue;
+            };
+            let Some(destination) = named.destination(lineage, normalizer) else {
+                continue;
+            };
+            indexed.destinations.insert(retarget.position, destination);
+            let (keys, place) = match &named.old.before {
+                Resolves::One { path } => (&mut indexed.resolved, Some(stored_path(path))),
+                Resolves::None {} => (
+                    &mut indexed.broken,
+                    norn_store::spelled_place(&retarget.old),
+                ),
+                _ => continue,
+            };
+            if let Some(file) =
+                place.and_then(|path| normalizer.normalize(Path::new(path.as_str())).ok())
+            {
+                keys.entry(file).or_default().push(retarget);
+            }
+        }
+        indexed
+    }
 }
 
 /// **The one rule which operation of a plan decides what a link names after
 /// it**, the link written as `link` in the document held at `holder` after
 /// the plan, and naming `named` before it: an authored link rewrite naming
 /// the link — its holder, its syntax and the address it is written with —
-/// the first in plan order; else a wikilink rewrite whose `old` names it
-/// ([`selecting`]), the first in plan order — each whatever a move or a
+/// the first in composition order; else a wikilink rewrite whose `old` names it
+/// ([`selecting`]), the first by operation position — each whatever a move or a
 /// delete would do with it, since its author said what it names; else a
 /// delete removing the one document it named; else the moves carrying that
 /// document away. `None` where the plan leaves what it named where it stood.
@@ -1366,18 +1438,17 @@ pub(crate) fn decider<'l>(
     link: &LinkFact,
     named: Named<'_>,
     lineage: &'l Lineage,
-    namings: &BTreeMap<usize, RetargetNaming>,
+    indexed: &Retargets<'l>,
     normalizer: &PathNormalizer,
 ) -> Option<Decider<'l>> {
     let held = normalizer.normalize(Path::new(holder.as_str())).ok();
-    if let Some(relink) = lineage.relinks().find(|relink| {
-        held.as_ref() == Some(&relink.holder)
-            && relink.syntax == wire_family(link.family)
-            && relink.from == address(link)
-    }) {
+    if let Some(relink) = held
+        .as_ref()
+        .and_then(|held| lineage.relink(held, wire_family(link.family), &address(link)))
+    {
         return Some(Decider::Authored(relink));
     }
-    if let Some(&first) = selecting(link, named, lineage, namings, normalizer).first() {
+    if let Some(&first) = selecting(link, named, indexed, normalizer).first() {
         return Some(Decider::Retarget(first));
     }
     let Named::One(path) = named else {
@@ -1398,7 +1469,7 @@ pub(crate) fn decider<'l>(
 /// link resolving to `before` before the plan and `after` after it: never an
 /// authored link rewrite, which writes the link itself rather than through a
 /// cascade; a wikilink rewrite, where the link does not already name the one document
-/// its `new` names after the plan (`namings`); a delete, by its own rule
+/// its `new` names after the plan (`indexed`); a delete, by its own rule
 /// ([`rewritten_for`], its target named as `rewritten_to` says); the moves,
 /// by theirs ([`left_behind`]).
 ///
@@ -1410,7 +1481,7 @@ pub(crate) fn respells(
     after: &Resolves,
     lineage: &Lineage,
     rewritten_to: &BTreeMap<usize, TargetNaming>,
-    namings: &BTreeMap<usize, RetargetNaming>,
+    indexed: &Retargets<'_>,
     normalizer: &PathNormalizer,
 ) -> bool {
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
@@ -1421,10 +1492,10 @@ pub(crate) fn respells(
     match decider {
         Decider::Authored(_) => false,
         Decider::Retarget(retarget) => {
-            let new = namings
+            let new = indexed
+                .destinations
                 .get(&retarget.position)
-                .and_then(|ends| ends.destination(lineage, normalizer))
-                .map(|(file, _)| file);
+                .map(|(file, _)| file.clone());
             new.is_none() || one(after) != new
         }
         Decider::Removal(removal) => rewritten_for(removal, after, rewritten_to, normalizer),
@@ -2069,6 +2140,548 @@ mod tests {
 
     fn path(text: &str) -> DocumentPath {
         DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// Every link reads only its own authored rewrite key as the number of
+    /// holders and unrelated authored rewrites doubles.
+    #[test]
+    fn authored_rewrite_selection_work_grows_with_links() {
+        fn run(size: usize) -> u64 {
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::rewrite_link(
+                        path(&format!("h{at}.md")),
+                        LinkFamily::Wikilink,
+                        "old",
+                        "new",
+                    ))
+                })
+                .collect();
+            let account = std::sync::Arc::new(crate::evidence::JobEvidence::default());
+            {
+                let _attribution = account.attributing();
+                let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+                for at in 0..size {
+                    let holder = super::stored_path(&path(&format!("h{at}.md")));
+                    for text in ["[[old]]", "[[unrelated]]"] {
+                        let link = crate::derivation::document_links(text.as_bytes()).remove(0);
+                        let owner = super::decider(
+                            &holder,
+                            &link,
+                            super::Named::Other,
+                            &lineage,
+                            &Default::default(),
+                            &normalizer,
+                        )
+                        .map(|by| by.owner());
+                        assert_eq!(owner, (text == "[[old]]").then_some(at));
+                    }
+                }
+            }
+            account.read().rewrite_selection_steps
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0, "selection must move the instrument");
+        assert!(
+            large <= 2 * small,
+            "doubling links and rewrites: {small} -> {large}"
+        );
+    }
+
+    /// A link resolving to one document reads only rewrites of that
+    /// document, including the cost of checking their destinations once.
+    #[test]
+    fn retarget_selection_work_grows_with_links() {
+        fn run(size: usize) -> u64 {
+            use norn_store::TargetNaming;
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let target = |text: String| ResolutionTarget::new(text).expect("a target");
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::rewrite_wikilink(
+                        target(format!("old{at}")),
+                        target("new".into()),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+            let namings = (0..size)
+                .map(|at| {
+                    (
+                        at,
+                        super::RetargetNaming {
+                            old: TargetNaming::new(
+                                Resolves::one(path(&format!("old{at}.md"))),
+                                Resolves::none(),
+                                None,
+                            ),
+                            new: TargetNaming::new(
+                                Resolves::none(),
+                                Resolves::one(path("new.md")),
+                                None,
+                            ),
+                        },
+                    )
+                })
+                .collect();
+            let account = std::sync::Arc::new(crate::evidence::JobEvidence::default());
+            {
+                let _attribution = account.attributing();
+                let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
+                let link = crate::derivation::document_links(b"[[old]]").remove(0);
+                for at in 0..size {
+                    let name = format!("old{at}.md");
+                    let selected =
+                        super::selecting(&link, super::Named::One(&name), &indexed, &normalizer);
+                    assert_eq!(
+                        selected
+                            .iter()
+                            .map(|rewrite| rewrite.position)
+                            .collect::<Vec<_>>(),
+                        [at]
+                    );
+                }
+            }
+            account.read().rewrite_selection_steps
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling links and retargets: {small} -> {large}"
+        );
+    }
+
+    /// Broken links read their reached places once per shared key, rather
+    /// than testing every rewrite against every possible place.
+    #[test]
+    fn broken_retarget_selection_work_grows_with_rewrites_and_reached_places() {
+        fn run(size: usize) -> u64 {
+            use norn_store::{PathOverlay, ProbedLink, TargetNaming};
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::rewrite_wikilink(
+                        ResolutionTarget::new(format!("area/{at}/lost")).unwrap(),
+                        ResolutionTarget::new("new").unwrap(),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(
+                &operations,
+                &(0..size).rev().collect::<Vec<_>>(),
+                &normalizer,
+            );
+            let namings = (0..size)
+                .map(|at| {
+                    (
+                        at,
+                        super::RetargetNaming {
+                            old: TargetNaming::new(Resolves::none(), Resolves::none(), None),
+                            new: TargetNaming::new(
+                                Resolves::none(),
+                                Resolves::one(path("new.md")),
+                                None,
+                            ),
+                        },
+                    )
+                })
+                .collect();
+            let overlay = (0..size).fold(PathOverlay::new(), |overlay, at| {
+                overlay.reaching(super::stored_path(&path(&format!("area/{at}/lost.md"))))
+            });
+            let store = EmptyStore::new();
+            let index = store.index();
+            let link = crate::derivation::document_links(b"[[lost]]").remove(0);
+            let mut could = None;
+            super::LinkIndex::changes(
+                &index,
+                &overlay,
+                &[ProbedLink {
+                    before_holder: super::stored_path(&path("h.md")),
+                    after_holder: super::stored_path(&path("h.md")),
+                    link: link.clone(),
+                    written: true,
+                }],
+                &mut |change| {
+                    assert_eq!(change.before, Resolves::none());
+                    could = Some(change.before_targets);
+                },
+            )
+            .expect("the empty store answers");
+            let could = could.expect("one broken link is judged");
+            assert_eq!(could.iter().count(), size);
+            let account = std::sync::Arc::new(crate::evidence::JobEvidence::default());
+            {
+                let _attribution = account.attributing();
+                let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
+                for _ in 0..3 {
+                    let selected = super::selecting(
+                        &link,
+                        super::Named::Broken(&could),
+                        &indexed,
+                        &normalizer,
+                    );
+                    assert_eq!(
+                        selected
+                            .iter()
+                            .map(|rewrite| rewrite.position)
+                            .collect::<Vec<_>>(),
+                        (0..size).collect::<Vec<_>>()
+                    );
+                }
+            }
+            account.read().rewrite_selection_steps
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling broken rewrite keys and places: {small} -> {large}"
+        );
+    }
+
+    /// Many broken links under one key reuse the key's candidate places,
+    /// including places that match no rewrite.
+    #[test]
+    fn broken_links_share_candidate_selection_work_when_most_places_match_no_rewrite() {
+        fn run(size: usize) -> u64 {
+            use norn_store::{PathOverlay, ProbedLink, TargetNaming};
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations = [Operation::new(OperationKind::rewrite_wikilink(
+                ResolutionTarget::new("area/0/lost").unwrap(),
+                ResolutionTarget::new("new").unwrap(),
+            ))];
+            let lineage = Lineage::of(&operations, &[0], &normalizer);
+            let namings = [(
+                0,
+                super::RetargetNaming {
+                    old: TargetNaming::new(Resolves::none(), Resolves::none(), None),
+                    new: TargetNaming::new(Resolves::none(), Resolves::one(path("new.md")), None),
+                },
+            )]
+            .into_iter()
+            .collect();
+            let overlay = (0..size).fold(PathOverlay::new(), |overlay, at| {
+                overlay.reaching(super::stored_path(&path(&format!("area/{at}/lost.md"))))
+            });
+            let link = crate::derivation::document_links(b"[[lost]]").remove(0);
+            let probes: Vec<_> = (0..size)
+                .map(|at| {
+                    let holder = super::stored_path(&path(&format!("h{at}.md")));
+                    ProbedLink {
+                        before_holder: holder.clone(),
+                        after_holder: holder,
+                        link: link.clone(),
+                        written: true,
+                    }
+                })
+                .collect();
+            let store = EmptyStore::new();
+            let mut changes = Vec::new();
+            super::LinkIndex::changes(&store.index(), &overlay, &probes, &mut |change| {
+                changes.push(change)
+            })
+            .unwrap();
+            assert_eq!(changes.len(), size);
+            let shared = changes[0]
+                .before_targets
+                .lists()
+                .first()
+                .expect("one shared candidate list");
+            for change in &changes {
+                assert_eq!(change.before, Resolves::none());
+                assert_eq!(change.before_targets.iter().count(), size);
+                assert!(std::sync::Arc::ptr_eq(
+                    shared,
+                    &change.before_targets.lists()[0]
+                ));
+            }
+            let account = std::sync::Arc::new(crate::evidence::JobEvidence::default());
+            {
+                let _attribution = account.attributing();
+                let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
+                for change in &changes {
+                    let selected = super::selecting(
+                        &change.link,
+                        super::Named::of(change),
+                        &indexed,
+                        &normalizer,
+                    );
+                    assert_eq!(
+                        selected
+                            .iter()
+                            .map(|rewrite| rewrite.position)
+                            .collect::<Vec<_>>(),
+                        [0]
+                    );
+                }
+            }
+            account.read().rewrite_selection_steps
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling broken links and shared candidate places: {small} -> {large}"
+        );
+    }
+
+    /// Dependencies can reverse composition order without changing which
+    /// retarget owns a link: the earliest operation position wins.
+    #[test]
+    fn retarget_precedence_follows_position_when_composition_order_is_reversed() {
+        use norn_store::TargetNaming;
+        use norn_wire::ResolutionTarget;
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let operations: Vec<_> = ["a", "x/a"]
+            .into_iter()
+            .map(|old| {
+                Operation::new(OperationKind::rewrite_wikilink(
+                    ResolutionTarget::new(old).unwrap(),
+                    ResolutionTarget::new("new").unwrap(),
+                ))
+            })
+            .collect();
+        let lineage = Lineage::of(&operations, &[1, 0], &normalizer);
+        let namings = (0..2)
+            .map(|at| {
+                (
+                    at,
+                    super::RetargetNaming {
+                        old: TargetNaming::new(
+                            Resolves::one(path("x/a.md")),
+                            Resolves::none(),
+                            None,
+                        ),
+                        new: TargetNaming::new(
+                            Resolves::none(),
+                            Resolves::one(path("new.md")),
+                            None,
+                        ),
+                    },
+                )
+            })
+            .collect();
+        let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
+        let link = crate::derivation::document_links(b"[[a]]").remove(0);
+        let selected = super::selecting(&link, super::Named::One("x/a.md"), &indexed, &normalizer);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|rewrite| rewrite.position)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        let by = super::decider(
+            &super::stored_path(&path("h.md")),
+            &link,
+            super::Named::One("x/a.md"),
+            &lineage,
+            &indexed,
+            &normalizer,
+        )
+        .expect("a retarget decides the link");
+        assert_eq!(by.owner(), 0);
+    }
+
+    /// An earlier rewrite without a destination cannot take ownership from
+    /// a later rewrite that can retarget the link.
+    #[test]
+    fn an_invalid_destination_does_not_precede_a_valid_retarget_of_the_same_link() {
+        use norn_store::TargetNaming;
+        use norn_wire::ResolutionTarget;
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let operations: Vec<_> = ["gone", "new"]
+            .into_iter()
+            .map(|new| {
+                Operation::new(OperationKind::rewrite_wikilink(
+                    ResolutionTarget::new("a").unwrap(),
+                    ResolutionTarget::new(new).unwrap(),
+                ))
+            })
+            .collect();
+        let lineage = Lineage::of(&operations, &[0, 1], &normalizer);
+        let namings = [
+            (
+                0,
+                super::RetargetNaming {
+                    old: TargetNaming::new(Resolves::one(path("a.md")), Resolves::none(), None),
+                    new: TargetNaming::new(Resolves::none(), Resolves::none(), None),
+                },
+            ),
+            (
+                1,
+                super::RetargetNaming {
+                    old: TargetNaming::new(Resolves::one(path("a.md")), Resolves::none(), None),
+                    new: TargetNaming::new(Resolves::none(), Resolves::one(path("new.md")), None),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
+        let link = crate::derivation::document_links(b"[[a]]").remove(0);
+        let selected = super::selecting(&link, super::Named::One("a.md"), &indexed, &normalizer);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|rewrite| rewrite.position)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        let by = super::decider(
+            &super::stored_path(&path("h.md")),
+            &link,
+            super::Named::One("a.md"),
+            &lineage,
+            &indexed,
+            &normalizer,
+        )
+        .expect("the valid retarget decides the link");
+        assert_eq!(by.owner(), 1);
+    }
+
+    #[test]
+    fn authored_rewrite_precedence_follows_composition_order() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let operations = [
+            Operation::new(OperationKind::rewrite_link(
+                path("H.md"),
+                LinkFamily::Wikilink,
+                "old",
+                "one",
+            )),
+            Operation::new(OperationKind::rewrite_link(
+                path("h.md"),
+                LinkFamily::Wikilink,
+                "old",
+                "two",
+            )),
+        ];
+        let lineage = Lineage::of(&operations, &[1, 0], &normalizer);
+        let holder = super::stored_path(&path("h.md"));
+        let link = crate::derivation::document_links(b"[[old]]").remove(0);
+        let by = super::decider(
+            &holder,
+            &link,
+            super::Named::One("old.md"),
+            &lineage,
+            &Default::default(),
+            &normalizer,
+        )
+        .expect("an authored rewrite");
+        assert!(matches!(by, super::Decider::Authored(_)));
+        assert_eq!(by.owner(), 1);
+    }
+
+    /// Rewriting deletes share a judgment over the overlay, so doubling
+    /// deletes and overlay targets doubles the construction work.
+    #[test]
+    fn rewriting_delete_namings_index_the_overlay_once() {
+        fn run(size: usize) -> u64 {
+            use norn_store::PathOverlay;
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::delete_document_rewriting(
+                        path(&format!("old{at}.md")),
+                        ResolutionTarget::new("new").unwrap(),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+            let overlay = (0..size).fold(
+                PathOverlay::new().with(super::stored_path(&path("new.md")), false, true),
+                |overlay, at| {
+                    overlay.with(
+                        super::stored_path(&path(&format!("old{at}.md"))),
+                        true,
+                        false,
+                    )
+                },
+            );
+            let store = EmptyStore::new();
+            let index = store.index();
+            let named = super::rewrite_targets(&lineage, &overlay, &index).unwrap();
+            assert_eq!(named.len(), size);
+            for naming in named.values() {
+                assert_eq!(naming.before, Resolves::none());
+                assert_eq!(naming.after, Resolves::one(path("new.md")));
+                assert!(naming.candidates.is_none());
+            }
+            index.link_judgment_cost().overlay_targets_indexed
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling deletes and overlay targets: {small} -> {large}"
+        );
+    }
+
+    /// Retarget ends share two judgments. The old end's head belongs to
+    /// Before and the new end's to After even when the other side is ambiguous.
+    #[test]
+    fn retarget_namings_index_the_overlay_twice_with_heads_on_the_correct_sides() {
+        fn run(size: usize) -> u64 {
+            use norn_store::PathOverlay;
+            use norn_wire::ResolutionTarget;
+            let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+            let operations: Vec<_> = (0..size)
+                .map(|at| {
+                    Operation::new(OperationKind::rewrite_wikilink(
+                        ResolutionTarget::new(format!("old{at}")).unwrap(),
+                        ResolutionTarget::new(format!("new{at}")).unwrap(),
+                    ))
+                })
+                .collect();
+            let lineage = Lineage::of(&operations, &(0..size).collect::<Vec<_>>(), &normalizer);
+            let overlay = (0..size).fold(PathOverlay::new(), |overlay, at| {
+                [
+                    (format!("before/old{at}.md"), true, false),
+                    (format!("after-a/old{at}.md"), false, true),
+                    (format!("after-b/old{at}.md"), false, true),
+                    (format!("before-a/new{at}.md"), true, false),
+                    (format!("before-b/new{at}.md"), true, false),
+                    (format!("after/new{at}.md"), false, true),
+                ]
+                .into_iter()
+                .fold(overlay, |overlay, (at, before, after)| {
+                    overlay.with(super::stored_path(&path(&at)), before, after)
+                })
+            });
+            let store = EmptyStore::new();
+            let index = store.index();
+            let named = super::retarget_namings(&lineage, &overlay, &index).unwrap();
+            assert_eq!(named.len(), size);
+            for (at, ends) in named {
+                assert_eq!(
+                    ends.old.before,
+                    Resolves::one(path(&format!("before/old{at}.md")))
+                );
+                assert!(matches!(ends.old.after, Resolves::Several {}));
+                assert!(ends.old.candidates.is_none(), "old is unique on Before");
+                assert!(matches!(ends.new.before, Resolves::Several {}));
+                assert_eq!(
+                    ends.new.after,
+                    Resolves::one(path(&format!("after/new{at}.md")))
+                );
+                assert!(ends.new.candidates.is_none(), "new is unique on After");
+            }
+            index.link_judgment_cost().overlay_targets_indexed
+        }
+        let (small, large) = (run(16), run(32));
+        assert!(small > 0);
+        assert!(
+            large <= 2 * small,
+            "doubling retargets and overlay targets: {small} -> {large}"
+        );
     }
 
     /// An encoded Markdown rewrite is recognized by the anchor the store derives.
