@@ -114,7 +114,7 @@ use norn_wire::{
 use super::compose::{Composition, Skipped};
 use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
-    CarriedLinks, Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Target,
+    CarriedLinks, Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Retargets, Target,
     WrittenLinks, address, decider, family_name, left_as_written, reach, reaching, removed_by,
     respells, retarget_namings, rewrite_destination, rewrite_targets, selecting, spelled,
     stored_path, wire_family,
@@ -272,6 +272,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         written: WrittenLinks::of(operations, normalizer),
         kept: left_as_written(&composition.skipped, &composition.kept),
         namings: BTreeMap::new(),
+        indexed: Retargets::default(),
         destinations: BTreeMap::new(),
     };
     let targets = Target::of(composition, carried);
@@ -298,11 +299,14 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     // they name.
     let mut unresolved: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     cascade.namings = retarget_namings(lineage, &overlay, index)?;
+    cascade.indexed = Retargets::of(lineage, &cascade.namings, normalizer);
     for retarget in lineage.retargets() {
         let named = &cascade.namings[&retarget.position];
-        match named.destination(lineage, normalizer) {
+        match cascade.indexed.destinations.get(&retarget.position) {
             Some(destination) => {
-                cascade.destinations.insert(retarget.position, destination);
+                cascade
+                    .destinations
+                    .insert(retarget.position, destination.clone());
             }
             None => {
                 unresolved.insert(retarget.position, unretargeted(retarget, named, normalizer));
@@ -339,8 +343,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         let selecting = selecting(
             &change.link,
             Named::of(&change),
-            lineage,
-            &cascade.namings,
+            &cascade.indexed,
             normalizer,
         );
         selected.extend(selecting.iter().map(|retarget| retarget.position));
@@ -382,7 +385,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
             &change.after,
             lineage,
             &rewritten_to,
-            &cascade.namings,
+            &cascade.indexed,
             normalizer,
         );
         if !respelled {
@@ -683,6 +686,7 @@ struct Cascade<'a> {
     kept: BTreeSet<EntryKey>,
     /// What each wikilink rewrite's two ends name, by its position.
     namings: BTreeMap<usize, RetargetNaming>,
+    indexed: Retargets<'a>,
     /// The one document each delete rewriting the links naming its document
     /// names where the plan leaves the vault, and each wikilink rewrite's
     /// `new` names there, and its path there, by the operation's position.
@@ -733,7 +737,7 @@ impl<'a> Cascade<'a> {
             link,
             named,
             self.lineage,
-            &self.namings,
+            &self.indexed,
             self.normalizer,
         )?;
         let to = match by {

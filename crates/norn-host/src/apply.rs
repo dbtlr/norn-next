@@ -1280,12 +1280,15 @@ where
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let (planned, clock_reads) =
-            crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused));
+        let ((planned, clock_reads), selection_steps) =
+            crate::evidence::rewrite_selection_steps_of(|| {
+                crate::evidence::clock_reads_of(|| plan(ground, &snapshot, &refused))
+            });
         self.count_preview_link_judgments(snapshot.link_judgment_cost());
         self.count_similar_stems(snapshot.similar.get());
         self.count_planning_hold(PlanningHoldCost::of(hold.snapshot().counters()));
         self.count_clock_reads(clock_reads);
+        self.count_rewrite_selection_steps(selection_steps);
         Ok((reading, planned?))
     }
 

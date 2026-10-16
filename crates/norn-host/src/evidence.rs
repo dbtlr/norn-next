@@ -103,6 +103,7 @@ pub struct JobEvidence {
     /// The readings the jobs' plans took of the host's clock, summed: folded
     /// whole when a job ends ([`EvidenceReading::clock_reads`]).
     clock_reads: AtomicU64,
+    rewrite_selection_steps: AtomicU64,
     /// The file each counted read of every job read, in the order the jobs
     /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
     /// ran: nothing is kept while none is.
@@ -267,6 +268,9 @@ pub struct EvidenceReading {
     /// plan, and none for a plan no template or rule default of which
     /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
     pub clock_reads: u64,
+    /// Authored rewrite entries, selection keys and matching entries read by
+    /// link selection, including construction of its indexes.
+    pub rewrite_selection_steps: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -346,6 +350,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.apply_full_scan_steps),
             rule_work: rule_work_since(self.rule_work, earlier.rule_work),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
+            rewrite_selection_steps: self
+                .rewrite_selection_steps
+                .saturating_sub(earlier.rewrite_selection_steps),
         }
     }
 }
@@ -446,6 +453,7 @@ impl JobEvidence {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
             clock_reads: get(&self.clock_reads),
+            rewrite_selection_steps: get(&self.rewrite_selection_steps),
         }
     }
 
@@ -549,6 +557,8 @@ impl JobEvidence {
         drop(rule_work);
         self.clock_reads
             .fetch_add(take_clock_reads(), Ordering::Relaxed);
+        self.rewrite_selection_steps
+            .fetch_add(take_rewrite_selection_steps(), Ordering::Relaxed);
 
         let changesets = take_changeset_tally();
         self.changesets_applied
@@ -585,6 +595,7 @@ impl JobEvidence {
         let _ = take_documents_derived();
         let _ = take_rule_work();
         let _ = take_clock_reads();
+        let _ = take_rewrite_selection_steps();
         Attribution {
             account: Arc::clone(self),
             window: Some(window),
@@ -1104,6 +1115,7 @@ pub(crate) struct ReadEvidence {
     repair_advisories: RepairAdvisoryAccount,
     planning_holds: PlanningHoldAccount,
     clock_reads: AtomicU64,
+    rewrite_selection_steps: AtomicU64,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -1280,6 +1292,8 @@ pub struct ReadReading {
     /// none for a plan no template or rule default of which reads
     /// `{{now}}`, `{{date}}` or `{{time}}`.
     pub clock_reads: u64,
+    /// Authored rewrite entries, keys and matches read while planning.
+    pub rewrite_selection_steps: u64,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -1334,6 +1348,8 @@ pub struct ReadsSince {
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
     pub clock_reads: u64,
+    /// Authored rewrite entries, keys and matches read while planning.
+    pub rewrite_selection_steps: u64,
 }
 
 impl ReadReading {
@@ -1369,6 +1385,9 @@ impl ReadReading {
             repair_advisories: self.repair_advisories.since(earlier.repair_advisories),
             planning_holds: self.planning_holds.since(earlier.planning_holds),
             clock_reads: self.clock_reads.saturating_sub(earlier.clock_reads),
+            rewrite_selection_steps: self
+                .rewrite_selection_steps
+                .saturating_sub(earlier.rewrite_selection_steps),
         }
     }
 }
@@ -1401,6 +1420,7 @@ impl ReadEvidence {
             repair_advisories: self.repair_advisories.read(),
             planning_holds: self.planning_holds.read(),
             clock_reads: get(&self.clock_reads),
+            rewrite_selection_steps: get(&self.rewrite_selection_steps),
         }
     }
 
@@ -1441,6 +1461,11 @@ impl ReadEvidence {
     /// where the hold is given back.
     pub(crate) fn count_clock_reads(&self, reads: u64) {
         self.clock_reads.fetch_add(reads, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_rewrite_selection_steps(&self, steps: u64) {
+        self.rewrite_selection_steps
+            .fetch_add(steps, Ordering::Relaxed);
     }
 
     /// Record what one read's mint ran under the entry gate.
@@ -2126,4 +2151,27 @@ impl PlanningHoldAccount {
             full_scan_steps: get(&self.full_scan_steps),
         }
     }
+}
+
+thread_local! {
+    static REWRITE_SELECTION_STEPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Count selection work where an authored rewrite, key or matching entry is
+/// read, so scanning unrelated rewrites is visible in the job's account.
+pub(crate) fn count_rewrite_selection_step() {
+    REWRITE_SELECTION_STEPS.with(|cell| cell.set(cell.get() + 1));
+}
+
+fn take_rewrite_selection_steps() -> u64 {
+    REWRITE_SELECTION_STEPS.with(|cell| cell.replace(0))
+}
+
+/// Read one planning window's selection work without attributing earlier
+/// work on the same thread to that plan.
+pub(crate) fn rewrite_selection_steps_of<T>(run: impl FnOnce() -> T) -> (T, u64) {
+    let standing = take_rewrite_selection_steps();
+    let ran = run();
+    let tallied = REWRITE_SELECTION_STEPS.with(|cell| cell.replace(standing));
+    (ran, tallied)
 }
