@@ -462,6 +462,16 @@ impl fmt::Display for WatchError {
 }
 impl std::error::Error for WatchError {}
 
+/// Confirmed coverage loss explains an earlier backend symptom; every other
+/// terminal cause keeps its precedence.
+fn preferred_terminal(existing: Option<&WatchError>, detected: WatchError) -> WatchError {
+    match existing {
+        None => detected,
+        Some(WatchError::Backend(_)) if matches!(detected, WatchError::CoverageLost(_)) => detected,
+        Some(error) => error.clone(),
+    }
+}
+
 /// The single-consumer source of settled batches returned by [`watch`].
 ///
 /// Delivery is pull-only. [`Subscription::try_recv`] takes at most one settled
@@ -659,7 +669,7 @@ impl Subscription {
             });
             if let Some(error) = terminal {
                 state.pending.take();
-                return Err(error);
+                return Err(self.recorded_terminal_cause(error));
             }
             let root = state.root.clone();
             let ledger = state.ledger.clone();
@@ -741,22 +751,30 @@ impl Subscription {
         };
         match received {
             Ok(Ok(batch)) => Ok(Some(batch)),
-            Ok(Err(error @ WatchError::Backend(_))) => {
-                // A queued symptom cannot undo root loss already confirmed,
-                // even if the original directory has since been restored.
-                if let SubscriptionState::Terminal(error @ WatchError::CoverageLost(_)) =
-                    self.state()
+            Ok(Err(error)) => {
+                let error = self.recorded_terminal_cause(error);
+                // An unreadable anchor proves no coverage loss and must not
+                // replace the queued backend error.
+                if matches!(error, WatchError::Backend(_))
+                    && let Err(detected @ WatchError::CoverageLost(_)) = self.root_anchor.check()
                 {
-                    return Err(error);
+                    return Err(self.record_terminal(detected));
                 }
-                self.check_root_anchor()?;
                 Err(error)
             }
-            Ok(Err(error)) => Err(error),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
             Err(mpsc::TryRecvError::Disconnected) => {
                 Err(WatchError::Backend("watcher stopped".into()))
             }
+        }
+    }
+
+    /// The control state retains the terminal cause after its delivery has
+    /// consumed the pending error, so later symptoms cannot replace it.
+    fn recorded_terminal_cause(&self, detected: WatchError) -> WatchError {
+        match self.state() {
+            SubscriptionState::Terminal(existing) => preferred_terminal(Some(&existing), detected),
+            _ => detected,
         }
     }
 
@@ -767,19 +785,19 @@ impl Subscription {
         let Err(detected) = self.root_anchor.check() else {
             return Ok(());
         };
+        Err(self.record_terminal(detected))
+    }
+
+    fn record_terminal(&self, detected: WatchError) -> WatchError {
         let error = {
             let mut state = self.state.lock().expect("watch state poisoned");
-            let terminal = state.terminal.get_or_insert_with(|| detected.clone());
-            // A backend error may be the symptom; the anchor proves the cause.
-            if matches!(terminal, WatchError::Backend(_))
-                && matches!(detected, WatchError::CoverageLost(_))
-            {
-                *terminal = detected;
-            }
-            terminal.clone()
+            let detected = preferred_terminal(state.terminal.as_ref(), detected);
+            let error = self.recorded_terminal_cause(detected);
+            state.terminal = Some(error.clone());
+            error
         };
         publish_control(&self.control, SubscriptionState::Terminal(error.clone()));
-        Err(error)
+        error
     }
 }
 
@@ -809,15 +827,14 @@ fn wait_for_synchronization(
 fn publish_control(control: &Arc<(Mutex<SubscriptionState>, Condvar)>, next: SubscriptionState) {
     let (state, changed) = &**control;
     let mut state = state.lock().expect("watch control state poisoned");
-    if !matches!(*state, SubscriptionState::Terminal(_))
-        || matches!(
-            (&*state, &next),
-            (
-                SubscriptionState::Terminal(WatchError::Backend(_)),
-                SubscriptionState::Terminal(WatchError::CoverageLost(_))
-            )
-        )
-    {
+    let next = match (&*state, next) {
+        (SubscriptionState::Terminal(existing), SubscriptionState::Terminal(detected)) => {
+            SubscriptionState::Terminal(preferred_terminal(Some(existing), detected))
+        }
+        (SubscriptionState::Terminal(_), _) => return,
+        (_, next) => next,
+    };
+    if *state != next {
         *state = next;
         changed.notify_all();
     }
@@ -1653,9 +1670,9 @@ fn folds_into_a_batch(state: &Mutex<State>, event: &Event) -> bool {
 /// Fold one backend delivery into shared state, reporting the terminal failure
 /// the subscription now carries.
 ///
-/// The report is the whole recorded cause rather than what this delivery
-/// contributed: the first cause is the one kept, and a caller waiting on the
-/// synchronization boundary needs it whichever delivery recorded it.
+/// The report is the selected recorded cause rather than what this delivery
+/// contributed: confirmed root loss supersedes a backend symptom, and a caller
+/// waiting on synchronization needs that cause whichever delivery recorded it.
 fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<WatchError> {
     let mut state = shared.lock().expect("watch state poisoned");
     match result {
@@ -1854,7 +1871,10 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             Ok(Some(identity)) if identity == state.root_identity => {}
             Ok(_) => {
                 let root = state.root.clone();
-                state.terminal.get_or_insert(WatchError::CoverageLost(root));
+                state.terminal = Some(preferred_terminal(
+                    state.terminal.as_ref(),
+                    WatchError::CoverageLost(root),
+                ));
             }
             Err(refusal) => {
                 state
@@ -1866,7 +1886,10 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     }
     if coverage_lost {
         let root = state.root.clone();
-        state.terminal.get_or_insert(WatchError::CoverageLost(root));
+        state.terminal = Some(preferred_terminal(
+            state.terminal.as_ref(),
+            WatchError::CoverageLost(root),
+        ));
         return;
     }
     if schema_rescan {
@@ -2879,6 +2902,7 @@ mod tests {
     fn a_heal_reports_confirmed_root_loss_over_a_backend_error() {
         let (scratch, subscription) = a_batch_waiting_behind_the_slot("backend-before-root-loss");
         let vault = scratch.path("vault");
+        let covered = subscription.covered_root().to_owned();
         let moved = scratch.path("moved-vault");
         subscription.begin_heal();
         let error = ingest(
@@ -2896,15 +2920,15 @@ mod tests {
 
         assert_eq!(
             subscription.finish_heal(),
-            Err(WatchError::CoverageLost(vault.clone()))
+            Err(WatchError::CoverageLost(covered.clone()))
         );
         assert_eq!(
             subscription.state(),
-            SubscriptionState::Terminal(WatchError::CoverageLost(vault.clone()))
+            SubscriptionState::Terminal(WatchError::CoverageLost(covered.clone()))
         );
         assert_eq!(
             subscription.synchronize(Duration::ZERO),
-            Err(WatchError::CoverageLost(vault))
+            Err(WatchError::CoverageLost(covered))
         );
         dropped_within_the_budget(subscription);
     }
@@ -2914,6 +2938,7 @@ mod tests {
     fn synchronization_reports_confirmed_root_loss_over_a_backend_error() {
         let (scratch, subscription) = a_batch_waiting_behind_the_slot("sync-backend-root-loss");
         let vault = scratch.path("vault");
+        let covered = subscription.covered_root().to_owned();
         subscription.begin_heal();
         let error = ingest(
             &subscription.state,
@@ -2928,11 +2953,11 @@ mod tests {
 
         assert_eq!(
             subscription.synchronize(Duration::ZERO),
-            Err(WatchError::CoverageLost(vault.clone()))
+            Err(WatchError::CoverageLost(covered.clone()))
         );
         assert_eq!(
             subscription.state(),
-            SubscriptionState::Terminal(WatchError::CoverageLost(vault))
+            SubscriptionState::Terminal(WatchError::CoverageLost(covered))
         );
         dropped_within_the_budget(subscription);
     }
@@ -2957,6 +2982,13 @@ mod tests {
             &subscription.control,
             SubscriptionState::Terminal(error.clone()),
         );
+        wait_for_terminal_delivery(&subscription);
+        (scratch, subscription, error)
+    }
+
+    /// Order assertions after the terminal error has left pending state and
+    /// entered the delivery slot, without consuming that error.
+    fn wait_for_terminal_delivery(subscription: &Subscription) {
         let _ = subscription.wake.as_ref().unwrap().try_send(());
         norn_testkit::wait::wait_until("the queued terminal error", watch_budget(), || {
             if subscription.worker.as_ref().unwrap().is_finished() {
@@ -2966,7 +2998,6 @@ mod tests {
             }
         })
         .unwrap();
-        (scratch, subscription, error)
     }
 
     #[test]
@@ -2975,24 +3006,25 @@ mod tests {
         for restore in [false, true] {
             let (scratch, subscription, _) = a_queued_backend_error("queued-backend-root-loss");
             let vault = scratch.path("vault");
+            let covered = subscription.covered_root().to_owned();
             let moved = scratch.path("moved-vault");
             std::fs::rename(&vault, &moved).unwrap();
             if restore {
                 assert_eq!(
                     subscription.finish_heal(),
-                    Err(WatchError::CoverageLost(vault.clone()))
+                    Err(WatchError::CoverageLost(covered.clone()))
                 );
                 std::fs::rename(&moved, &vault).unwrap();
             }
 
             assert_eq!(
                 subscription.try_recv(),
-                Err(WatchError::CoverageLost(vault.clone())),
+                Err(WatchError::CoverageLost(covered.clone())),
                 "root restored: {restore}"
             );
             assert_eq!(
                 subscription.state(),
-                SubscriptionState::Terminal(WatchError::CoverageLost(vault))
+                SubscriptionState::Terminal(WatchError::CoverageLost(covered))
             );
             dropped_within_the_budget(subscription);
         }
@@ -3033,6 +3065,178 @@ mod tests {
             SubscriptionState::Terminal(WatchError::SynchronizationExpired)
         );
         dropped_within_the_budget(subscription);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_registered_link_loss_overrides_a_backend_error_even_after_the_link_is_restored() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = Scratch::new("registered-link-backend-root-loss");
+        let real = scratch.path("real");
+        let other = scratch.path("other");
+        let link = scratch.path("registered-vault");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        symlink(&real, &link).unwrap();
+        let schema = real.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&link, &schema).unwrap();
+        let covered = subscription.covered_root().to_owned();
+        let registered_link = subscription.state.lock().unwrap().registered_links[0].clone();
+        subscription.begin_heal();
+        let backend = ingest(
+            &subscription.state,
+            Err(notify::Error::generic("backend symptom")),
+        )
+        .unwrap();
+        publish_control(&subscription.control, SubscriptionState::Terminal(backend));
+        std::fs::remove_file(&link).unwrap();
+        symlink(&other, &link).unwrap();
+        let loss = ingest(
+            &subscription.state,
+            Ok(Event::new(EventKind::Remove(RemoveKind::Any)).add_path(registered_link)),
+        )
+        .unwrap();
+        publish_control(&subscription.control, SubscriptionState::Terminal(loss));
+        std::fs::remove_file(&link).unwrap();
+        symlink(&real, &link).unwrap();
+
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::CoverageLost(covered.clone()))
+        );
+        assert_eq!(
+            subscription.state(),
+            SubscriptionState::Terminal(WatchError::CoverageLost(covered))
+        );
+        dropped_within_the_budget(subscription);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_root_lifecycle_loss_overrides_a_backend_error_even_after_the_root_is_restored() {
+        let (scratch, subscription) = a_batch_waiting_behind_the_slot("root-event-backend-loss");
+        let vault = scratch.path("vault");
+        let moved = scratch.path("moved-vault");
+        let covered = subscription.covered_root().to_owned();
+        subscription.begin_heal();
+        let backend = ingest(
+            &subscription.state,
+            Err(notify::Error::generic("backend symptom")),
+        )
+        .unwrap();
+        publish_control(&subscription.control, SubscriptionState::Terminal(backend));
+        std::fs::rename(&vault, &moved).unwrap();
+        let loss = ingest(
+            &subscription.state,
+            Ok(Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(covered.clone())),
+        )
+        .unwrap();
+        publish_control(&subscription.control, SubscriptionState::Terminal(loss));
+        std::fs::rename(&moved, &vault).unwrap();
+
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::CoverageLost(covered.clone()))
+        );
+        assert_eq!(
+            subscription.state(),
+            SubscriptionState::Terminal(WatchError::CoverageLost(covered))
+        );
+        dropped_within_the_budget(subscription);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_anchor_io_refusal_does_not_replace_a_queued_backend_error_or_leave_a_second_failure() {
+        let scratch = Scratch::new("queued-backend-anchor-io");
+        let parent = scratch.path("registered-parent");
+        let moved = scratch.path("moved-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::os::unix::fs::symlink(scratch.path("vault"), parent.join("vault")).unwrap();
+        let schema = scratch.path("vault/schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (mut subscription, _) = watch_polling(&parent.join("vault"), &schema).unwrap();
+        let backend = ingest(
+            &subscription.state,
+            Err(notify::Error::generic("unrelated backend failure")),
+        )
+        .unwrap();
+        publish_control(
+            &subscription.control,
+            SubscriptionState::Terminal(backend.clone()),
+        );
+        wait_for_terminal_delivery(&subscription);
+        subscription.watcher.take();
+        std::fs::rename(&parent, &moved).unwrap();
+        std::fs::write(&parent, "a file cannot be traversed").unwrap();
+        assert!(matches!(
+            subscription.root_anchor.check(),
+            Err(WatchError::Backend(_))
+        ));
+
+        let received = subscription.try_recv();
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::rename(&moved, &parent).unwrap();
+
+        assert_eq!(received, Err(backend.clone()));
+        assert_eq!(subscription.state(), SubscriptionState::Terminal(backend));
+        assert_eq!(subscription.finish_heal(), Ok(Batch::default()));
+        dropped_within_the_budget(subscription);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_delivered_expiry_precedes_callback_root_loss_even_after_the_root_is_restored() {
+        for restore in [false, true] {
+            let scratch = Scratch::new("delivered-expiry-root-loss");
+            let vault = scratch.path("vault");
+            let moved = scratch.path("moved-vault");
+            std::fs::create_dir_all(&vault).unwrap();
+            let schema = vault.join("schema.yml");
+            std::fs::write(&schema, "version: 1\n").unwrap();
+            let registered = scratch.path("registered-vault");
+            std::os::unix::fs::symlink(&vault, &registered).unwrap();
+            let (mut subscription, _) = watch_polling(&registered, &schema).unwrap();
+            let registered_link = subscription.state.lock().unwrap().registered_links[0].clone();
+            subscription.state.lock().unwrap().terminal = Some(WatchError::SynchronizationExpired);
+            publish_control(
+                &subscription.control,
+                SubscriptionState::Terminal(WatchError::SynchronizationExpired),
+            );
+            wait_for_terminal_delivery(&subscription);
+            subscription.watcher.take();
+            assert_eq!(
+                subscription.try_recv(),
+                Err(WatchError::SynchronizationExpired)
+            );
+            std::fs::rename(&vault, &moved).unwrap();
+            let loss = ingest(
+                &subscription.state,
+                Ok(Event::new(EventKind::Remove(RemoveKind::Any)).add_path(registered_link)),
+            )
+            .unwrap();
+            publish_control(&subscription.control, SubscriptionState::Terminal(loss));
+            if restore {
+                std::fs::rename(&moved, &vault).unwrap();
+            }
+
+            assert_eq!(
+                subscription.finish_heal(),
+                Err(WatchError::SynchronizationExpired),
+                "root restored: {restore}"
+            );
+            assert_eq!(
+                subscription.state(),
+                SubscriptionState::Terminal(WatchError::SynchronizationExpired)
+            );
+            assert_eq!(
+                subscription.synchronize(Duration::ZERO),
+                Err(WatchError::SynchronizationExpired)
+            );
+            dropped_within_the_budget(subscription);
+        }
     }
 
     /// **The bar under the native barrier.** Returning from registration is
