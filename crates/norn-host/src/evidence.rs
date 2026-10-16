@@ -268,8 +268,8 @@ pub struct EvidenceReading {
     /// plan, and none for a plan no template or rule default of which
     /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
     pub clock_reads: u64,
-    /// Authored rewrite entries, selection keys and matching entries read by
-    /// link selection, including construction of its indexes.
+    /// Rewrite entries processed while indexing, logical key probes, shared
+    /// candidate places examined and retarget matches accumulated.
     pub rewrite_selection_steps: u64,
 }
 
@@ -1292,7 +1292,7 @@ pub struct ReadReading {
     /// none for a plan no template or rule default of which reads
     /// `{{now}}`, `{{date}}` or `{{time}}`.
     pub clock_reads: u64,
-    /// Authored rewrite entries, keys and matches read while planning.
+    /// Logical rewrite selection work on planning holds.
     pub rewrite_selection_steps: u64,
 }
 
@@ -1348,7 +1348,7 @@ pub struct ReadsSince {
     pub planning_holds: PlanningHoldCost,
     /// Readings of the host's clock this window's plans took.
     pub clock_reads: u64,
-    /// Authored rewrite entries, keys and matches read while planning.
+    /// Logical rewrite selection work on planning holds.
     pub rewrite_selection_steps: u64,
 }
 
@@ -2168,8 +2168,9 @@ thread_local! {
     static REWRITE_SELECTION_STEPS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Count selection work where an authored rewrite, key or matching entry is
-/// read, so scanning unrelated rewrites is visible in the job's account.
+/// Count rewrite entries processed while indexing, key probes, shared candidate
+/// places and retarget matches at their selection seams. Collection traversal
+/// inside a probe remains subject to source review.
 pub(crate) fn count_rewrite_selection_step() {
     REWRITE_SELECTION_STEPS.with(|cell| cell.set(cell.get() + 1));
 }

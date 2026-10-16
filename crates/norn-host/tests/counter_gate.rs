@@ -2061,6 +2061,104 @@ fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
     .assert_size_independent();
 }
 
+/// The real preview path keeps selection indexes for each judgment. Each
+/// holder keeps a Markdown backlink beside the rewritten wikilink, so the
+/// change set and the applier's recheck both decide an unwritten link.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn rewrite_selection_through_a_preview_grows_with_operations_and_links() {
+    #[derive(Clone, Copy, Debug)]
+    enum Rewrites {
+        Authored,
+        Retargets,
+    }
+
+    fn preview(size: usize, rewrites: Rewrites) -> u64 {
+        use norn_wire::{
+            ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, LinkFamily, Operation,
+            OperationKind, PlanDocument,
+        };
+        let label = format!("rewrite-selection-{rewrites:?}-{size}");
+        let sandbox =
+            Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), &label).expect("a sandbox");
+        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
+        let folder = vault.path().join("rewrite-selection");
+        std::fs::create_dir(&folder).expect("the holders' folder");
+        let mut operations = Vec::new();
+        for at in 0..size {
+            let old = format!("selection-old-{at}");
+            let new = format!("selection-new-{at}");
+            std::fs::write(folder.join(format!("{old}.md")), "Old\n").expect("an old target");
+            std::fs::write(folder.join(format!("{new}.md")), "New\n").expect("a new target");
+            std::fs::write(
+                folder.join(format!("h{at}.md")),
+                format!("[[{old}]] [kept]({old}.md)\n"),
+            )
+            .expect("a holder");
+            let kind = match rewrites {
+                Rewrites::Authored => OperationKind::rewrite_link(
+                    norn_wire::DocumentPath::new(format!("rewrite-selection/h{at}.md"))
+                        .expect("a holder path"),
+                    LinkFamily::Wikilink,
+                    old,
+                    new,
+                ),
+                Rewrites::Retargets => OperationKind::rewrite_wikilink(
+                    ResolutionTarget::new(old).expect("an old target"),
+                    ResolutionTarget::new(new).expect("a new target"),
+                ),
+            };
+            operations.push(Operation::new(kind));
+        }
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let before = host.read_evidence();
+        let previewed = host
+            .apply(ApplyParams::new(
+                ApplyMode::Preview,
+                PlanDocument::operations(AuthoredPlan::new(
+                    VaultAddress::name(vault.name().clone()),
+                    operations,
+                )),
+            ))
+            .expect("the preview is answered")
+            .wait()
+            .expect("the rewrites preview");
+        let work = host.read_evidence().since(before).rewrite_selection_steps;
+        let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+            panic!("a preview answered {:?}", previewed.report);
+        };
+        assert_eq!(plan.operations.len(), size, "every rewrite resolves");
+        let cascades = plan
+            .operations
+            .iter()
+            .map(|operation| operation.cascade.len())
+            .sum::<usize>();
+        assert_eq!(
+            cascades,
+            match rewrites {
+                Rewrites::Authored => 0,
+                Rewrites::Retargets => size,
+            }
+        );
+        assert!(forecast.links.is_empty(), "{:?}", forecast.links);
+        record_the_counters(
+            &label,
+            &[("rewrite_selection_steps", work)].into_iter().collect(),
+        );
+        work
+    }
+
+    for rewrites in [Rewrites::Authored, Rewrites::Retargets] {
+        let (small, large) = (preview(16, rewrites), preview(32, rewrites));
+        assert!(small > 0, "the preview must forward its selection work");
+        assert!(
+            large <= 2 * small,
+            "{rewrites:?}: doubling operations and reached links: {small} -> {large}"
+        );
+    }
+}
+
 /// Attach `profile` with the hub, [`HUB_IN_LINKS`] in-links and a document
 /// no link names planted beside it, preview the three deletes through the
 /// host, and read what each preview's link judgments cost off the host's
