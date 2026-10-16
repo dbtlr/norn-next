@@ -353,6 +353,38 @@ fn a_delete_whose_target_names_no_one_document_is_unresolved_saying_why() {
     );
 }
 
+/// A move can make a delete's rewrite target ambiguous. The refusal heads
+/// the candidates after the plan, including the moved document's destination.
+#[test]
+fn a_delete_heads_its_ambiguous_rewrite_target_after_the_plans_moves() {
+    let fixture = Fixture::new(&[
+        ("old.md", "Old\n"),
+        ("y/b.md", "Y\n"),
+        ("z/c.md", "C\n"),
+        ("h.md", "[[old]]\n"),
+    ]);
+    let moved = moving("z/c.md", "x/b.md");
+    let resolution = fixture.planned(vec![moved.clone(), rewriting("old.md", "b")]);
+    assert_eq!(
+        resolution.unresolved,
+        [UnresolvedOperation::new(
+            rewriting("old.md", "b"),
+            UnresolvedReason::ambiguous_target(
+                AmbiguousEnd::Target,
+                CandidateHead::new(
+                    [
+                        Candidate::new(path("x/b.md"), "x/b"),
+                        Candidate::new(path("y/b.md"), "y/b"),
+                    ],
+                    2,
+                )
+                .expect("a head of two after-state candidates"),
+            ),
+        )]
+    );
+    assert_eq!(resolution.plan.operations, [moved]);
+}
+
 /// **A delete's `rewrite_to` is read whatever the document it removes
 /// was.** A document the plan itself creates and then deletes stood nowhere
 /// before the plan, so no link names it, yet a `rewrite_to` naming no
