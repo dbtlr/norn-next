@@ -132,6 +132,7 @@ pub mod readings;
 pub mod regression;
 pub mod scale;
 pub mod scratch;
+pub mod volume;
 pub mod wait;
 pub mod work;
 mod workflows;

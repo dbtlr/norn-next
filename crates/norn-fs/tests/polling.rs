@@ -131,3 +131,134 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
     );
     assert_eq!(watcher.content_reads() - before, 4);
 }
+
+/// The one stat field a whole-second case changes.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Size,
+    Mtime,
+    Inode,
+}
+
+#[cfg(target_os = "macos")]
+impl Field {
+    fn name(self) -> &'static str {
+        match self {
+            Field::Size => "size",
+            Field::Mtime => "mtime",
+            Field::Inode => "inode",
+        }
+    }
+}
+
+/// The four fields polling compares, as one value: size, mtime, ctime, inode.
+#[cfg(target_os = "macos")]
+fn stat(path: &Path) -> (u64, (i64, i64), (i64, i64), u64) {
+    let metadata = fs::metadata(path).unwrap();
+    (
+        metadata.len(),
+        (metadata.mtime(), metadata.mtime_nsec()),
+        (metadata.ctime(), metadata.ctime_nsec()),
+        metadata.ino(),
+    )
+}
+
+/// The fields that differ between two stats.
+#[cfg(target_os = "macos")]
+fn differing(
+    old: (u64, (i64, i64), (i64, i64), u64),
+    new: (u64, (i64, i64), (i64, i64), u64),
+) -> Vec<&'static str> {
+    [
+        ("size", old.0 != new.0),
+        ("mtime", old.1 != new.1),
+        ("ctime", old.2 != new.2),
+        ("inode", old.3 != new.3),
+    ]
+    .into_iter()
+    .filter_map(|(name, differs)| differs.then_some(name))
+    .collect()
+}
+
+/// Sleep until the wall clock is early in a second, so a case's write and its
+/// edit land within one whole-second timestamp.
+#[cfg(target_os = "macos")]
+fn start_of_a_second() {
+    let into = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .subsec_millis();
+    if into > 100 {
+        std::thread::sleep(Duration::from_millis(u64::from(1_005 - into)));
+    }
+}
+
+/// On a volume that keeps timestamps to the whole second, an edit made in the
+/// second its file was written can change size, mtime or inode while leaving
+/// ctime where it was. Each of those fields alone is a reported change.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_change_to_size_mtime_or_inode_alone_is_reported_on_a_whole_second_volume() {
+    let volume = norn_testkit::volume::Volume::provision("polling-stat")
+        .unwrap_or_else(|reason| panic!("this case needs a whole-second volume: {reason}"));
+    let vault = volume.mount().join("vault");
+    let clock = volume.mount().join("clock");
+    fs::create_dir(&vault).unwrap();
+    fs::create_dir(&clock).unwrap();
+    let (tx, events) = mpsc::channel();
+    let mut watcher = PollWatcher::new(
+        tx,
+        Config::default()
+            .with_manual_polling()
+            .with_compare_contents(true),
+    )
+    .unwrap();
+    watcher.watch(&vault, RecursiveMode::Recursive).unwrap();
+    watcher.watch(&clock, RecursiveMode::NonRecursive).unwrap();
+    let mut ticks = 0..;
+
+    for field in [Field::Size, Field::Mtime, Field::Inode] {
+        // A second boundary crossed between the write and the edit moves ctime
+        // too; such an attempt proves nothing about the field and is retried.
+        let reported = (0..5).find_map(|attempt| {
+            let target = vault.join(format!("{field:?}-{attempt}.md"));
+            start_of_a_second();
+            fs::write(&target, b"aaaa").unwrap();
+            tick(&watcher, &events, &clock, ticks.next().unwrap());
+            let old = stat(&target);
+            match field {
+                Field::Size => {
+                    use std::io::Write;
+                    File::options()
+                        .append(true)
+                        .open(&target)
+                        .unwrap()
+                        .write_all(b"b")
+                        .unwrap();
+                }
+                Field::Mtime => {
+                    fs::write(&target, b"bbbb").unwrap();
+                    File::open(&target)
+                        .unwrap()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(5_000))
+                        .unwrap();
+                }
+                Field::Inode => {
+                    let replacement = volume.mount().join(format!("replacement-{attempt}.md"));
+                    fs::write(&replacement, b"bbbb").unwrap();
+                    fs::rename(&replacement, &target).unwrap();
+                }
+            }
+            let changed = differing(old, stat(&target));
+            let paths = tick(&watcher, &events, &clock, ticks.next().unwrap());
+            (changed == [field.name()]).then(|| paths.contains(&target))
+        });
+        assert_eq!(
+            reported,
+            Some(true),
+            "a change to {} alone must be reported (None: no attempt changed it alone)",
+            field.name()
+        );
+    }
+}
