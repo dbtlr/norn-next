@@ -17,7 +17,8 @@
 /// Which lane prefix a file's `#[ignore]` reasons must open with, keyed by
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
-/// - `counter-lane case:` — the per-PR `counter gates` job's `--ignored` step.
+/// - `counter-lane case:` — the per-PR `counter gates` job's `--ignored` step,
+///   and the macOS job's `counter_gate` step.
 /// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
 ///   step.
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.
