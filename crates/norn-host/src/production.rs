@@ -11288,7 +11288,7 @@ mod tests {
         ops.detach(&name, attachment);
         corrupt_the_document_pages(&f, &database);
 
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Created,
@@ -11465,7 +11465,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Reused,
@@ -11591,7 +11591,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         assert_eq!(
             *attachment.store.open_outcome(),
             OpenOutcome::Reused,
@@ -12402,8 +12402,7 @@ mod tests {
         // vault on rather than finding this run still holding it. That attach
         // creates the store the failed one could not, which is what says the
         // arm was one-shot and the refusal was the environment of that moment.
-        let mut attachment = ops
-            .attach(&f.registration(), &progress)
+        let mut attachment = reattach(&ops, &f.registration(), &progress)
             .expect("the failed rung 3 released the entry");
         assert_eq!(attachment.store.path(), database.as_path());
         assert_eq!(stored_paths(&mut attachment.store).len(), 4);
@@ -13046,6 +13045,70 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Attach `registration` again in the process that detached it.
+    ///
+    /// Detaching closes the maintainer lock's descriptor, but a child another
+    /// case's thread forked while it was open holds a copy until that child
+    /// execs, and for that long the lock reads as held by this very process.
+    /// The lock leaves any wait to its caller, so a re-attach here waits out a
+    /// contention naming this process, and answers every other outcome as the
+    /// attach answered it.
+    fn reattach(
+        ops: &ProductionEntryOps,
+        registration: &Registration,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<ProductionAttachment, JobFailure> {
+        wait_until(
+            "the re-attach to stop meeting the lock this process released",
+            lifecycle_budget(),
+            || match ops.attach(registration, progress) {
+                Err(JobFailure::MaintainerContended(MaintainerIdentity::Named { pid, .. }))
+                    if pid == std::process::id() =>
+                {
+                    Observed::pending(format!("the lock reads as held by this process ({pid})"))
+                }
+                answered => Observed::Met(answered),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **A re-attach waits out the lock this process still reads as holding.**
+    /// Another descriptor of the lock outlives the detach, as a child forked
+    /// while the lock was held keeps one until it execs, so the first attach
+    /// after the detach meets a contention naming this process; the re-attach
+    /// answers with the attachment once that descriptor goes.
+    #[test]
+    fn a_re_attach_waits_out_the_lock_this_process_still_holds() {
+        let f = Fixture::new("reattach-own-holder");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let lock = attachment.maintainership.path().to_path_buf();
+        ops.detach(&name, attachment);
+        let norn_fs::Acquisition::Acquired(held) = norn_fs::try_acquire(&lock).unwrap() else {
+            panic!("the detach left the lock held");
+        };
+        let contended = ops.attach(&f.registration(), &progress).err();
+        assert!(
+            matches!(
+                contended,
+                Some(JobFailure::MaintainerContended(MaintainerIdentity::Named { pid, .. }))
+                    if pid == std::process::id()
+            ),
+            "the held lock did not read as this process's: {contended:?}"
+        );
+        let holder = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+
+        let attachment = reattach(&ops, &f.registration(), &progress)
+            .expect("the re-attach did not outlast the other descriptor");
+        holder.join().unwrap();
+        ops.detach(&name, attachment);
+    }
+
     /// **A degraded row whose own finding is not beside it is re-derived.** The
     /// row says its block was read by nothing, so the next heal reads the
     /// document again and states the cause again — no edit to the file is
@@ -13073,7 +13136,7 @@ mod tests {
         assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
 
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         let recovered = findings_at(&mut attachment.store, "note.md");
         assert_eq!(
             recovered.len(),
@@ -13135,7 +13198,7 @@ mod tests {
         );
         ops.detach(&name, attachment);
 
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         let restored = findings_at(&mut attachment.store, "note.md");
         let recovered: Vec<&str> = restored
             .iter()
@@ -13171,7 +13234,7 @@ mod tests {
         assert_eq!(finding.len(), 1);
         ops.detach(&name, attachment);
 
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let mut attachment = reattach(&ops, &f.registration(), &progress).unwrap();
         let again = attachment
             .store
             .begin_request()
