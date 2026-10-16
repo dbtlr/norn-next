@@ -28,7 +28,7 @@
 //! [`stage`](crate::stage), [`publish`](crate::publish),
 //! [`confirm_landed`](crate::confirm_landed), [`discard`](crate::discard) and
 //! [`remove_empty_folders`](crate::remove_empty_folders) — arm themselves from this process's environment
-//! rather than passing [`Faults::NONE`]. That is what a lockdown suite's
+//! rather than passing `Faults::NONE`. That is what a lockdown suite's
 //! process-death bars need and what nothing else can give them — a stage whose
 //! required outcome is "this process does not survive here" cannot be reached
 //! by a caller that has to return to make its assertion, so the arm is read by
@@ -576,7 +576,7 @@ impl Faults {
 
     /// What a public entry point outside a publication passes.
     ///
-    /// Without the `induced-failure` feature this is [`Faults::NONE`] and the
+    /// Without the `induced-failure` feature this is `Faults::NONE` and the
     /// entry point asks one comparison against an empty list. With it, the
     /// answer is whatever this process was started armed with — read once, and
     /// empty in every process that armed nothing, which is every process that

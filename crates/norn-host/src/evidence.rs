@@ -266,7 +266,7 @@ pub struct EvidenceReading {
     pub rule_work: RuleWork,
     /// Readings the jobs' plans took of the host's clock: at most one per
     /// plan, and none for a plan no template or rule default of which
-    /// reads `{{now}}`, `{{date}}` or `{{time}}` ([`crate::clock::local_now`]).
+    /// reads `{{now}}`, `{{date}}` or `{{time}}` (`crate::clock::local_now`).
     pub clock_reads: u64,
     /// Rewrite entries processed while indexing, logical key probes, shared
     /// candidate places examined and retarget matches accumulated.
