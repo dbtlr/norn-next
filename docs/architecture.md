@@ -1217,16 +1217,22 @@ one snapshot is the whole ranking. Its conjunction is compiled by the same compi
 with a `resolves` part reported as not applicable and, where a lexical page runs, a
 mixed-offset comparison advised as a find's is, and a hit's document row is hydrated
 through the hydration a find's rows are read through, only where the request names a
-column. It names one statement under the same discipline, carrying a plan bar with
-negative controls and held by a census to exactly one bar: the lexical page, whose
-searching row is the read of `documents_fts` through its `MATCH` selection — the bundled
+column. It names three statements under the same discipline, each carrying a plan bar with
+negative controls and held by a census to exactly one bar. The lexical page's searching row is the read of `documents_fts` through its `MATCH` selection — the bundled
 FTS5 plans a read as `SCAN <table> VIRTUAL TABLE INDEX <idxNum>:<idxStr>`, a spelling a
 SQLite upgrade may change, and the bar holds `idxStr`
 to a `MATCH` and `idxNum` to zero, so the module hands back no order of its own — as the
 outer loop, each match reaching its document by row id, and one temporary B-tree for the
 page's order. Each filter tests a match before it is scored. **Ranking costs the matched
 set**: every match the filters keep is scored and sorted before the page's first hit is
-known, a continuation included. A work bar reads the page's SQLite counters: beside 50
+known, a continuation included. The held paths — which of a set of paths the snapshot
+holds as documents — are barred to reach each document by one seek of `documents_path`,
+the path list the outer loop and no document read end to end, so the question costs the
+paths it is handed and never the vault. The feed rows — how many rows each change feed
+holds past a generation, counted to a bound — are barred to read a range of
+`documents_change_feed` and a range of `tombstones_change_feed` past the generation, with
+nothing read end to end or sorted; the statement itself stops each range at the bound, so
+the count costs at most twice the bound whatever the feeds hold. A work bar reads the page's SQLite counters: beside 50
 documents of 64-byte bodies and beside 500 of 16 KiB bodies that the query does not
 match, every search costs the same; beside 50 and 500 that it does, a page's work grows
 with the matches, and a narrowing part narrows what is scored but not what is matched. A

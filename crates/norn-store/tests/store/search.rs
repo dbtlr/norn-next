@@ -1515,8 +1515,9 @@ fn judge_feed_rows(plan: &QueryPlan) {
 }
 
 /// **The feed rows are counted over a range of each feed's index**, past the
-/// generation it is asked about and stopped at the bound, so the count costs
-/// at most twice the bound whatever the feeds hold.
+/// generation it is asked about, never read end to end or sorted. The statement
+/// stops each range at the bound, so the count costs at most twice the bound
+/// whatever the feeds hold; this bar holds the ranges, not the stop.
 ///
 /// Control: the death feed read end to end. It fails.
 #[test]
