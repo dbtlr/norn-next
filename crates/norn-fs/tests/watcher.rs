@@ -15,6 +15,7 @@ use norn_fs::{
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::scratch;
+use norn_testkit::volume::Volume;
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 /// The wait a case gives coverage to cross its backend synchronization
@@ -557,65 +558,6 @@ fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
             _ => Observed::Pending(seen.state()),
         }
     });
-}
-
-/// A second mounted volume, for the coverage plan that needs one.
-///
-/// A RAM disk is the volume a test can mount and release without privileges.
-/// Where the machine will not provide one the case that wanted it says so and
-/// asserts nothing, because a volume is the environment's to give.
-struct Volume {
-    device: String,
-    mount: PathBuf,
-}
-
-impl Volume {
-    fn provision(label: &str) -> Result<Self, String> {
-        // 65,536 512-byte sectors: 32 MiB, which holds a schema file and the
-        // volume's own event log with room to spare.
-        let device = command("hdiutil", &["attach", "-nomount", "ram://65536"])?;
-        // The device is attached from here on, so the volume owns it before
-        // anything else can fail and leave it attached with no owner.
-        let mut volume = Self {
-            device: device.clone(),
-            mount: PathBuf::new(),
-        };
-        let name = scratch::unique_name(&format!("norn-{label}"));
-        command("diskutil", &["eraseVolume", "HFS+", &name, &device])?;
-        volume.mount = command("diskutil", &["info", &device])?
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("Mount Point:").map(str::trim))
-            .filter(|mount| !mount.is_empty())
-            .ok_or_else(|| format!("{device} reports no mount point"))?
-            .into();
-        Ok(volume)
-    }
-
-    fn mount(&self) -> &Path {
-        &self.mount
-    }
-}
-
-impl Drop for Volume {
-    fn drop(&mut self) {
-        let _ = command("hdiutil", &["detach", "-force", &self.device]);
-    }
-}
-
-/// Run one provisioning command, reporting its output or why it gave none.
-fn command(program: &str, arguments: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(program)
-        .args(arguments)
-        .output()
-        .map_err(|error| format!("{program} could not run: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{program} {} failed: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// **The bar under the readiness check.** A vault-wide rescan covers the canary

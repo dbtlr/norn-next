@@ -5,11 +5,15 @@ wired in through `[patch.crates-io]` in the workspace manifest.
 
 ## `notify`
 
-Patches the `notify` 8.2.0 release from crates.io. Every change is in
-`src/fsevent.rs`, so the patch is inert on every platform except macOS.
+Patches the `notify` 8.2.0 release from crates.io. The patch adds two
+capabilities: an event-history barrier for the FSEvents backend, in
+`src/fsevent.rs` and inert on every platform except macOS, and stat-gated
+content hashing for the poll backend, in `src/poll.rs` and active on every
+platform.
 
-The capability the patch adds is an event-history barrier for the FSEvents
-backend:
+### FSEvents event-history barrier
+
+The first capability is an event-history barrier for the FSEvents backend:
 
 - `fsevent::current_event_id()` reads the per-host FSEvents event identifier.
 - `FsEventWatcher::with_event_history(handler, since_when, history_done)`
@@ -44,5 +48,28 @@ provably continuous from before its edges were installed. The release exposes
 no event identifier and drops the sentinel, so the boundary is unobservable
 through its public API.
 
+### Stat-gated poll hashing
+
+The second capability bounds what a poll tick reads. With content comparison
+enabled, the release reads and hashes every watched file on every tick, and
+compares modification times only to the whole second. The patch changes that:
+
+- Each tick compares size, modification time, change time and inode, the last
+  two on Unix only, at full timestamp precision.
+- Content is read only for an entry whose stat changed or that is new. An
+  entry whose stat is unchanged keeps its previous hash, so a tick over an
+  unchanged tree reads no file content.
+- A stat change is reported even where the content hash is unchanged.
+- `PollWatcher::content_reads()`, hidden from the documentation, counts the
+  content hashes the watcher has attempted, initial scans included.
+
+`norn-fs` needs this so a polled vault costs stat calls per tick, not its
+whole size in reads. The release has no stat gate on its content comparison
+and no way to observe how much content a tick read.
+
+### Removal
+
 Delete this directory and the `[patch.crates-io]` entry when a published
-`notify` release carries an equivalent capability.
+`notify` release carries equivalents of both capabilities. Where a release
+carries only one, keep the patch and drop the changes that release made
+redundant.

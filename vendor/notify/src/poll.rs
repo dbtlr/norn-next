@@ -67,29 +67,25 @@ mod data {
         EventHandler,
     };
     use std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         collections::{hash_map::RandomState, HashMap},
         fmt::{self, Debug},
         fs::{self, File, Metadata},
         hash::{BuildHasher, Hasher},
         io::{self, Read},
         path::{Path, PathBuf},
-        time::Instant,
+        time::{Instant, SystemTime},
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use walkdir::WalkDir;
 
     use super::ScanEventHandler;
 
-    fn system_time_to_seconds(time: std::time::SystemTime) -> i64 {
-        match time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-            Ok(d) => d.as_secs() as i64,
-            Err(e) => -(e.duration().as_secs() as i64),
-        }
-    }
-
     /// Builder for [`WatchData`] & [`PathData`].
     pub(super) struct DataBuilder {
         emitter: EventEmitter,
+        pub(super) content_reads: Cell<u64>,
         scan_emitter: Option<Box<RefCell<dyn ScanEventHandler>>>,
 
         // TODO: May allow user setup their custom BuildHasher / BuildHasherDefault
@@ -121,6 +117,7 @@ mod data {
             };
             Self {
                 emitter: EventEmitter::new(event_handler),
+                content_reads: Cell::new(0),
                 scan_emitter,
                 build_hasher: compare_content.then(RandomState::default),
                 now: Instant::now(),
@@ -146,8 +143,8 @@ mod data {
         }
 
         /// Create [`PathData`].
-        fn build_path_data(&self, meta_path: &MetaPath) -> PathData {
-            PathData::new(self, meta_path)
+        fn build_path_data(&self, meta_path: &MetaPath, old: Option<&PathData>) -> PathData {
+            PathData::new(self, meta_path, old)
         }
     }
 
@@ -206,13 +203,17 @@ mod data {
                 return None;
             }
 
-            let all_path_data = Self::scan_all_path_data(
+            let all_path_data = Self::scan_all_metadata(
                 data_builder,
                 root.clone(),
                 is_recursive,
                 follow_symlinks,
                 true,
             )
+            .map(|meta_path| {
+                let data = data_builder.build_path_data(&meta_path, None);
+                (meta_path.into_path(), data)
+            })
             .collect();
 
             Some(Self {
@@ -230,13 +231,18 @@ mod data {
         /// This function may emit event by `data_builder.emitter`.
         pub(super) fn rescan(&mut self, data_builder: &mut DataBuilder) {
             // scan current filesystem.
-            for (path, new_path_data) in Self::scan_all_path_data(
+            for meta_path in Self::scan_all_metadata(
                 data_builder,
                 self.root.clone(),
                 self.is_recursive,
                 self.follow_symlinks,
                 false,
             ) {
+                let new_path_data = data_builder.build_path_data(
+                    &meta_path,
+                    self.all_path_data.get(meta_path.path()),
+                );
+                let path = meta_path.into_path();
                 let old_path_data = self
                     .all_path_data
                     .insert(path.clone(), new_path_data.clone());
@@ -269,19 +275,19 @@ mod data {
             }
         }
 
-        /// Get all `PathData` by given configuration.
+        /// Get all path metadata by given configuration.
         ///
         /// # Side Effect
         ///
         /// This function may emit some IO Error events by `data_builder.emitter`.
-        fn scan_all_path_data(
+        fn scan_all_metadata(
             data_builder: &'_ DataBuilder,
             root: PathBuf,
             is_recursive: bool,
             follow_symlinks: bool,
             // whether this is an initial scan, used only for events
             is_initial: bool,
-        ) -> impl Iterator<Item = (PathBuf, PathData)> + '_ {
+        ) -> impl Iterator<Item = MetaPath> + '_ {
             log::trace!("rescanning {root:?}");
             // WalkDir return only one entry if root is a file (not a folder),
             // so we can use single logic to do the both file & dir's jobs.
@@ -316,10 +322,7 @@ mod data {
                                 emitter.borrow_mut().handle_event(Ok(path.clone()));
                             }
                         }
-                        let meta_path = MetaPath::from_parts_unchecked(path, metadata);
-                        let data_path = data_builder.build_path_data(&meta_path);
-
-                        Some((meta_path.into_path(), data_path))
+                        Some(MetaPath::from_parts_unchecked(path, metadata))
                     }
                     Err(e) => {
                         // emit event.
@@ -340,13 +343,22 @@ mod data {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Stat {
+        size: u64,
+        mtime: Option<SystemTime>,
+        #[cfg(unix)]
+        ctime: (i64, i64),
+        #[cfg(unix)]
+        inode: u64,
+    }
+
     /// Stored data for a one path locations.
     ///
     /// See [`WatchData`] for more detail.
     #[derive(Debug, Clone)]
     struct PathData {
-        /// File updated time.
-        mtime: i64,
+        stat: Stat,
 
         /// Content's hash value, only available if user request compare file
         /// contents and read successful.
@@ -358,25 +370,47 @@ mod data {
 
     impl PathData {
         /// Create a new `PathData`.
-        fn new(data_builder: &DataBuilder, meta_path: &MetaPath) -> PathData {
+        fn new(data_builder: &DataBuilder, meta_path: &MetaPath, old: Option<&PathData>) -> PathData {
             let metadata = meta_path.metadata();
-
-            PathData {
-                mtime: metadata.modified().map_or(0, system_time_to_seconds),
-                hash: data_builder
+            let stat = Stat {
+                size: metadata.len(),
+                mtime: metadata.modified().ok(),
+                #[cfg(unix)]
+                ctime: (metadata.ctime(), metadata.ctime_nsec()),
+                #[cfg(unix)]
+                inode: metadata.ino(),
+            };
+            // Compare size, mtime, ctime and inode on Unix before reading content:
+            // unchanged stat reuses the hash, avoiding vault-wide reads each tick.
+            let hash = match old.filter(|old| old.stat == stat) {
+                Some(old) => old.hash,
+                None => data_builder
                     .build_hasher
                     .as_ref()
                     .filter(|_| metadata.is_file())
                     .and_then(|build_hasher| {
-                        Self::get_content_hash(build_hasher, meta_path.path()).ok()
+                        Self::get_content_hash(
+                            build_hasher,
+                            meta_path.path(),
+                            &data_builder.content_reads,
+                        )
+                        .ok()
                     }),
-
+            };
+            PathData {
+                stat,
+                hash,
                 last_check: data_builder.now,
             }
         }
 
         /// Get hash value for the data content in given file `path`.
-        fn get_content_hash(build_hasher: &RandomState, path: &Path) -> io::Result<u64> {
+        fn get_content_hash(
+            build_hasher: &RandomState,
+            path: &Path,
+            content_reads: &Cell<u64>,
+        ) -> io::Result<u64> {
+            content_reads.set(content_reads.get() + 1);
             let mut hasher = build_hasher.build_hasher();
             let mut file = File::open(path)?;
             let mut buf = [0; 512];
@@ -406,12 +440,14 @@ mod data {
         {
             match (old, new) {
                 (Some(old), Some(new)) => {
-                    if new.mtime > old.mtime {
+                    if new.stat.mtime != old.stat.mtime {
                         Some(EventKind::Modify(ModifyKind::Metadata(
                             MetadataKind::WriteTime,
                         )))
                     } else if new.hash != old.hash {
                         Some(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    } else if new.stat != old.stat {
+                        Some(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
                     } else {
                         None
                     }
@@ -515,6 +551,12 @@ pub struct PollWatcher {
 }
 
 impl PollWatcher {
+    /// Number of content hash attempts by this watcher, including initial scans.
+    #[doc(hidden)]
+    pub fn content_reads(&self) -> u64 {
+        self.data_builder.lock().unwrap().content_reads.get()
+    }
+
     /// Create a new [`PollWatcher`], configured as needed.
     pub fn new<F: EventHandler>(event_handler: F, config: Config) -> crate::Result<PollWatcher> {
         Self::with_opt::<_, ()>(event_handler, config, None)

@@ -1462,6 +1462,12 @@ Two mechanisms carry trust, and both are contract:
   under-report never.** A redundant re-derivation costs work; a missed change costs a wrong
   answer, so every tuning choice biases toward the safe direction, and a lost-notification or
   overflow signal marks the entry untrusted for a rung-2 re-heal rather than being absorbed.
+  One accepted limit is the exception to that bias: the poll backend, which a registration
+  selects explicitly, detects a change by stat alone — size, modification time, change time
+  and inode — and reads content only where one of them moved, so an edit that leaves all four
+  unchanged goes unreported by polling. The drift scans below are the mechanism that closes
+  that gap; until they are built, such an edit waits for a later change to the same path or
+  for the next attach or recovery heal.
   **Reporting less and reporting nothing are two states, and they resume differently.** A
   watcher still covering the vault that dropped or overflowed notifications re-heals on the
   host's own dispatch; coverage that *ended* — a failed backend, a vault root that left the
