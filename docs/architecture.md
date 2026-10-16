@@ -1230,9 +1230,9 @@ holds as documents — are barred to reach each document by one seek of `documen
 the path list the outer loop and no document read end to end, so the question costs the
 paths it is handed and never the vault. The feed rows — how many rows each change feed
 holds past a generation, counted to a bound — are barred to read a range of
-`documents_change_feed` and a range of `tombstones_change_feed` past the generation, each
-stopped at the bound, with nothing read end to end or sorted, so the count costs at most
-twice the bound whatever the feeds hold. A work bar reads the page's SQLite counters: beside 50
+`documents_change_feed` and a range of `tombstones_change_feed` past the generation, with
+nothing read end to end or sorted; the statement itself stops each range at the bound, so
+the count costs at most twice the bound whatever the feeds hold. A work bar reads the page's SQLite counters: beside 50
 documents of 64-byte bodies and beside 500 of 16 KiB bodies that the query does not
 match, every search costs the same; beside 50 and 500 that it does, a page's work grows
 with the matches, and a narrowing part narrows what is scored but not what is matched. A
