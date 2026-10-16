@@ -9267,7 +9267,7 @@ mod tests {
     /// Take one batch off a source, reporting whether there was one to take.
     fn spend_one(source: &AtomicUsize) -> bool {
         source
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                 value.checked_sub(1)
             })
             .is_ok()
@@ -17951,7 +17951,7 @@ mod tests {
         fn poll(&self, _: &VaultName, _: &mut FakeCoverage) -> Result<Option<Batch>, JobFailure> {
             if self
                 .queued
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     value.checked_sub(1)
                 })
                 .is_ok()

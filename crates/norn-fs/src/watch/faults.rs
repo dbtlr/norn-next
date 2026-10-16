@@ -780,7 +780,7 @@ mod armed {
             return true;
         };
         remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |left| {
                 (left > 0).then(|| left - 1)
             })
             .is_ok()
