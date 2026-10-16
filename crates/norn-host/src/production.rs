@@ -909,6 +909,8 @@ impl ProductionEntryOps {
         write: impl FnOnce(&mut norn_config::registry::Registry),
     ) -> Result<(), RetireRefusal> {
         let name = &registration.name;
+        #[cfg(test)]
+        crate::child_gate::await_spawns_in_flight();
         let _maintainership = match try_acquire(&self.derived(name).join(MAINTAINER_LOCK_FILE)) {
             Ok(Acquisition::Acquired(guard)) => guard,
             Ok(Acquisition::Contended { incumbent }) => {
@@ -1422,6 +1424,8 @@ impl EntryOps for ProductionEntryOps {
         let _job = self.evidence.attributing();
         progress.installing_coverage();
         let derived = self.derived(&registration.name);
+        #[cfg(test)]
+        crate::child_gate::await_spawns_in_flight();
         let maintainership =
             match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
                 Acquisition::Acquired(guard) => guard,
@@ -5266,14 +5270,10 @@ mod tests {
 
     /// A production host over `ops` serving the fixture's one vault, `Ready`,
     /// with the lease that keeps it served.
-    fn ready_host(
+    fn ready_host<O: EntryOps>(
         f: &Fixture,
-        ops: ProductionEntryOps,
-    ) -> (
-        crate::Host<ProductionEntryOps>,
-        VaultName,
-        crate::DemandLease<ProductionEntryOps>,
-    ) {
+        ops: O,
+    ) -> (crate::Host<O>, VaultName, crate::DemandLease<O>) {
         let registration = f.registration();
         let name = registration.name.clone();
         let registry = crate::RegistryRead::from_entries([registration]);
@@ -5893,17 +5893,148 @@ mod tests {
         );
     }
 
+    /// Another writer's edit, made once by whichever seam reaches it first.
+    type ForeignEdit = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    /// Make `edit`, where no seam has made it yet.
+    fn make_once(edit: &ForeignEdit) {
+        if let Some(edit) = edit.lock().unwrap().take() {
+            edit();
+        }
+    }
+
+    /// Production ops whose apply leg makes another writer's edit as it
+    /// begins: after the job's intake has drained the watcher and derived
+    /// what it delivered, and before the apply takes its snapshot and plans.
+    /// Every leg but the apply is the production one, unchanged.
+    struct EditedBeforeApply {
+        inner: ProductionEntryOps,
+        edit: ForeignEdit,
+    }
+
+    impl EntryOps for EditedBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn reload(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.reload(name, attachment, progress)
+        }
+        fn judge_reload(
+            &self,
+            name: &VaultName,
+            attachment: &Self::Attachment,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.judge_reload(name, attachment)
+        }
+        fn active_fingerprints(
+            &self,
+            attachment: &Self::Attachment,
+        ) -> Option<crate::ActiveFingerprints> {
+            self.inner.active_fingerprints(attachment)
+        }
+        fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
+            self.inner.control_root(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            make_once(&self.edit);
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
+            self.inner.withheld_trust(attachment)
+        }
+        fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory> {
+            self.inner.advisories(attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+            self.inner.semantic()
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
+            self.inner.maintenance_due(name, attachment)
+        }
+        fn maintain(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<(), JobFailure> {
+            self.inner.maintain(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+    }
+
     /// A vault of three `wave: flip` documents, attached and ready, whose
-    /// `wave/b.md` a foreign writer then changes to `wave: published`. The
-    /// host polls its watcher once a minute, so the store has not taken the
-    /// edit in when the case asks.
+    /// `wave/b.md` a foreign writer changes to `wave: published` once a set
+    /// has read the store and before it plans: as an apply's leg begins,
+    /// after its intake drained the watcher, or as a preview's read lets the
+    /// entry's gate go, after its snapshot stands. Nothing takes the edit in
+    /// between, so the store still holds `wave: flip` when the set plans,
+    /// whenever the watcher delivers the edit.
     fn a_foreign_edit_the_index_has_not_seen(
         label: &str,
     ) -> (
         Fixture,
-        crate::Host<ProductionEntryOps>,
+        crate::Host<EditedBeforeApply>,
         VaultName,
-        crate::DemandLease<ProductionEntryOps>,
+        crate::DemandLease<EditedBeforeApply>,
     ) {
         let f = Fixture::new(label);
         fs::create_dir_all(f.vault().join("wave")).unwrap();
@@ -5914,9 +6045,16 @@ mod tests {
             )
             .unwrap();
         }
-        let ops = fixture_ops(&f);
+        let b = f.vault().join("wave/b.md");
+        let edit: ForeignEdit = Arc::new(std::sync::Mutex::new(Some(Box::new(move || {
+            fs::write(&b, "---\nwave: published\n---\n").unwrap();
+        }))));
+        let ops = EditedBeforeApply {
+            inner: fixture_ops(&f),
+            edit: Arc::clone(&edit),
+        };
         let (host, name, lease) = ready_host(&f, ops);
-        fs::write(f.vault().join("wave/b.md"), "---\nwave: published\n---\n").unwrap();
+        host.when_a_read_lets_go(&name, move || make_once(&edit));
         (f, host, name, lease)
     }
 
@@ -12912,6 +13050,93 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Take `lock` beside the host, once no spawn in flight can hold a copy
+    /// of it.
+    fn another_holder_of(lock: &Path) -> norn_fs::Maintainership {
+        crate::child_gate::await_spawns_in_flight();
+        let norn_fs::Acquisition::Acquired(held) = norn_fs::try_acquire(lock).unwrap() else {
+            panic!("the idle vault's lock is held");
+        };
+        held
+    }
+
+    /// A stand-in for a child spawned while `lock` was held, which keeps a
+    /// copy of its descriptor until it execs: once no real spawn in flight can
+    /// hold a copy of the released `lock`, it holds the child gate as a spawn
+    /// does and a descriptor of that lock, and lets the descriptor go 300ms
+    /// later and the gate after it. Returns once both are held.
+    fn a_spawn_in_flight_holding(lock: PathBuf) -> thread::JoinHandle<()> {
+        let (holds, held) = std::sync::mpsc::channel();
+        let spawn = thread::spawn(move || {
+            crate::child_gate::await_spawns_in_flight();
+            let _spawning = crate::child_gate::spawning();
+            let norn_fs::Acquisition::Acquired(copy) = norn_fs::try_acquire(&lock).unwrap() else {
+                panic!("the lock was not released");
+            };
+            holds.send(()).unwrap();
+            thread::sleep(Duration::from_millis(300));
+            drop(copy);
+        });
+        held.recv()
+            .expect("the stand-in holds the gate and the lock");
+        spawn
+    }
+
+    /// Assert that `lock` reads as held by this process.
+    fn assert_held_by_this_process(lock: &Path) {
+        let read = norn_fs::try_acquire(lock).unwrap();
+        assert!(
+            matches!(
+                &read,
+                norn_fs::Acquisition::Contended {
+                    incumbent: norn_fs::Incumbent::Named { pid, .. }
+                } if *pid == std::process::id()
+            ),
+            "the stand-in's descriptor did not read as this process's: {read:?}"
+        );
+    }
+
+    /// **An attach waits out a spawn in flight over the lock it takes.** A
+    /// child forked while the lock was held keeps a descriptor of it until it
+    /// execs, so after the detach the lock reads as held by this process; the
+    /// attach takes it once the spawn lets the gate go.
+    #[test]
+    fn an_attach_waits_out_a_spawn_in_flight_over_its_lock() {
+        let f = Fixture::new("attach-after-spawn");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let lock = attachment.maintainership.path().to_path_buf();
+        ops.detach(&name, attachment);
+        let spawn = a_spawn_in_flight_holding(lock.clone());
+        assert_held_by_this_process(&lock);
+
+        let attachment = ops
+            .attach(&f.registration(), &progress)
+            .expect("the attach did not wait out the spawn in flight");
+        spawn.join().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    /// **A retirement waits out a spawn in flight over the lock it takes.**
+    /// A retirement takes the maintainer lock an attach takes, in the process
+    /// that may have just released it.
+    #[test]
+    fn a_retirement_waits_out_a_spawn_in_flight_over_its_lock() {
+        let f = Fixture::new("retire-after-spawn");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let lock = attachment.maintainership.path().to_path_buf();
+        ops.detach(&name, attachment);
+        let spawn = a_spawn_in_flight_holding(lock.clone());
+        assert_held_by_this_process(&lock);
+
+        ops.retire(&f.registration(), true, &[])
+            .expect("the retirement did not wait out the spawn in flight");
+        spawn.join().unwrap();
+    }
+
     /// **A degraded row whose own finding is not beside it is re-derived.** The
     /// row says its block was read by nothing, so the next heal reads the
     /// document again and states the cause again — no edit to the file is
@@ -13656,10 +13881,8 @@ mod tests {
         let f = Fixture::new("schema-pipe");
         let schema = f.vault().join(IN_VAULT_SCHEMA_PATH);
         fs::remove_file(&schema).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(&schema)
-            .status()
-            .unwrap();
+        let made =
+            crate::child_gate::status(std::process::Command::new("mkfifo").arg(&schema)).unwrap();
         assert!(made.success(), "mkfifo failed");
 
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -14833,10 +15056,10 @@ mod tests {
         fs::create_dir_all(f.vault().join("elsewhere")).unwrap();
         fs::write(f.vault().join("elsewhere/note.md"), "body").unwrap();
         symlink(f.vault().join("elsewhere"), f.vault().join("dir/link")).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(f.vault().join("dir/pipe.md"))
-            .status()
-            .unwrap();
+        let made = crate::child_gate::status(
+            std::process::Command::new("mkfifo").arg(f.vault().join("dir/pipe.md")),
+        )
+        .unwrap();
         assert!(made.success(), "mkfifo failed");
         fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
 
@@ -15046,10 +15269,10 @@ mod tests {
         let f = Fixture::new("increment-under-an-entry");
         fs::write(f.vault().join("note.md"), "body").unwrap();
         fs::write(f.vault().join("plain.md"), "body").unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(f.vault().join("pipe"))
-            .status()
-            .unwrap();
+        let made = crate::child_gate::status(
+            std::process::Command::new("mkfifo").arg(f.vault().join("pipe")),
+        )
+        .unwrap();
         assert!(made.success(), "mkfifo failed");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -16919,11 +17142,7 @@ mod tests {
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let answer = unregister_once_idle(&host, &UnregisterParams::new(notes()));
 
@@ -17437,11 +17656,7 @@ mod tests {
                 .registration;
             attach_and_idle(&host);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let refusal =
                 set_once_idle(&host, &moving_to(&moved)).expect_err("a contended vault was moved");
@@ -17633,11 +17848,7 @@ mod tests {
                 .unwrap();
             wait_state(&host, &notes(), norn_wire::TrustState::Unattached);
             let derived = dirs.derived_dir(&notes());
-            let norn_fs::Acquisition::Acquired(held) =
-                norn_fs::try_acquire(&derived.join("maintainer.lock")).unwrap()
-            else {
-                panic!("the idle vault's lock is held");
-            };
+            let held = another_holder_of(&derived.join("maintainer.lock"));
 
             let report = set_once_idle(
                 &host,

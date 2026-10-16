@@ -9,6 +9,8 @@
 mod address;
 mod applier;
 mod apply;
+#[cfg(test)]
+mod child_gate;
 mod clock;
 mod derivation;
 mod evidence;
