@@ -223,15 +223,16 @@ pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 /// hours and the ceiling is what binds; at a hold window short enough that the
 /// depth comes in under the ceiling, the depth binds instead.
 ///
-/// The probe bound carries over unchanged: one probe is one non-blocking
-/// attempt at the lock, which costs a syscall whatever the queue is doing.
+/// A probe makes a non-blocking lock attempt and reads the holder record.
+/// Its ten-second allowance is independent of the holder's own probes:
+/// descheduling a waiter must not turn a moving queue into a failure.
 pub fn acquisition_budget(hold_window: Budget) -> Budget {
     Budget::new(
         hold_window
             .work()
             .saturating_mul(QUEUED_HOLDERS)
             .min(ACQUISITION_WALL),
-        hold_window.probe(),
+        Duration::from_secs(10),
     )
 }
 
@@ -1030,7 +1031,6 @@ mod tests {
     fn the_acquisition_wall_fits_inside_the_job_it_has_to_fail_in() {
         let hold_window = Budget::new(Duration::from_secs(15), Duration::from_millis(250));
         let acquisition = acquisition_budget(hold_window);
-        assert_eq!(acquisition.probe(), hold_window.probe());
         assert!(
             acquisition.work() <= ACQUISITION_WALL,
             "an acquisition gets {:?}, past the {ACQUISITION_WALL:?} ceiling",
@@ -1055,6 +1055,23 @@ mod tests {
             acquisition_budget(brief).work(),
             Duration::from_secs(1) * QUEUED_HOLDERS
         );
+    }
+
+    #[test]
+    fn acquisition_tolerates_a_pending_probe_slower_than_the_holders_probe_bound() {
+        let hold_window = Budget::new(Duration::from_secs(15), Duration::from_millis(1));
+        let mut probes = 0;
+        let outcome = wait_until("a queued lease", acquisition_budget(hold_window), || {
+            probes += 1;
+            if probes == 1 {
+                std::thread::sleep(Duration::from_millis(20));
+                Observed::pending("held by another case")
+            } else {
+                Observed::Met(())
+            }
+        });
+        assert!(outcome.is_ok(), "acquisition ended before its next look");
+        assert_eq!(probes, 2);
     }
 
     /// The lease directory is derived from the environment, never written
