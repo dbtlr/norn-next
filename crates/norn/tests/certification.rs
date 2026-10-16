@@ -1279,6 +1279,9 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
 ///
 /// The split is what keeps the longest job short; the pairing below keeps it
 /// from drifting back, and keeps the suite from being dropped in the move.
+/// Neither job, and no step of the macOS job, may carry `needs:`, `if:` or
+/// `continue-on-error:`: each would serialize the job behind the build, skip
+/// it, or let it fail without failing the PR.
 #[test]
 fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_macos() {
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
@@ -1300,6 +1303,18 @@ fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_
     );
 
     let recovery = ci_job(&gate, "induced-failure");
+    let platform = ci_job(&gate, "platform");
+    for (job, lines) in [("induced-failure", &recovery), ("platform", &platform)] {
+        for line in lines {
+            let key = line.trim_start_matches("- ");
+            assert!(
+                !["needs:", "if:", "continue-on-error:"]
+                    .iter()
+                    .any(|forbidden| key.starts_with(forbidden)),
+                "the `{job}` job holds `{line}`, which orders, skips or excuses it"
+            );
+        }
+    }
     for required in [
         "name: induced-failure recovery",
         "runs-on: ubuntu-latest",
@@ -1313,7 +1328,6 @@ fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_
         );
     }
 
-    let platform = ci_job(&gate, "platform");
     assert!(
         platform.contains(&"timeout-minutes: 25".to_string()),
         "the macOS job's timeout: {platform:?}"

@@ -145,17 +145,18 @@ use norn_wire::{
     VaultName,
 };
 
-/// Whether `case` stands down because the scratch root folds case.
+/// Whether `case` stands down because the scratch root (the volume its vaults
+/// are built on) folds case.
 ///
 /// On a folding root the host confirms each spelling it lists against the
-/// directory (NORN-387), so the `walk_dirents` count of the cases that call this
+/// directory, so the `walk_dirents` count of the cases that call this
 /// grows with the vault and the size-independence bars cannot hold there. They
 /// hold on a distinct root, which the ubuntu counter job measures. The stand-down
 /// is stated on standard error and as a workflow notice naming the case and the
 /// reason, so a run that skipped it says so in its log and its annotations.
 fn stands_down_on_a_folding_root(case: &str) -> bool {
-    let root = std::env::temp_dir();
-    let folds = norn_testkit::churn::folding(&root).expect("the scratch volume's case behavior")
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let folds = norn_testkit::churn::folding(root).expect("the scratch volume's case behavior")
         == norn_testkit::churn::Folding::Folded;
     if folds {
         eprintln!(
