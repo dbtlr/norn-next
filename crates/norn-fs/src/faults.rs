@@ -94,8 +94,8 @@
 //! what each answer does are its own; the grammar an arm is spelled in, the
 //! refusal of a spelling that cannot be read, the record file and the writing of
 //! a record are one discipline across all three, and a second copy of any of them
-//! is a copy that drifts. [`read_armed_pairs`], [`refuse_a_stage_armed_twice`],
-//! [`armed_hits`] and [`append_record`] are that discipline.
+//! is a copy that drifts. `read_armed_pairs`, `refuse_a_stage_armed_twice`,
+//! `armed_hits` and `append_record` are that discipline.
 
 use std::io;
 
@@ -370,7 +370,7 @@ impl Stage {
 /// each has a different required outcome: an error the protocol refuses on, a
 /// disk with no room left, and a machine that stops between two system calls.
 /// Naming them apart is what lets one arm say `ENOSPC` — which has no
-/// [`io::ErrorKind`](std::io::ErrorKind) of its own, and which a caller reads
+/// [`io::ErrorKind`] of its own, and which a caller reads
 /// off the refusal as an error number — and another say nothing at all,
 /// because the process it was armed in does not reach a return. The fourth is
 /// the foreign stage's alone.

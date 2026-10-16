@@ -104,7 +104,7 @@ jobs:
       # this pass sees, and no lint above reads it. Denied here so the doc
       # lane cannot drift red on main between reviews.
       - name: Document
-        run: cargo doc --locked --workspace --no-deps
+        run: cargo doc --locked --workspace --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Test

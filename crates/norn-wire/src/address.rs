@@ -17,7 +17,7 @@
 //! representation that could disagree with the first.
 //!
 //! **The read path is the constructor**, as it is for
-//! [`VaultName`](crate::VaultName): a string that is empty, relative or
+//! [`VaultName`]: a string that is empty, relative or
 //! otherwise outside the grammar has no representation on either side of the
 //! seam, so nothing downstream asks whether the path it holds was checked. The
 //! advertised schema says the string is absolute in words rather than in a

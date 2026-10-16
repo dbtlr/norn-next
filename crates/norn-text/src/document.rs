@@ -114,7 +114,7 @@ pub enum EditError {
         field: String,
     },
     /// The edit lands a frontmatter block past
-    /// [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES), which is
+    /// [`FRONTMATTER_MAX_BYTES`], which is
     /// longer than the block this crate reads.
     ///
     /// The written bytes would be well-formed and no read would ever turn

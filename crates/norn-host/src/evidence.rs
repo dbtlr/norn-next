@@ -101,7 +101,7 @@ pub struct JobEvidence {
     /// counts, folded whole under its lock when a job ends.
     rule_work: Mutex<RuleWork>,
     /// The readings the jobs' plans took of the host's clock, summed: folded
-    /// whole when a job ends ([`EvidenceReading::clock_reads`]).
+    /// whole when a job ends (`EvidenceReading::clock_reads`).
     clock_reads: AtomicU64,
     rewrite_selection_steps: AtomicU64,
     /// The file each counted read of every job read, in the order the jobs

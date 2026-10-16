@@ -6,7 +6,7 @@
 //! **Which links a move breaks is the change set's own question.** A link
 //! follows a move where, before the plan, it resolves to exactly the document
 //! the move carries away, and after the plan does not resolve to exactly the
-//! file the move carries it to — the one rule [`left_behind`] states, which
+//! file the move carries it to — the one rule [`left_behind`](super::links::left_behind) states, which
 //! the change set records and advises by too. Both sides are read through
 //! the store's resolution door, over the overlay and probes the change set
 //! itself reads ([`reach`]), so the backlinks a cascade rewrites are the
@@ -36,7 +36,7 @@
 //! generates nothing. Rewriting them, its `rewrite_to` is read through the
 //! same door where the plan leaves the vault ([`rewrite_targets`]) and must
 //! name one document there, other than the one it removes; every backlink
-//! not already naming that document after the plan ([`rewritten_for`]) is
+//! not already naming that document after the plan ([`rewritten_for`](super::links::rewritten_for)) is
 //! respelled to it as below, both syntaxes alike. An ambiguous link that
 //! could name the deleted document is never rewritten, and the forecast says
 //! so.
