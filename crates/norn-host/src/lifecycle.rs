@@ -8470,19 +8470,29 @@ impl Drop for GateHeldElsewhere {
 
 #[cfg(test)]
 impl<O: EntryOps> Host<O> {
+    /// Run `hook` once, in the instant after the next read of `name` lets
+    /// the entry's gate go. A case outside this module reaches a read's way
+    /// past its establishing hold this way.
+    pub(crate) fn when_a_read_lets_go(
+        &self,
+        name: &VaultName,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        let entry = self.shared.entries.get(name).expect("the entry is served");
+        entry.gate.when_a_read_lets_go(hook);
+    }
+
     /// Once the next read of `name` lets the entry's gate go, take the gate
     /// on another thread and keep it: the hold arrives on the receiver this
-    /// answers, and the gate goes back when the case drops it. A case outside
-    /// this module reaches a read's way past its establishing hold this way.
+    /// answers, and the gate goes back when the case drops it.
     pub(crate) fn hold_the_gate_once_a_read_lets_go(
         &self,
         name: &VaultName,
     ) -> mpsc::Receiver<GateHeldElsewhere> {
         let entry = self.shared.entries.get(name).expect("the entry is served");
         let (taken, held) = mpsc::channel();
-        let hook_entry = Arc::clone(&entry);
-        entry.gate.when_a_read_lets_go(move || {
-            let _ = taken.send(GateHeldElsewhere::take(&hook_entry));
+        self.when_a_read_lets_go(name, move || {
+            let _ = taken.send(GateHeldElsewhere::take(&entry));
         });
         held
     }

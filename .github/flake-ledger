@@ -127,3 +127,9 @@ signature: a_reap_that_unwinds_leaves_the_dispatcher_reaping_on_later_ticks
 class: harness reading a published state as the leg's end
 first-seen: 2026-09-29
 disposition: Opened 2026-09-29 off a local run under CPU load, and seen again 2026-10-14 in a local workspace run: the case dropped its lease at once, so a slow attach left `Ready` standing only until the next reap tick, shorter than the wait's polling, and the wait breached its work bound reading `Unattached`. Fixed 2026-10-16: the lease stands until `Ready` is seen. A recurrence is a defect rather than a flake.
+
+id: foreign-edit-derived-before-the-set-plans
+signature: a_where_leaves_unresolved_a_document_changed_since_the_index_saw_it
+class: harness racing the watcher it relies on not to deliver
+first-seen: 2026-10-08
+disposition: Opened 2026-10-08 off the macOS ARM64 'Host filesystem contracts' job (run 37725119308, PR #300), and seen on both platforms since, each time cleared by a rerun. The case wrote its foreign edit before the set and relied on nothing draining the watcher, but the apply's own intake drains it, so a watcher that had delivered the edit by then derived it and the stale match it was meant to refuse resolved and applied: 'a stale match wrote', at generation 4. Fixed 2026-10-16: the shared fixture makes the edit once the set has read the store and before it plans, from the apply leg's start after its intake or as the preview's read lets the gate go, so no drain falls between the edit and the plan. A recurrence is a defect rather than a flake.

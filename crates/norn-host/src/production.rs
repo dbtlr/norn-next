@@ -5266,14 +5266,10 @@ mod tests {
 
     /// A production host over `ops` serving the fixture's one vault, `Ready`,
     /// with the lease that keeps it served.
-    fn ready_host(
+    fn ready_host<O: EntryOps>(
         f: &Fixture,
-        ops: ProductionEntryOps,
-    ) -> (
-        crate::Host<ProductionEntryOps>,
-        VaultName,
-        crate::DemandLease<ProductionEntryOps>,
-    ) {
+        ops: O,
+    ) -> (crate::Host<O>, VaultName, crate::DemandLease<O>) {
         let registration = f.registration();
         let name = registration.name.clone();
         let registry = crate::RegistryRead::from_entries([registration]);
@@ -5893,17 +5889,148 @@ mod tests {
         );
     }
 
+    /// Another writer's edit, made once by whichever seam reaches it first.
+    type ForeignEdit = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+    /// Make `edit`, where no seam has made it yet.
+    fn make_once(edit: &ForeignEdit) {
+        if let Some(edit) = edit.lock().unwrap().take() {
+            edit();
+        }
+    }
+
+    /// Production ops whose apply leg makes another writer's edit as it
+    /// begins: after the job's intake has drained the watcher and derived
+    /// what it delivered, and before the apply takes its snapshot and plans.
+    /// Every leg but the apply is the production one, unchanged.
+    struct EditedBeforeApply {
+        inner: ProductionEntryOps,
+        edit: ForeignEdit,
+    }
+
+    impl EntryOps for EditedBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn reload(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.reload(name, attachment, progress)
+        }
+        fn judge_reload(
+            &self,
+            name: &VaultName,
+            attachment: &Self::Attachment,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.judge_reload(name, attachment)
+        }
+        fn active_fingerprints(
+            &self,
+            attachment: &Self::Attachment,
+        ) -> Option<crate::ActiveFingerprints> {
+            self.inner.active_fingerprints(attachment)
+        }
+        fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
+            self.inner.control_root(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            make_once(&self.edit);
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn withheld_trust(&self, attachment: &Self::Attachment) -> Option<UntrustedReason> {
+            self.inner.withheld_trust(attachment)
+        }
+        fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory> {
+            self.inner.advisories(attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn semantic(&self) -> Option<&crate::semantic::SemanticEngines> {
+            self.inner.semantic()
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
+            self.inner.maintenance_due(name, attachment)
+        }
+        fn maintain(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<(), JobFailure> {
+            self.inner.maintain(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+    }
+
     /// A vault of three `wave: flip` documents, attached and ready, whose
-    /// `wave/b.md` a foreign writer then changes to `wave: published`. The
-    /// host polls its watcher once a minute, so the store has not taken the
-    /// edit in when the case asks.
+    /// `wave/b.md` a foreign writer changes to `wave: published` once a set
+    /// has read the store and before it plans: as an apply's leg begins,
+    /// after its intake drained the watcher, or as a preview's read lets the
+    /// entry's gate go, after its snapshot stands. Nothing takes the edit in
+    /// between, so the store still holds `wave: flip` when the set plans,
+    /// whenever the watcher delivers the edit.
     fn a_foreign_edit_the_index_has_not_seen(
         label: &str,
     ) -> (
         Fixture,
-        crate::Host<ProductionEntryOps>,
+        crate::Host<EditedBeforeApply>,
         VaultName,
-        crate::DemandLease<ProductionEntryOps>,
+        crate::DemandLease<EditedBeforeApply>,
     ) {
         let f = Fixture::new(label);
         fs::create_dir_all(f.vault().join("wave")).unwrap();
@@ -5914,9 +6041,16 @@ mod tests {
             )
             .unwrap();
         }
-        let ops = fixture_ops(&f);
+        let b = f.vault().join("wave/b.md");
+        let edit: ForeignEdit = Arc::new(std::sync::Mutex::new(Some(Box::new(move || {
+            fs::write(&b, "---\nwave: published\n---\n").unwrap();
+        }))));
+        let ops = EditedBeforeApply {
+            inner: fixture_ops(&f),
+            edit: Arc::clone(&edit),
+        };
         let (host, name, lease) = ready_host(&f, ops);
-        fs::write(f.vault().join("wave/b.md"), "---\nwave: published\n---\n").unwrap();
+        host.when_a_read_lets_go(&name, move || make_once(&edit));
         (f, host, name, lease)
     }
 
