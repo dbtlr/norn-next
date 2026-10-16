@@ -1296,6 +1296,9 @@ fn exclusions(registration: &Registration, shadows: &ShadowHome) -> Vec<PathBuf>
     exclusions_at(registration, shadows, registration.root.as_path())
 }
 
+/// Schema exclusion compares path spellings, not file identity. A configured
+/// source reached through a linked folder does not exclude its target's other
+/// in-vault spelling from walks or document operations.
 fn exclusions_at(
     registration: &Registration,
     shadows: &ShadowHome,
@@ -1459,6 +1462,9 @@ impl EntryOps for ProductionEntryOps {
         // derivation that wrote them: a store derived under another of either
         // is rebuilt from zero here, before anything derives into it or reads
         // from it.
+        // No root identity is recorded in the store. A registry root hand edit
+        // keeps its epoch when those rebuild inputs agree. `vault set --root`
+        // discards derived state so the next attach mints a new epoch.
         let store = Store::open(
             derived.join(STORE_FILE),
             path_order,
@@ -2486,10 +2492,10 @@ pub(crate) struct PlanEffect {
 /// nothing to read here, and no prune is owed: a quarantined file the plan
 /// removed has its findings ended by the changeset's own [`Change::Vacated`]
 /// entry, so nothing is left behind for a reading to find, and the changeset
-/// walks no scope whose unaccounted findings a prune would take. A plan path
-/// that carries the rendering marker, which a real document name may, owes the
-/// reading of the other spellings that render to it, and the changeset does not
-/// run it (NORN-340).
+/// walks no scope whose unaccounted findings a prune would take. A death at a
+/// path carrying the rendering marker U+FFFD can also discard a different file's
+/// finding at the same rendered subject. This changeset does not re-read those
+/// other spellings. A rebuild restores the finding.
 pub(crate) fn commit_plan_changeset(
     store: &mut Store,
     root: &Path,

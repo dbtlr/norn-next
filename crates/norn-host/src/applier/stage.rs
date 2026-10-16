@@ -144,6 +144,10 @@ pub(super) enum Classified {
 /// not a name below the root, a respell on a folder not proven to fold — is
 /// the planner's fault, never the vault's: it is asserted in a debug build and
 /// answered as a failure otherwise, since nothing was published.
+///
+/// Publication-time drift reports a content hash only. Its `FileState` does not
+/// establish whether the drifted bytes decode. The default `quarantined: false`
+/// is not evidence that a document stands there.
 pub(super) fn classify(refusal: &Refusal) -> Classified {
     match refusal {
         Refusal::FoldersLeft { refusal, .. } => classify(refusal),

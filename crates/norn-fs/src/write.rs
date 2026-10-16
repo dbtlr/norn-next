@@ -619,9 +619,13 @@ pub fn stage(
 /// in its own look and refuses the plan where the source has drifted, gone or
 /// will not open.
 ///
+/// Preview judges the plan, not the environment's capacity to write. An
+/// unusable shadow home, a read-only filesystem, or exhausted space can still
+/// refuse apply after this judgment succeeds.
+///
 /// **Its caller is the one applier's preview** (`norn-host`'s `applier`,
-/// Layer 4 plan-apply), which judges a resolved plan as an apply of it would
-/// and answers the refusal staging would meet, or the plan.
+/// Layer 4 plan-apply), which runs the shared checks and answers their refusal,
+/// or the plan.
 pub fn judge(
     anchor: &Path,
     root: Identity,

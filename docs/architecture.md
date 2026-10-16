@@ -3934,11 +3934,12 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   kernel's own staging judgment of every written target in publication order, its descent
   through no link included, so a target beneath a folder since swapped for a link refuses in
   a preview as staging refuses it in an apply; all of it reads the vault and stages nothing.
-  Where an apply
-  would go on to stage, the preview answers the same plan and its forecast; where it would
+  Preview judges the plan, not the environment's capacity to write: an unusable shadow home,
+  a read-only filesystem, or exhausted space can still refuse apply. Where those checks
+  allow staging, the preview answers the same plan and its forecast; where they would
   not, the preview answers what the apply ends in — a refusal, a fault in the plan's shape, or,
-  where the checks cannot read the vault, `vault/write-failed` with the plan. So what a caller
-  previewed is what applies, and a plan an interruption left part-landed previews as itself.
+  where the checks cannot read the vault, `vault/write-failed` with the plan. The previewed
+  plan passes the same plan checks. A plan an interruption left part-landed previews as itself.
 - **A failure planning cannot get past answers what a read meeting it carries.** A root that
   no longer stands answers `host/apply-not-run` with the refusal a read carries once the
   watcher reports the root's coverage lost; a root that stands and cannot be read while
