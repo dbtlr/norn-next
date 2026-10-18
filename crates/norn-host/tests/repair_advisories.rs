@@ -283,7 +283,7 @@ fn reload(host: &attach::ServingHost, vault: &attach::Vault, schema: &str) {
     std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("rewrite schema");
     norn_testkit::wait::wait_until(
         "the schema reload",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::reload_budget(attach::READY_LIMIT),
         || match host.reload(vault.name()) {
             Ok(_) => norn_testkit::wait::Observed::Met(()),
             Err(norn_host::ReloadRefusal::Unavailable(state)) => {

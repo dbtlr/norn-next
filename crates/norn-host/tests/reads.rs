@@ -227,7 +227,7 @@ fn a_hold_carries_the_declaration_its_snapshot_pins_across_a_schema_reload() {
     .expect("rewrite the vault schema");
     wait_until(
         "the reload to activate the rewritten schema",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::reload_budget(attach::READY_LIMIT),
         || match host.reload(vault.name()) {
             Ok(_) => Observed::Met(()),
             Err(ReloadRefusal::Unavailable(standing)) => {

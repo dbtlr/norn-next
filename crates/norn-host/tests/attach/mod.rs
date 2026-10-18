@@ -80,6 +80,10 @@ pub const READY_LIMIT: Duration = Duration::from_secs(240);
 /// under load moves in one place and every suite relaxes with it. A suite that
 /// takes a single look outside a wait reads it directly and bounds that look
 /// with it, so the same bound separates the same two things either way.
+///
+/// A probe that opens [`Vault::store`] and reads rows is bounded with this
+/// too: the store runs in WAL mode, so the open and its snapshot read the last
+/// commit without waiting behind a changeset the host is writing.
 pub const STATE_PROBE: Duration = Duration::from_millis(250);
 
 /// The budget a wait on an entry's published state obeys, under the caller's
@@ -108,6 +112,22 @@ pub const READ_PROBE: Duration = norn_host::READ_SETTLE_BOUND.saturating_add(STA
 /// caller's own runaway bound.
 pub fn read_budget(limit: Duration) -> Budget {
     Budget::new(limit, READ_PROBE)
+}
+
+/// How long one look that asks the host for a reload may take.
+///
+/// A reload admitted over a `Ready` entry answers only once its job has run: a
+/// schema reload heals the vault under the new declaration and drains the
+/// watcher facts behind it before it replies. So a look at a reload is a job
+/// of an attachment's size, bounded as an attachment converging is, and only
+/// a reload that outlasts [`READY_LIMIT`] is a machine that stopped answering.
+/// A reload refused at admission answers at once.
+pub const RELOAD_PROBE: Duration = READY_LIMIT;
+
+/// The budget a wait whose probe asks the host for a reload obeys, under the
+/// caller's own runaway bound.
+pub fn reload_budget(limit: Duration) -> Budget {
+    Budget::new(limit, RELOAD_PROBE)
 }
 
 /// How long an entry nothing demands may sit attached before the host reaps it.
@@ -503,7 +523,7 @@ pub fn reload_refusal_once_settled(
     // entry's reconcile and runs a reload, so its bound is that work's.
     wait_until(
         &format!("a reload of `{name}` to run rather than lose its turn"),
-        Budget::new(READY_LIMIT, READY_LIMIT),
+        reload_budget(READY_LIMIT),
         || {
             if !reload_lost_its_turn(refused.as_ref()) {
                 return Observed::Met(refused.take());
