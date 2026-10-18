@@ -403,7 +403,9 @@ impl<'a> BodyScan<'a> {
     /// Trailing block-id definitions (`… ^block-id`), one per line that
     /// carries one, in document order. These are the anchors a
     /// `[[Note#^block-id]]` reference points at; each carries the span of its
-    /// `^` marker, body-relative like every other span this scan reports.
+    /// `^` marker, an offset into the scanned body like every other span this
+    /// scan reports; [`crate::Document::block_ids`] reports them in source
+    /// coordinates.
     pub fn block_ids(&self) -> Vec<BlockId> {
         parse_block_ids_in(self.body, &self.code_ranges)
     }

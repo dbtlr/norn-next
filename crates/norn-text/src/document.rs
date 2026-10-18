@@ -703,7 +703,8 @@ impl<'a> Document<'a> {
         links
     }
 
-    /// Rebase body-relative link spans onto the source.
+    /// Rebase link spans a body scan reports, offsets into the body, onto the
+    /// source.
     fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
         let mut cursor = LineCursor::new(self.source);
         links
