@@ -9,18 +9,10 @@
 //! rows**, because a follow decides only between one and more than one: one
 //! death and one holder is a move, and two of either is ambiguous.
 //!
-//! - The suffix read probes the one key the root decides, raw or folded, as a
-//!   document suffix probe does. The ambiguity-ignore set is not applied: it
-//!   narrows which live documents a link resolves to, not which deaths it can
-//!   follow.
-//! - The exact-path read uses the root's case behaviour: bytewise on a root
-//!   that tells spellings apart, or an equality seek under `NOCASE` of the
-//!   partial `tombstones_path_nocase` on a root that folds ASCII case. Several
-//!   deaths at one folded place remain several deaths, bounded to two.
-//! - **A quarantine death is never read.** Its file is still on disk, so it
-//!   never moved, and following its last good hash would point a link at a
-//!   copy. The suffix indexes and `tombstones_path_nocase` hold no quarantine
-//!   row, so the limit counts only deaths whose file is gone.
+//! - Suffix and exact-path reads seek normalized comparison keys on every root.
+//!   Ambiguity-ignore narrows live resolution, not recorded deaths.
+//! - Quarantine deaths are excluded by the partial suffix and path-key indexes:
+//!   their files still stand on disk and cannot be followed as moves.
 //! - These reads walk an index that runs on to `path`, so which two
 //!   deaths or holders a caller names does not depend on row ids.
 //!
@@ -34,7 +26,7 @@ use norn_db::rusqlite::{self, Row};
 
 use crate::error::{self, StoreError};
 use crate::facts::Provenance;
-use crate::path::{DocumentPath, SuffixKey, suffix_probe};
+use crate::path::{DocumentPath, suffix_probe};
 use crate::read::{Ran, ReadStatement};
 use crate::request::{range_predicate_from, unreadable};
 use crate::store::Snapshot;
@@ -42,9 +34,9 @@ use crate::store::Snapshot;
 /// Every statement shape the move-following reads run, named.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MovedStatement {
-    /// Recorded deaths in the suffix ranges the root's key opens.
+    /// Recorded deaths in the normalized suffix ranges.
     TombstonesBySuffix,
-    /// Recorded deaths at an exact place under the root's case behaviour.
+    /// Recorded deaths at a normalized complete path key.
     TombstoneAtPath,
     /// Live documents holding a content hash, in path order.
     LiveHolders,
@@ -116,10 +108,9 @@ impl Snapshot {
         self.explained(record, |statement, _, plan| MovedPlan { statement, plan })
     }
 
-    /// At most two deaths at an exact place, in bytewise path order.
-    /// Quarantine is excluded because the file remains on disk.
-    /// A root that tells spellings apart compares paths bytewise; a root
-    /// that folds ASCII case reads deaths at the folded place.
+    /// At most two deaths sharing the complete-path comparison key, in
+    /// original bytewise path order on every root. Quarantine is excluded
+    /// because the file remains on disk.
     pub fn tombstone_at_path(
         &self,
         path: &DocumentPath,
@@ -175,29 +166,20 @@ impl Snapshot {
         .collect()
     }
 
-    /// Read the exact place under the root's case behaviour, recording the
-    /// statement that ran. The folded seek walks only deaths at the folded
-    /// place and names at most two in path order.
+    /// Read at most two deaths at the normalized complete path key, recording
+    /// the indexed equality seek in path order.
     fn read_tombstone_at_path(
         &self,
         path: &DocumentPath,
         record: &mut Vec<Ran>,
     ) -> Result<Vec<MovedTombstone>, StoreError> {
-        let query = match SuffixKey::under(self.path_order()) {
-            SuffixKey::Raw => (
-                "SELECT path, last_content_hash, provenance FROM tombstones \
-                 WHERE path = ?1 AND provenance <> 'quarantine'"
-                    .to_string(),
-                vec![Value::Text(path.as_str().to_string())],
-            ),
-            SuffixKey::Folded => (
-                "SELECT path, last_content_hash, provenance FROM tombstones \
-                 WHERE path = ?1 COLLATE NOCASE AND provenance <> 'quarantine' \
-                 ORDER BY path LIMIT 2"
-                    .to_string(),
-                vec![Value::Text(path.as_str().to_string())],
-            ),
-        };
+        let query = (
+            "SELECT path, last_content_hash, provenance FROM tombstones \
+             WHERE path_key = ?1 AND provenance <> 'quarantine' \
+             ORDER BY path LIMIT 2"
+                .to_string(),
+            vec![Value::Text(path.path_key().to_string())],
+        );
         let ran = Ran::new(MovedStatement::TombstoneAtPath, query);
         self.run_statement(record, ran, moved_tombstone)
             .map_err(|problem| error::sql("reading a tombstone at a path", problem))?
@@ -211,9 +193,9 @@ impl Snapshot {
         target: &str,
         record: &mut Vec<Ran>,
     ) -> Result<Vec<MovedTombstone>, StoreError> {
-        let probe = suffix_probe(target)?.in_space(SuffixKey::under(self.path_order()));
+        let probe = suffix_probe(target)?;
         // Each OR arm carries the partial indexes' predicate, so SQLite seeks
-        // the partial index for both reductions instead of scanning it, and
+        // the partial index for both optional `.md` readings instead of scanning it, and
         // the two-row limit counts only deaths whose file is gone.
         let predicate = (0..probe.range_count())
             .map(|at| {

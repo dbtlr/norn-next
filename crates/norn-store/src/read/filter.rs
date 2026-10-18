@@ -58,22 +58,20 @@ pub enum ReadFilter {
     /// The document does not match a path glob, tested at its row key.
     ExcludePathGlob(StoredPathOrder),
     /// The document is in the class a resolution target opens on the root:
-    /// the target's suffix ranges in each admitted-count run on
-    /// `documents_admitted_suffix_key` where the root tells spellings apart,
-    /// and on `documents_admitted_folded_suffix_key` where it folds ASCII case.
+    /// the target's normalized suffix ranges in each admitted-count run on
+    /// `documents_admitted_suffix_key`.
     Resolves(SuffixKey),
     /// The document carries the tag: its folded name, bound folded, on
     /// `document_tags_folded_name`.
     Tag,
     /// The document holds a link that resolves to exactly the one document a
     /// links-to part's target names: an equality seek of `link_keys_key`
-    /// where the root tells spellings apart, and of `link_keys_folded_key`
-    /// where it folds ASCII case, at each key that document is named by, then
+    /// at each normalized key that document is named by, then
     /// for each link reached, a seek of `link_keys_link` for the link's keys
     /// and of the documents each of them reaches — a range of the suffix key
-    /// the root probes, or the path — to confirm no other document is in the
+    /// the comparison probe opens, or the path key — to confirm no other document is in the
     /// link's resolution. A path key is confirmed as a suffix key is: a
-    /// rooted wikilink holds a path key per reduction, so a link reached at
+    /// rooted wikilink ending in `.md` holds two path keys, so a link reached at
     /// the named document's path may name another document at its other one.
     LinksTo(SuffixKey),
     /// A finding of the kind stands over the document under the active
@@ -102,10 +100,10 @@ impl ReadFilter {
             Self::After(FieldOrder::Raw),
             Self::FullText,
             Self::PathGlob(StoredPathOrder::Sensitive),
-            Self::Resolves(SuffixKey::Raw),
+            Self::Resolves(SuffixKey::Comparison),
             Self::Tag,
             Self::Finding,
-            Self::LinksTo(SuffixKey::Raw),
+            Self::LinksTo(SuffixKey::Comparison),
             Self::ExcludePathGlob(StoredPathOrder::Sensitive),
         ]
     }

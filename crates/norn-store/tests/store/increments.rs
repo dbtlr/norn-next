@@ -114,8 +114,8 @@ fn stored_document_pages_share_ascii_folded_order_without_changing_sensitive_ord
     );
 }
 
-/// The sample every ASCII fold the store carries is pinned over — the folded
-/// page order, the folded suffix key and the ignore globs' fold — shared
+/// The sample the filesystem page order and query path-glob fold are pinned
+/// over, shared
 /// verbatim with `norn-fs`'s test of `CaseSensitivity::compare`.
 ///
 /// It is deliberately awkward: ASCII case pairs, the punctuation sitting
@@ -215,36 +215,27 @@ fn contract_folds_together(left: &str, right: &str) -> bool {
         .eq(right.bytes().map(|byte| byte.to_ascii_lowercase()))
 }
 
-/// **The folded suffix key is the written ASCII-fold contract.** Over the
-/// sample the page order is pinned to, two paths share a folded key exactly
-/// where the contract makes their raw keys one, so a fold widened to Unicode
-/// merges `Éclair` and `éclair` here, and a fold narrowed splits `A` and `a`.
+/// Resolution suffix keys normalize Unicode case and canonical spelling.
 #[test]
-fn the_folded_suffix_key_is_the_written_ascii_fold_contract() {
-    let keys: Vec<DocumentPath> = FOLD_CONTRACT_SAMPLE.iter().map(|at| path(at)).collect();
-    for left in &keys {
-        for right in &keys {
-            assert_eq!(
-                left.folded_suffix_key() == right.folded_suffix_key(),
-                contract_folds_together(left.suffix_key(), right.suffix_key()),
-                "`{}` and `{}`",
-                left.as_str(),
-                right.as_str()
-            );
-        }
+fn suffix_keys_use_the_unicode_comparison_contract() {
+    for (name, key) in [
+        ("A.md", "a/"),
+        ("a.md", "a/"),
+        ("Éclair.md", "éclair/"),
+        ("e\u{301}clair.md", "éclair/"),
+        ("STRASSE.md", "strasse/"),
+        ("Straße.md", "straße/"),
+    ] {
+        assert_eq!(path(name).suffix_key(), key);
     }
-    let folded = |at: &str| path(at).folded_suffix_key().to_string();
-    assert_eq!(folded("A.md"), folded("a.md"));
-    assert_ne!(folded("Éclair.md"), folded("éclair.md"));
-    assert_ne!(folded("STRASSE.md"), folded("Straße.md"));
 }
 
-/// **An ambiguity-ignore glob's ASCII fold is the written contract.** Each
+/// Query path globs retain the filesystem's ASCII-fold contract. Each
 /// sample spelling, read as a glob with no hole in it, matches another spelling
 /// under [`CaseFold::Ascii`] exactly where the contract makes the two one, and
 /// under [`CaseFold::Exact`] only itself.
 #[test]
-fn the_ignore_glob_fold_is_the_written_ascii_fold_contract() {
+fn query_path_globs_keep_the_written_ascii_fold_contract() {
     for pattern in FOLD_CONTRACT_SAMPLE {
         let glob = Pattern::parse(pattern).expect("a glob");
         for subject in FOLD_CONTRACT_SAMPLE {
@@ -1241,12 +1232,12 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
     let mut store = scratch.open();
     let mut request = store.begin_request();
 
-    // `notes.tar` reduces two ways, and the two prefixes are disjoint under
-    // `BINARY`, so the finding is in both `notes.tar/` and `notes/`.
+    // `notes.md` reduces two ways, and the two prefixes are disjoint under
+    // `BINARY`, so the finding is in both `notes.md/` and `notes/`.
     request
         .record_finding(&crate::common::path_names_no_document_for_target(
             "docs/index.md",
-            "notes.tar",
+            "notes.md",
             &[],
             2,
         ))
@@ -1256,7 +1247,7 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
         .apply_increment(
             IncrementProvenance::Derived,
             [
-                upsert("archive/notes.tar.gz", "hash-1", "a body\n"),
+                upsert("archive/notes.md.md", "hash-1", "a body\n"),
                 upsert("notes.md", "hash-1", "a body\n"),
             ],
             &[],
@@ -1266,7 +1257,7 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
 
     assert_eq!(
         outcome.affected_classes,
-        classes(&["notes.tar/", "notes/"]),
+        classes(&["notes.md/", "notes/"]),
         "the two paths did not name the two classes the finding is in"
     );
     assert_eq!(
@@ -1483,14 +1474,10 @@ fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
     );
 }
 
-/// **A key from the other key space is refused.** A path key never ends in the
-/// separator, which is a class key's spelling, so a class key handed over as a
-/// path key is refused, and a path is no class key either. On a root that
-/// folds ASCII case, a path key spelled with an upper-case letter is outside
-/// the key space the store names its changed paths in, so it is refused where
-/// a finding is filed under it and where a discard is explained over it.
+/// Class and path keys reject each other's shapes. Finding writes and
+/// path-discard plans also refuse unnormalized comparison spellings.
 #[test]
-fn a_path_key_from_the_other_key_space_is_refused() {
+fn class_and_path_keys_reject_each_others_shapes_and_unnormalized_spellings() {
     for spelling in ["glossary/", "glossary/norn/", "dir/"] {
         assert!(
             matches!(
@@ -1549,11 +1536,10 @@ fn a_path_key_from_the_other_key_space_is_refused() {
     );
 }
 
-/// **A root that folds ASCII case names a changed path by its folded key**,
-/// which is the spelling the link index holds a path-addressed link under
-/// there, so the death of `Dir/T.md` takes the finding keyed by `dir/t.md`.
+/// A changed path names its normalized complete-path key, reaching
+/// the finding recorded under that key for invalidation.
 #[test]
-fn a_folding_store_names_a_changed_path_by_its_folded_key() {
+fn a_changed_path_uses_its_normalized_key_for_finding_invalidation() {
     let scratch = Scratch::new("path-axis-folded");
     let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
     let mut request = store.begin_request();
@@ -1609,19 +1595,16 @@ fn a_changesets_own_derived_finding_stands_through_its_own_path_discard() {
     );
 }
 
-/// **Folding a path key is ASCII-only, on a folding root too.** `É` is not
-/// an ASCII letter, so folding `Été.md` leaves it exactly as written — the
-/// same rule the link index folds by — and a folding store still names the
-/// death of `Été.md` by that unfolded key, which is what reaches the finding
-/// a link to it filed there.
+/// A document change reaches path-keyed findings through Unicode
+/// lowercase comparison, including a non-ASCII initial letter.
 #[test]
-fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
+fn unicode_path_keys_reach_findings_when_a_document_changes() {
     let scratch = Scratch::new("path-axis-non-ascii");
     let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
     let mut request = store.begin_request();
     write_document(&mut request, &document("index.md", "hash-1", "a body\n"));
     request
-        .record_finding(&keyed_by_paths("index.md", &["Été.md"]))
+        .record_finding(&keyed_by_paths("index.md", &["été.md"]))
         .expect("recording a finding");
 
     let outcome = request
@@ -1634,8 +1617,8 @@ fn a_folding_store_folds_a_path_key_by_ascii_case_alone() {
         .expect("applying a changeset");
     assert_eq!(
         outcome.affected_paths,
-        path_keys(&["Été.md"]),
-        "ASCII case folding changed a non-ASCII letter's case"
+        path_keys(&["été.md"]),
+        "the Unicode comparison key reaches the path finding"
     );
     assert_eq!(outcome.invalidated.findings_discarded, 1);
     assert!(targets_at(&request, "index.md").is_empty());

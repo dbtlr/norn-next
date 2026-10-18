@@ -177,8 +177,7 @@
 //! # Full candidate enumeration is a query, and it is indexed
 //!
 //! The head is a head *because* the full list stays reachable. It is not a
-//! table: it is a range scan over the suffix key the root probes — raw, or
-//! folded by ASCII case — keyed by a class the finding is in, which costs the
+//! table: it is a range scan over the normalized suffix key, keyed by a class the finding is in, which costs the
 //! class rather than the vault and returns the class as it stands rather than
 //! as it stood. The scan is the one resolver's ([`crate::TargetClass`]), so a
 //! finding's class is the class a find's `resolves` part reads on that root.
@@ -189,12 +188,9 @@
 //! change to any of them discards it and re-decides the link. Every finding
 //! the host files is about its own subject and carries no class key.
 //!
-//! A finding's class keys are spelled in the key space its root probes, which
-//! the store's path order selects, and a changed path names its class in that
-//! same space — see [`crate::IncrementOutcome::affected_classes`] — so
-//! maintenance reaches every finding filed in the store. A finding filed under
-//! a key outside that space is refused where it is written, and a class or a
-//! class probe from another space is refused where it is read.
+//! Findings and changed paths name classes under the same comparison key.
+//! Unnormalized finding keys are refused at the write, so changeset maintenance
+//! reaches every recorded class regardless of filesystem order.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!
@@ -212,19 +208,20 @@
 //! class**, and the segment-reversed path encoding is what makes it computable
 //! and indexable:
 //!
-//! - A document's class key is its `stem` followed by a separator —
+//! - A document's class key is its comparison stem followed by a separator —
 //!   `docs/norn/glossary.md` gives `glossary/` — and every suffix target that
 //!   can address it is a prefix of its `suffix_key`, `glossary/norn/docs/`.
 //! - A finding's classes are the same form built from the target it is about,
-//!   one per reduction of that target: `[[glossary]]` gives `glossary/`,
-//!   `[[norn/glossary]]` gives `glossary/norn/`, `[[v1.2]]` gives `v1.2/` *and*
-//!   `v1/`. They are rows in `finding_classes`, one per pair.
+//!   one per document-name reading: `[[glossary]]` gives `glossary/`,
+//!   `[[norn/glossary]]` gives `glossary/norn/`, and `[[note.md]]` gives both
+//!   `note.md/` and `note/`. `[[v1.2]]` gives only `v1.2/`. These are rows in
+//!   `finding_classes`, one per pair.
 //! - So the findings a changed path affects are the ones holding a class key
 //!   that path's class key prefixes — one prefix range over
 //!   `finding_classes(class_key)`, joined back by finding id — and the
 //!   candidates of each are one prefix range over `documents(suffix_key)`. Both
 //!   bounds come from [`crate::Request::class_probe`], in the key space the
-//!   store's path order selects.
+//!   comparison key defines.
 //!
 //! The class range is **correct in the no-miss direction, and a superset**: a
 //! probe of one class key opens every finding holding a class key it prefixes, so
@@ -233,18 +230,12 @@
 //! particular change cannot have reached it. Re-deciding a finding that was
 //! already right is cheap; missing one is a stale finding nothing revisits.
 //!
-//! # Membership is a set, because the two reductions are disjoint
+//! # Membership is a set, because optional `.md` reads two disjoint classes
 //!
-//! A written target whose leaf carries a dot reduces both ways and reads both
-//! ranges, and those ranges do not nest: `.` is `0x2e` and `/` is `0x2f`, so
-//! under `BINARY` collation `notes.tar/` sorts *before* `notes/` rather than
-//! inside it. A single-valued class column could therefore hold only one of the
-//! two, and the no-miss direction would be false for every finding about such a
-//! target — a finding about `notes.tar` filed under `notes/` alone is invisible
-//! to the class `archive/notes.tar.gz` is in, and a finding about `v1.2` filed
-//! under `v1/` alone is invisible to the class `notes/v1.2.md` is in. Both are
-//! findings that no maintenance ever revisits, which is exactly what class
-//! scoping exists to prevent.
+//! A target carrying `.md` reads both the written and extensionless stems.
+//! The two ranges are disjoint: `note.md/` sorts before `note/`, and neither
+//! prefixes the other. A finding records both keys so a change to `note.md`
+//! or `note.md.md` reaches it.
 //!
 //! So `finding_classes` holds one row per `(finding, class)` pair, and a finding
 //! is reached through **any** class it is in. The rows cascade from the finding,
@@ -262,7 +253,7 @@
 //! range. So a finding about such a link is maintained by those paths:
 //! `finding_paths` holds one row per `(finding, path)` pair, each a validated
 //! [`crate::PathKey`] spelled as the link index holds the link's path, in the
-//! key space the store's path order selects. A changeset discards every
+//! normalized comparison key space. A changeset discards every
 //! finding holding the path key of a path it writes or kills — one equality
 //! seek of `finding_paths_path_key` per path, joined back by finding id — and
 //! a rename is a death of the old path and a write of the new, so both paths'

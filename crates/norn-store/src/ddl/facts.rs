@@ -97,15 +97,15 @@
 //!
 //! - A wikilink's target is a suffix address, and its keys are its probe's
 //!   prefixes in the segment-reversed form `documents.suffix_key` takes — one
-//!   key, or two for a leaf carrying a dot, which reduces both ways — beside
+//!   key, or two for a leaf carrying `.md`, which is optional — beside
 //!   the number of segments the target spells, which the ambiguity-ignore test
 //!   reads.
 //! - A path — a Markdown target, `vault://` or not — has one key: the vault
 //!   path it names, read from the holding document's directory or from the
 //!   vault root by URL rules; a same-document anchor's key is the holding
 //!   document's own path. A `vault://` wikilink is a rooted name, and its keys
-//!   are the root paths its reductions spell — one, or two for a leaf
-//!   carrying an extension. `segments` is `NULL` beside a path's key.
+//!   are the complete root paths its optional `.md` spellings name, one
+//!   or two where the target ends in `.md`. `segments` is `NULL` beside a path's key.
 //!
 //! A target naming an attachment is keyed like any other, since a document
 //! may carry the attachment's name. A link addressed elsewhere — a protocol
@@ -116,8 +116,7 @@
 //! equality seeks.** The documents a link could name share a key with it: a
 //! suffix key is a segment-aligned prefix of the named document's own suffix
 //! key, and a path key is the document's path. A seek for the links that could
-//! name one document therefore reads `link_keys_key` — or
-//! `link_keys_folded_key`, where the root folds ASCII case — at each of that
+//! name one document therefore reads `link_keys_key` at each of that
 //! document's prefixes and its path, and reaches the holding document off the
 //! index entry. A suffix key always ends in the separator and a path never
 //! does, so the two kinds share one column, and the `CHECK` holds `segments`
@@ -137,8 +136,7 @@
 //! **A class's range reads suffix keys alone.** A class is a prefix range, and
 //! a path key spelled under a folder named like the class's stem —
 //! `hub/0001.md` against the class `hub/` — sorts inside it. So the ranges a
-//! class is walked by seek `link_keys_suffix_key` or
-//! `link_keys_folded_suffix_key`, the same columns held only where `segments`
+//! class is walked by seek `link_keys_suffix_key`, the same columns held only where `segments`
 //! is set: a path key is not in them, and a folder note's class costs its own
 //! links however many links into the folder beside it stand.
 
@@ -226,17 +224,13 @@ const STATEMENTS: &[&str] = &[
     link       INTEGER NOT NULL,
     document   INTEGER NOT NULL,
     key        TEXT    NOT NULL,
-    folded_key TEXT    NOT NULL,
     segments   INTEGER,
     FOREIGN KEY (link, document) REFERENCES links(id, document) ON DELETE CASCADE,
     CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))
 )",
     "CREATE UNIQUE INDEX link_keys_link ON link_keys(link, key)",
     "CREATE INDEX link_keys_key ON link_keys(key, document, link)",
-    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document, link)",
     "CREATE INDEX link_keys_suffix_key ON link_keys(key, document, link)
-    WHERE segments IS NOT NULL",
-    "CREATE INDEX link_keys_folded_suffix_key ON link_keys(folded_key, document, link)
     WHERE segments IS NOT NULL",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,

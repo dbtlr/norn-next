@@ -87,14 +87,14 @@
 //! - [`Snapshot::tombstones_by_suffix`] — recorded deaths a wikilink suffix
 //!   names, bounded to two for Layer 5C move-following;
 //!   [`Snapshot::tombstone_at_path`] reads deaths at an exact path under the
-//!   root's case behaviour, bounded to two at a folded place, and
+//!   comparison key, bounded to two at a matching place, and
 //!   [`Snapshot::live_holders`] reads at most two live documents holding a
 //!   content hash. Their `*_plans` methods explain what ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
 //! - [`TargetClass`] — the one resolver: a target compiled for its root, over
-//!   the suffix key the root's proven case behaviour selects and less the
+//!   the normalized suffix key and less the
 //!   places its schema's ambiguity-ignore set names.
 //!
 //! # The shapes the API is built out of
@@ -211,7 +211,7 @@ pub use read::{
 pub use norn_db::{ColumnRead, EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, PathKey, RENDERED_MARKER, SuffixKey, SuffixProbe,
-    suffix_probe,
+    comparison_key, suffix_probe,
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,

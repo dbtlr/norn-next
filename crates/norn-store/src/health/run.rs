@@ -33,10 +33,12 @@ use crate::request::{ReadWork, Reading, Request};
 use crate::store::Snapshot;
 
 /// A statement the resolution change set runs on a read snapshot, named so a
-/// snapshot's record of what it ran says which it was. Each is a statement
-/// the changeset's link-health re-decision runs too, spelled once.
+/// snapshot's record of what it ran says which it was. Shared link-health
+/// statements are spelled once; overlay identity seeks use exact stored paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResolutionStatement {
+    /// Exact stored spellings replaced by the overlay, sought by path equality.
+    StandingTargets,
     /// Which of a chunk of keys any link is held under: the path arm of
     /// [`crate::ExplainedStatement::LinkHealthOccupied`], an equality seek of
     /// the link index per key, each stopping at its first row.

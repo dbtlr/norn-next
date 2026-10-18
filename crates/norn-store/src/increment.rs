@@ -194,9 +194,8 @@ pub struct IncrementOutcome {
     /// derives the same path counts the death here and leaves no tombstone,
     /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in, spelled in the key space
-    /// the store's path order selects — raw where its root tells spellings
-    /// apart, folded by ASCII case where it folds — which is the space every
+    /// Every ambiguity class the changed paths are in, normalized by the
+    /// comparison key, which is the space every
     /// finding in the store is filed in. This is the resolution axis of the
     /// findings maintenance this changeset implies: the classes whose standing
     /// findings the store discarded and whose suffix-addressed links it
@@ -263,8 +262,8 @@ pub(crate) fn apply(
             request::check_callers_discard(scope)?;
         }
         request::check_finding_bounds(&finding.facts)?;
-        request::check_finding_classes(&finding.facts, store.path_order())?;
-        request::check_finding_paths(&finding.facts, store.path_order())?;
+        request::check_finding_classes(&finding.facts)?;
+        request::check_finding_paths(&finding.facts)?;
         if finding.bytes_hash.is_some() {
             request::check_content_finding(&finding.facts)?;
         }
@@ -279,11 +278,8 @@ pub(crate) fn apply(
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
-    // Every finding in this store is filed in the key space its order
-    // selects, so that is the space a changed path names its class and its
-    // path key in.
-    let order = store.path_order();
-    let class_space = SuffixKey::under(order);
+    // Findings and changed paths share one comparison key for both axes.
+    let class_space = SuffixKey::Comparison;
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
@@ -320,7 +316,7 @@ pub(crate) fn apply(
                         |()| {
                             let admitting = declared
                                 .ambiguity_ignore()
-                                .admitting_segments(facts.path.as_str(), order);
+                                .admitting_segments(facts.path.as_str());
                             upsert(
                                 &mut statements,
                                 stamp,
@@ -398,7 +394,6 @@ pub(crate) fn apply(
         Some(generation) => health::redecide(
             &transaction,
             work,
-            order,
             declared.ambiguity_ignore(),
             generation,
             &tally.affected_classes,
@@ -613,7 +608,7 @@ impl<'t> Statements<'t> {
 /// pinned schema shapes: `admitting` is the fewest segments a target spells
 /// that keeps this document in its class
 /// ([`crate::AmbiguityIgnore::admitting_segments`]), computed by the caller
-/// under the declaration the changeset is judged under and the store's order.
+/// under the declaration the changeset is judged under.
 fn upsert(
     statements: &mut Statements<'_>,
     generation: i64,
@@ -638,7 +633,7 @@ fn upsert(
             params![
                 facts.path.as_str(),
                 facts.path.suffix_key(),
-                facts.path.folded_suffix_key(),
+                facts.path.path_key(),
                 i64::try_from(admitting).expect("a segment count fits i64"),
                 facts.content_hash,
                 facts.byte_length,
@@ -707,13 +702,7 @@ fn upsert(
         for key in link_keys(link, &facts.path) {
             statements
                 .insert_link_key
-                .execute(params![
-                    row,
-                    document,
-                    key.key,
-                    key.folded_key,
-                    key.segments
-                ])
+                .execute(params![row, document, key.key, key.segments])
                 .map_err(|error| error::sql("writing a link key", error))?;
         }
     }
@@ -869,7 +858,7 @@ fn record_death(
             generation,
             recorded_at,
             path.suffix_key(),
-            path.folded_suffix_key(),
+            path.path_key(),
         ])
         .map_err(|error| error::sql("recording a tombstone", error))?;
 

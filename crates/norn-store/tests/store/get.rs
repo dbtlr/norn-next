@@ -304,9 +304,7 @@ fn named(vault: &Vault, text: &str) -> String {
 
 // ---- which document a target names ----
 
-/// **A target naming one document answers it, under either path order**, by
-/// a suffix of any length and, where the root folds ASCII case, by any
-/// spelling of it.
+/// A unique target resolves under the same comparison key on either root.
 #[test]
 fn a_target_naming_one_document_answers_it_under_either_order() {
     for order in [Sensitive, Folding] {
@@ -319,26 +317,15 @@ fn a_target_naming_one_document_answers_it_under_either_order() {
             assert_eq!(named(&vault, spelled), "notes/glossary.md", "{order:?}");
         }
         let folded = getting("Notes/GLOSSARY").with_columns([Column::path()]);
-        match order {
-            Folding => assert_eq!(
-                record(&vault.get(&folded)).path.as_str(),
-                "notes/glossary.md"
-            ),
-            Sensitive => assert_eq!(
-                vault.refusal(&folded),
-                PageRefusal::UnknownTarget {
-                    target: target("Notes/GLOSSARY")
-                }
-            ),
-        }
+        assert_eq!(
+            record(&vault.get(&folded)).path.as_str(),
+            "notes/glossary.md"
+        );
     }
 }
 
-/// **A target naming several documents refuses with the head of its class**:
-/// the first five in the resolution ladder's order, each named by its minimal
-/// disambiguating suffix, how many there were, and the hint naming the target
-/// whose `find` resolves them all. The refusal echoes the target as the
-/// request named it, anchor included; the hint names its address alone.
+/// A target naming several documents refuses with a bounded head and a hint.
+/// A trailing `.md` reads both its written and extensionless stems.
 #[test]
 fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint() {
     // Written last to first, so the head's order is the ladder's and not the
@@ -373,15 +360,14 @@ fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint(
         assert_eq!(head.candidates(), expected.as_slice(), "{order:?}");
     }
 
-    // A dotted target reduces two ways, so a candidate whose stem is dotted
-    // is named apart by a suffix that reaches past the reduction the other
-    // candidate's stem is.
+    // A target ending in `.md` names both document-name classes. Folder
+    // suffixes distinguish candidates whose stems themselves end in `.md`.
     let vault = Vault::at(
         "get-ambiguous-dotted",
         Sensitive,
-        &["v1.md", "two/v1.2.md", "one/v1.2.md"],
+        &["v1.md", "two/v1.md.md", "one/v1.md.md"],
     );
-    let PageRefusal::AmbiguousTarget(ambiguity) = vault.refusal(&getting("v1.2")) else {
+    let PageRefusal::AmbiguousTarget(ambiguity) = vault.refusal(&getting("v1.md")) else {
         panic!("a dotted target naming three documents answered");
     };
     let head = ambiguity.head;
@@ -393,24 +379,19 @@ fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint(
     assert_eq!(
         named,
         [
-            ("one/v1.2.md", "one/v1.2"),
-            ("two/v1.2.md", "two/v1.2"),
+            ("one/v1.md.md", "one/v1.md"),
+            ("two/v1.md.md", "two/v1.md"),
             ("v1.md", "v1")
         ]
     );
     assert_eq!(head.total(), 3);
 }
 
-/// **On a root that folds ASCII case every folded spelling is one class**, so
-/// an exact-case spelling takes no precedence; a root that tells spellings
-/// apart answers each spelling alone.
+/// A get reports the same two case-variant candidates for every target
+/// case spelling, without preferring an exact spelling.
 #[test]
-fn a_folding_root_resolves_every_case_spelling_as_one_class() {
+fn a_get_reports_case_variants_as_one_ambiguous_class() {
     let paths = ["a/Glossary.md", "b/glossary.md"];
-    let sensitive = Vault::at("get-case-sensitive", Sensitive, &paths);
-    assert_eq!(named(&sensitive, "glossary"), "b/glossary.md");
-    assert_eq!(named(&sensitive, "Glossary"), "a/Glossary.md");
-
     let folding = Vault::at("get-case-folding", Folding, &paths);
     for spelled in ["glossary", "Glossary", "GLOSSARY"] {
         let PageRefusal::AmbiguousTarget(ambiguity) = folding.refusal(&getting(spelled)) else {
@@ -438,7 +419,7 @@ fn a_folding_root_resolves_every_case_spelling_as_one_class() {
 /// same ignored places.
 #[test]
 fn a_get_and_a_find_resolving_one_target_read_one_class() {
-    for (order, class) in [(Sensitive, 2), (Folding, 3)] {
+    for (order, class) in [(Sensitive, 3), (Folding, 3)] {
         let archived = ignoring(&["archive/**"]);
         let vault = Vault::at_under(
             &format!("get-one-class-{order:?}"),
@@ -2013,23 +1994,18 @@ fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
 /// **A get's class is read through the suffix key the root probes**: the
 /// head, the total and each candidate's suffix probe a get's target runs —
 /// the find builder's class statements, which every resolution of a target
-/// runs — are each a seek of `documents_admitted_suffix_key` where the root tells
-/// spellings apart and of `documents_admitted_folded_suffix_key` where it folds ASCII
-/// case, bounded on both sides by the target's range.
+/// runs — are each a seek of `documents_admitted_suffix_key` on both roots,
+/// bounded on both sides by the target's normalized range.
 ///
 /// Controls: a head read end to end fails; the probed index dropped, the head
 /// reads something else, and fails.
 #[test]
-fn a_class_is_read_through_the_suffix_key_the_root_probes() {
+fn a_get_seeks_the_same_suffix_comparison_index_on_every_root() {
     let paths: Vec<String> = (1..=7).map(|at| format!("d{at}/glossary.md")).collect();
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     for (order, index, key) in [
         (Sensitive, "documents_admitted_suffix_key", "suffix_key"),
-        (
-            Folding,
-            "documents_admitted_folded_suffix_key",
-            "folded_suffix_key",
-        ),
+        (Folding, "documents_admitted_suffix_key", "suffix_key"),
     ] {
         let mut vault = Vault::at(&format!("get-class-plan-{order:?}"), order, &paths);
         let plans = vault.plans(&getting("glossary"));

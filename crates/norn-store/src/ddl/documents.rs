@@ -11,64 +11,28 @@
 //! Identity is a rowid with a unique `path` rather than the path itself: the
 //! path is the document's name, and a name is not an identity.
 //!
-//! # The path is stored two ways, both derived from one
+//! # Path spelling and comparison keys
 //!
-//! - `path` — the vault-root-relative path, already normalized. Case,
-//!   dot-prefix and separator normalization belong to the filesystem seam, so
-//!   the store compares bytes under the default `BINARY` collation and never
-//!   folds anything itself. This is the document's name and its unique key. It
-//!   refuses the empty spelling in the table as well as at
-//!   [`crate::path::DocumentPath`], because a paged read takes `''` for the
-//!   floor a scope bounded by nothing seeks from — so "no path sorts at or
-//!   below `''`" is a fact a statement relies on rather than one a constructor
-//!   happens to keep.
-//! - `suffix_key` — the segment-reversed form the suffix-resolution ladder
-//!   probes, described in [`crate::path`]. It exists so that
-//!   right-to-left, segment-aligned suffix resolution is a range scan over an
-//!   index rather than a scan over every path in the vault.
-//! - `folded_suffix_key` — the same key with ASCII case folded, which is the
-//!   key a probe ranges over on a root that proves it folds case.
+//! `path` preserves the vault spelling and is unique under `BINARY`. Empty
+//! paths are refused both here and by [`crate::DocumentPath`], so `''` is
+//! below every path a page can seek. `suffix_key` is the segment-reversed
+//! Markdown stem and ancestors; `path_key` is the complete path's comparison
+//! key. [`crate::DocumentPath`] computes all three together. Resolution uses
+//! [`crate::comparison_key`] on every root and seeks `documents_suffix_key`
+//! or `documents_path_key`; the original spelling never wins a tie.
 //!
-//! All three are computed in one place, from one input, by
-//! [`crate::path::DocumentPath`] — columns that must agree, produced together
-//! so they cannot disagree.
+//! The stem and depth are recomputed from the path rather than stored as
+//! duplicate columns.
 //!
-//! # Two suffix keys, and the root decides which one a probe reads
+//! # The admitting count is shaped by the declaration
 //!
-//! **The folded key is declared for every store**, with its own index,
-//! `documents_folded_suffix_key`, for the reason the folded path index below
-//! is: the schema is one statement list, and which key applies is a filesystem
-//! behaviour proven at the vault root and carried to the read as a parameter.
-//! A root that tells spellings apart probes `suffix_key` and never consults the
-//! folded one; a root that folds ASCII case probes `folded_suffix_key`, so
-//! `Foo` and `foo` open one class there. The fold is the seam's — `A`-`Z` onto
-//! `a`-`z`, every other byte as itself — and a column rather than a `NOCASE`
-//! index, because a probe's upper bound is a successor computed over bytes and
-//! is exact only under `BINARY`.
-//!
-//! **One fact, one home.** The stem and the segment count are functions of
-//! `path`, and [`crate::path::DocumentPath`] computes both from it on the way
-//! back out of the table. A column for either would be a second spelling that
-//! no statement reads and that a bad write could make disagree with the path
-//! beside it.
-//!
-//! # The admitting count: the one column the declaration shapes
-//!
-//! `admitting_segments` is the fewest segments a link target spells that keeps
-//! the document in its ambiguity class
-//! ([`crate::AmbiguityIgnore::admitting_segments`]): one for a place no
-//! ambiguity-ignore glob reaches, more for one under an ignored place. It is a
-//! function of the path and the pinned declaration together, so it is not a
-//! second spelling of the path; the changeset that writes the row computes it
-//! under the declaration it is judged under, and a pin that moves the ignore
-//! set is followed by a heal that writes every row again.
-//!
-//! `documents_admitted_suffix_key` and `documents_admitted_folded_suffix_key`
-//! lead with it, then the key the root probes and the path, so a link key's
-//! head seeks the members of one count in ladder order and never reads the
-//! members its class keeps out (the link-health head statement). The two
-//! indexes are a second copy of the key and the path for each row, which is
-//! the price of a head whose cost does not grow with an ignored subtree.
+//! `admitting_segments` is the fewest target segments admitting this path
+//! under the ambiguity-ignore set ([`crate::AmbiguityIgnore`]). Patterns and
+//! paths compare under the resolution key. The changeset derives this count
+//! under its pinned declaration; a changed declaration is followed by a heal.
+//! `documents_admitted_suffix_key` leads with that count, then the suffix
+//! key and path, so a bounded head seeks admitted candidates in ladder order
+//! without stepping through an ignored subtree.
 //!
 //! # Two indexes over one column: the root's order and the answer's
 //!
@@ -194,7 +158,7 @@ const STATEMENTS: &[&str] = &[
     id                           INTEGER PRIMARY KEY,
     path                         TEXT    NOT NULL CHECK (path <> ''),
     suffix_key                   TEXT    NOT NULL,
-    folded_suffix_key            TEXT    NOT NULL,
+    path_key                     TEXT    NOT NULL,
     admitting_segments           INTEGER NOT NULL CHECK (admitting_segments >= 1),
     content_hash                 TEXT    NOT NULL,
     byte_length                  INTEGER NOT NULL,
@@ -209,14 +173,12 @@ const STATEMENTS: &[&str] = &[
     CHECK ((frontmatter IS NULL) = (frontmatter_projection_hash IS NULL))
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
+    "CREATE INDEX documents_path_key ON documents(path_key, path)",
     "CREATE INDEX documents_content_hash ON documents(content_hash, path)",
     "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
-    "CREATE INDEX documents_folded_suffix_key ON documents(folded_suffix_key)",
     "CREATE INDEX documents_admitted_suffix_key
     ON documents(admitting_segments, suffix_key, path)",
-    "CREATE INDEX documents_admitted_folded_suffix_key
-    ON documents(admitting_segments, folded_suffix_key, path)",
     "CREATE INDEX documents_change_feed ON documents(
     generation, path, content_hash, body_hash, frontmatter_projection_hash
 )",

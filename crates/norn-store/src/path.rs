@@ -1,94 +1,36 @@
-//! The segment-aware path representation, and the probes that read it.
+//! The segment-aware path representation and indexed suffix probes.
 //!
-//! Targets resolve by **right-to-left, segment-aligned path suffix**:
-//! `glossary` addresses any `**/glossary.md`, `norn/glossary` only
-//! `**/norn/glossary.md`, and stem resolution is the one-segment case. That is
-//! one grammar across every surface, and this module is how the store makes it
-//! an indexed range scan instead of a walk over every path in the vault.
+//! A suffix names every document whose vault path ends in its segments.
+//! `glossary` names `**/glossary.md`, and `norn/glossary` names
+//! `**/norn/glossary.md`. The complete named path is normalized before its
+//! Markdown extension is removed. The key reverses the remaining segments
+//! and terminates each with `/`:
+//! `docs/norn/glossary.md` becomes `glossary/norn/docs/`.
 //!
-//! # The encoding: segments reversed, leaf stem first, separator-terminated
+//! Paths and targets use [`comparison_key`] on every root. Stored paths keep
+//! their original spelling for filesystem identity and answer ordering; the
+//! suffix and path comparison columns are derived beside them. `BINARY`
+//! collation is load-bearing: a separator-terminated prefix and its bytewise
+//! successor bound exactly its indexed range, with no table scan.
 //!
-//! A document's `suffix_key` is its segments in reverse order, with the leaf's
-//! final extension removed, each followed by `/`:
+//! Only `.md` is optional, in any ASCII case. A target `v1.2` opens `v1.2/`
+//! alone, while `note.md` opens both `note/` and `note.md/`, naming
+//! `note.md` and `note.md.md`. Neither spelling takes precedence. These two
+//! ranges are disjoint: `.` sorts before `/`, so neither prefixes the other.
+//! A finding records both class keys so either class changing reaches it.
 //!
-//! | path | `suffix_key` | stem |
-//! |---|---|---|
-//! | `glossary.md` | `glossary/` | `glossary` |
-//! | `docs/norn/glossary.md` | `glossary/norn/docs/` | `glossary` |
-//! | `docs/norn/index.md` | `index/norn/docs/` | `index` |
-//!
-//! A suffix target becomes the same form, and resolving it is the **prefix**
-//! relation between the two: `norn/glossary` becomes `glossary/norn/`, which is
-//! a prefix of `glossary/norn/docs/` and of nothing else in the table. Since
-//! byte-order ranges over an index are how SQLite answers a prefix predicate
-//! without a scan, [`SuffixProbe`] carries ranges rather than a pattern:
-//! `suffix_key >= lower AND suffix_key < upper`.
-//!
-//! Three properties make the encoding right rather than merely clever:
-//!
-//! - **Segment alignment is structural.** Every probe ends with the separator,
-//!   so `glossary/norn/` cannot match `glossary/norntest/docs/`. A substring or
-//!   `LIKE '%'` formulation has to re-check alignment after the fact; this one
-//!   cannot match across a segment boundary at all.
-//! - **The extension is dropped from the leaf and only the leaf.** `glossary`
-//!   addressing `glossary.md` is the whole reason stem resolution reads as a
-//!   one-segment suffix, and dropping the extension in the stored key is what
-//!   lets one index answer both.
-//! - **Bytes are compared as bytes.** Case, dot-prefix and separator
-//!   normalization belong to the filesystem seam, which is the workspace's one
-//!   path-spelling normalization point. The store therefore requires a
-//!   normalized path and refuses one that is obviously not — but it spells no
-//!   path differently from the way it arrived, so nothing here can disagree
-//!   with the seam about what two paths are.
-//!
-//!   Where the root proves it folds ASCII case, a probe ranges over the
-//!   **folded** suffix key instead — the same encoding with `A`-`Z` folded onto
-//!   `a`-`z`, stored beside the raw one — and compares those bytes as bytes
-//!   ([`SuffixKey`]). Where a read has to compare case-insensitively it applies
-//!   the same ASCII fold the seam is held to, spelled here as a collation — see
-//!   [`crate::StoredPathOrder`] — which changes an order and a key range, never
-//!   a stored byte. **`BINARY` collation is load-bearing**: it is what makes the
-//!   exclusive upper bound below exact, and a case-insensitive collation on
-//!   `suffix_key` would silently change which keys a range holds.
-//!
-//! # A target has two reductions, and it probes both
-//!
-//! Dropping a final extension is unambiguous on the stored side — the store
-//! holds the whole path and knows which segment is the leaf — and ambiguous on
-//! the target side, because a dot in a written target may be an extension or may
-//! be part of the name. `v1.2` is a version, `notes.md` is a file, and nothing
-//! in the two strings tells them apart.
-//!
-//! So a target reduces **both ways** and the probe is the union: `v1.2` opens
-//! `v1.2/` and `v1/`, `notes.tar` opens `notes.tar/` and `notes/`. Choosing one
-//! reduction would answer confidently and wrongly — reducing always would make
-//! `v1.2` resolve to `notes/v1.md` as a single candidate, and reducing never
-//! would leave `notes.tar.gz` unreachable by any target that names less than the
-//! whole leaf. Two ranges cost two index seeks and report the ambiguity that is
-//! really there.
-//!
-//! A target with no dot in its leaf has one reduction and one range.
-//!
-//! # An ambiguity class is a probe of length one
-//!
-//! The class a document belongs to is named by its stem, and its bounds are
-//! [`class_probe`] over that stem. Both directions of findings maintenance are
-//! the same range read: which documents are in a class, and which findings are
-//! about a class. See [`crate::ddl::findings`].
-//!
-//! **The two reductions are two classes, not one.** They are not nested: `.` is
-//! `0x2e` and `/` is `0x2f`, so `notes.tar/` sorts *before* `notes/` rather than
-//! inside it, and neither reduction's range holds the other's keys. A probe
-//! therefore names a **set** of class keys — [`SuffixProbe::class_keys`] — and a
-//! finding recorded from one belongs to every class in that set.
+//! A document's class is its normalized stem followed by `/`; a path key
+//! is its normalized complete vault path. The two spaces drive the class and
+//! path maintenance that keeps link health current inside each changeset.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_wire::{PathProblem, is_refused_character, is_refused_segment, leaf_stem};
+use unicode_normalization::UnicodeNormalization;
+
+use norn_wire::{PathProblem, is_refused_character, is_refused_segment};
 
 use crate::error::StoreError;
-use crate::facts::StoredPathOrder;
 
 /// The separator between segments, in a path and in a reversed key alike.
 const SEPARATOR: char = '/';
@@ -111,7 +53,7 @@ pub const RENDERED_MARKER: char = '\u{FFFD}';
 pub struct DocumentPath {
     path: String,
     suffix_key: String,
-    folded_suffix_key: String,
+    path_key: String,
     stem: String,
     depth: usize,
 }
@@ -142,27 +84,15 @@ impl DocumentPath {
                 problem: problem.message(),
             });
         }
-        let segments: Vec<&str> = path.split(SEPARATOR).collect();
-
-        let (leaf, ancestors) = segments
-            .split_last()
-            .expect("a non-empty path splits into at least one segment");
-        let stem = leaf_stem(leaf).to_string();
-
-        let mut suffix_key = String::with_capacity(path.len() + 1);
-        suffix_key.push_str(&stem);
-        suffix_key.push(SEPARATOR);
-        for segment in ancestors.iter().rev() {
-            suffix_key.push_str(segment);
-            suffix_key.push(SEPARATOR);
-        }
-
+        let path_key = comparison_key(path);
+        let suffix_key = suffix_of_path(&path_key);
+        let leaf = path.rsplit(SEPARATOR).next().expect("a path has a leaf");
         Ok(DocumentPath {
             path: path.to_string(),
-            folded_suffix_key: fold_ascii_case(&suffix_key),
+            path_key,
             suffix_key,
-            stem,
-            depth: segments.len(),
+            stem: markdown_stem(leaf).to_string(),
+            depth: path.split(SEPARATOR).count(),
         })
     }
 
@@ -281,14 +211,12 @@ impl DocumentPath {
         &self.suffix_key
     }
 
-    /// The suffix key with ASCII case folded — `A`-`Z` onto `a`-`z`, every
-    /// other character as itself — which is the key a probe ranges over on a
-    /// root that proves it folds case.
-    pub fn folded_suffix_key(&self) -> &str {
-        &self.folded_suffix_key
+    /// The comparison key of the complete vault path.
+    pub fn path_key(&self) -> &str {
+        &self.path_key
     }
 
-    /// The leaf segment with its final extension removed.
+    /// The leaf segment with only its Markdown extension removed.
     pub fn stem(&self) -> &str {
         &self.stem
     }
@@ -302,16 +230,10 @@ impl DocumentPath {
         self.depth
     }
 
-    /// The suffix addresses that could name this document, shortest first:
-    /// for each count of trailing segments from one to the whole path, the
-    /// leaf spelled by its stem, then — where the leaf has an extension — by
-    /// the leaf as written.
-    ///
-    /// The *minimal disambiguating suffix* of a candidate is the first of
-    /// these whose class holds the candidate alone. The stem spelling comes
-    /// first because it is the shorter; the written leaf follows because a
-    /// dotted stem reduces two ways, and only the written leaf's reductions
-    /// leave out a document whose stem is the dotted stem's own reduction.
+    /// The suffix addresses that could name this document, shortest first.
+    /// For each trailing segment count, the leaf's stem precedes its complete
+    /// spelling. Only `.md` is removed. The first spelling whose class contains
+    /// the candidate alone is its minimal disambiguating suffix.
     pub fn suffix_spellings(&self) -> impl Iterator<Item = String> + '_ {
         let segments: Vec<&str> = self.path.split(SEPARATOR).collect();
         let leaf = *segments.last().expect("a path has a leaf");
@@ -338,66 +260,29 @@ impl DocumentPath {
         descendant_bounds(&self.path)
     }
 
-    /// The key of the ambiguity class this document belongs to among probes of
-    /// `key`: its stem as stored, or folded by ASCII case, with the separator
-    /// that makes the match segment-aligned.
-    ///
-    /// One class, not a set: the store holds the whole path, so which segment is
-    /// the leaf and which bytes are its extension are settled facts here. The
-    /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
-    /// that carries it.
-    ///
-    /// Class-scoped maintenance reaches a finding through the class key its
-    /// producer recorded, which is spelled in the key space the root probes,
-    /// so a change to this document names its class in that space.
-    ///
-    /// Crate-private: the key space a class key is spelled in is the store's
-    /// to choose, never a caller's, so the only door out of `norn-store` is
-    /// [`crate::Request::class_key_of`], which reads the store's own path
-    /// order rather than taking one.
-    pub(crate) fn class_key_in(&self, key: SuffixKey) -> ClassKey {
-        let stem = match key {
-            SuffixKey::Raw => self.stem.clone(),
-            SuffixKey::Folded => fold_ascii_case(&self.stem),
-        };
-        // A document's own stem already passed every refusal `class_probe`
-        // applies — it came from a leaf segment `DocumentPath::new` already
-        // checked for a `.`/`..` reduction and a control byte, and a leaf
-        // segment carries no separator by construction.
-        let probe = class_probe(&stem).expect("a document's own stem is a valid class probe");
-        ClassKey::of_prefix(&probe.ranges[0].lower)
+    /// The normalized stem class this document belongs to.
+    /// A changeset names this key to reach findings about the same class.
+    pub(crate) fn class_key_in(&self, _key: SuffixKey) -> ClassKey {
+        let end = self
+            .suffix_key
+            .find(SEPARATOR)
+            .expect("a suffix has a leaf");
+        ClassKey::of_prefix(&self.suffix_key[..=end])
     }
 
-    /// The path key a link naming this document exactly is filed under among
-    /// keys of `key`: the path as written, or with ASCII case folded.
-    ///
-    /// Path-keyed maintenance reaches a finding through the path key its
-    /// producer recorded, spelled in the key space the store's path order
-    /// selects, so a change to this document names its path in that space.
-    /// This is the one place a path key is spelled from a document's own
-    /// path; the store's `link` module spells a link's path key through
-    /// [`spell_path_key`], the same rule, so the two never drift apart.
+    /// The normalized complete path a path-addressed link is filed under.
+    /// Document and link keys use [`spell_path_key`] so changeset maintenance
+    /// and link resolution agree.
     pub(crate) fn path_key_in(&self, key: SuffixKey) -> PathKey {
-        // A document path is a path key, and folding ASCII case leaves one a
-        // document path: no refusal reads a letter's case.
+        // Normalization preserves the document-path grammar.
         PathKey(spell_path_key(&self.path, key))
     }
 }
 
-/// The raw or ASCII-case-folded spelling of `path` in the key space `key`
-/// selects.
-///
-/// The one function that spells a path key: [`DocumentPath::path_key_in`]
-/// calls it for a document's own path, and the store's `link` module calls it
-/// for the paths a link names, which are not yet a [`DocumentPath`] at the
-/// point a key is wanted. Both land on the same bytes for the same path, which
-/// is what ties a link's recorded path key to the key a change to that path
-/// discards by.
-pub(crate) fn spell_path_key(path: &str, key: SuffixKey) -> String {
-    match key {
-        SuffixKey::Raw => path.to_string(),
-        SuffixKey::Folded => fold_ascii_case(path),
-    }
+/// The comparison key of a complete vault path.
+/// Documents and links call this same function for path-keyed maintenance.
+pub(crate) fn spell_path_key(path: &str, _key: SuffixKey) -> String {
+    comparison_key(path)
 }
 
 /// A vault-root-relative directory, as the range of stored paths beneath it.
@@ -503,8 +388,8 @@ impl ClassKey {
     /// as.
     ///
     /// The address's own probe opens this class, and where its leaf carries a
-    /// dot, the class of the leaf's stem as well: `v1.2/` reads back as
-    /// `v1.2`, which opens `v1.2/` and `v1/`.
+    /// `.md`, the class of the extensionless stem as well: `note.md/`
+    /// reads back as `note.md`, which opens `note.md/` and `note/`.
     pub fn address(&self) -> String {
         let segments = self.0.strip_suffix(SEPARATOR).unwrap_or(&self.0);
         let reversed: Vec<&str> = segments.split(SEPARATOR).rev().collect();
@@ -567,13 +452,9 @@ impl ClassKey {
 /// reaches a path key it prefixes: the class `glossary/` holds nothing from the
 /// path key `glossary/x.md`.
 ///
-/// The spelling is the one the link index holds the link's path under — see
-/// the store's `link` module — and a store files it in the key space its path
-/// order selects: the path as written where the root tells spellings apart,
-/// and with ASCII case folded where it folds, where a key holding an
-/// upper-case ASCII letter is refused wherever it is filed or explained. A
-/// changed path names its own path key in that same space
-/// ([`crate::IncrementOutcome::affected_paths`]).
+/// The link index and changed paths use the same normalized complete path.
+/// A key outside that comparison space is refused where it is filed or
+/// explained ([`crate::IncrementOutcome::affected_paths`]).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PathKey(String);
 
@@ -600,68 +481,36 @@ impl PathKey {
     }
 }
 
-/// Which of a document's two stored suffix keys a probe ranges over.
-///
-/// The choice is the vault root's, proven at the filesystem seam and carried to
-/// the store as a [`StoredPathOrder`]: a root that tells spellings apart probes
-/// the raw key and never consults the folded one, and a root that folds ASCII
-/// case probes the folded key, so every spelling it resolves to one entry
-/// opens one class there.
+/// The comparison key of segment-reversed document stems and ancestors.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SuffixKey {
-    /// `documents.suffix_key`, compared bytewise.
-    Raw,
-    /// `documents.folded_suffix_key`: the raw key with ASCII case folded.
-    Folded,
+    /// `documents.suffix_key`, compared bytewise after normalization.
+    Comparison,
 }
 
 impl SuffixKey {
-    /// The key a root with this proven case behaviour probes.
-    pub fn under(order: StoredPathOrder) -> Self {
-        match order {
-            StoredPathOrder::Sensitive => SuffixKey::Raw,
-            StoredPathOrder::AsciiCaseInsensitive => SuffixKey::Folded,
-        }
-    }
-
-    /// Whether `class` is spelled in this key space: every class key is a raw
-    /// one, and a folded class key is one ASCII case folding leaves as it is.
+    /// Whether a class key is normalized for resolution.
     pub(crate) fn holds(self, class: &ClassKey) -> bool {
-        self.holds_spelling(class.as_str())
+        comparison_key(class.as_str()) == class.as_str()
     }
 
-    /// Whether `path` is spelled in this key space, by the rule
-    /// [`SuffixKey::holds`] states for a class key: every path key is a raw
-    /// one, and a folded path key is one ASCII case folding leaves as it is.
+    /// Whether a path key is normalized for resolution.
     pub(crate) fn holds_path(self, path: &PathKey) -> bool {
-        self.holds_spelling(path.as_str())
+        comparison_key(path.as_str()) == path.as_str()
     }
 
-    /// The check [`SuffixKey::holds`] and [`SuffixKey::holds_path`] both run,
-    /// against whichever key's text they were handed: every raw key is held,
-    /// and a folded key is held where ASCII case folding it changes nothing.
-    fn holds_spelling(self, spelling: &str) -> bool {
-        match self {
-            SuffixKey::Raw => true,
-            SuffixKey::Folded => fold_ascii_case(spelling) == spelling,
-        }
-    }
-
-    /// The `documents` column this key is stored in.
+    /// The indexed column holding the comparison key.
     pub(crate) fn column(self) -> &'static str {
-        match self {
-            SuffixKey::Raw => "suffix_key",
-            SuffixKey::Folded => "folded_suffix_key",
-        }
+        "suffix_key"
     }
 }
 
 /// The bounds of the prefix ranges over a segment-reversed key that one probe
-/// opens, and which of the two stored keys they bound.
+/// opens in the comparison key.
 ///
 /// Ranges rather than patterns, because a range over an index is what SQLite
 /// answers without a scan. A probe carries one range or two: a target whose leaf
-/// carries a dot has two reductions and opens both.
+/// carries `.md` has two readings and opens both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SuffixProbe {
     key: SuffixKey,
@@ -682,26 +531,6 @@ impl SuffixProbe {
         self.key
     }
 
-    /// The same probe over `key`: a raw probe as it is, or over the folded key,
-    /// each prefix with ASCII case folded and bounded again.
-    ///
-    /// Probes are built raw, from the spelling a caller wrote, and taken into
-    /// the key space a store's path order selects here and only here.
-    pub(crate) fn in_space(self, key: SuffixKey) -> SuffixProbe {
-        debug_assert_eq!(self.key, SuffixKey::Raw, "a probe is built raw");
-        match key {
-            SuffixKey::Raw => self,
-            SuffixKey::Folded => SuffixProbe {
-                key: SuffixKey::Folded,
-                ranges: self
-                    .ranges
-                    .iter()
-                    .map(|range| bounded(fold_ascii_case(&range.lower)))
-                    .collect(),
-            },
-        }
-    }
-
     /// Every range this probe opens, as `(lower, upper)` pairs: `lower`
     /// inclusive, `upper` exclusive.
     ///
@@ -713,23 +542,14 @@ impl SuffixProbe {
             .map(|range| (range.lower.as_str(), range.upper.as_str()))
     }
 
-    /// How many ranges the probe opens: one, or two for a target with two
-    /// reductions.
+    /// How many ranges the probe opens: one, or two where the target ends
+    /// in the optional `.md` extension.
     pub fn range_count(&self) -> usize {
         self.ranges.len()
     }
 
-    /// Every ambiguity class this probe reads: one per reduction, so one key or
-    /// two, spelled in the key space the probe ranges over — folded where it
-    /// ranges over the folded key.
-    ///
-    /// A finding recorded from a probe belongs to **all** of them, because the
-    /// reductions are disjoint rather than nested. `notes.tar` opens `notes.tar/`
-    /// and `notes/`, and under `BINARY` collation `notes.tar/` sorts before
-    /// `notes/` — so neither range holds the other's keys, and a finding filed
-    /// under one alone is invisible to maintenance that named the other. Which is
-    /// a finding nothing ever revisits: the hazard class-scoped maintenance
-    /// exists to close.
+    /// Every ambiguity class this probe reads, one per reading of the leaf.
+    /// A finding records every key so a change in either disjoint class reaches it.
     pub fn class_keys(&self) -> BTreeSet<ClassKey> {
         self.ranges
             .iter()
@@ -738,15 +558,10 @@ impl SuffixProbe {
     }
 }
 
-/// The probe a suffix target resolves through.
-///
-/// The target is read as segments and its segments are reversed, with the leaf
-/// taken **both** as written and with its final extension dropped — see the
-/// module documentation for why one reduction cannot be chosen. The refusals are
-/// the spellings that are not a suffix address at all: an empty target, an
-/// absolute one, one carrying `.` or `..` (which is a document-relative path, a
-/// different resolution mode), one carrying an empty segment, one whose leaf
-/// reduces to a `.` or `..` stem, and one carrying a control byte.
+/// The indexed ranges a suffix target opens under [`comparison_key`].
+/// Only a trailing `.md` is optional; a target carrying it opens both its
+/// written stem and its extensionless stem. Relative and rooted forms,
+/// empty segments, control characters and `.` or `..` stems are refused.
 pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     let refuse = |problem| {
         Err(StoreError::Path {
@@ -773,40 +588,31 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
             _ => {}
         }
     }
-    let (leaf, ancestors) = segments
-        .split_last()
-        .expect("a non-empty target splits into at least one segment");
-    let stem = leaf_stem(leaf);
+    let leaf = segments.last().expect("a target has a leaf");
+    let stem = markdown_stem(leaf);
     if stem == "." || stem == ".." {
         return refuse("its leaf reduces to a `.` or `..` stem, which names no class");
     }
-
-    let reversed = |head: &str| {
-        let mut lower = String::with_capacity(target.len() + 1);
-        lower.push_str(head);
-        lower.push(SEPARATOR);
-        for segment in ancestors.iter().rev() {
-            lower.push_str(segment);
-            lower.push(SEPARATOR);
-        }
-        lower
-    };
-
-    let mut ranges = vec![bounded(reversed(stem))];
+    // Lowercase is contextual. Normalize each complete document name before
+    // removing `.md`, so full-path comparison twins also share a suffix key.
+    let mut ranges = Vec::with_capacity(2);
     if stem != *leaf {
-        ranges.push(bounded(reversed(leaf)));
+        ranges.push(bounded(suffix_of_path(&comparison_key(target))));
     }
+    ranges.push(bounded(suffix_of_path(&comparison_key(&format!(
+        "{target}.md"
+    )))));
     Ok(SuffixProbe {
-        key: SuffixKey::Raw,
+        key: SuffixKey::Comparison,
         ranges,
     })
 }
 
-/// The probe over the ambiguity class a stem names.
+/// The ambiguity class of the complete document name `stem.md`.
 ///
-/// Every document whose leaf reduces to `stem` is in the range, whatever
-/// directory it sits in, and so is every finding whose class key opens with it.
-/// One reduction and therefore one range: a stem is already reduced.
+/// The complete name is normalized before `.md` is removed. One range
+/// holds every document with that comparison stem, regardless of directory,
+/// and every finding whose class key opens with it.
 ///
 /// The refusals mirror [`ClassKey::new`] and [`suffix_probe`]: an empty stem,
 /// one carrying the separator (a stem is one segment, never a path), one that
@@ -834,9 +640,21 @@ pub(crate) fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
         return refuse(problem);
     }
     Ok(SuffixProbe {
-        key: SuffixKey::Raw,
-        ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
+        key: SuffixKey::Comparison,
+        ranges: vec![bounded(suffix_of_path(&comparison_key(&format!(
+            "{stem}.md"
+        ))))],
     })
+}
+
+/// Reverse a normalized complete path, dropping only its Markdown extension.
+fn suffix_of_path(path_key: &str) -> String {
+    let mut segments = path_key.rsplit(SEPARATOR);
+    let leaf = segments.next().expect("a path has a leaf");
+    std::iter::once(markdown_stem(leaf))
+        .chain(segments)
+        .map(|segment| format!("{segment}{SEPARATOR}"))
+        .collect()
 }
 
 /// The prefix, and the key just past everything it opens.
@@ -909,16 +727,24 @@ fn rendered_segment(segment: &str) -> String {
     rendered
 }
 
-/// `text` with ASCII case folded: `A`-`Z` onto `a`-`z`, and every other
-/// character as itself.
-///
-/// This is the filesystem seam's fold and SQLite's `NOCASE`, term for term, so
-/// a folded key names exactly the spellings a folding root resolves to one
-/// entry, and the folded key is pinned to the fold contract sample those are
-/// (see [`crate::StoredPathOrder`]). A non-ASCII letter keeps its case: a
-/// wider fold would claim two spellings the seam keeps apart as one document.
-pub(crate) fn fold_ascii_case(text: &str) -> String {
-    text.to_ascii_lowercase()
+/// A leaf with only its Markdown extension removed, in any ASCII case.
+pub(crate) fn markdown_stem(leaf: &str) -> &str {
+    match leaf.rfind('.').filter(|&dot| dot > 0) {
+        Some(dot) if leaf[dot + 1..].eq_ignore_ascii_case("md") => &leaf[..dot],
+        _ => leaf,
+    }
+}
+
+/// Paths and link targets compare by NFC under Unicode default lowercasing.
+/// The final composition keeps lowercase expansions in the same canonical form.
+/// Suffix derivation normalizes complete named paths before removing `.md`,
+/// because Unicode default lowercase can depend on the following extension.
+pub fn comparison_key(text: &str) -> String {
+    text.nfc()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect()
 }
 
 /// The refusal for a NUL or other control byte, which no printable key holds and
@@ -932,6 +758,11 @@ fn control_byte_problem(text: &str) -> Option<&'static str> {
         .then_some("it carries a control character")
 }
 
+/// ASCII lowercase for filesystem path ordering and query path globs.
+pub(crate) fn fold_ascii_case(text: &str) -> String {
+    text.to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,39 +774,41 @@ mod tests {
         assert_eq!(class.bounds(), ("foo/".to_string(), "foo0".to_string()));
     }
 
-    /// A folded class key is one ASCII case folding leaves as it is, and every
-    /// class key is a raw one.
+    /// Class keys are admitted only in NFC under Unicode default lowercasing.
+    /// Uppercase and decomposed spellings are outside the comparison form.
     #[test]
-    fn a_folded_key_space_holds_only_folded_class_keys() {
+    fn class_keys_are_admitted_only_in_normalized_comparison_form() {
         for (key, folded) in [
             ("foo/", true),
             ("Foo/", false),
             ("été/", true),
-            ("Été/", true),
+            ("Été/", false),
+            ("e\u{301}te\u{301}/", false),
         ] {
             let class = ClassKey::new(key).expect("a class key");
-            assert!(SuffixKey::Raw.holds(&class), "`{key}`");
-            assert_eq!(SuffixKey::Folded.holds(&class), folded, "`{key}`");
+            assert_eq!(SuffixKey::Comparison.holds(&class), folded, "`{key}`");
         }
     }
 
-    /// A folded path key is one ASCII case folding leaves as it is, every path
-    /// key is a raw one, and a document names its own path key in either space.
+    /// Path keys are admitted only in NFC under Unicode default lowercasing.
+    /// A document records the same comparison key for path maintenance.
     #[test]
-    fn a_folded_key_space_holds_only_folded_path_keys() {
+    fn path_keys_are_admitted_only_in_normalized_comparison_form() {
         for (key, folded) in [
             ("dir/t.md", true),
             ("Dir/t.md", false),
             ("été.md", true),
-            ("Été.md", true),
+            ("Été.md", false),
+            ("e\u{301}te\u{301}.md", false),
         ] {
             let path = PathKey::new(key).expect("a path key");
-            assert!(SuffixKey::Raw.holds_path(&path), "`{key}`");
-            assert_eq!(SuffixKey::Folded.holds_path(&path), folded, "`{key}`");
+            assert_eq!(SuffixKey::Comparison.holds_path(&path), folded, "`{key}`");
         }
         let document = DocumentPath::new("Dir/T.md").expect("a document path");
-        assert_eq!(document.path_key_in(SuffixKey::Raw).as_str(), "Dir/T.md");
-        assert_eq!(document.path_key_in(SuffixKey::Folded).as_str(), "dir/t.md");
+        assert_eq!(
+            document.path_key_in(SuffixKey::Comparison).as_str(),
+            "dir/t.md"
+        );
     }
 
     /// **`class_probe` validates like every other constructor here.** A stem
@@ -1002,7 +835,7 @@ mod tests {
             );
         }
         let class = class_probe("glossary").expect("a class stem");
-        assert_eq!(class.key(), SuffixKey::Raw);
+        assert_eq!(class.key(), SuffixKey::Comparison);
         assert_eq!(
             class.ranges().collect::<Vec<_>>(),
             [("glossary/", "glossary0")]

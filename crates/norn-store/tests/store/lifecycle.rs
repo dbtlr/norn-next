@@ -219,11 +219,10 @@ fn a_database_recording_no_epoch_is_rebuilt_from_zero() {
     );
 }
 
-/// A store schema version is pinned at 1 and the fingerprint is the digest of
-/// the whole statement list, so both are readable facts rather than claims.
+/// The schema version identifies the current key columns, and the fingerprint covers every DDL statement.
 #[test]
 fn the_store_schema_version_is_pinned_and_the_fingerprint_is_the_statement_list() {
-    assert_eq!(ddl::STORE_SCHEMA_VERSION, 1);
+    assert_eq!(ddl::STORE_SCHEMA_VERSION, 2);
 
     let fingerprint = ddl::fingerprint();
     assert_eq!(

@@ -72,10 +72,9 @@ fn a_read_answers_under_the_store_the_attachment_derived() {
     );
 }
 
-/// **A read resolves under the case behaviour the vault root proved, and
-/// detects none of its own.** The attach opened the store under the order its
-/// coverage proved, and the snapshot a read answers from reads under the order
-/// the store's rows were derived under.
+/// A read snapshot carries the filesystem order the attachment proved.
+/// Query path globs and filesystem paging need this fact; resolution uses
+/// the same comparison key on every root.
 #[test]
 fn a_reads_snapshot_carries_the_case_behaviour_the_root_proved() {
     let (_sandbox, vault) = a_vault("host-reads-case-behaviour");

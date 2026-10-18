@@ -405,11 +405,11 @@ impl<'a> Request<'a> {
     /// own length describes no vault.
     ///
     /// **Every class the finding is in is written**, one `finding_classes` row
-    /// each, because a target's reductions are disjoint classes and a finding
-    /// filed under one of them is invisible to the other's maintenance. A finding
+    /// each, because a target ending in `.md` opens two disjoint classes.
+    /// A finding filed under only one is invisible to the other's maintenance. A finding
     /// that is not about resolution carries no class and writes no such row.
     ///
-    /// A class key outside the key space the store's path order selects is
+    /// A class key outside the normalized comparison key space is
     /// refused ([`StoreError::KeySpace`]): no change in this store names it, so
     /// a finding filed under it is one no maintenance reaches. A producer
     /// files under [`TargetClass::class_keys`] of a class this store compiled.
@@ -420,8 +420,8 @@ impl<'a> Request<'a> {
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         check_callers_finding(finding)?;
         check_finding_bounds(finding)?;
-        check_finding_classes(finding, self.store.path_order())?;
-        check_finding_paths(finding, self.store.path_order())?;
+        check_finding_classes(finding)?;
+        check_finding_paths(finding)?;
         let transaction = self
             .store
             .database
@@ -743,8 +743,7 @@ impl<'a> Request<'a> {
                     Ok(Ok(StoredLinkKey {
                         link: row.get(0)?,
                         key: row.get(1)?,
-                        folded_key: row.get(2)?,
-                        segments: row.get(3)?,
+                        segments: row.get(2)?,
                     }))
                 },
                 "reading a document's link keys",
@@ -1157,11 +1156,11 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of stored suffix keys, raw and folded, and the
+    /// The next bounded page of stored suffix and path comparison keys, and the
     /// admitting count stored with them, each beside the path whose row holds
     /// them, in path order.
     ///
-    /// `documents.suffix_key` and `documents.folded_suffix_key` are derived
+    /// `documents.suffix_key` and `documents.path_key` are derived
     /// columns: the path type writes them and the resolution ladder ranges over
     /// one or the other, and every read that would notice a key drifting from
     /// its path goes through the drifted range. So the check
@@ -1326,55 +1325,33 @@ impl<'a> Request<'a> {
 
     // ---- probe reads ----
 
-    /// Compile `target` — a suffix address, with any `#` anchor already split
-    /// off — into the class it names on this store's root, excluding the places
-    /// `ignore` names.
-    ///
-    /// **The order is the store's.** A class is compiled under the path order
-    /// the store records, which selects the suffix key it probes, the key space
-    /// its class keys are spelled in, and the case its ignore globs match
-    /// under; no caller names one. A find compiles its `resolves` part the
-    /// same way under its snapshot's order.
-    ///
-    /// The refusals are [`crate::suffix_probe`]'s: a spelling that is not a
-    /// suffix address names no class under any root.
+    /// Compile a suffix target, with its anchor already split off, into its
+    /// comparison-key class excluding `ignore`. Resolution is independent of
+    /// the store's filesystem order. [`crate::suffix_probe`] states the refusals.
     pub fn target_class(
         &self,
         target: &str,
         ignore: &AmbiguityIgnore,
     ) -> Result<TargetClass, StoreError> {
-        TargetClass::compile(target, self.store.path_order(), ignore)
+        TargetClass::compile(target, ignore)
     }
 
-    /// The probe over the ambiguity class `stem` names, in the key space the
-    /// store's path order selects: the stem as written where the root tells
-    /// spellings apart, and folded by ASCII case where it folds them.
-    ///
-    /// Every document whose leaf reduces to the stem is in the range, whatever
-    /// directory it sits in, and so is every finding whose class key opens
-    /// with it. The refusals are a stem's: an empty one, one carrying the
-    /// separator, a `.` or `..` name, and one carrying a control byte.
+    /// The normalized ambiguity class a stem opens on every root.
+    /// Empty stems, separators, `.` and `..` names and controls are refused.
     pub fn class_probe(&self, stem: &str) -> Result<SuffixProbe, StoreError> {
-        Ok(crate::path::class_probe(stem)?.in_space(SuffixKey::under(self.store.path_order())))
+        crate::path::class_probe(stem)
     }
 
-    /// The key of the ambiguity class `path` belongs to, in the key space the
-    /// store's path order selects.
-    ///
-    /// The order is the store's, the same one [`Request::class_probe`] and
-    /// [`Request::target_class`] read it under: minting a class key in a space
-    /// the store's root does not probe would name a class no finding here is
-    /// ever filed under, so this is the one door a document's own class key
-    /// leaves the crate through.
+    /// The normalized stem class a changed document names for maintenance.
     pub fn class_key_of(&self, path: &DocumentPath) -> ClassKey {
-        path.class_key_in(SuffixKey::under(self.store.path_order()))
+        path.class_key_in(SuffixKey::Comparison)
     }
 
     /// Every document in the class a target names, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
     /// membership of an ambiguity class: ranges over the suffix key the
-    /// target's root probes, costing the class rather than the vault, with the
+    /// comparison probe opens, costing the class rather than the vault, with the
     /// places its schema ignores left out.
     ///
     /// The order is total — the probed key, then `path` — because equal suffix
@@ -1382,14 +1359,12 @@ impl<'a> Request<'a> {
     /// ties fall out in row-insertion order is a ladder that reorders itself
     /// when a document is re-derived.
     ///
-    /// The class is one [`Request::target_class`] compiled on a store under
-    /// the same path order; one compiled under another is refused
-    /// ([`StoreError::KeySpace`]).
+    /// A class compiled by [`Request::target_class`] reads identically under
+    /// either filesystem order.
     pub fn suffix_candidates(
         &self,
         resolution: &TargetClass,
     ) -> Result<Vec<DocumentPath>, StoreError> {
-        self.check_class(resolution)?;
         self.read_all(
             &suffix_candidates_sql(resolution),
             params_from_iter(resolution.parameters()),
@@ -1447,20 +1422,16 @@ impl<'a> Request<'a> {
         summaries: &mut KeySummaries,
         declared: &ContentModel,
     ) -> Result<Vec<FindingFacts>, StoreError> {
-        let order = self.store.path_order();
         match selection {
             LinkSelection::Documents(_) => {}
-            LinkSelection::Class(class) => refuse_outside_key_space(
-                SuffixKey::under(order).holds(class),
-                "a judged class key",
-                order,
-            )?,
+            LinkSelection::Class(class) => {
+                refuse_outside_key_space(SuffixKey::Comparison.holds(class), "a judged class key")?
+            }
             LinkSelection::Path(path) => self.check_path_key(path)?,
         }
         health::judge(
             self.store.connection(),
             &self.read_work,
-            order,
             declared.ambiguity_ignore(),
             selection,
             summaries,
@@ -1471,65 +1442,31 @@ impl<'a> Request<'a> {
     ///
     /// This is what scopes findings maintenance: a changed path names a class,
     /// and the findings a change to it can invalidate are exactly the ones with a
-    /// membership row in this range. A finding belongs to one class per reduction
-    /// of the target it is about, and **any** of them reaches it — which is what
-    /// makes the no-miss direction true for a target whose two reductions are
-    /// disjoint classes. A finding in two of the probe's own classes still comes
-    /// back once.
+    /// membership row in this range. Both optional `.md` readings record
+    /// their disjoint classes, and either class reaches the finding. A finding
+    /// in two of the probe's own classes still comes back once.
     ///
     /// The read is **correct in the no-miss direction and a superset**: a
     /// longer-suffix finding in the same class is read even where the particular
     /// change cannot have reached it, which costs a re-decision rather than a
     /// stale finding nothing revisits.
     ///
-    /// The probe is one in the store's own key space, as
-    /// [`Request::class_probe`] and [`TargetClass::probe`] build it; a probe
-    /// over the other key is refused ([`StoreError::KeySpace`]).
+    /// [`Request::class_probe`] and [`TargetClass::probe`] build probes in
+    /// the same normalized comparison space.
     pub fn findings_in_class(&self, probe: &SuffixProbe) -> Result<Vec<StoredFinding>, StoreError> {
-        self.check_probe(probe)?;
         self.findings(
             &findings_in_class_sql(probe.range_count()),
             probe_parameters(probe),
         )
     }
 
-    /// Refuse a class compiled under another path order than the store's.
-    fn check_class(&self, resolution: &TargetClass) -> Result<(), StoreError> {
-        let order = self.store.path_order();
-        if resolution.order() == order {
-            Ok(())
-        } else {
-            Err(StoreError::KeySpace {
-                what: "a class compiled under another path order",
-                order,
-            })
-        }
-    }
-
-    /// Refuse a class probe over another suffix key than the store's path
-    /// order selects.
-    fn check_probe(&self, probe: &SuffixProbe) -> Result<(), StoreError> {
-        let order = self.store.path_order();
-        if probe.key() == SuffixKey::under(order) {
-            Ok(())
-        } else {
-            Err(StoreError::KeySpace {
-                what: "a class probe over another suffix key",
-                order,
-            })
-        }
-    }
-
-    /// Refuse a path key spelled outside the key space the store's path order
-    /// selects.
+    /// Refuse a path key outside the normalized resolution space.
     fn check_path_key(&self, path: &PathKey) -> Result<(), StoreError> {
-        let order = self.store.path_order();
-        if SuffixKey::under(order).holds_path(path) {
+        if SuffixKey::Comparison.holds_path(path) {
             Ok(())
         } else {
             Err(StoreError::KeySpace {
                 what: "a path key outside the store's key space",
-                order,
             })
         }
     }
@@ -1839,51 +1776,31 @@ pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreEr
 /// Refuse where `holds` is false: the shape [`check_finding_classes`] and
 /// [`check_finding_paths`] both answer with, each over its own axis and its
 /// own refusal message.
-fn refuse_outside_key_space(
-    holds: bool,
-    what: &'static str,
-    order: StoredPathOrder,
-) -> Result<(), StoreError> {
+fn refuse_outside_key_space(holds: bool, what: &'static str) -> Result<(), StoreError> {
     if holds {
         Ok(())
     } else {
-        Err(StoreError::KeySpace { what, order })
+        Err(StoreError::KeySpace { what })
     }
 }
 
-/// Refuse a finding filed under a class key outside the key space a store
-/// derived under `order` files its findings in.
-///
-/// A change names its class in that key space alone, so a finding filed under
-/// a key outside it is one no change ever takes: the raw key `Foo/` on a root
-/// that folds ASCII case stands through `b/FOO.md` joining the class of `Foo`.
-pub(crate) fn check_finding_classes(
-    finding: &FindingFacts,
-    order: StoredPathOrder,
-) -> Result<(), StoreError> {
-    let space = SuffixKey::under(order);
+/// Refuse a finding with a class key outside the normalized comparison
+/// space, which a changed document could never reach.
+pub(crate) fn check_finding_classes(finding: &FindingFacts) -> Result<(), StoreError> {
+    let space = SuffixKey::Comparison;
     refuse_outside_key_space(
         finding.class_keys.iter().all(|class| space.holds(class)),
         "a finding's class key",
-        order,
     )
 }
 
-/// Refuse a finding filed under a path key outside the key space a store
-/// derived under `order` files its findings in.
-///
-/// A change names its path in that key space alone, so a finding filed under a
-/// key outside it is one no change ever takes: the raw key `Dir/t.md` on a root
-/// that folds ASCII case stands through `dir/T.md` dying.
-pub(crate) fn check_finding_paths(
-    finding: &FindingFacts,
-    order: StoredPathOrder,
-) -> Result<(), StoreError> {
-    let space = SuffixKey::under(order);
+/// Refuse a finding with a path key outside the normalized comparison
+/// space, which a changed document could never reach.
+pub(crate) fn check_finding_paths(finding: &FindingFacts) -> Result<(), StoreError> {
+    let space = SuffixKey::Comparison;
     refuse_outside_key_space(
         finding.path_keys.iter().all(|path| space.holds_path(path)),
         "a finding's path key",
-        order,
     )
 }
 
@@ -2186,7 +2103,7 @@ const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title,
 
 /// The statement [`Request::stored_facts`] reads a document's link keys with:
 /// each link row's keys by the link, in link order and then in key order.
-pub(crate) const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.folded_key, k.segments
+pub(crate) const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.segments
                  FROM links AS l JOIN link_keys AS k ON k.link = l.id
                  WHERE l.document = ?1 ORDER BY l.ordinal, k.key";
 
@@ -2739,7 +2656,7 @@ const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, ge
 /// column is read off the row the seek reached rather than off an index of its
 /// own, because `documents_suffix_key` orders by the key and this page orders
 /// by the path.
-const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key, admitting_segments
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, path_key, admitting_segments
              FROM documents
              WHERE path > COALESCE(?1, '')
              ORDER BY path
@@ -2888,8 +2805,8 @@ fn text_page_parameters(after: Option<&str>, limit: usize) -> Vec<Value> {
 /// range, `OR`ed, each bound its own parameter.
 ///
 /// Ranges rather than a pattern, and `OR`ed ranges rather than a wider one,
-/// because each range is an index seek and their union is what a two-reduction
-/// target opens.
+/// because each range is an index seek and their union is what a target
+/// ending in `.md` opens.
 fn range_predicate(column: &str, ranges: usize) -> String {
     range_predicate_from(column, ranges, 1)
 }
@@ -2944,17 +2861,17 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     }))
 }
 
-/// One row's path and the two suffix keys and the admitting count stored
-/// beside it.
+/// One row's original path, suffix and complete-path comparison keys, and
+/// stored admitting count.
 fn stored_suffix_key(row: &Row<'_>) -> Reading<StoredSuffixKeys> {
     let path: String = row.get(0)?;
-    let raw: String = row.get(1)?;
-    let folded: String = row.get(2)?;
+    let suffix_key: String = row.get(1)?;
+    let path_key: String = row.get(2)?;
     let admitting_segments: usize = row.get(3)?;
     Ok(DocumentPath::new(&path).map(|path| StoredSuffixKeys {
         path,
-        raw,
-        folded,
+        suffix_key,
+        path_key,
         admitting_segments,
     }))
 }

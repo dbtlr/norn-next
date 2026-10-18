@@ -6,17 +6,12 @@
 //!
 //! # It is empty through the pre-release build, and that is the design
 //!
-//! Store schema version is pinned at 1 and does not move: a DDL change during
-//! development is a fingerprint mismatch resolved by rebuilding from zero,
-//! which consumes no version numbers. Nothing is migrating, so there is nothing
-//! to record, and recording version 1 here at create time would put the same
-//! fact in two places — `meta` already answers *what shape is this database*,
-//! and this table answers *how did it get here*.
+//! Before release, a DDL fingerprint or store-schema version mismatch rebuilds
+//! the derived database from zero. Nothing migrates, so there is no ledger
+//! row to record; `meta` already records the current schema and fingerprint.
 //!
-//! At the first release version 1 freezes as the first migratable baseline. The
-//! baseline row arrives then, from the code that freezes it, and from that point
-//! every store schema change is a migration with a row here rather than a
-//! rebuild.
+//! The first release freezes a migratable baseline. Its baseline row arrives
+//! from the code that freezes it, and later schema migrations record rows here.
 //!
 //! The table exists now because its absence would make that first release a
 //! schema change to a table nobody can migrate — and because the carve is what

@@ -472,13 +472,9 @@ fn address_of(change: &LinkChange) -> String {
     }
 }
 
-/// **A place no document stands at names every link that would resolve to
-/// a document standing there**, as the root reads it. With nothing at `Old
-/// Note.md`, `[[Old Note]]`, `[[Old Note.md]]`, `[[vault://Old Note]]` and
-/// the Markdown link to that path could each name a document there, and
-/// `[[old note]]` too only where the root folds ASCII case; `[[sub/Old
-/// Note]]` names a deeper place and is never reached. `[[v1]]` could never
-/// name a document at `v1.2.md`, which `[[v1.2]]` could.
+/// An empty place reaches every link that could name a document there
+/// under the comparison key, including case variants on every root.
+/// A deeper path and a name with another extension address other places.
 #[test]
 fn a_place_no_document_stands_at_names_the_links_that_would_resolve_there() {
     both_orders("resolution-reached-place", |mut vault| {
@@ -499,9 +495,7 @@ fn a_place_no_document_stands_at_names_the_links_that_would_resolve_there() {
             "Old%20Note.md",
             "vault://Old Note",
         ];
-        if vault.order == Folding {
-            note.push("old note");
-        }
+        note.push("old note");
         note.sort_unstable();
         assert_eq!(place("Old Note.md"), note, "{:?}", vault.order);
         assert_eq!(place("v1.2.md"), ["v1.2"], "{:?}", vault.order);
@@ -566,29 +560,32 @@ fn a_landed_target_heading_a_class_leaves_two_stored_documents_to_read() {
     });
 }
 
-/// **On a root that folds case, the store's spelling of a target is the
-/// target.** The store holds `Notes/A.md`; a plan removing it under the
-/// spelling `notes/a.md` leaves no stored row standing in for it.
+/// A case-variant rename updates the resolved spelling on either root.
 #[test]
-fn a_target_spelled_in_another_case_on_a_folding_root_is_the_stored_document() {
-    let mut vault = Vault::new("resolution-folding-respell", Folding);
-    vault.write(&[("Notes/A.md", "alpha\n"), ("b.md", "[[a]]\n")]);
-    let (judged_links, _) = vault.judge(&overlay(&[], &["notes/a.md"]), &[]);
-    assert_eq!(
-        judged_links,
-        [judged("b.md", "a", "one:notes/a.md", "none")]
-    );
+fn a_case_variant_rename_changes_the_resolved_spelling() {
+    both_orders("resolution-case-rename", |mut vault| {
+        vault.write(&[("Notes/A.md", "alpha\n"), ("b.md", "[[notes/a]]\n")]);
+        let (judged_links, _) = vault.judge(&overlay(&["notes/a.md"], &["Notes/A.md"]), &[]);
+        assert_eq!(
+            judged_links,
+            [judged(
+                "b.md",
+                "notes/a",
+                "one:Notes/A.md",
+                "one:notes/a.md"
+            )]
+        );
+    });
 }
 
-/// **A link held under two changed keys is judged once.** `[[v1.2]]` is held
-/// under the classes of both of its reductions; a plan creating a document
-/// in each reaches it twice and hands it back once.
+/// A link ending in `.md` is held under both document-name keys. A plan
+/// creating a candidate in each class reaches the link twice and judges it once.
 #[test]
 fn a_link_held_under_two_changed_keys_is_judged_once() {
     both_orders("resolution-least-key", |mut vault| {
-        vault.write(&[("b.md", "[[v1.2]]\n")]);
-        let (judged_links, work) = vault.judge(&overlay(&["v1.2.md", "v1.md"], &[]), &[]);
-        assert_eq!(judged_links, [judged("b.md", "v1.2", "none", "several")]);
+        vault.write(&[("b.md", "[[v1.md]]\n")]);
+        let (judged_links, work) = vault.judge(&overlay(&["v1.md.md", "v1.md"], &[]), &[]);
+        assert_eq!(judged_links, [judged("b.md", "v1.md", "none", "several")]);
         assert_eq!(work.links_evaluated, 1);
     });
 }
@@ -828,13 +825,9 @@ fn a_chunks_cache_upkeep_visits_its_own_keys_never_the_keys_kept_for_the_judgmen
     );
 }
 
-/// **A link held under several keys reads each key's places once per key,
-/// never once per link**: a plan moving every `t.v.md` and every `t.md` of
-/// `a/NNNN/` to `b/NNNN/` gives `[[t.v]]` both of its reductions' targets,
-/// and `[[t.md]]` the stem's, so each holder's link could name a moved
-/// document under two keys; ten times the holders read no more places, every
-/// link holding a key shares that key's one list, and every link still names
-/// each moved document its keys could name.
+/// Links to `t.md` share the places of both optional `.md` readings;
+/// links to `t` share only the extensionless class. Each key's places are
+/// read once regardless of how many links hold it.
 #[test]
 fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_them() {
     const MOVED: usize = 40;
@@ -844,7 +837,7 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
             .map(|at| {
                 format!(
                     "a/{at:04}/{}.md",
-                    if at.is_multiple_of(2) { "t.v" } else { "t" }
+                    if at.is_multiple_of(2) { "t.md" } else { "t" }
                 )
             })
             .collect();
@@ -853,9 +846,9 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
             moved.iter().map(|at| (at.as_str(), "a task\n")).collect();
         documents.extend(held.iter().enumerate().map(|(at, holder)| {
             let body = if at.is_multiple_of(2) {
-                "[[t.v]]\n"
-            } else {
                 "[[t.md]]\n"
+            } else {
+                "[[t]]\n"
             };
             (holder.as_str(), body)
         }));
@@ -900,8 +893,8 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
         assert_eq!(
             named,
             BTreeMap::from([
-                ("t.md".to_string(), BTreeSet::from([stem])),
-                ("t.v".to_string(), BTreeSet::from([stems])),
+                ("t".to_string(), BTreeSet::from([stem])),
+                ("t.md".to_string(), BTreeSet::from([stems])),
             ]),
             "each link names every moved document its keys could name"
         );
@@ -992,14 +985,9 @@ fn create_beside_few_and_many(
     })
 }
 
-/// **A key's head costs the members its class admits, not the ones it keeps
-/// out.** Two thousand documents `archive/aNNNN/index.md` under the ignored
-/// `archive/**` sort ahead of `zz/index.md`, the one member the class `index`
-/// admits, and a plan creating `new/index.md` judges `[[index]]` in the same
-/// steps beside them as beside twenty: one link, one key, one head row, read
-/// by a seek of the admitted members alone. On a root that folds case
-/// `Archive/aNNNN/index.md` is the same ignored place, kept out by the same
-/// stored count.
+/// A key's head seeks admitted candidates without reading ignored
+/// subtrees. `archive/**` excludes case variants under the comparison
+/// key, independently of filesystem order.
 #[test]
 fn a_heads_work_does_not_follow_the_ignored_members_of_its_class() {
     for (order, place) in [

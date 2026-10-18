@@ -176,8 +176,8 @@ pub mod induced_failure {
         finding: &crate::FindingFacts,
     ) -> Result<(), StoreError> {
         crate::request::check_finding_bounds(finding)?;
-        crate::request::check_finding_classes(finding, store.path_order())?;
-        crate::request::check_finding_paths(finding, store.path_order())?;
+        crate::request::check_finding_classes(finding)?;
+        crate::request::check_finding_paths(finding)?;
         let transaction = store
             .database
             .immediate_transaction("opening the finding transaction")?;

@@ -82,8 +82,8 @@ use std::sync::Arc;
 
 use norn_config::schema::{FieldType, RuleWork, VaultSchema};
 use norn_fs::NormalizedPath;
-use norn_store::{AmbiguityIgnore, LinkFamily, PathOverlay, ProbedLink, StoredPathOrder};
-use norn_wire::{CaseFold, DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding};
+use norn_store::{AmbiguityIgnore, LinkFamily, PathOverlay, ProbedLink};
+use norn_wire::{DocumentPath, FindingKind, Resolves, SkipReason, SkippedFinding};
 
 use super::{Draft, State};
 use crate::applier::standing;
@@ -376,37 +376,29 @@ pub(crate) fn blinded<T>(run: impl FnOnce() -> T) -> T {
 /// its destination, or the other way about, as the store's own
 /// ambiguity-ignore rule reads the schema's set
 /// ([`AmbiguityIgnore::admits`] for a one-segment target), folded as
-/// [`stem_of`] folds one.
+/// the store's normalized suffix key spells one.
 fn crossing_stems(
     routes: &[(usize, &super::routes::Passed)],
     schema: &VaultSchema,
-    repairing: &Repairing<'_>,
+    _repairing: &Repairing<'_>,
 ) -> BTreeSet<String> {
     if schema.ambiguity_ignore().is_empty() {
         return BTreeSet::new();
     }
     let ignore = AmbiguityIgnore::new(schema.ambiguity_ignore().iter().cloned());
-    let order = match repairing.case {
-        CaseFold::Exact => StoredPathOrder::Sensitive,
-        CaseFold::Ascii => StoredPathOrder::AsciiCaseInsensitive,
-    };
-    let named_bare = |path: &DocumentPath| ignore.admits(path.as_str(), 1, order);
+    let named_bare = |path: &DocumentPath| ignore.admits(path.as_str(), 1);
     routes
         .iter()
         .filter(|(_, passed)| named_bare(&passed.from) != named_bare(&passed.to))
-        .filter_map(|(_, passed)| passed.to.as_str().rsplit('/').next().map(stem_of))
+        .map(|(_, passed)| {
+            norn_store::DocumentPath::from(&passed.to)
+                .suffix_key()
+                .split('/')
+                .next()
+                .expect("a document has a stem key")
+                .to_string()
+        })
         .collect()
-}
-
-/// `name`, a file name or a bare wikilink's target, as one stem's documents
-/// are compared here: lower-cased, the document extension dropped. A wider
-/// fold than the store's only ever counts more links as possibly respelled.
-fn stem_of(name: &str) -> String {
-    let folded = name.to_lowercase();
-    match folded.strip_suffix(".md") {
-        Some(stem) => stem.to_string(),
-        None => folded,
-    }
 }
 
 /// Whether a cascade may respell `link`, a wikilink resolving before the
@@ -416,7 +408,11 @@ fn stem_of(name: &str) -> String {
 fn may_respell(link: &norn_store::LinkFact, crossing: &BTreeSet<String>) -> bool {
     link.protocol.is_some()
         || link.target.contains('/')
-        || crossing.contains(&stem_of(&link.target))
+        || norn_store::suffix_probe(&link.target).is_ok_and(|probe| {
+            probe
+                .ranges()
+                .any(|(key, _)| crossing.contains(key.trim_end_matches('/')))
+        })
 }
 
 /// Every frontmatter wikilink each batch document holds at a state it may

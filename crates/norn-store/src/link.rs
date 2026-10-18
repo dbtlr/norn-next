@@ -31,28 +31,26 @@
 //! A `vault://` link is read from the vault root under its own family's
 //! rules. A Markdown one is a path, as above. A wikilink's is a rooted name:
 //! read by the wikilink grammar, with nothing decoded or cut off, it names
-//! exactly the root path each reduction of its leaf spells — the stem as
-//! written, and the stem with its extension stripped, each with the document
-//! extension appended — mirroring a suffix wikilink's own two reductions, so
+//! the complete root path with `.md` appended and, where the target already
+//! ends in `.md`, that complete path too. No other extension is removed, so
 //! `[[vault://Notes]]` and `[[vault://Notes.md]]` name `Notes.md`,
-//! `[[vault://v1.2]]` names `v1.2.md` or `v1.md`, and `[[vault://Deep]]`
+//! `[[vault://v1.2]]` names only `v1.2.md`, and `[[vault://Deep]]`
 //! never reaches `sub/Deep.md`.
 //!
 //! # The keys are what every read of a link seeks
 //!
-//! A suffix address's keys are its probe's prefixes — one per reduction of a
-//! dotted leaf — in the segment-reversed form a document's suffix key takes,
-//! beside the target's segment count its ambiguity-ignore test reads. A path's
-//! key is the path itself, and a rooted name's keys are the paths its
-//! reductions spell. Each is held raw and with ASCII case folded, so a read
-//! seeks the one the store's path order selects. A suffix key always ends in
+//! A suffix address opens one segment-reversed prefix, or two where the
+//! target ends in `.md`, beside the segment count its ambiguity-ignore test
+//! reads. A path's key is its complete-path comparison key. A rooted name
+//! records one key per complete path its optional `.md` spelling names.
+//! Every root uses the same comparison key. A suffix key always ends in
 //! the separator and a path never does, so the two kinds share one key column
 //! and no key of one kind equals a key of the other.
 
-use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind, leaf_stem};
+use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind};
 
 use crate::facts::LinkFact;
-use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, spell_path_key, suffix_probe};
+use crate::path::{DocumentPath, SuffixKey, markdown_stem, spell_path_key, suffix_probe};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -65,8 +63,8 @@ pub(crate) enum Addressing<'a> {
     /// A suffix address, resolved through the one resolver.
     Suffix(&'a str),
     /// The vault paths the target names, each resolved exactly: none where it
-    /// names no vault path, one for a path, and one per reduction for a
-    /// rooted name.
+    /// names no vault path, one for a path, and up to two for a rooted
+    /// name whose target ends in `.md`.
     Paths(Vec<String>),
 }
 
@@ -98,10 +96,8 @@ pub(crate) fn address_kind(link: &LinkFact) -> LinkAddressKind {
 /// One key the link index holds a link under.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LinkKey {
-    /// The key as the target spells it.
+    /// The normalized comparison key of the target.
     pub(crate) key: String,
-    /// The key with ASCII case folded.
-    pub(crate) folded_key: String,
     /// How many segments a suffix address spells, which is what its
     /// ambiguity-ignore test reads, and `None` for a path's key.
     pub(crate) segments: Option<u64>,
@@ -116,8 +112,7 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
         Addressing::Paths(paths) => paths
             .into_iter()
             .map(|path| LinkKey {
-                folded_key: spell_path_key(&path, SuffixKey::Folded),
-                key: spell_path_key(&path, SuffixKey::Raw),
+                key: spell_path_key(&path, SuffixKey::Comparison),
                 segments: None,
             })
             .collect(),
@@ -125,8 +120,8 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
     }
 }
 
-/// The keys a suffix address `target` is read through: one per reduction of
-/// its leaf, each a prefix of the suffix keys of the documents it could name,
+/// The keys a suffix address `target` is read through: one, or two where
+/// it ends in `.md`, each a prefix of the documents' suffix comparison keys,
 /// beside how many segments the address spells. None where `target` is no
 /// suffix address. A wikilink written with the address is held under exactly
 /// these, and a request's target naming it is read through the same.
@@ -139,7 +134,6 @@ pub(crate) fn suffix_keys(target: &str) -> Vec<LinkKey> {
         .ranges()
         .map(|(lower, _)| LinkKey {
             key: lower.to_string(),
-            folded_key: fold_ascii_case(lower),
             segments: Some(segments),
         })
         .collect()
@@ -154,10 +148,7 @@ pub(crate) fn suffix_keys(target: &str) -> Vec<LinkKey> {
 /// so a seek of them reaches every such link; which of the links it reaches
 /// resolve to the document alone is the seek's own question.
 pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String> {
-    let suffix = match key {
-        SuffixKey::Raw => document.suffix_key().to_string(),
-        SuffixKey::Folded => document.folded_suffix_key().to_string(),
-    };
+    let suffix = document.suffix_key();
     let mut keys: Vec<String> = suffix
         .match_indices(SEPARATOR)
         .map(|(at, _)| suffix[..=at].to_string())
@@ -169,26 +160,17 @@ pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String
     keys
 }
 
-/// The root paths a rooted wikilink's `name` spells, one per reduction of its
-/// leaf — mirroring a suffix wikilink's own two reductions: the stem as
-/// written, with the document extension appended, and, where the leaf carries
-/// an extension, the stem with that extension stripped, with the document
-/// extension appended in its place. `leaf_stem` is what decides whether the
-/// leaf carries an extension and where it ends, the same rule a suffix
-/// address's own reductions strip by, so `[[vault://v1.2]]` names `v1.2.md`
-/// or `v1.md` — never the literal `v1.2`. A name the wikilink grammar
-/// refuses — an empty segment, a `.` or `..` segment — names none, and so does
-/// a spelling the document path grammar refuses. Nothing in the name is
-/// decoded or cut off.
+/// The complete paths a rooted wikilink names, with only `.md` optional.
+/// `note.md` names `note.md.md` and `note.md`; `v1.2` names `v1.2.md`.
+/// Nothing is decoded or cut off, and refused suffix spellings name no path.
 fn rooted_name(name: &str) -> Vec<String> {
     if suffix_probe(name).is_err() {
         return Vec::new();
     }
     let (ancestors, leaf) = name.rsplit_once(SEPARATOR).unwrap_or(("", name));
-    let stem = leaf_stem(leaf);
+    let stem = markdown_stem(leaf);
     let as_a_stem = format!("{name}.{DOCUMENT_EXTENSION}");
-    // The leaf carries an extension exactly where its stem is shorter than
-    // it, which is the one case with a second reduction.
+    // A trailing `.md` adds the target's explicit complete-path reading.
     let stripped = (stem != leaf).then(|| {
         if ancestors.is_empty() {
             format!("{stem}.{DOCUMENT_EXTENSION}")
@@ -207,8 +189,8 @@ fn rooted_name(name: &str) -> Vec<String> {
 /// for a wikilink written with the address to name it by every segment it
 /// spells — `address` itself where its leaf carries the document extension,
 /// in any ASCII case, and `address` with the extension appended otherwise,
-/// the leaf's extension read by the one rule a suffix address's reductions
-/// strip by. `None` where the wikilink grammar refuses the address, or the
+/// with no other extension removed. `None` where the wikilink grammar
+/// refuses the address, or the
 /// document path grammar the place.
 ///
 /// **What a repair of broken links names.** A wikilink rewrite whose `old`
@@ -241,7 +223,7 @@ pub fn query_leaf(link: &norn_wire::LinkKey) -> String {
 }
 
 fn without_document_extension(leaf: &str) -> &str {
-    let stem = leaf_stem(leaf);
+    let stem = markdown_stem(leaf);
     if stem != leaf && leaf[stem.len() + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION) {
         stem
     } else {
@@ -251,7 +233,7 @@ fn without_document_extension(leaf: &str) -> &str {
 
 /// The vault paths `link`, held by the document at `holder`, names by path:
 /// the one path a Markdown path or a path read from the root names, each
-/// root path a rooted wikilink's reductions spell, and the holder itself for
+/// complete path a rooted wikilink's optional `.md` spellings name, and the holder itself for
 /// an empty target — read by this module's one reading of a link's address.
 /// None for a suffix address, which names documents through the resolver
 /// rather than by path, and none for a link addressed elsewhere or naming no
@@ -498,31 +480,26 @@ mod tests {
         .collect()
     }
 
-    /// A `vault://` wikilink is keyed by the root paths its reductions spell —
-    /// the target with the document extension appended, and, where its leaf
-    /// carries an extension, the target with that extension stripped and the
-    /// document extension appended in its place — with nothing decoded or cut
-    /// off, and a target the wikilink grammar refuses names none. A
-    /// `vault://` Markdown link is keyed by the one root path it decodes to,
-    /// its query cut off and never reduced. Neither is read from the holding
-    /// document's directory.
+    /// A rooted wikilink names the target with `.md` appended and, where it
+    /// already ends in `.md`, the target itself. Other extensions remain in
+    /// the stem. A rooted Markdown link retains its decoded complete path.
     #[test]
     fn a_vault_link_is_keyed_by_the_root_paths_its_family_spells() {
         use crate::facts::LinkFamily::{Markdown, Wikilink};
         for (family, target, keys) in [
-            (Wikilink, "Notes", &["Notes.md"][..]),
-            (Wikilink, "Notes.md", &["Notes.md.md", "Notes.md"]),
-            (Wikilink, "v1.2", &["v1.2.md", "v1.md"]),
-            (Wikilink, "a.b/Notes", &["a.b/Notes.md"]),
+            (Wikilink, "Notes", &["notes.md"][..]),
+            (Wikilink, "Notes.md", &["notes.md.md", "notes.md"]),
+            (Wikilink, "v1.2", &["v1.2.md"]),
+            (Wikilink, "a.b/Notes", &["a.b/notes.md"]),
             (Wikilink, "my%20note", &["my%20note.md"]),
-            (Wikilink, "Notes?x", &["Notes?x.md"]),
+            (Wikilink, "Notes?x", &["notes?x.md"]),
             (Wikilink, "notes/", &[]),
             (Wikilink, "/Notes", &[]),
             (Wikilink, "a/../Notes", &[]),
             (Wikilink, "./Notes", &[]),
             (Wikilink, "..", &[]),
-            (Markdown, "Notes", &["Notes"]),
-            (Markdown, "Notes.md", &["Notes.md"]),
+            (Markdown, "Notes", &["notes"]),
+            (Markdown, "Notes.md", &["notes.md"]),
             (Markdown, "my%20note.md?x=1", &["my note.md"]),
             (Markdown, "/a/./b.md", &["a/b.md"]),
             (Markdown, "../Notes.md", &[]),
@@ -694,10 +671,8 @@ mod tests {
         }
     }
 
-    /// **A link names by path what its address reads to**: a relative or
-    /// rooted Markdown destination its one path, a rooted wikilink each path
-    /// its reductions spell, and a suffix wikilink none, since the resolver
-    /// names its documents.
+    /// Path-addressed links name complete paths, with only `.md` optional
+    /// for rooted wikilinks. Suffix links name documents through class probes.
     #[test]
     fn named_paths_are_the_paths_a_link_reads_to() {
         use crate::facts::LinkFamily::{Markdown, Wikilink};
@@ -708,28 +683,19 @@ mod tests {
         );
         assert_eq!(
             named_paths(&written(Wikilink, Some("vault"), "v1.2"), &holder),
-            ["v1.2.md", "v1.md"]
+            ["v1.2.md"]
         );
         assert!(named_paths(&written(Wikilink, None, "x"), &holder).is_empty());
         assert!(named_paths(&written(Markdown, Some("https"), "x.md"), &holder).is_empty());
     }
 
-    /// A document is named by each segment-aligned prefix of its suffix key
-    /// and by its path, in the key space the root probes.
+    /// A document is named by normalized suffix prefixes and its complete
+    /// path comparison key. Original path case does not select another key.
     #[test]
-    fn a_document_is_named_by_its_suffix_prefixes_and_its_path() {
+    fn a_document_is_named_by_normalized_suffix_prefixes_and_its_complete_path_key() {
         let document = at("Docs/Norn/Glossary.md");
         assert_eq!(
-            keys_naming(&document, SuffixKey::Raw),
-            [
-                "Glossary/",
-                "Glossary/Norn/",
-                "Glossary/Norn/Docs/",
-                "Docs/Norn/Glossary.md"
-            ]
-        );
-        assert_eq!(
-            keys_naming(&document, SuffixKey::Folded),
+            keys_naming(&document, SuffixKey::Comparison),
             [
                 "glossary/",
                 "glossary/norn/",
@@ -739,21 +705,15 @@ mod tests {
         );
     }
 
-    /// **A path-addressed link's keys are `path_key_in`'s keys.** A Markdown
-    /// path link and a rooted wikilink to the same document are two different
-    /// readings of the target, but both end up naming the one document at
-    /// `Dir/T.md`, and the raw and folded keys `link_keys` files them under
-    /// are the keys [`crate::path::DocumentPath::path_key_in`] gives that
-    /// document — the same bytes a change to `Dir/T.md` discards by. ADR 0027
-    /// condition 2 needs exactly this: a finding's keys are the keys the
-    /// discard ranges over.
+    /// A Markdown path and a rooted wikilink naming the same document
+    /// record its normalized path key. Changeset maintenance uses that key too.
     #[test]
-    fn a_path_addressed_link_is_keyed_by_path_key_in() {
+    fn path_addressed_links_and_documents_share_the_same_comparison_key() {
         let holder = at("holder.md");
         for (path, stem) in [("Dir/T.md", "Dir/T"), ("Été/Ü.md", "Été/Ü")] {
             let document = at(path);
-            let raw = document.path_key_in(SuffixKey::Raw);
-            let folded = document.path_key_in(SuffixKey::Folded);
+            let document_key = document.path_key_in(SuffixKey::Comparison);
+            let same_document_key = document.path_key_in(SuffixKey::Comparison);
 
             let markdown = link_keys(
                 &written(crate::facts::LinkFamily::Markdown, None, path),
@@ -768,13 +728,13 @@ mod tests {
                 assert_eq!(keys.len(), 1, "{family} link to {path} named {keys:?}");
                 assert_eq!(
                     keys[0].key,
-                    raw.as_str(),
-                    "{family} link to {path}'s raw key"
+                    document_key.as_str(),
+                    "{family} link to {path}'s document comparison key"
                 );
                 assert_eq!(
-                    keys[0].folded_key,
-                    folded.as_str(),
-                    "{family} link to {path}'s folded key"
+                    keys[0].key,
+                    same_document_key.as_str(),
+                    "{family} link to {path}'s shared comparison key"
                 );
             }
         }

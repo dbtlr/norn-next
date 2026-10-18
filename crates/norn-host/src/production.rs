@@ -11315,9 +11315,8 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// A vault holding `a/Foo.md` and `b/foo.md`: two documents a target
-    /// `Foo` tells apart on a root that tells spellings apart, and one class on
-    /// a root that folds ASCII case.
+    /// Two documents whose stems share the comparison key: `Foo` names
+    /// both `a/Foo.md` and `b/foo.md` on every filesystem order.
     fn write_two_spellings_of_one_stem(f: &Fixture) {
         for (at, body) in [("a/Foo.md", "# Foo\n"), ("b/foo.md", "# foo\n")] {
             let path = f.vault().join(at);
@@ -11326,14 +11325,9 @@ mod tests {
         }
     }
 
-    /// What `Foo` names on a root that proves `order`.
-    fn foo_resolves_under(order: StoredPathOrder) -> Vec<String> {
-        match order {
-            StoredPathOrder::Sensitive => vec!["a/Foo.md".to_string()],
-            StoredPathOrder::AsciiCaseInsensitive => {
-                vec!["a/Foo.md".to_string(), "b/foo.md".to_string()]
-            }
-        }
+    /// What `Foo` names under either filesystem order.
+    fn foo_resolves_under(_order: StoredPathOrder) -> Vec<String> {
+        vec!["a/Foo.md".to_string(), "b/foo.md".to_string()]
     }
 
     /// Rows a store derived under another order holds: one the vault holds
@@ -11412,11 +11406,10 @@ mod tests {
 
     /// **A store derived under the case behaviour its root does not prove is
     /// rebuilt from zero at the attach that opens it, and the reason names both
-    /// orders.** What the attach then derives resolves under the order the root
-    /// proves — `Foo` names `a/Foo.md` alone where the root tells spellings
-    /// apart and both documents where it folds, in the find a read runs and in
-    /// the class a finding is filed under — and an attach under the same order
-    /// afterwards reuses the store.
+    /// orders.** The rebuilt store resolves `Foo` to both `a/Foo.md` and
+    /// `b/foo.md` under the shared comparison key, in both a find and the
+    /// class a finding records. A later attach under the same filesystem
+    /// order reuses the store.
     ///
     /// The root's real case behaviour cannot be flipped from here, so the
     /// store is what is derived under the other order: it is created at the
@@ -11667,8 +11660,9 @@ mod tests {
     /// derived under the order the coverage does not prove: it owes rung 3,
     /// which rebuilds the store under the proven order and derives nothing
     /// under the unreadable declaration, and the reload that pins a readable
-    /// one derives into the rebuilt store — so `Foo` resolves under the order
-    /// the root proves, to both spellings where it folds ASCII case.
+    /// one derives into the rebuilt store. `Foo` then names both case
+    /// spellings under the shared comparison key, regardless of the proven
+    /// filesystem order.
     #[test]
     fn a_recovery_over_an_unreadable_schema_still_judges_the_path_order() {
         let f = Fixture::new("recover-order-moved-unreadable");

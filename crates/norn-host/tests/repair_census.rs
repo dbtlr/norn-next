@@ -437,16 +437,8 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         .iter()
         .map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
-    let (suffix_range, tombstone_at_path) = match store.path_order() {
-        StoredPathOrder::Sensitive => (
-            "suffix_key >= ?1 AND suffix_key < ?2",
-            "SELECT path, last_content_hash, provenance FROM tombstones WHERE path = ?1 AND provenance <> 'quarantine'",
-        ),
-        StoredPathOrder::AsciiCaseInsensitive => (
-            "folded_suffix_key >= ?1 AND folded_suffix_key < ?2",
-            "SELECT path, last_content_hash, provenance FROM tombstones WHERE path = ?1 COLLATE NOCASE AND provenance <> 'quarantine' ORDER BY path LIMIT 2",
-        ),
-    };
+    let suffix_range = "suffix_key >= ?1 AND suffix_key < ?2";
+    let tombstone_at_path = "SELECT path, last_content_hash, provenance FROM tombstones WHERE path_key = ?1 AND provenance <> 'quarantine' ORDER BY path LIMIT 2";
     assert!(
         normalized.iter().any(|sql| sql
             .starts_with("SELECT path, last_content_hash, provenance FROM tombstones WHERE ")
@@ -596,18 +588,11 @@ const REACHED: &[&[&str]] = &[
     // A held document's row by its path.
     &["documents_path"],
     // The resolution of a route's moved links and a link fix's address: the
-    // links held under a key and a class's heads, each under the key the root
-    // decides (raw where it tells spellings apart, folded where it folds).
-    &["link_keys_key", "link_keys_folded_key"],
-    &[
-        "documents_admitted_suffix_key",
-        "documents_admitted_folded_suffix_key",
-    ],
+    // links held under a comparison key and a class's indexed heads.
+    &["link_keys_key"],
+    &["documents_admitted_suffix_key"],
     // A links-to part's target: its class's head and total.
-    &[
-        "documents_admitted_suffix_key",
-        "documents_admitted_folded_suffix_key",
-    ],
+    &["documents_admitted_suffix_key"],
     // The apply's changeset: its written links re-decided, and the rule sets
     // its findings cite.
     &["documents_change_feed"],
@@ -767,7 +752,7 @@ fn every_part() -> (Vec<Part>, [usize; 2]) {
         },
         // Not applied by a repair, so nothing drives the read it compiles.
         Part {
-            shape: ReadFilter::Resolves(SuffixKey::Raw),
+            shape: ReadFilter::Resolves(SuffixKey::Comparison),
             part: Predicate::resolves(target("zz-repair/t/two")),
             reach: Reach::Unasked,
         },
@@ -790,7 +775,7 @@ fn every_part() -> (Vec<Part>, [usize; 2]) {
                 reach,
             },
             Part {
-                shape: ReadFilter::LinksTo(SuffixKey::Raw),
+                shape: ReadFilter::LinksTo(SuffixKey::Comparison),
                 part: Predicate::links_to(target(&format!("zz-repair/t/{word}"))),
                 reach,
             },
@@ -813,7 +798,7 @@ fn every_part() -> (Vec<Part>, [usize; 2]) {
             ),
             (ReadFilter::FullText, Predicate::matches("noiseword")),
             (
-                ReadFilter::LinksTo(SuffixKey::Raw),
+                ReadFilter::LinksTo(SuffixKey::Comparison),
                 Predicate::links_to(target("zz-repair/t/noise")),
             ),
             (
@@ -1203,11 +1188,6 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
                     (
                         Some("documents_admitted_suffix_key"),
                         Some("(admitting_segments=? AND suffix_key>? AND suffix_key<?)")
-                    ) | (
-                        Some("documents_admitted_folded_suffix_key"),
-                        Some(
-                            "(admitting_segments=? AND folded_suffix_key>? AND folded_suffix_key<?)"
-                        )
                     )
                 )
             })

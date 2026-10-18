@@ -27,7 +27,7 @@
 //!
 //! # A finding is keyed by its link's keys and its candidates' naming classes
 //!
-//! A finding's keys are its link's keys, in the key space the root probes — a
+//! A finding's keys are its link's keys, under the comparison key — a
 //! suffix key as a class key, and a path key as a path key — and the naming
 //! classes of every candidate it carries: the classes the candidate's minimal
 //! disambiguating suffix is read from ([`SuffixSpellings::naming_classes`]).
@@ -105,9 +105,7 @@ use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
 use norn_wire::{FindingKind, LinkHealth};
 
 use crate::error::StoreError;
-use crate::facts::{
-    CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink, StoredPathOrder,
-};
+use crate::facts::{CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink};
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::read::SuffixSpellings;
 use crate::request::{self, ReadWork, Request, stored_link_row, unreadable};
@@ -142,7 +140,7 @@ const MISSING_ANCHOR: &str = "the document the link names holds no place its anc
 /// link is reached it is judged alike: the selection decides which links are
 /// read, and never what is found about them.
 ///
-/// A key is spelled in the key space the store's path order selects, as the
+/// A key is spelled under the comparison key, as the
 /// changeset names its classes and paths
 /// ([`crate::IncrementOutcome::affected_classes`],
 /// [`crate::IncrementOutcome::affected_paths`]).
@@ -161,7 +159,7 @@ pub enum LinkSelection<'a> {
     Path(&'a PathKey),
 }
 
-/// One key a link is held under, in the root's key space, beside its segment
+/// One key a link is held under, under the comparison key, beside its segment
 /// count, which a suffix key carries and a path key does not.
 type Key = (String, Option<u64>);
 
@@ -326,8 +324,7 @@ enum Verdict {
 }
 
 /// The link-health findings about every link `selection` selects, judged
-/// against the documents the store holds now under the key space `order`
-/// selects, less the places `ignore` keeps out of a class. Each key the links
+/// against the documents the store holds now under the comparison key, less the places `ignore` keeps out of a class. Each key the links
 /// hold that `summaries` does not yet hold is resolved and kept there, so a
 /// judgment taken in chunks resolves each key once. Each statement runs on
 /// `connection` and its steps are added to `work`.
@@ -338,12 +335,11 @@ enum Verdict {
 pub(crate) fn judge(
     connection: &Connection,
     work: &ReadWork,
-    order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
     selection: LinkSelection<'_>,
     summaries: &mut KeySummaries,
 ) -> Result<Vec<FindingFacts>, StoreError> {
-    let key = SuffixKey::under(order);
+    let key = SuffixKey::Comparison;
     let mut findings = Vec::new();
     match selection {
         LinkSelection::Documents([]) => {}
@@ -354,14 +350,12 @@ pub(crate) fn judge(
                 statement::documents_parameters(&paths.into_iter().collect::<Vec<&str>>())?;
             let writer = OnWriter { connection, work };
             let (links, _) = read_links(&writer, key, Selected::Documents, values)?;
-            findings = judge_links(connection, work, order, ignore, &links, summaries)?;
+            findings = judge_links(connection, work, ignore, &links, summaries)?;
         }
         LinkSelection::Class(_) | LinkSelection::Path(_) => {
             let mut pages = Pages::new(selection);
             while let Some(links) = pages.next(&OnWriter { connection, work }, key)? {
-                findings.extend(judge_links(
-                    connection, work, order, ignore, &links, summaries,
-                )?);
+                findings.extend(judge_links(connection, work, ignore, &links, summaries)?);
             }
         }
     }
@@ -532,7 +526,7 @@ pub(crate) struct Redecided {
 /// chunk is filed, every summary no link in it holds is forgotten, in every
 /// arm alike, so what is held at once is a chunk and the keys of two chunks
 /// at most, never the re-decided set. A link holds a key in each class its
-/// reductions name and one per path its rooted name spells, and those other
+/// optional `.md` spellings name and one per path its rooted name spells, and those other
 /// classes and paths fall outside the walk under way, so no walk order tells
 /// when one of them is passed; the chunk that held it is what does. A key
 /// held by consecutive chunks is resolved once across them — a hub class's
@@ -547,13 +541,12 @@ pub(crate) struct Redecided {
 pub(crate) fn redecide(
     transaction: &Transaction<'_>,
     work: &ReadWork,
-    order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
     generation: i64,
     classes: &BTreeSet<ClassKey>,
     paths: &BTreeSet<PathKey>,
 ) -> Result<Redecided, StoreError> {
-    let key = SuffixKey::under(order);
+    let key = SuffixKey::Comparison;
     let writer = OnWriter {
         connection: transaction,
         work,
@@ -565,7 +558,7 @@ pub(crate) fn redecide(
             return Ok(());
         }
         redecided.links += links.len() as u64;
-        for finding in judge_links(transaction, work, order, ignore, &links, summaries)? {
+        for finding in judge_links(transaction, work, ignore, &links, summaries)? {
             request::write_finding(transaction, &finding)?;
             redecided.findings += 1;
         }
@@ -682,7 +675,7 @@ pub(crate) fn redecide(
 /// anything under: positions in the lists [`occupied`] was asked about.
 #[derive(Debug, Default)]
 struct Occupied {
-    /// The classes a suffix key the root probes falls in.
+    /// The classes a suffix comparison key falls in.
     class_links: BTreeSet<usize>,
     /// The classes a finding is held under.
     class_findings: BTreeSet<usize>,
@@ -807,7 +800,6 @@ fn classes_hold(classes: &BTreeSet<ClassKey>, class: &str) -> bool {
 fn judge_links(
     connection: &Connection,
     work: &ReadWork,
-    order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
     links: &[Held],
     summaries: &mut KeySummaries,
@@ -815,7 +807,7 @@ fn judge_links(
     if links.is_empty() {
         return Ok(Vec::new());
     }
-    let key = SuffixKey::under(order);
+    let key = SuffixKey::Comparison;
     resolve_keys(connection, work, key, links, summaries)?;
 
     let verdicts = links
@@ -839,7 +831,7 @@ fn judge_links(
     // Each candidate is named once per set of summaries: a candidate an
     // earlier chunk named keeps the name it was named by.
     named.retain(|id, _| !summaries.names.contains_key(id));
-    let named = candidate_names(connection, work, order, ignore, &named)?;
+    let named = candidate_names(connection, work, ignore, &named)?;
     summaries.names.extend(named);
     let names = &summaries.names;
 
@@ -1147,14 +1139,13 @@ fn missing_anchors(
 fn candidate_names(
     connection: &Connection,
     work: &ReadWork,
-    order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
     named: &BTreeMap<i64, &str>,
 ) -> Result<HashMap<i64, CandidateName>, StoreError> {
     if named.is_empty() {
         return Ok(HashMap::new());
     }
-    let spellings = SuffixSpellings::new(named, ignore, order)?;
+    let spellings = SuffixSpellings::new(named, ignore)?;
     let mut classes = spellings.naming_classes();
     let (sql, values) = spellings.statement()?;
     let rows = Request::read_all_on(
@@ -1273,7 +1264,7 @@ mod tests {
         let root = norn_testkit::scratch::Scratch::new("norn-store-redecide-mass-delete");
         let mut store = Store::open_throwaway(
             root.join("store.sqlite3"),
-            StoredPathOrder::Sensitive,
+            crate::StoredPathOrder::Sensitive,
             crate::DerivationVersion::new(1),
         )
         .expect("opening a store");

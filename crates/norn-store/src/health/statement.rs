@@ -290,7 +290,7 @@ pub(crate) const FINDINGS_ARM: i64 = 2;
 /// anything under, each row the arm and the key's index in its list.
 ///
 /// Three arms, one per pass: [`CLASS_ARM`] answers each class a suffix key the
-/// root probes falls in, [`FINDINGS_ARM`] each class a finding is held under a
+/// comparison key names falls in, [`FINDINGS_ARM`] each class a finding is held under a
 /// class key in, and [`PATH_ARM`] each path key a link is held under exactly.
 /// These are the rows each pass reads first, so a key an arm answers no row
 /// for is one that arm's pass would read nothing under. The class arms walk
@@ -500,3 +500,7 @@ pub(crate) fn anchors_parameters(pairs: &[(i64, i64)]) -> Result<Vec<Value>, Sto
         ),
     )?)])
 }
+
+/// Exact stored spellings the overlay replaces, each reached by path equality.
+pub(crate) const STANDING_TARGETS_SQL: &str = "SELECT d.path
+    FROM json_each(?1) AS j CROSS JOIN documents AS d WHERE d.path = j.value";

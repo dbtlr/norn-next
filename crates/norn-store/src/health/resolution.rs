@@ -12,9 +12,9 @@
 //! the second. **Every target is overlaid both ways**, whatever the store
 //! holds at its path: a re-send whose landed targets the store has already
 //! taken in reads the same two vaults as the first send, so a plan's own
-//! progress never changes what it records (ADR 0037). A target is matched by
-//! its path key in the store's key space, so on a root that folds case the
-//! store's spelling of a target is the target.
+//! progress never changes what it records (ADR 0037). An overlay target replaces
+//! its exact stored path spelling. Comparison twins remain candidates unless
+//! their own stored paths are changed too.
 //!
 //! **A target changes where its presence does, or where the plan replaces the
 //! document standing there** ([`PathOverlay::replacing`]): one taken away and
@@ -123,7 +123,7 @@ use norn_wire::{Candidate, CandidateHead, LinkAddressKind, Resolves};
 use super::run::{OnSnapshot, ResolutionStatement, Runner};
 use super::{Held, Key, LINK_HEALTH_CHUNK, Pages, occupied_keys, statement};
 use crate::error::StoreError;
-use crate::facts::{CANDIDATE_HEAD, LinkFact, StoredPathOrder};
+use crate::facts::{CANDIDATE_HEAD, LinkFact};
 use crate::fields::ContentModel;
 use crate::link::{self, address_kind, keys_naming, link_keys, suffix_keys};
 use crate::path::{DocumentPath, SuffixKey};
@@ -459,12 +459,7 @@ impl Snapshot {
     ) -> Result<ResolutionWork, PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
-        let mut judging = Judging::new(
-            self.path_order(),
-            declared.ambiguity_ignore(),
-            overlay,
-            OnSnapshot::new(self),
-        );
+        let mut judging = Judging::new(declared.ambiguity_ignore(), overlay, OnSnapshot::new(self));
         judging.run(probed, &mut each).map_err(PageRefusal::from)?;
         Ok(judging.finished())
     }
@@ -513,12 +508,7 @@ impl Snapshot {
     ) -> Result<(Vec<TargetNaming>, ResolutionWork), PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
-        let mut judging = Judging::new(
-            self.path_order(),
-            declared.ambiguity_ignore(),
-            overlay,
-            OnSnapshot::new(self),
-        );
+        let mut judging = Judging::new(declared.ambiguity_ignore(), overlay, OnSnapshot::new(self));
         let namings = addresses
             .iter()
             .map(|address| judging.name(address, headed))
@@ -609,13 +599,12 @@ impl Present {
 /// One judgment's state: the overlay read into the store's key space, and the
 /// keys resolved so far.
 struct Judging<'a, R> {
-    order: StoredPathOrder,
     key: SuffixKey,
     ignore: &'a AmbiguityIgnore,
     overlay: &'a PathOverlay,
     runner: R,
     /// Each target's path key.
-    target_keys: BTreeSet<String>,
+    target_paths: BTreeSet<String>,
     /// Each key that could name a target, and the targets it could name.
     naming: BTreeMap<String, Vec<usize>>,
     /// Each key whose links are judged: one that could name a target the
@@ -638,13 +627,8 @@ struct Judging<'a, R> {
 }
 
 impl<'a, R: Runner> Judging<'a, R> {
-    fn new(
-        order: StoredPathOrder,
-        ignore: &'a AmbiguityIgnore,
-        overlay: &'a PathOverlay,
-        runner: R,
-    ) -> Self {
-        let key = SuffixKey::under(order);
+    fn new(ignore: &'a AmbiguityIgnore, overlay: &'a PathOverlay, runner: R) -> Self {
+        let key = SuffixKey::Comparison;
         let mut naming: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut sought = BTreeSet::new();
         let mut work = ResolutionWork::default();
@@ -666,15 +650,14 @@ impl<'a, R: Runner> Judging<'a, R> {
             }
         }
         Judging {
-            order,
             key,
             ignore,
             overlay,
             runner,
-            target_keys: overlay
+            target_paths: overlay
                 .targets
                 .iter()
-                .map(|target| target.path.path_key_in(key).as_str().to_string())
+                .map(|target| target.path.as_str().to_string())
                 .collect(),
             naming,
             sought,
@@ -741,10 +724,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     fn owned_by(&self, key: &str, held: Held) -> Result<Option<Judged>, StoreError> {
         let holder = DocumentPath::new(&held.holder)
             .map_err(|_| unreadable("documents.path", &held.holder))?;
-        if self
-            .target_keys
-            .contains(holder.path_key_in(self.key).as_str())
-        {
+        if self.target_paths.contains(holder.as_str()) {
             return Ok(None);
         }
         if held
@@ -775,10 +755,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         let mut keys: Vec<Key> = keys
             .into_iter()
             .map(|key| {
-                let text = match self.key {
-                    SuffixKey::Raw => key.key,
-                    SuffixKey::Folded => key.folded_key,
-                };
+                let text = key.key;
                 (text, key.segments)
             })
             .collect();
@@ -830,7 +807,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             let rows = heads.get(*key).map(Vec::as_slice).unwrap_or_default();
             let mut stored = Vec::with_capacity(rows.len());
             for row in rows {
-                if !self.targets(&row.1)? {
+                if !self.targets(&row.1) {
                     stored.push(row.clone());
                 }
             }
@@ -843,10 +820,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             for target in self.members(key).filter(|target| side.holds(target)) {
                 total += 1;
                 let rung = match key.1 {
-                    Some(_) => match self.key {
-                        SuffixKey::Raw => target.path.suffix_key().to_string(),
-                        SuffixKey::Folded => target.path.folded_suffix_key().to_string(),
-                    },
+                    Some(_) => target.path.suffix_key().to_string(),
                     None => key.0.clone(),
                 };
                 named.push((rung, target.path.as_str().to_string()));
@@ -875,28 +849,31 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// document at, which the overlay names instead.
     fn stored_past_the_targets(&mut self, filled: &[&Key]) -> Result<u64, StoreError> {
         let totals = self.totals(filled)?;
-        // Which of the targets the filled keys could name the store holds a
-        // document at, read by their path keys, one row each at most.
-        let mut held_at: BTreeSet<Key> = BTreeSet::new();
+        // Overlay entries replace exact stored spellings. A comparison twin
+        // remains a candidate unless the overlay also changes its own path.
+        let mut paths = BTreeSet::new();
         for key in filled {
             for target in self.members(key) {
-                held_at.insert((target.path.path_key_in(self.key).as_str().to_string(), None));
+                paths.insert(target.path.as_str());
             }
         }
-        let bounds: Vec<(&Key, usize)> = held_at.iter().map(|key| (key, 1)).collect();
-        let held: BTreeSet<Key> = self
-            .heads(&bounds)?
+        let values = statement::documents_parameters(&paths.into_iter().collect::<Vec<_>>())?;
+        let held: BTreeSet<String> = self
+            .runner
+            .read_all(
+                ResolutionStatement::StandingTargets,
+                statement::STANDING_TARGETS_SQL.to_string(),
+                values,
+                |row| Ok(Ok(row.get(0)?)),
+                "reading the overlay's standing document paths",
+            )?
             .into_iter()
-            .filter(|(_, rows)| !rows.is_empty())
-            .map(|(key, _)| key)
             .collect();
         let mut stored = 0u64;
         for key in filled {
             let standing = self
                 .members(key)
-                .filter(|target| {
-                    held.contains(&(target.path.path_key_in(self.key).as_str().to_string(), None))
-                })
+                .filter(|target| held.contains(target.path.as_str()))
                 .count() as u64;
             stored += totals
                 .get(*key)
@@ -934,9 +911,8 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// Whether a target of the plan stands at the stored `path`, or why the
     /// store holds a path its own grammar does not read.
-    fn targets(&self, path: &str) -> Result<bool, StoreError> {
-        let at = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
-        Ok(self.target_keys.contains(at.path_key_in(self.key).as_str()))
+    fn targets(&self, path: &str) -> bool {
+        self.target_paths.contains(path)
     }
 
     /// Whether one of `keys` is sought: it could name a target the plan
@@ -1009,7 +985,6 @@ impl<'a, R: Runner> Judging<'a, R> {
                     self.ignore.admits(
                         target.path.as_str(),
                         usize::try_from(segments).unwrap_or(usize::MAX),
-                        self.order,
                     )
                 })
             })
@@ -1030,7 +1005,6 @@ impl<'a, R: Runner> Judging<'a, R> {
                     self.ignore.admits(
                         document.as_str(),
                         usize::try_from(segments).unwrap_or(usize::MAX),
-                        self.order,
                     )
                 })
             })
@@ -1118,7 +1092,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         for (key, head) in self.heads(&bounds)? {
             let mut stored = Vec::new();
             for (_, path) in head {
-                if !self.targets(&path)? && stored.len() < 2 {
+                if !self.targets(&path) && stored.len() < 2 {
                     stored.push(path);
                 }
             }

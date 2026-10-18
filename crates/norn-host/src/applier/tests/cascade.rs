@@ -735,8 +735,8 @@ fn a_backlink_added_to_a_refilled_path_after_preview_refuses_the_plan() {
 
 /// **A link is respelled only in the extension style it was written in**: a
 /// wikilink written without the document extension whose every spelling of
-/// the destination without one reads as something else — `Ü/v1.2` names an
-/// attachment — is left as written and said to be unrepresentable, never
+/// the destination without one reads as something else — `Ü/v1.md` names two
+/// documents — is left as written and said to be unrepresentable, never
 /// given an extension its author did not write.
 #[test]
 fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
@@ -745,7 +745,7 @@ fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
         ("Ü/v1.md", "V\n"),
         ("h.md", "[[b/note one]]\n"),
     ]);
-    let resolution = fixture.resolution(vec![moving("b/note one.md", "Ü/v1.2.md")]);
+    let resolution = fixture.resolution(vec![moving("b/note one.md", "Ü/v1.md.md")]);
     assert_eq!(resolution.plan.operations[0].cascade, []);
     assert_eq!(
         resolution.forecast.links,
@@ -913,7 +913,7 @@ fn a_left_behind_link_sharing_its_key_with_a_respelled_one_is_still_unrepresenta
         ("c.md", "[[x]]\n"),
     ]);
     let resolution =
-        fixture.previewed_and_applied(vec![moving("x.md", "Ü/v1.2.md"), moving("t.md", "x.md")]);
+        fixture.previewed_and_applied(vec![moving("x.md", "Ü/v1.md.md"), moving("t.md", "x.md")]);
     assert_eq!(
         resolution.plan.operations[1].cascade,
         [wikilink("h.md", "t", "x")]

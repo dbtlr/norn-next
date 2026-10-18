@@ -384,7 +384,7 @@ pub fn driving_parts() -> Vec<(ReadFilter, Predicate)> {
             Predicate::has_finding(FindingKind::BodyBytesNotUtf8),
         ),
         (
-            ReadFilter::LinksTo(SuffixKey::Raw),
+            ReadFilter::LinksTo(SuffixKey::Comparison),
             Predicate::links_to(target("a")),
         ),
     ]
@@ -676,7 +676,7 @@ pub fn path_names_no_document_in_class(
 
 /// The same `document/path-names-no-document` finding with its classes taken
 /// from the probe `target` opens, which is how a resolution reading mints
-/// them: one class per reduction.
+/// them: one class, or both document-name classes where `target` ends in `.md`.
 pub fn path_names_no_document_for_target(
     at: &str,
     target: &str,
