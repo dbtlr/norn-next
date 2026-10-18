@@ -1,0 +1,493 @@
+{
+  "schema_version": 1,
+  "probe_root": "artifacts/scratch/norn-422",
+  "cases": [
+    {
+      "id": "M01",
+      "concern": "shortest unique name",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M01](n422-unique.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "M02",
+      "concern": "shortest extensionless name",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M02](n422-unique)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "M03",
+      "concern": "explicit parent relative",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M03](../targets/n422-unique.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "M04",
+      "concern": "explicit local relative",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M04](./n422-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/sources/n422-choice.md",
+        "artifacts/scratch/norn-422/targets/n422-choice.md"
+      ]
+    },
+    {
+      "id": "M05",
+      "concern": "bare duplicate name vs local",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M05](n422-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/sources/n422-choice.md",
+        "artifacts/scratch/norn-422/targets/n422-choice.md"
+      ]
+    },
+    {
+      "id": "M06",
+      "concern": "vault path without leading slash",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M06](artifacts/scratch/norn-422/targets/n422-path-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-path-choice.md"
+      ]
+    },
+    {
+      "id": "M07",
+      "concern": "vault path with leading slash",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M07](/artifacts/scratch/norn-422/targets/n422-path-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-path-choice.md"
+      ]
+    },
+    {
+      "id": "M08",
+      "concern": "unprefixed suffix vs source-relative path",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M08](targets/n422-path-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-path-choice.md",
+        "artifacts/scratch/norn-422/sources/targets/n422-path-choice.md"
+      ]
+    },
+    {
+      "id": "M09",
+      "concern": "explicit relative disambiguates path",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M09](./targets/n422-path-choice.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/sources/targets/n422-path-choice.md",
+        "artifacts/scratch/norn-422/targets/n422-path-choice.md"
+      ]
+    },
+    {
+      "id": "M10",
+      "concern": "percent-encoded space",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M10](../targets/n422-space%20name.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-space name.md"
+      ]
+    },
+    {
+      "id": "M11",
+      "concern": "angle-bracket space",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M11](<../targets/n422-space name.md>)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-space name.md"
+      ]
+    },
+    {
+      "id": "M12",
+      "concern": "percent-encoded percent",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M12](../targets/n422-percent%25name.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-percent%name.md"
+      ]
+    },
+    {
+      "id": "M13",
+      "concern": "extensionless parent relative",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M13](../targets/n422-unique)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "M14",
+      "concern": "ASCII case mismatch",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M14](../targets/N422-CASE.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-Case.md"
+      ]
+    },
+    {
+      "id": "M15",
+      "concern": "Unicode case mismatch",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M15](../targets/n422-éclair.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-Éclair.md"
+      ]
+    },
+    {
+      "id": "M16",
+      "concern": "NFD link to NFC-only file",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M16](../unicode/nfc/n422-café.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/unicode/nfc/n422-café.md"
+      ]
+    },
+    {
+      "id": "M17",
+      "concern": "NFC link to NFD-only file",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M17](../unicode/nfd/n422-thé.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/unicode/nfd/n422-thé.md"
+      ]
+    },
+    {
+      "id": "M18",
+      "concern": "heading with encoded spaces",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M18](../targets/n422-anchors.md#Heading%20with%20spaces)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "M19",
+      "concern": "block fragment",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M19](../targets/n422-anchors.md#^n422-block)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "M20",
+      "concern": "missing heading",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M20](../targets/n422-anchors.md#n422-missing)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "M21",
+      "concern": "missing block",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M21](../targets/n422-anchors.md#^n422-missing)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "M22",
+      "concern": "known missing document",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M22](../targets/n422-does-not-exist.md)",
+      "candidates": []
+    },
+    {
+      "id": "M23",
+      "concern": "exact vault path vs deeper suffix",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M23](artifacts/scratch/norn-422/targets/n422-exact.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-exact.md",
+        "artifacts/scratch/norn-422/shadow/artifacts/scratch/norn-422/targets/n422-exact.md"
+      ]
+    },
+    {
+      "id": "M24",
+      "concern": "dotted extensionless note",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M24](../dots/n422-v1.2)",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/n422-v1.2.md"
+      ]
+    },
+    {
+      "id": "M25",
+      "concern": "attachment beside same-stem Markdown",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M25](../dots/photo.png)",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/photo.png",
+        "artifacts/scratch/norn-422/dots/photo.md"
+      ]
+    },
+    {
+      "id": "M26",
+      "concern": "unmatched dotted name vs stem",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[M26](../dots/v1.2)",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/v1.md"
+      ]
+    },
+    {
+      "id": "W01",
+      "concern": "shortest unique name",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-unique|W01]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "W02",
+      "concern": "explicit Markdown extension",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-unique.md|W02]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "W03",
+      "concern": "explicit local relative",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[./n422-choice|W03]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/sources/n422-choice.md",
+        "artifacts/scratch/norn-422/targets/n422-choice.md"
+      ]
+    },
+    {
+      "id": "W04",
+      "concern": "explicit parent relative",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[../targets/n422-unique|W04]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "W05",
+      "concern": "vault path with leading slash",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[/artifacts/scratch/norn-422/targets/n422-unique|W05]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "W06",
+      "concern": "vault path without leading slash",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[artifacts/scratch/norn-422/targets/n422-unique|W06]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-unique.md"
+      ]
+    },
+    {
+      "id": "W07",
+      "concern": "exact vault path vs deeper suffix",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[artifacts/scratch/norn-422/targets/n422-exact|W07]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-exact.md",
+        "artifacts/scratch/norn-422/shadow/artifacts/scratch/norn-422/targets/n422-exact.md"
+      ]
+    },
+    {
+      "id": "W08",
+      "concern": "ASCII case mismatch",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[N422-CASE|W08]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-Case.md"
+      ]
+    },
+    {
+      "id": "W09",
+      "concern": "Unicode case mismatch",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-éclair|W09]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-Éclair.md"
+      ]
+    },
+    {
+      "id": "W10",
+      "concern": "NFD link to NFC-only file",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-café|W10]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/unicode/nfc/n422-café.md"
+      ]
+    },
+    {
+      "id": "W11",
+      "concern": "NFC link to NFD-only file",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-thé|W11]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/unicode/nfd/n422-thé.md"
+      ]
+    },
+    {
+      "id": "W12",
+      "concern": "NFC vs NFD duplicate stem",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-résumé|W12]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/unicode/pair-a/n422-résumé.md",
+        "artifacts/scratch/norn-422/unicode/pair-b/n422-résumé.md"
+      ]
+    },
+    {
+      "id": "W13",
+      "concern": "attachment beside same-stem Markdown",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[artifacts/scratch/norn-422/dots/photo.png|W13]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/photo.png",
+        "artifacts/scratch/norn-422/dots/photo.md"
+      ]
+    },
+    {
+      "id": "W14",
+      "concern": "unmatched dotted name vs stem",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[artifacts/scratch/norn-422/dots/v1.2|W14]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/v1.md"
+      ]
+    },
+    {
+      "id": "W15",
+      "concern": "dotted note without Markdown extension",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-v1.2|W15]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/n422-v1.2.md"
+      ]
+    },
+    {
+      "id": "W16",
+      "concern": "extension-like note name",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-photo.png|W16]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/dots/n422-photo.png.md"
+      ]
+    },
+    {
+      "id": "W17",
+      "concern": "ambiguous stem with local candidate",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-twin|W17]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/ambiguous/a/n422-twin.md",
+        "artifacts/scratch/norn-422/ambiguous/b/n422-twin.md",
+        "artifacts/scratch/norn-422/sources/n422-twin.md"
+      ]
+    },
+    {
+      "id": "W18",
+      "concern": "known missing suffix control",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[ambiguous/n422-none|W18]]",
+      "candidates": []
+    },
+    {
+      "id": "W19",
+      "concern": "heading with spaces",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-anchors#Heading with spaces|W19]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "W20",
+      "concern": "block fragment",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-anchors#^n422-block|W20]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "W21",
+      "concern": "missing heading",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-anchors#n422-missing|W21]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "W22",
+      "concern": "missing block",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-anchors#^n422-missing|W22]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-anchors.md"
+      ]
+    },
+    {
+      "id": "W23",
+      "concern": "space in name",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-space name|W23]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-space name.md"
+      ]
+    },
+    {
+      "id": "W24",
+      "concern": "percent spelling in wikilink",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-space%20name|W24]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/targets/n422-space name.md"
+      ]
+    },
+    {
+      "id": "W25",
+      "concern": "known missing document",
+      "source": "artifacts/scratch/norn-422/sources/n422-links.md",
+      "link": "[[n422-does-not-exist|W25]]",
+      "candidates": []
+    },
+    {
+      "id": "A01",
+      "concern": "ambiguous stem without local candidate",
+      "source": "artifacts/scratch/norn-422/observer/n422-remote-links.md",
+      "link": "[[n422-twin|A01]]",
+      "candidates": [
+        "artifacts/scratch/norn-422/ambiguous/a/n422-twin.md",
+        "artifacts/scratch/norn-422/ambiguous/b/n422-twin.md",
+        "artifacts/scratch/norn-422/sources/n422-twin.md"
+      ]
+    },
+    {
+      "id": "A02",
+      "concern": "Markdown ambiguous stem without local candidate",
+      "source": "artifacts/scratch/norn-422/observer/n422-remote-links.md",
+      "link": "[A02](n422-twin.md)",
+      "candidates": [
+        "artifacts/scratch/norn-422/ambiguous/a/n422-twin.md",
+        "artifacts/scratch/norn-422/ambiguous/b/n422-twin.md",
+        "artifacts/scratch/norn-422/sources/n422-twin.md"
+      ]
+    }
+  ]
+}
