@@ -17,7 +17,7 @@ use crate::read::{
     AnswerSeek, Binder, Driver, FINDING_ROW_COLUMNS, FieldOrder, Filter, Reach, Term,
     answer_ordering, answer_place, answer_range, key_walk,
 };
-use crate::resolve::{self, AmbiguityIgnore, TargetClass};
+use crate::resolve::{self, TargetClass};
 
 /// Every statement shape the find builder runs, named.
 ///
@@ -109,16 +109,15 @@ pub enum FindStatement {
     /// `finding_classes`' primary key per finding. Run by every read that
     /// answers finding rows.
     FindingClasses,
-    /// The head of the class a target opens, in the resolution ladder's
-    /// order: the target's suffix ranges on `documents_suffix_key` where the
-    /// root tells spellings apart and on `documents_folded_suffix_key` where
-    /// it folds ASCII case, less the places the schema ignores, at most
-    /// [`crate::CANDIDATE_HEAD`] of them. The ladder's tie-break on the path
-    /// sorts the rows the ranges reached, so it costs the class. Run by every
-    /// read that resolves one target: a get's and a links-to part's.
+    /// The head of the class a target opens: each admitting-count run of
+    /// each suffix range on `documents_admitted_suffix_key` where the root
+    /// tells spellings apart and on `documents_admitted_folded_suffix_key`
+    /// where it folds ASCII case, cut at [`crate::CANDIDATE_HEAD`] in ladder
+    /// order, then merged and cut again. Run by every read that resolves one
+    /// target: a get's and a links-to part's.
     ClassHead,
     /// How many documents the class holds, run only where the head filled
-    /// [`crate::CANDIDATE_HEAD`]: a count over the same ranges.
+    /// [`crate::CANDIDATE_HEAD`]: a sum of the disjoint admitted-run counts.
     ClassTotal,
     /// Whether each suffix spelling of each candidate a read names names that
     /// candidate alone, for every candidate at once: for each range of each
@@ -978,8 +977,8 @@ pub(crate) fn compose_finding_classes(ids: &[i64]) -> (String, Vec<Value>) {
 /// [`FindStatement::ClassHead`]: at most `rows` of `class`, each as its id and
 /// its path, in the resolution ladder's order.
 ///
-/// **A class is read as every read of a class reads it**: its rows are
-/// [`resolve::class_rows`], and a head of it is in [`resolve::ladder_order`].
+/// **A class is read as every read of a class reads it**: its bounded runs are
+/// [`resolve::class_head_rows`], and a head of it is in [`resolve::ladder_order`].
 pub(crate) fn compose_class_head(class: &TargetClass, rows: usize) -> (String, Vec<Value>) {
     let mut values = class.parameters();
     let limit = values.len() + 1;
@@ -989,7 +988,7 @@ pub(crate) fn compose_class_head(class: &TargetClass, rows: usize) -> (String, V
     (
         format!(
             "SELECT dr.id, dr.path {} {} LIMIT ?{limit}",
-            resolve::class_rows(class),
+            resolve::class_head_rows(class, &format!("?{limit}")),
             resolve::ladder_order(class)
         ),
         values,
@@ -998,10 +997,7 @@ pub(crate) fn compose_class_head(class: &TargetClass, rows: usize) -> (String, V
 
 /// [`FindStatement::ClassTotal`]: how many documents `class` holds.
 pub(crate) fn compose_class_total(class: &TargetClass) -> (String, Vec<Value>) {
-    (
-        format!("SELECT COUNT(*) {}", resolve::class_rows(class)),
-        class.parameters(),
-    )
+    (resolve::class_total(class), class.parameters())
 }
 
 /// One range of one suffix spelling's class, as
@@ -1013,18 +1009,18 @@ pub(crate) struct SpellingRange<'a> {
     pub(crate) segments: usize,
 }
 
-/// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two of
-/// the documents in it under `ignore` and `order`, each as the range's index in
-/// `ranges` and the document's id, in no order.
+/// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two
+/// of the admitted documents in it under `order`, each as the range's index
+/// in `ranges` and the document's id, in no order.
 ///
-/// The ranges drive the statement — `CROSS JOIN` keeps them the outer loop —
-/// and each range is a seek of the suffix key the root probes that stops at its
-/// second document, each document then reached by its row id, so a range
-/// costs at most two of its class, however large the class. **A range is read
-/// as every class range is read**: [`resolve::range_class`].
+/// The ranges drive the statement — `CROSS JOIN` keeps them the outer loop.
+/// Each admitting count opens one seek of the suffix key the root probes,
+/// cut at two documents in ladder order. The bounded heads are merged and
+/// cut at two before their documents are emitted, each reached by row id.
+/// A range costs at most two members per admitting count, however large the
+/// class. Every class range uses [`resolve::range_rows`].
 pub(crate) fn compose_candidate_suffixes(
     ranges: &[SpellingRange<'_>],
-    ignore: &AmbiguityIgnore,
     order: StoredPathOrder,
 ) -> Result<(String, Vec<Value>), StoreError> {
     let listed = canonical_json(&FrontmatterValue::Sequence(
@@ -1041,55 +1037,51 @@ pub(crate) fn compose_candidate_suffixes(
             })
             .collect(),
     ))?;
-    let class = resolve::range_class(
-        "dr",
+    let class = resolve::range_rows(
         SuffixKey::under(order),
         (
             "json_extract(j.value, '$[0]')",
             "json_extract(j.value, '$[1]')",
         ),
         "json_extract(j.value, '$[2]')",
-        "?2",
-        "?3",
+        Some("2"),
     );
     Ok((
         format!(
             "SELECT j.key, dc.id FROM json_each(?1) AS j
-             CROSS JOIN documents AS dc
-             WHERE dc.id IN (SELECT dr.id FROM documents AS dr WHERE {class} LIMIT 2)"
+        CROSS JOIN documents AS dc
+        WHERE dc.id IN (SELECT id FROM ({class}))"
         ),
-        vec![
-            Value::Text(listed),
-            Value::Text(ignore.encoded()),
-            Value::Text(order.as_str().to_string()),
-        ],
+        vec![Value::Text(listed)],
     ))
 }
 
 /// [`FindStatement::LinkTargets`]: for each link `links` names that names a
-/// document, at most `head` of the documents it names under `ignore` and
-/// `order`, in the resolution ladder's order, each as the link's id, the
-/// document's id and path, and how many documents the link names.
+/// document, at most `head` of the documents it names under `order`, in the
+/// resolution ladder's order, each as the link's id, the document's id and
+/// path, and how many documents the link names.
 ///
 /// **Each distinct key is read once**, however many of the links carry it:
 /// `keyed` is the page's keys, each once, and `reached` the documents each
-/// reaches — a suffix key's class through [`resolve::link_key_class`], a path
-/// key's documents through [`resolve::link_key_path`] — so links sharing a key
-/// share its read. Each link's head and total are then read off the rows its
-/// own keys reached, ranked in the ladder's order: the probed key, then the
-/// path. A path key's rows share one key, so they rank by the path alone,
-/// which is its path order among documents a folding root reads as one.
+/// reaches — a suffix key's bounded head through [`resolve::link_key_rows`],
+/// a path key's documents through [`resolve::link_key_path`] — so links
+/// sharing a key share its read. Each key's total sums its admitted runs
+/// separately from its bounded head. Each link's head merges its keys' heads
+/// in the ladder's order: the probed key, then the path. Its total sums
+/// their disjoint counts. A path key's rows share one key, so they rank by
+/// the path alone, which is its path order among documents a folding root
+/// reads as one.
 pub(crate) fn compose_link_targets(
     links: &[i64],
-    ignore: &AmbiguityIgnore,
     order: StoredPathOrder,
     head: usize,
 ) -> (String, Vec<Value>) {
     let key = SuffixKey::under(order);
     let link_key = resolve::link_key_column(key);
-    let class = resolve::link_key_class("dl", key, "keyed.key", "keyed.segments", "?2", "?3");
+    let class = resolve::link_key_rows(key, "keyed.key", "keyed.segments", Some("?2"));
+    let total = resolve::link_key_total(key, "keyed.key", "keyed.segments");
     let path = resolve::link_key_path("dp", key, "keyed.key");
-    let rung = format!("dl.{}", key.column());
+    let rung = format!("dc.{}", key.column());
     let ladder = resolve::ladder("reached.rung", "reached.path");
     (
         format!(
@@ -1097,27 +1089,30 @@ pub(crate) fn compose_link_targets(
              keyed(key, segments) AS MATERIALIZED (
                  SELECT DISTINCT lk.{link_key}, lk.segments
                  FROM page CROSS JOIN link_keys AS lk WHERE lk.link = page.link),
+             totals(key, total) AS MATERIALIZED (
+                 SELECT keyed.key, CASE WHEN keyed.segments IS NOT NULL THEN ({total})
+                     ELSE (SELECT COUNT(*) FROM documents AS dp WHERE {path}) END FROM keyed),
              reached(key, id, path, rung) AS MATERIALIZED (
-                 SELECT keyed.key, dl.id, dl.path, {rung}
-                 FROM keyed CROSS JOIN documents AS dl
-                 WHERE keyed.segments IS NOT NULL AND {class}
+                 SELECT keyed.key, dc.id, dc.path, {rung}
+                 FROM keyed CROSS JOIN documents AS dc
+                 WHERE keyed.segments IS NOT NULL AND dc.id IN (SELECT id FROM ({class}))
                  UNION ALL
-                 SELECT keyed.key, dp.id, dp.path, keyed.key
-                 FROM keyed CROSS JOIN documents AS dp
-                 WHERE keyed.segments IS NULL AND {path}),
+                 SELECT keyed.key, dc.id, dc.path, keyed.key
+                 FROM keyed CROSS JOIN documents AS dc
+                 WHERE keyed.segments IS NULL AND dc.id IN (
+                     SELECT dp.id FROM documents AS dp WHERE {path} ORDER BY dp.path LIMIT ?2)),
              ranked(link, id, path, place, total) AS (
                  SELECT lr.link, reached.id, reached.path,
                         ROW_NUMBER() OVER (PARTITION BY lr.link ORDER BY {ladder}),
-                        COUNT(*) OVER (PARTITION BY lr.link)
+                        (SELECT SUM(t.total) FROM link_keys AS lt CROSS JOIN totals AS t
+                         WHERE lt.link = lr.link AND t.key = lt.{link_key})
                  FROM page CROSS JOIN link_keys AS lr CROSS JOIN reached
                  WHERE lr.link = page.link AND reached.key = lr.{link_key})
-             SELECT link, id, path, total FROM ranked WHERE place <= ?4
+             SELECT link, id, path, total FROM ranked WHERE place <= ?2
              ORDER BY link, place"
         ),
         vec![
             id_list(links),
-            Value::Text(ignore.encoded()),
-            Value::Text(order.as_str().to_string()),
             Value::Integer(i64::try_from(head).expect("a head fits i64")),
         ],
     )

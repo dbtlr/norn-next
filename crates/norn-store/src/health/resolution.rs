@@ -1209,8 +1209,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             paths,
             keys: arms,
         } = arms(keys);
-        let values: Vec<Value> =
-            statement::totals_parameters(&classes, &paths, self.ignore, self.order)?;
+        let values: Vec<Value> = statement::totals_parameters(&classes, &paths)?;
         let rows = self.runner.read_all(
             ResolutionStatement::Totals,
             statement::totals_sql(self.key),

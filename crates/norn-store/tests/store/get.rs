@@ -26,9 +26,7 @@ use norn_wire::{
     Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{
-    Scratch, document, heading_anchor, planned_get_work, span, unread_block, write_documents,
-};
+use crate::common::{Scratch, document, heading_anchor, planned_get_work, span, unread_block};
 use crate::find::{failure_of, map, rows_of, string};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -135,6 +133,15 @@ struct Vault {
 
 impl Vault {
     fn holding(label: &str, order: StoredPathOrder, documents: &[DocumentFacts]) -> Self {
+        Self::holding_under(label, order, documents, &declared())
+    }
+
+    fn holding_under(
+        label: &str,
+        order: StoredPathOrder,
+        documents: &[DocumentFacts],
+        declared: &ContentModel,
+    ) -> Self {
         let scratch = Scratch::new(label);
         let mut store = Store::open(scratch.database(), order, crate::common::DERIVATION)
             .expect("opening a store");
@@ -142,7 +149,15 @@ impl Vault {
             .begin_request()
             .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
             .expect("pinning the suite's schema");
-        write_documents(&mut store.begin_request(), documents);
+        store
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                documents.iter().cloned().map(norn_store::Change::Upsert),
+                &[],
+                declared,
+            )
+            .expect("deriving under the reading's declaration");
         let reader = Arc::new(store.open_reader().reader.expect("a reader"));
         Vault {
             _scratch: scratch,
@@ -158,6 +173,19 @@ impl Vault {
             .map(|at| document(at, &format!("hash-{at}"), "a body\n"))
             .collect();
         Self::holding(label, order, &documents)
+    }
+
+    fn at_under(
+        label: &str,
+        order: StoredPathOrder,
+        paths: &[&str],
+        declared: &ContentModel,
+    ) -> Self {
+        let documents: Vec<_> = paths
+            .iter()
+            .map(|at| document(at, &format!("hash-{at}"), "a body\n"))
+            .collect();
+        Self::holding_under(label, order, &documents, declared)
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -390,7 +418,8 @@ fn a_folding_root_resolves_every_case_spelling_as_one_class() {
 #[test]
 fn a_get_and_a_find_resolving_one_target_read_one_class() {
     for (order, class) in [(Sensitive, 2), (Folding, 3)] {
-        let vault = Vault::at(
+        let archived = ignoring(&["archive/**"]);
+        let vault = Vault::at_under(
             &format!("get-one-class-{order:?}"),
             order,
             &[
@@ -400,8 +429,8 @@ fn a_get_and_a_find_resolving_one_target_read_one_class() {
                 "archive/glossary.md",
                 "notes/other.md",
             ],
+            &archived,
         );
-        let archived = ignoring(&["archive/**"]);
         let found: Vec<String> = vault
             .snapshot()
             .find(
@@ -455,12 +484,13 @@ fn a_target_naming_no_document_refuses_as_unknown() {
 #[test]
 fn an_ignored_place_stays_out_of_the_class_a_get_resolves() {
     for order in [Sensitive, Folding] {
-        let vault = Vault::at(
+        let archived = ignoring(&["archive/**"]);
+        let vault = Vault::at_under(
             &format!("get-ignored-{order:?}"),
             order,
             &["archive/glossary.md", "notes/glossary.md"],
+            &archived,
         );
-        let archived = ignoring(&["archive/**"]);
         let path = |spelled: &str| {
             record(&vault.get_under(&getting(spelled).with_columns([Column::path()]), &archived))
                 .path
@@ -469,6 +499,11 @@ fn an_ignored_place_stays_out_of_the_class_a_get_resolves() {
         };
         assert_eq!(path("glossary"), "notes/glossary.md");
         assert_eq!(path("archive/glossary"), "archive/glossary.md");
+        let vault = Vault::at(
+            "get-unignored-control",
+            order,
+            &["archive/glossary.md", "notes/glossary.md"],
+        );
         assert!(matches!(
             vault.refusal(&getting("glossary")),
             PageRefusal::AmbiguousTarget(_)
@@ -1893,16 +1928,19 @@ fn find_plans_of(plans: &[GetPlan], statement: FindStatement) -> Vec<QueryPlan> 
 /// the root probes, bounded on both sides, and nothing read end to end.
 fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
     plan.assert_no_full_scan();
-    let rows = rows_of(plan, "dr");
+    let rows = rows_of(plan, "dl");
     rows.assert_searches_through("documents", Access::Index(index));
-    rows.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
+    rows.assert_search_constraint(
+        "documents",
+        &format!("(admitting_segments=? AND {key}>? AND {key}<?)"),
+    );
 }
 
 /// **A get's class is read through the suffix key the root probes**: the
 /// head, the total and each candidate's suffix probe a get's target runs —
 /// the find builder's class statements, which every resolution of a target
-/// runs — are each a seek of `documents_suffix_key` where the root tells
-/// spellings apart and of `documents_folded_suffix_key` where it folds ASCII
+/// runs — are each a seek of `documents_admitted_suffix_key` where the root tells
+/// spellings apart and of `documents_admitted_folded_suffix_key` where it folds ASCII
 /// case, bounded on both sides by the target's range.
 ///
 /// Controls: a head read end to end fails; the probed index dropped, the head
@@ -1912,8 +1950,12 @@ fn a_class_is_read_through_the_suffix_key_the_root_probes() {
     let paths: Vec<String> = (1..=7).map(|at| format!("d{at}/glossary.md")).collect();
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     for (order, index, key) in [
-        (Sensitive, "documents_suffix_key", "suffix_key"),
-        (Folding, "documents_folded_suffix_key", "folded_suffix_key"),
+        (Sensitive, "documents_admitted_suffix_key", "suffix_key"),
+        (
+            Folding,
+            "documents_admitted_folded_suffix_key",
+            "folded_suffix_key",
+        ),
     ] {
         let mut vault = Vault::at(&format!("get-class-plan-{order:?}"), order, &paths);
         let plans = vault.plans(&getting("glossary"));
@@ -1928,8 +1970,8 @@ fn a_class_is_read_through_the_suffix_key_the_root_probes() {
         }
         let head = find_plans_of(&plans, FindStatement::ClassHead).remove(0);
         let walked = rewritten(&head, |detail| {
-            if detail.starts_with("SEARCH dr ") {
-                "SCAN dr".to_string()
+            if detail.starts_with("SEARCH dl ") {
+                "SCAN dl".to_string()
             } else {
                 detail.to_string()
             }
@@ -2174,4 +2216,136 @@ fn a_gets_work_reads_out_every_count_by_name() {
             ("get_link_candidates_read", 6),
         ]
     );
+}
+
+/// Class reads pay only for admitted members, even when ignored namesakes
+/// precede them in the resolution ladder.
+#[test]
+fn class_reads_seek_admitted_members_without_stepping_ignored_namesakes() {
+    fn measure(order: StoredPathOrder, ignored: usize) -> [u64; 6] {
+        let declared = ignoring(&["archive/**"]);
+        let mut measured = [0; 6];
+        for admitted in [1, 2] {
+            let scratch = Scratch::new("admitted-class-work");
+            let mut store = scratch.open_under(order);
+            store
+                .begin_request()
+                .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
+                .unwrap();
+            let mut documents: Vec<_> = (0..ignored)
+                .map(|n| crate::health::derived(&format!("archive/a{n:04}/index.md"), "ignored\n"))
+                .collect();
+            documents.push(crate::health::derived("zz/index.md", "admitted\n"));
+            if admitted == 2 {
+                documents.push(crate::health::derived("yy/index.md", "admitted\n"));
+            }
+            documents.push(crate::health::derived(
+                "holder.md",
+                "[[index]]\n[[zz/index]]\n",
+            ));
+            store
+                .begin_request()
+                .apply_increment(
+                    norn_store::IncrementProvenance::Derived,
+                    documents.into_iter().map(norn_store::Change::Upsert),
+                    &[],
+                    &declared,
+                )
+                .unwrap();
+            let reader = Arc::new(store.open_reader().reader.unwrap());
+            let vault = Vault {
+                _scratch: scratch,
+                store,
+                reader,
+            };
+            let snapshot = vault.snapshot();
+            let first = FindParams::new(address())
+                .with_predicates([Predicate::path("archive/**")])
+                .with_limit(500);
+            let mut page = first.clone();
+            let mut held = 0;
+            loop {
+                let found = snapshot.find(&page, &declared).unwrap();
+                held += found.rows.len();
+                match found.next {
+                    Some(next) => page = first.clone().with_after(next),
+                    None => break,
+                }
+            }
+            assert_eq!(
+                held, ignored,
+                "the moved fixture lost its ignored namesakes"
+            );
+            let before = snapshot.counters().vm_steps();
+            let plans = snapshot
+                .get_plans(
+                    &getting("index").with_columns([Column::path()]),
+                    &declared,
+                    &Text,
+                )
+                .unwrap();
+            assert!(!plans.is_empty());
+            measured[admitted - 1] = snapshot.counters().vm_steps() - before;
+            if admitted == 2 {
+                for (slot, params) in [
+                    FindParams::new(address())
+                        .with_predicates([Predicate::resolves(target("index"))]),
+                    FindParams::new(address())
+                        .with_predicates([Predicate::links_to(target("zz/index"))]),
+                    FindParams::new(address())
+                        .with_predicates([Predicate::path("holder.md")])
+                        .with_columns([Column::links()]),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let before = snapshot.counters().vm_steps();
+                    let found = snapshot.find(&params, &declared).unwrap();
+                    assert!(
+                        !found.rows.is_empty(),
+                        "the measured find returned nothing: {params:?}"
+                    );
+                    measured[slot + 2] = snapshot.counters().vm_steps() - before;
+                }
+                drop(snapshot);
+                let mut vault = vault;
+                let mut request = vault.store.begin_request();
+                request
+                    .apply_increment(
+                        norn_store::IncrementProvenance::Derived,
+                        [norn_store::Change::Upsert(crate::health::derived(
+                            "zz/index.md",
+                            "changed\n",
+                        ))],
+                        &[],
+                        &declared,
+                    )
+                    .unwrap();
+                measured[5] = request.read_steps();
+            }
+        }
+        measured
+    }
+    let readings = [Sensitive, Folding].map(|order| (order, [20, 2000].map(|n| measure(order, n))));
+    for (order, steps) in &readings {
+        eprintln!("admitted class VM steps {order:?}, n=20/2000: {steps:?}");
+    }
+    for (order, [small, large]) in readings {
+        for (slot, name) in [
+            "get index (one admitted)",
+            "get index (two admitted)",
+            "find resolves index",
+            "find links_to zz/index",
+            "holder links column",
+            "ambiguous index changeset / health totals",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                small[slot], large[slot],
+                "{name} VM steps grew with ignored namesakes under {order:?}"
+            );
+        }
+    }
 }

@@ -107,19 +107,18 @@
 //! reach the next of a few once the budget reaches the ceiling: a part
 //! keeping more than the ceiling with its documents bunched together, or a
 //! part whose seek reaches many documents it rejects — findings at paths no
-//! document stands at, values of the wrong declared shape or failing a folded
-//! key's typed order, links whose key names another document, documents the
-//! ambiguity-ignore set leaves out, paths under a glob's literal prefix the
-//! glob rejects — which its count takes for documents it keeps, so the page
-//! walks on — or a part keeping many documents of which few hold the rows the
-//! page selects, which stand among many at documents the part rejects: a
-//! validate's findings of one kind, severity or rule, or a field sort's
-//! section of documents carrying its key, where the count is of documents and
-//! not of those rows, so the page walks on past the ceiling.
-//! Such a page pays its rounds to the ceiling first — windows counted in its
-//! own rows, and counts — which, as each round but the last walks its whole
-//! window, come to a few times the rows the page passes; then each row past
-//! the ceiling's rounds is walked once
+//! document stands at, values of the wrong declared shape or failing a
+//! folded key's typed order, links whose key names another document, paths
+//! under a glob's literal prefix the glob rejects — which its count takes
+//! for documents it keeps, so the page walks on — or a part keeping many
+//! documents of which few hold the rows the page selects, which stand among
+//! many at documents the part rejects: a validate's findings of one kind,
+//! severity or rule, or a field sort's section of documents carrying its
+//! key, where the count is of documents and not of those rows, so the page
+//! walks on past the ceiling. Such a page pays its rounds to the ceiling
+//! first — windows counted in its own rows, and counts — which, as each
+//! round but the last walks its whole window, come to a few times the rows
+//! the page passes; then each row past the ceiling's rounds is walked once
 //! over a drain, so the drain stays linear: no index holds a range's, a
 //! full-text match's, a resolution's or a links-to part's documents in a
 //! page's order, and a count that judged each row would read without bound.

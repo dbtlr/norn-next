@@ -26,7 +26,7 @@ use norn_wire::{
 
 use crate::common::{
     DOCUMENT_PAYLOAD, Scratch, document, heading_anchor, planned_get_work, reads_of, span,
-    violation, write_documents,
+    violation,
 };
 use crate::find::{failure_of, is_page, rows_of};
 
@@ -161,6 +161,15 @@ struct Linked {
 
 impl Linked {
     fn holding(label: &str, order: StoredPathOrder, documents: &[DocumentFacts]) -> Self {
+        Self::holding_under(label, order, documents, &declared())
+    }
+
+    fn holding_under(
+        label: &str,
+        order: StoredPathOrder,
+        documents: &[DocumentFacts],
+        declared: &ContentModel,
+    ) -> Self {
         let scratch = Scratch::new(label);
         let mut store = Store::open(scratch.database(), order, crate::common::DERIVATION)
             .expect("opening a store");
@@ -168,7 +177,15 @@ impl Linked {
             .begin_request()
             .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
             .expect("pinning the suite's schema");
-        write_documents(&mut store.begin_request(), documents);
+        store
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                documents.iter().cloned().map(norn_store::Change::Upsert),
+                &[],
+                declared,
+            )
+            .expect("deriving under the reading's declaration");
         let reader = Arc::new(store.open_reader().reader.expect("a reader"));
         Linked {
             _scratch: scratch,
@@ -717,6 +734,7 @@ fn an_ignored_place_stays_out_of_a_links_resolution() {
             reading(&linked.links_under("src/b.md", &declared())[0]),
             names(LinkHealth::Healthy, &["notes/glossary.md"])
         );
+        let linked = Linked::holding_under("links-unignored", order, &documents(), &bare());
         assert_eq!(
             reading(&linked.links_under("src/b.md", &bare())[0]),
             names(
@@ -725,6 +743,7 @@ fn an_ignored_place_stays_out_of_a_links_resolution() {
             )
         );
         let archived = bare().declare_ambiguity_ignore(Pattern::parse("x/**").expect("a glob"));
+        let linked = Linked::holding_under("links-ignored-path", order, &documents(), &archived);
         assert_eq!(
             reading(&linked.links_under("src/a.md", &archived)[5]),
             names(LinkHealth::Healthy, &["x/y.md"])
@@ -878,7 +897,7 @@ fn links_to_keeps_a_link_whose_class_holds_the_named_document_alone() {
 /// `glossary` names two documents and is reported.
 #[test]
 fn links_to_applies_the_ignored_places_a_resolution_applies() {
-    let linked = Linked::new("links-to-ignored", Sensitive, 0);
+    let linked = Linked::holding_under("links-to-ignored", Sensitive, &documents(), &bare());
     let found = linked.find_under(
         &request().with_predicates([Predicate::links_to(resolution("notes/glossary"))]),
         &bare(),
@@ -1059,9 +1078,12 @@ fn rewritten(plan: &QueryPlan, edit: impl Fn(&str) -> String) -> QueryPlan {
 /// the root probes, bounded on both sides, and nothing read end to end.
 fn judge_class(plan: &QueryPlan, index: &str, key: &str) {
     plan.assert_no_full_scan();
-    let rows = rows_of(plan, "dr");
+    let rows = rows_of(plan, "dl");
     rows.assert_searches_through("documents", Access::Index(index));
-    rows.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
+    rows.assert_search_constraint(
+        "documents",
+        &format!("(admitting_segments=? AND {key}>? AND {key}<?)"),
+    );
 }
 
 /// Judge a read of what a page's links name: each link's keys a search of
@@ -1078,7 +1100,10 @@ fn judge_link_targets(plan: &QueryPlan, class_index: &str, key: &str, path_index
     }
     let class = rows_of(plan, "dl");
     class.assert_searches_through("documents", Access::Index(class_index));
-    class.assert_search_constraint("documents", &format!("({key}>? AND {key}<?)"));
+    class.assert_search_constraint(
+        "documents",
+        &format!("(admitting_segments=? AND {key}>? AND {key}<?)"),
+    );
     let at = rows_of(plan, "dp");
     at.assert_searches_through("documents", Access::Index(path_index));
     at.assert_search_constraint("documents", "(path=?)");
@@ -1107,8 +1132,8 @@ fn crowded(label: &str, order: StoredPathOrder) -> Linked {
 
 /// **A read of what targets name seeks the class or the path each names**: a
 /// page's links are read as one set, each link's keys a seek of
-/// `link_keys_link`, each suffix key's class a seek of `documents_suffix_key`
-/// where the root tells spellings apart and of `documents_folded_suffix_key`
+/// `link_keys_link`, each suffix key's class a seek of `documents_admitted_suffix_key`
+/// where the root tells spellings apart and of `documents_admitted_folded_suffix_key`
 /// where it folds ASCII case, bounded on both sides by the key's range, and
 /// each path key's documents a seek of `documents_path` at the path where the
 /// root tells spellings apart and of `documents_path_nocase` where it folds;
@@ -1123,13 +1148,13 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
     for (order, class_index, key, path_index) in [
         (
             Sensitive,
-            "documents_suffix_key",
+            "documents_admitted_suffix_key",
             "suffix_key",
             "documents_path",
         ),
         (
             Folding,
-            "documents_folded_suffix_key",
+            "documents_admitted_folded_suffix_key",
             "folded_suffix_key",
             "documents_path_nocase",
         ),
@@ -1300,7 +1325,7 @@ fn judge_links_to(
     reached.assert_searches_through("documents", Access::Index(suffix_index));
     reached.assert_search_constraint(
         "documents",
-        &format!("({suffix_column}>? AND {suffix_column}<?)"),
+        &format!("(admitting_segments=? AND {suffix_column}>? AND {suffix_column}<?)"),
     );
     let at = rows_of(page, "dp");
     at.assert_searches_through("documents", Access::Index(path_index));
@@ -1323,14 +1348,14 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
             Sensitive,
             "link_keys_key",
             "key",
-            "documents_suffix_key",
+            "documents_admitted_suffix_key",
             "documents_path",
         ),
         (
             Folding,
             "link_keys_folded_key",
             "folded_key",
-            "documents_folded_suffix_key",
+            "documents_admitted_folded_suffix_key",
             "documents_path_nocase",
         ),
     ] {

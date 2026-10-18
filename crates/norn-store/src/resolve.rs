@@ -9,9 +9,10 @@
 //! each of the link's keys opens: a row's links, and a links-to part's
 //! confirmation that a link names one document alone. What a [`TargetClass`]
 //! carries is what each of them needs and nothing more — the probe, over the
-//! key the root selects, and the exclusion — and this module holds the one
-//! spelling of each class predicate in SQL — a range of the probed key, the
-//! exclusion, and a link key's class or path — so no two surfaces can disagree
+//! key the root selects, the target's segment count and the ignore set for
+//! in-memory admission — and this module holds the one spelling of each class
+//! predicate in SQL: admitted-count runs over the probed key's ranges, and a
+//! link key's class or path, so no two surfaces can disagree
 //! about a class.
 //!
 //! [`TargetClass::class_keys`] spells the class keys a target is read
@@ -56,7 +57,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::functions::FunctionFlags;
-use norn_db::rusqlite::types::{Value, ValueRef};
+use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
 use norn_wire::{CaseFold, Pattern};
 
@@ -65,18 +66,10 @@ use crate::facts::StoredPathOrder;
 use crate::path::{ClassKey, SuffixKey, SuffixProbe, prefix_successor, suffix_probe};
 use crate::request::range_predicate_from;
 
-/// The name a statement calls the exclusion by:
-/// `norn_ambiguity_admits(ignored, target_segments, path_order, path)`.
-pub(crate) const ADMITS_FUNCTION: &str = "norn_ambiguity_admits";
-
 /// The name a statement calls the prefix step by: `norn_key_successor(key)`,
 /// the least text after every text a separator-terminated suffix key opens,
 /// which is [`crate::path::prefix_successor`] itself.
 pub(crate) const SUCCESSOR_FUNCTION: &str = "norn_key_successor";
-
-/// How many values [`TargetClass::parameters`] numbers after the ranges'
-/// bounds: the ignore set, the target's segment count, and the path order.
-pub(crate) const EXCLUSION_PARAMETERS: usize = 3;
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -165,7 +158,7 @@ impl AmbiguityIgnore {
     /// root.
     ///
     /// A store writes it beside each document it derives
-    /// (`documents.admitting_segments`), so a link key's head seeks the
+    /// (`documents.admitting_segments`), so every class read seeks the
     /// members its class admits rather than stepping past the ones it keeps
     /// out.
     pub fn admitting_segments(&self, path: &str, order: StoredPathOrder) -> usize {
@@ -199,35 +192,6 @@ impl AmbiguityIgnore {
                     .any(|pattern| pattern.matches(place, case))
             })
             .map(|(index, _)| index + 1)
-    }
-
-    /// The set as one text value a statement binds: each glob's byte length,
-    /// a colon, and the glob. Length-prefixed, so a glob may hold any character
-    /// and the encoding still reads back one way.
-    pub(crate) fn encoded(&self) -> String {
-        self.patterns
-            .iter()
-            .map(|pattern| format!("{}:{}", pattern.as_str().len(), pattern.as_str()))
-            .collect()
-    }
-
-    /// Read back what [`AmbiguityIgnore::encoded`] wrote.
-    fn decoded(mut text: &str) -> Result<Self, String> {
-        let mut patterns = Vec::new();
-        while !text.is_empty() {
-            let (length, rest) = text
-                .split_once(':')
-                .ok_or_else(|| format!("an ignore set lacks a length before `{text}`"))?;
-            let length: usize = length
-                .parse()
-                .map_err(|problem| format!("an ignore set's length `{length}`: {problem}"))?;
-            let source = rest
-                .get(..length)
-                .ok_or_else(|| format!("an ignore set's glob is shorter than {length}"))?;
-            patterns.push(Pattern::parse(source).map_err(|problem| problem.to_string())?);
-            text = &rest[length..];
-        }
-        Ok(AmbiguityIgnore { patterns })
     }
 }
 
@@ -290,9 +254,7 @@ impl TargetClass {
         self.ignore.admits(path, self.target_segments, self.order)
     }
 
-    /// The values [`predicate`] numbers, in its order: each range's bounds,
-    /// then the ignore set, the target's segment count, and the recorded
-    /// spelling of the path order the ignore set is matched under.
+    /// Each range's bounds, then the target's segment count.
     pub(crate) fn parameters(&self) -> Vec<Value> {
         self.probe
             .ranges()
@@ -302,62 +264,150 @@ impl TargetClass {
                     Value::Text(upper.to_string()),
                 ]
             })
-            .chain([
-                Value::Text(self.ignore.encoded()),
-                Value::Integer(self.target_segments as i64),
-                Value::Text(self.order.as_str().to_string()),
-            ])
+            .chain([Value::Integer(self.target_segments as i64)])
             .collect()
     }
 }
 
-/// The predicate a resolution of `ranges` ranges over `key` spells against the
-/// `documents` rows a statement calls `alias`, its values numbered from
-/// `first` in [`TargetClass::parameters`]'s order.
-///
-/// Each range is a seek of the key's own index; the ignore set is a test of
-/// the rows those seeks reached, so it narrows a class without widening what
-/// is read.
-pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize) -> String {
-    let column = format!("{alias}.{}", key.column());
-    let seeks = range_predicate_from(&column, ranges, first);
-    let ignored = first + ranges * 2;
-    let segments = ignored + 1;
-    let order = segments + 1;
-    format!(
-        "({seeks}) AND {}",
-        admits(
-            &format!("?{ignored}"),
-            &format!("?{segments}"),
-            &format!("?{order}"),
-            &format!("{alias}.path")
-        )
-    )
+/// Splitting a separator-terminated suffix key yields one row per segment
+/// plus one trailing empty element. Every probe lower bound and stored link
+/// key spells exactly its target's segments, with `/` after each segment.
+/// The driver's `n.key` is zero-based, so the admitting count is `n.key + 1`;
+/// callers keep `n.key < segments`. JSON quoting keeps arbitrary key
+/// characters intact.
+pub(crate) fn admitting_counts(key: &str) -> String {
+    format!(r#"json_each('[' || replace(json_quote({key}), '/', '","') || ']')"#)
 }
 
-/// The exclusion, spelled over its four arguments: whether the document at
-/// `path` stays in the class of a target of `segments` segments under the
-/// ignore set `ignored` and the path order `order`.
-pub(crate) fn admits(ignored: &str, segments: &str, order: &str, path: &str) -> String {
-    format!("{ADMITS_FUNCTION}({ignored}, {segments}, {order}, {path})")
+/// A row from [`admitting_counts`] supplies its one-based admitting count.
+pub(crate) fn admitting_count(alias: &str) -> String {
+    format!("(CAST({alias}.key AS INTEGER) + 1)")
 }
 
-/// The rows of `documents` a statement calls `alias` in the one range from
-/// `lower` to `upper` of the key the root probes, less the places the ignore
-/// set `ignored` excludes from a class of a target of `segments` segments
-/// under `order`: one class range, each bound an expression the caller names.
-pub(crate) fn range_class(
+/// A driver's row is in range when its count is at most the target's segments.
+pub(crate) fn admitting_count_within(alias: &str, segments: &str) -> String {
+    format!("CAST({alias}.key AS INTEGER) < {segments}")
+}
+
+/// Each count's rows stand together in one run of the admitted index. The
+/// count equality and key bounds seek that run in ladder order.
+pub(crate) fn range_admitted(
     alias: &str,
     key: SuffixKey,
     (lower, upper): (&str, &str),
-    segments: &str,
-    ignored: &str,
-    order: &str,
+    admitting: &str,
 ) -> String {
     let column = format!("{alias}.{}", key.column());
     format!(
-        "{column} >= {lower} AND {column} < {upper} AND {}",
-        admits(ignored, segments, order, &format!("{alias}.path"))
+        "{alias}.admitting_segments = {admitting} AND {column} >= {lower} AND {column} < {upper}"
+    )
+}
+
+/// The admitted rows of one range. A head cuts each run in ladder order before
+/// merging, so neither the merge nor its sort ever reads a whole class.
+pub(crate) fn range_rows(
+    key: SuffixKey,
+    bounds: (&str, &str),
+    segments: &str,
+    head: Option<&str>,
+) -> String {
+    let counts = admitting_counts(bounds.0);
+    let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
+    let within = admitting_count_within("n", segments);
+    let rung = key.column();
+    let rows = if let Some(head) = head {
+        let order = ladder(&format!("dl.{rung}"), "dl.path");
+        format!(
+            "da.id IN (SELECT dl.id FROM documents AS dl WHERE {admitted}
+                           ORDER BY {order} LIMIT {head})"
+        )
+    } else {
+        range_admitted("da", key, bounds, &admitting_count("n"))
+    };
+    let cut = head
+        .map(|head| {
+            format!(
+                " ORDER BY {} LIMIT {head}",
+                ladder(&format!("da.{rung}"), "da.path")
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "SELECT da.id, da.path, da.{rung} FROM {counts} AS n
+             CROSS JOIN documents AS da WHERE {within} AND {rows}{cut}"
+    )
+}
+
+/// A class range's count is the sum of its disjoint admitted-index run counts.
+pub(crate) fn range_total(key: SuffixKey, bounds: (&str, &str), segments: &str) -> String {
+    let counts = admitting_counts(bounds.0);
+    let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
+    let within = admitting_count_within("n", segments);
+    format!(
+        "SELECT COALESCE(SUM((SELECT COUNT(*) FROM documents AS dl WHERE {admitted})), 0)
+             FROM {counts} AS n WHERE {within}"
+    )
+}
+
+/// Membership tested at one document's row key: its stored count and the
+/// target's ranges, numbered in [`TargetClass::parameters`]'s order.
+pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize) -> String {
+    let column = format!("{alias}.{}", key.column());
+    let ranges_sql = range_predicate_from(&column, ranges, first);
+    let segments = first + ranges * 2;
+    format!("({ranges_sql}) AND {alias}.admitting_segments <= ?{segments}")
+}
+
+/// Each range's admitted runs, streamed so a caller's ceiling can stop them.
+pub(crate) fn target_rows(
+    key: SuffixKey,
+    ranges: usize,
+    first: usize,
+    head: Option<&str>,
+) -> String {
+    let segments = format!("?{}", first + ranges * 2);
+    (0..ranges)
+        .map(|range| {
+            let lower = format!("?{}", first + range * 2);
+            let upper = format!("?{}", first + range * 2 + 1);
+            format!(
+                "SELECT * FROM ({})",
+                range_rows(key, (&lower, &upper), &segments, head)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ")
+}
+
+/// The admitted rows of a link key, with the same per-run head bound as a
+/// compiled target's ranges where `head` is given.
+pub(crate) fn link_key_rows(
+    key: SuffixKey,
+    link_key: &str,
+    segments: &str,
+    head: Option<&str>,
+) -> String {
+    range_rows(
+        key,
+        (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
+        segments,
+        head,
+    )
+}
+
+/// The sum of the disjoint admitted-index run counts of a link key.
+pub(crate) fn link_key_total(key: SuffixKey, link_key: &str, segments: &str) -> String {
+    range_total(
+        key,
+        (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
+        segments,
+    )
+}
+
+/// Whether the named document's stored count admits it to a link's class.
+pub(crate) fn named_admitted(document: &str, segments: &str) -> String {
+    format!(
+        "(SELECT dn.admitting_segments FROM documents AS dn WHERE dn.id = {document}) <= {segments}"
     )
 }
 
@@ -368,51 +418,6 @@ pub(crate) fn link_key_column(key: SuffixKey) -> &'static str {
         SuffixKey::Raw => "key",
         SuffixKey::Folded => "folded_key",
     }
-}
-
-/// The rows of `documents` a statement calls `alias` in the class a link's
-/// suffix key `link_key` — an expression holding the key in the space `key`
-/// selects — opens, less the places the ignore set `ignored` excludes for a
-/// target of `segments` segments under `order`. The range's upper bound is the
-/// key's [`SUCCESSOR_FUNCTION`], so the range is the one the link's own probe
-/// opens.
-pub(crate) fn link_key_class(
-    alias: &str,
-    key: SuffixKey,
-    link_key: &str,
-    segments: &str,
-    ignored: &str,
-    order: &str,
-) -> String {
-    range_class(
-        alias,
-        key,
-        (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
-        segments,
-        ignored,
-        order,
-    )
-}
-
-/// The rows of `documents` a statement calls `alias` in the class a link's
-/// suffix key `link_key` opens whose stored admitting count is `admitting`:
-/// one run of the admitted-key index — `documents_admitted_suffix_key`, or
-/// `documents_admitted_folded_suffix_key` where the root folds — over the
-/// range [`link_key_class`] reads, held in ladder order. A class of a target
-/// of `segments` segments is the union of these runs for each count from one
-/// to `segments`, which is [`AmbiguityIgnore::admits`] read off the column the
-/// store derived it into rather than computed per row.
-pub(crate) fn link_key_admitted(
-    alias: &str,
-    key: SuffixKey,
-    link_key: &str,
-    admitting: &str,
-) -> String {
-    let column = format!("{alias}.{}", key.column());
-    format!(
-        "{alias}.admitting_segments = {admitting} AND {column} >= {link_key} \
-         AND {column} < {SUCCESSOR_FUNCTION}({link_key})"
-    )
 }
 
 /// The rows of `documents` a statement calls `alias` standing at a link's path
@@ -431,9 +436,39 @@ pub(crate) fn link_key_path(alias: &str, key: SuffixKey, link_key: &str) -> Stri
 /// from `?1` in [`TargetClass::parameters`]'s order.
 pub(crate) fn class_rows(class: &TargetClass) -> String {
     format!(
-        "FROM documents AS dr WHERE {}",
-        predicate("dr", class.probe().key(), class.probe().range_count(), 1)
+        "FROM ({}) AS dr",
+        target_rows(class.probe().key(), class.probe().range_count(), 1, None)
     )
+}
+
+/// A head bounds each range's count runs before the caller merges and cuts them.
+pub(crate) fn class_head_rows(class: &TargetClass, head: &str) -> String {
+    format!(
+        "FROM ({}) AS dr",
+        target_rows(
+            class.probe().key(),
+            class.probe().range_count(),
+            1,
+            Some(head)
+        )
+    )
+}
+
+/// The sum of the counts of a target's disjoint ranges and admitting runs.
+pub(crate) fn class_total(class: &TargetClass) -> String {
+    let segments = format!("?{}", class.probe().range_count() * 2 + 1);
+    let totals = (0..class.probe().range_count())
+        .map(|range| {
+            let lower = format!("?{}", range * 2 + 1);
+            let upper = format!("?{}", range * 2 + 2);
+            format!(
+                "({})",
+                range_total(class.probe().key(), (&lower, &upper), &segments)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!("SELECT {totals}")
 }
 
 /// The resolution ladder's order over the rows [`class_rows`] reads: the
@@ -471,16 +506,7 @@ pub(crate) fn ladder_cmp(left: (&str, &str), right: (&str, &str)) -> Ordering {
     left.cmp(&right)
 }
 
-/// Register the exclusion and the prefix step on `connection`, so every
-/// statement a resolution spells can call them: the writer's and every read
-/// snapshot's alike.
-///
-/// **Deterministic**, both, and registered as such: the exclusion's answer is
-/// a function of its four arguments, the path order among them, so the case
-/// the globs match under is the statement's input rather than the
-/// connection's state, and the step's is a function of its one key. The
-/// ignore set is decoded once per statement and kept as the call's auxiliary
-/// data for the rows after the first.
+/// Register the deterministic prefix step on the writer and every reader.
 pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreError> {
     connection
         .create_scalar_function(
@@ -496,37 +522,7 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
             },
         )
         .map_err(|problem| error::sql("registering the key successor function", problem))?;
-    connection
-        .create_scalar_function(
-            ADMITS_FUNCTION,
-            4,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            |context| {
-                let ignore = context.get_or_create_aux(0, |encoded: ValueRef<'_>| {
-                    let encoded = encoded
-                        .as_str()
-                        .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
-                    AmbiguityIgnore::decoded(encoded)
-                        .map_err(|problem| rusqlite::Error::UserFunctionError(problem.into()))
-                })?;
-                let segments: i64 = context.get(1)?;
-                let recorded = context
-                    .get_raw(2)
-                    .as_str()
-                    .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
-                let order = StoredPathOrder::from_recorded(recorded).ok_or_else(|| {
-                    rusqlite::Error::UserFunctionError(
-                        format!("`{recorded}` is no path order").into(),
-                    )
-                })?;
-                let path = context
-                    .get_raw(3)
-                    .as_str()
-                    .map_err(|problem| rusqlite::Error::UserFunctionError(Box::new(problem)))?;
-                Ok(ignore.admits(path, usize::try_from(segments).unwrap_or(0), order))
-            },
-        )
-        .map_err(|problem| error::sql("registering the ambiguity-ignore function", problem))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -540,21 +536,6 @@ mod tests {
                 .iter()
                 .map(|glob| Pattern::parse(glob).expect("a glob")),
         )
-    }
-
-    #[test]
-    fn an_encoded_set_reads_back_whole() {
-        let set = ignoring(&["archive/**", "a:b/*", "7:x"]);
-        assert_eq!(AmbiguityIgnore::decoded(&set.encoded()), Ok(set));
-        // A glob whose bytes outnumber its characters: the prefix counts
-        // bytes, which is what the decoder slices by.
-        let wide = ignoring(&["archivé/**", "日記/*", "x"]);
-        assert_eq!(AmbiguityIgnore::decoded(&wide.encoded()), Ok(wide));
-        assert_eq!(
-            AmbiguityIgnore::decoded(""),
-            Ok(AmbiguityIgnore::none()),
-            "the empty set encodes as nothing"
-        );
     }
 
     /// A target reaches an ignored place when the segments it spells run up to

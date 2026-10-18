@@ -27,6 +27,7 @@ struct Vault {
     _scratch: Scratch,
     store: Store,
     reader: Arc<SnapshotReader>,
+    documents: Vec<norn_store::DocumentFacts>,
 }
 
 impl Vault {
@@ -49,17 +50,19 @@ impl Vault {
             _scratch: scratch,
             store,
             reader,
+            documents,
         }
     }
 
     /// The paths a find's `resolves` part keeps on this vault's root, the
     /// schema ignoring `ignored`, in path order.
-    fn resolves(&self, target: &str, ignored: &[&str]) -> Vec<String> {
+    fn resolves(&mut self, target: &str, ignored: &[&str]) -> Vec<String> {
         let declared = ignored
             .iter()
             .fold(ContentModel::under(SCHEMA), |declared, glob| {
                 declared.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
             });
+        self.rederive(&declared);
         let params = FindParams::new(address()).with_predicates([Predicate::resolves(
             ResolutionTarget::new(target).expect("a target"),
         )]);
@@ -81,8 +84,26 @@ impl Vault {
             .collect()
     }
 
+    fn rederive(&mut self, declared: &ContentModel) {
+        self.store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                self.documents.iter().cloned().map(Change::Upsert),
+                &[],
+                declared,
+            )
+            .expect("healing rows under the reading's declaration");
+    }
+
     /// `target` compiled on this vault's store, the schema ignoring `ignored`.
     fn target_class(&mut self, target: &str, ignored: &[&str]) -> TargetClass {
+        let declared = ignored
+            .iter()
+            .fold(ContentModel::under(SCHEMA), |declared, glob| {
+                declared.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
+            });
+        self.rederive(&declared);
         self.store
             .begin_request()
             .target_class(target, &ignoring(ignored))
@@ -126,7 +147,7 @@ fn strings(paths: &[&str]) -> Vec<String> {
 /// precedence.** The root itself does not tell `Foo` from `foo`.
 #[test]
 fn a_folding_root_resolves_every_case_spelling_as_one_class() {
-    let vault = Vault::holding(
+    let mut vault = Vault::holding(
         "resolve-folded",
         Folding,
         &["a/Foo.md", "b/foo.md", "c/food.md"],
@@ -144,7 +165,7 @@ fn a_folding_root_resolves_every_case_spelling_as_one_class() {
 /// `Foo` names the document spelled `Foo` and nothing else.
 #[test]
 fn a_sensitive_root_resolves_the_raw_spelling_alone() {
-    let vault = Vault::holding("resolve-raw", Sensitive, &["a/Foo.md", "b/foo.md"]);
+    let mut vault = Vault::holding("resolve-raw", Sensitive, &["a/Foo.md", "b/foo.md"]);
     assert_eq!(vault.resolves("Foo", &[]), strings(&["a/Foo.md"]));
     assert_eq!(vault.resolves("foo", &[]), strings(&["b/foo.md"]));
     assert!(vault.resolves("FOO", &[]).is_empty());
@@ -156,7 +177,7 @@ fn a_sensitive_root_resolves_the_raw_spelling_alone() {
 #[test]
 fn a_folding_root_reduces_a_dotted_target_both_ways() {
     let paths = ["archive/notes.tar.gz", "docs/NOTES.md", "docs/v1.md"];
-    let folding = Vault::holding("resolve-folded-reductions", Folding, &paths);
+    let mut folding = Vault::holding("resolve-folded-reductions", Folding, &paths);
     assert_eq!(
         folding.resolves("Notes.TAR", &[]),
         strings(&["archive/notes.tar.gz", "docs/NOTES.md"])
@@ -165,7 +186,7 @@ fn a_folding_root_reduces_a_dotted_target_both_ways() {
         folding.resolves("NOTES.MD", &[]),
         strings(&["docs/NOTES.md"])
     );
-    let sensitive = Vault::holding("resolve-raw-reductions", Sensitive, &paths);
+    let mut sensitive = Vault::holding("resolve-raw-reductions", Sensitive, &paths);
     assert!(sensitive.resolves("Notes.TAR", &[]).is_empty());
 }
 
@@ -173,7 +194,7 @@ fn a_folding_root_reduces_a_dotted_target_both_ways() {
 /// folding root, so `Été` and `été` stay two classes there.
 #[test]
 fn a_folding_root_does_not_fold_a_letter_outside_ascii() {
-    let vault = Vault::holding(
+    let mut vault = Vault::holding(
         "resolve-non-ascii",
         Folding,
         &["a/Été.md", "b/été.md", "c/ÉTÉ.md"],
@@ -191,7 +212,7 @@ fn a_folding_root_does_not_fold_a_letter_outside_ascii() {
 fn an_ignored_place_resolves_only_where_the_target_names_it() {
     let archive = ["archive/**"];
     for order in [Sensitive, Folding] {
-        let vault = Vault::holding(
+        let mut vault = Vault::holding(
             &format!("resolve-ignored-{order:?}"),
             order,
             &[
@@ -328,7 +349,7 @@ fn a_sensitive_root_matches_an_ignore_glob_bytewise() {
 /// `Été/x/term.md`, because only the ASCII `T` differs.
 #[test]
 fn an_ignore_glob_never_folds_a_letter_outside_ascii() {
-    let vault = Vault::holding(
+    let mut vault = Vault::holding(
         "resolve-ignored-non-ascii",
         Folding,
         &["Été/x/term.md", "été/x/term.md"],
@@ -352,7 +373,7 @@ fn an_ignore_glob_never_folds_a_letter_outside_ascii() {
 /// directory, so a longer target naming it resolves, and a bare name does not.
 #[test]
 fn an_ignored_leaf_resolves_to_any_target_longer_than_its_name() {
-    let vault = Vault::holding(
+    let mut vault = Vault::holding(
         "resolve-ignored-leaf",
         Sensitive,
         &["attachments/image.md", "notes/image.md"],
@@ -375,7 +396,7 @@ fn an_ignored_leaf_resolves_to_any_target_longer_than_its_name() {
 #[test]
 fn an_ignored_root_level_document_resolves_to_a_target_naming_it() {
     for order in [Sensitive, Folding] {
-        let vault = Vault::holding(
+        let mut vault = Vault::holding(
             &format!("resolve-ignored-root-{order:?}"),
             order,
             &["docs/glossary.md", "glossary.md"],

@@ -1864,11 +1864,9 @@ fn moved_hub_path() -> String {
 /// new folder plans one rewrite per in-link, and generating that cascade
 /// costs the same at both per-PR scales: a move's cascade costs the links it
 /// reaches, the spellings it probes and the documents it rewrites, never the
-/// vault around them. The profiles declare no ignore set: the head read
-/// seeks past no member of its class the ignore set keeps out (the hub write
-/// and delete bars' ignored-subtree twins hold that), but the cascade's
-/// backlink pass and the naming of its targets still read a class through the
-/// ignore filter row by row (NORN-339).
+/// vault around them. Each profile declares an ignored subtree and holds
+/// ignored namesakes of the hub there. The cascade's backlink pass and target
+/// naming seek the admitted members without reading those namesakes.
 ///
 /// A preview of the move through the host plans a cascade of one rewrite
 /// per in-link and records one written entry per rewritten link, and the
@@ -1933,6 +1931,7 @@ fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
 fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_ignored_hub_members(&vault, ignored_hub_members(profile));
     plant_hub_in_links(&vault);
     std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
     let hub = norn_wire::DocumentPath::new(hub_path()).expect("a document path");
@@ -2038,10 +2037,9 @@ const LONELY_STEM: &str = "hub-gate-lonely";
 /// Each costs the same judgments, links evaluated, keys resolved, head rows,
 /// statements and steps, and steps no table or index end to end, at
 /// `ambiguous` (300 documents) exactly as at `realistic` (2000). The
-/// profiles declare no ignore set: the head read seeks past no member of its
-/// class the ignore set keeps out (the hub write and delete bars'
-/// ignored-subtree twins hold that), but the backlink pass still reads a
-/// class through the ignore filter row by row (NORN-339).
+/// profiles declare an ignored subtree and hold ignored namesakes of the hub
+/// there. The backlink pass seeks the admitted members without reading those
+/// namesakes.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
@@ -2191,6 +2189,7 @@ fn rewrite_selection_through_a_preview_grows_with_operations_and_links() {
 fn hub_deletes(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_ignored_hub_members(&vault, ignored_hub_members(profile));
     plant_hub_in_links(&vault);
     std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
     let lonely_path = format!("hub-gate/{LONELY_STEM}.md");
@@ -2254,8 +2253,8 @@ fn hub_deletes(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
         counters.push(("lonely_entries".to_string(), link_entries(&plan)));
     }
 
-    // The hub and the lonely document are each the one document of their
-    // stem, so the hub's in-links name it alone and nothing names the other.
+    // The hub and the lonely document each stand alone among the admitted
+    // members of their stem, so only the hub has in-links.
     let mut store = vault.store();
     for at in [hub_path(), lonely_path] {
         let stem = DocumentPath::new(&at)
@@ -2264,7 +2263,10 @@ fn hub_deletes(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
             .to_string();
         let mut sharing = Vec::new();
         attach::for_each_derived_path(&mut store, |path| {
-            if path.stem() == stem && path.as_str() != at {
+            if path.stem() == stem
+                && path.as_str() != at
+                && !path.as_str().starts_with(IGNORED_HUB_FOLDER)
+            {
                 sharing.push(path.as_str().to_string());
             }
         });
@@ -2334,11 +2336,10 @@ const RETARGET_STEM: &str = "hub-gate-retarget";
 /// the applier's computation of it again, each naming both ends again: the
 /// same judgments, links evaluated, keys resolved, head rows, statements and
 /// steps, and no table or index stepped end to end, at `ambiguous` (300
-/// documents) exactly as at `realistic` (2000). The profiles declare no
-/// ignore set: the head read seeks past no member of its class the ignore set
-/// keeps out (the hub write and delete bars' ignored-subtree twins hold
-/// that), but naming `old` and `new` and the cascade's backlink pass still
-/// read a class through the ignore filter row by row (NORN-339).
+/// documents) exactly as at `realistic` (2000). Each profile declares an
+/// ignored subtree and holds ignored namesakes of the hub there. Naming both
+/// ends and reading the cascade's backlinks seek the admitted members without
+/// reading those namesakes.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales() {
@@ -2381,6 +2382,7 @@ fn a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales() {
 fn hub_rewrite(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_ignored_hub_members(&vault, ignored_hub_members(profile));
     plant_hub_in_links(&vault);
     std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
     let retarget_path = format!("hub-gate/{RETARGET_STEM}.md");
@@ -2418,8 +2420,8 @@ fn hub_rewrite(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
         counters.push(("advised".to_string(), forecast.links.len() as u64));
     }
 
-    // The hub and the retarget are each the one document of their stem, so
-    // the hub's in-links name it alone and the retarget's name it alone.
+    // The hub and the retarget each stand alone among the admitted members
+    // of their stem, so each name resolves to its planted document.
     let mut store = vault.store();
     for at in [hub_path(), retarget_path] {
         let stem = DocumentPath::new(&at)
@@ -2428,7 +2430,10 @@ fn hub_rewrite(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
             .to_string();
         let mut sharing = Vec::new();
         attach::for_each_derived_path(&mut store, |path| {
-            if path.stem() == stem && path.as_str() != at {
+            if path.stem() == stem
+                && path.as_str() != at
+                && !path.as_str().starts_with(IGNORED_HUB_FOLDER)
+            {
                 sharing.push(path.as_str().to_string());
             }
         });

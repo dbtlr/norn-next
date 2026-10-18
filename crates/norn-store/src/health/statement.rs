@@ -14,12 +14,11 @@ use norn_db::rusqlite::types::Value;
 
 use crate::anchor::{anchor_held, carries_anchor};
 use crate::error::StoreError;
-use crate::facts::StoredPathOrder;
 use crate::find::path_list;
 use crate::health::LinkSelection;
 use crate::json::{FrontmatterValue, canonical_json};
 use crate::path::{ClassKey, PathKey, SuffixKey};
-use crate::resolve::{self, AmbiguityIgnore};
+use crate::resolve;
 
 /// Which arm of [`heads_sql`] and [`totals_sql`] a row came from: a suffix
 /// key's class.
@@ -352,7 +351,7 @@ pub(crate) fn discard_sql() -> String {
 ///
 /// Two arms, one per key space a link is addressed in. The class arm walks
 /// the suffix keys `?1` lists, each a `[key, segments]` pair, and reads the
-/// members each key's class admits through [`resolve::link_key_admitted`],
+/// members each key's class admits through [`resolve::link_key_rows`],
 /// its rung the document's suffix key. The path arm walks the path keys `?2`
 /// lists and reads the documents at each through [`resolve::link_key_path`],
 /// its rung the key itself, so a path key's rows rank by the path alone. Each
@@ -365,10 +364,10 @@ pub(crate) fn discard_sql() -> String {
 /// stored admitting count is at most `segments`
 /// ([`crate::AmbiguityIgnore::admitting_segments`]). The members of one
 /// count stand together in that count's run of the admitted-key index, in
-/// ladder order, so the class arm reads each count from one to `segments` —
-/// the counts `?4` lists, from one up — as a seek of that run cut at `?3`
-/// rows, then cuts the union of those runs at `?3` in ladder order: a sort of
-/// at most `segments` heads, never of the class. A key costs its segments'
+/// ladder order, so the class arm enumerates each count from one to
+/// `segments` through [`resolve::admitting_counts`]. It seeks each run cut at
+/// `?3` rows, then cuts their union at `?3` in ladder order. That sort holds
+/// at most `segments` heads, never the class. A key costs its segments'
 /// worth of bounded seeks, and the members its class keeps out, however many
 /// sort ahead of its head, are never read.
 ///
@@ -387,19 +386,17 @@ pub(crate) fn discard_sql() -> String {
 /// spells in SQL.
 pub(crate) fn heads_sql(key: SuffixKey) -> String {
     let rung = key.column();
-    let admitted =
-        resolve::link_key_admitted("dl", key, "json_extract(j.value, '$[0]')", "n.value");
+    let class = resolve::link_key_rows(
+        key,
+        "json_extract(j.value, '$[0]')",
+        "json_extract(j.value, '$[1]')",
+        Some("?3"),
+    );
     let path = resolve::link_key_path("dp", key, "j.value");
-    let runs = resolve::ladder(&format!("dl.{rung}"), "dl.path");
-    let merged = resolve::ladder(&format!("da.{rung}"), "da.path");
     format!(
         "SELECT {CLASS_ARM}, j.key, dc.id, dc.path, dc.{rung}
          FROM json_each(?1) AS j CROSS JOIN documents AS dc
-         WHERE dc.id IN (SELECT da.id FROM json_each(?4) AS n CROSS JOIN documents AS da
-                         WHERE n.value <= json_extract(j.value, '$[1]')
-                           AND da.id IN (SELECT dl.id FROM documents AS dl WHERE {admitted}
-                                         ORDER BY {runs} LIMIT ?3)
-                         ORDER BY {merged} LIMIT ?3)
+         WHERE dc.id IN (SELECT id FROM ({class}))
          UNION ALL
          SELECT {PATH_ARM}, j.key, dc.id, dc.path, j.value
          FROM json_each(?2) AS j CROSS JOIN documents AS dc
@@ -409,81 +406,46 @@ pub(crate) fn heads_sql(key: SuffixKey) -> String {
 }
 
 /// The values [`heads_sql`] binds: the suffix keys beside their segment
-/// counts, the path keys, the head's bound, and the admitting counts from one
-/// to the most segments any listed suffix key spells.
+/// counts, the path keys, and the head's bound.
 pub(crate) fn heads_parameters(
     classes: &[(&str, u64)],
     paths: &[&str],
     head: usize,
 ) -> Result<Vec<Value>, StoreError> {
-    let deepest = classes
-        .iter()
-        .map(|(_, segments)| *segments)
-        .max()
-        .unwrap_or(0);
-    let counts = canonical_json(&FrontmatterValue::Sequence(
-        (1..=deepest)
-            .map(|count| {
-                FrontmatterValue::Int(i64::try_from(count).expect("a segment count fits i64"))
-            })
-            .collect(),
-    ))?;
     Ok(vec![
         class_list(classes)?,
         path_list(paths)?,
         Value::Integer(i64::try_from(head).expect("a head fits i64")),
-        Value::Text(counts),
     ])
 }
 
 /// [`crate::ExplainedStatement::LinkHealthTotals`]: how many documents each
 /// distinct key names, each row the arm, the key's index in its list, and the
-/// count, over the two arms [`heads_sql`] reads. The class arm counts the
-/// key's range of the suffix key the root probes, less the places the ignore
-/// set `?3` excludes under the order `?4`. That is the same set of members
-/// [`heads_sql`] seeks through the stored admitting counts, but this count
-/// tests the globs row by row, so it steps past every member its class keeps
-/// out, as it steps past every member it admits (NORN-339).
+/// count, over the two arms [`heads_sql`] reads. The class arm sums the
+/// disjoint admitted-index run counts from one to the key's segment count,
+/// over the same range and stored admitting counts as [`heads_sql`], so the
+/// total reads every admitted member and none the class keeps out.
 pub(crate) fn totals_sql(key: SuffixKey) -> String {
-    let class = class_predicate(key);
-    let path = resolve::link_key_path("dp", key, "j.value");
-    format!(
-        "SELECT {CLASS_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dl WHERE {class})
-         FROM json_each(?1) AS j
-         UNION ALL
-         SELECT {PATH_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dp WHERE {path})
-         FROM json_each(?2) AS j"
-    )
-}
-
-/// The class of the `[key, segments]` pair the row `j` walks, as the `documents`
-/// rows a statement calls `dl`.
-fn class_predicate(key: SuffixKey) -> String {
-    resolve::link_key_class(
-        "dl",
+    let total = resolve::link_key_total(
         key,
         "json_extract(j.value, '$[0]')",
         "json_extract(j.value, '$[1]')",
-        "?3",
-        "?4",
+    );
+    let path = resolve::link_key_path("dp", key, "j.value");
+    format!(
+        "SELECT {CLASS_ARM}, j.key, ({total}) FROM json_each(?1) AS j
+        UNION ALL
+        SELECT {PATH_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dp WHERE {path})
+        FROM json_each(?2) AS j"
     )
 }
 
-/// The values [`totals_sql`] binds: the suffix keys beside their segment
-/// counts, the path keys, and the ignore set and the order it is matched
-/// under.
+/// The suffix keys beside their segment counts, and the path keys.
 pub(crate) fn totals_parameters(
     classes: &[(&str, u64)],
     paths: &[&str],
-    ignore: &AmbiguityIgnore,
-    order: StoredPathOrder,
 ) -> Result<Vec<Value>, StoreError> {
-    Ok(vec![
-        class_list(classes)?,
-        path_list(paths)?,
-        Value::Text(ignore.encoded()),
-        Value::Text(order.as_str().to_string()),
-    ])
+    Ok(vec![class_list(classes)?, path_list(paths)?])
 }
 
 /// The suffix keys beside their segment counts, as the list of `[key,

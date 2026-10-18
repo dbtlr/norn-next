@@ -8,7 +8,6 @@ use super::{FieldMatch, FieldOrder, MatchedColumn};
 use crate::facts::StoredPathOrder;
 use crate::fields::FieldContainer;
 use crate::path::SuffixKey;
-use crate::request::range_predicate_from;
 use crate::resolve;
 
 /// Every filter shape a page statement narrows by, named.
@@ -59,9 +58,9 @@ pub enum ReadFilter {
     /// The document does not match a path glob, tested at its row key.
     ExcludePathGlob(StoredPathOrder),
     /// The document is in the class a resolution target opens on the root:
-    /// the target's suffix ranges on `documents_suffix_key` where the root
-    /// tells spellings apart, and on `documents_folded_suffix_key` where it
-    /// folds ASCII case, less the places the schema ignores.
+    /// the target's suffix ranges in each admitted-count run on
+    /// `documents_admitted_suffix_key` where the root tells spellings apart,
+    /// and on `documents_admitted_folded_suffix_key` where it folds ASCII case.
     Resolves(SuffixKey),
     /// The document carries the tag: its folded name, bound folded, on
     /// `document_tags_folded_name`.
@@ -188,9 +187,8 @@ pub(crate) enum Filter {
         shape: ReadFilter,
         /// The values the fragment binds, in the order [`Filter::spell`]
         /// writes their placeholders. A resolution filter binds two per
-        /// suffix range and [`crate::resolve::EXCLUSION_PARAMETERS`] more —
-        /// the ignore set, the target's segment count and the path order — so
-        /// the count also says how many ranges it opens. A links-to filter
+        /// suffix range and the target's segment count, so the count also
+        /// says how many ranges it opens. A links-to filter
         /// binds each key it seeks and [`LINKS_TO_PARAMETERS`] more.
         values: Vec<Value>,
         /// The values a membership names, one by one, which its source seeks
@@ -262,11 +260,11 @@ impl Filter {
     /// statement answers it: the distinct documents among the rows its index
     /// seek reaches, read until one past the ceiling and counted. Every
     /// condition the index does not answer — a glob, a reading's shape or fold,
-    /// a links-to part's ambiguity, a resolution's ignore set, a finding's
-    /// document row — is dropped, so the count reads no row past the seek's
-    /// own and costs the ceiling's documents' rows whatever the filter keeps.
-    /// A dropped condition can only count a document the filter does not keep,
-    /// so a filter is never taken to keep fewer documents than it does.
+    /// a links-to part's ambiguity, a finding's document row — is dropped, so
+    /// the count reads no row past the seek's own and costs the ceiling's
+    /// documents' rows whatever the filter keeps. A dropped condition can only
+    /// count a document the filter does not keep, so a filter is never taken to
+    /// keep fewer documents than it does.
     pub(crate) fn kept_within(&self, ceiling: usize) -> (String, Vec<Value>) {
         let mut binder = Binder::default();
         let Rows {
@@ -643,30 +641,22 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             Rows::new("documents AS dg", "dg.id", condition)
         }
         ReadFilter::Resolves(key) => {
-            // Each value takes its number in turn, and the resolution's
-            // predicate spells its ranges and its exclusion over those
-            // numbers from `first`: two bounds per range, then the ignore
-            // set, the target's segment count and the path order.
-            let ranges = (values.len() - resolve::EXCLUSION_PARAMETERS) / 2;
-            if seek_only {
-                for _ in 0..ranges * 2 {
-                    next();
-                }
-                let column = format!("dr.{}", key.column());
-                return Rows::new(
-                    "documents AS dr",
-                    "dr.id",
-                    format!("({})", range_predicate_from(&column, ranges, first)),
-                );
-            }
+            // Admission is part of each index seek, so a seek-only count
+            // keeps it too. Streaming the runs lets a ceiling stop the read.
+            let ranges = (values.len() - 1) / 2;
             for _ in values {
                 next();
             }
-            Rows::new(
-                "documents AS dr",
-                "dr.id",
-                resolve::predicate("dr", key, ranges, first),
-            )
+            if reached == Reached::OneDocument {
+                Rows::new(
+                    "documents AS dr",
+                    "dr.id",
+                    resolve::predicate("dr", key, ranges, first),
+                )
+            } else {
+                let rows = resolve::target_rows(key, ranges, first, None);
+                Rows::new(&format!("({rows}) AS dr"), "dr.id", "1".to_string())
+            }
         }
         ReadFilter::Tag => {
             let name = next();
@@ -688,29 +678,34 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                     format!("lk.{link_key} IN ({})", listed.join(", ")),
                 );
             }
-            let (ignored, order, path, document) = (next(), next(), next(), next());
+            let document = next();
+            let counts = resolve::admitting_counts(&format!("lo.{link_key}"));
             Rows::new(
                 "link_keys AS lk",
                 "lk.document",
                 format!(
                     "lk.{link_key} IN ({listed})
                        AND (lk.segments IS NULL OR {named_admitted})
-                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lo, documents AS dl
+                       AND NOT EXISTS (SELECT 1 FROM link_keys AS lo
+                           CROSS JOIN {counts} AS n CROSS JOIN documents AS dl
                            WHERE lo.link = lk.link AND lo.segments IS NOT NULL
+                             AND {within}
                              AND {other_in_class}
                              AND dl.id <> {document})
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
                            WHERE lp.link = lk.link AND lp.segments IS NULL
                              AND {other_at_path} AND dp.id <> {document})",
                     listed = listed.join(", "),
-                    named_admitted = resolve::admits(&ignored, "lk.segments", &order, &path),
-                    other_in_class = resolve::link_key_class(
+                    named_admitted = resolve::named_admitted(&document, "lk.segments"),
+                    within = resolve::admitting_count_within("n", "lo.segments"),
+                    other_in_class = resolve::range_admitted(
                         "dl",
                         key,
-                        &format!("lo.{link_key}"),
-                        "lo.segments",
-                        &ignored,
-                        &order,
+                        (
+                            &format!("lo.{link_key}"),
+                            &format!("{}(lo.{link_key})", resolve::SUCCESSOR_FUNCTION)
+                        ),
+                        &resolve::admitting_count("n"),
                     ),
                     other_at_path = resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
                 ),
@@ -845,9 +840,8 @@ fn source_bound(
 pub const MERGED_SOURCE_VALUES: usize = 16;
 
 /// How many values a links-to filter binds after the keys it seeks: the
-/// ignore set, the path order it is matched under, and the named document's
-/// path and row id.
-pub(crate) const LINKS_TO_PARAMETERS: usize = 4;
+/// named document's row id, which also reaches its stored admitting count.
+pub(crate) const LINKS_TO_PARAMETERS: usize = 1;
 
 /// The test that `path`, a column holding a path, matches the glob bound at
 /// `pattern` under the path order whose recorded spelling is bound at

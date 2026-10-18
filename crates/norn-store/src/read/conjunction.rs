@@ -410,12 +410,7 @@ impl Snapshot {
                             .into_iter()
                             .map(Value::Text)
                             .collect();
-                        values.extend([
-                            Value::Text(ignore.encoded()),
-                            Value::Text(self.path_order().as_str().to_string()),
-                            Value::Text(path),
-                            Value::Integer(document),
-                        ]);
+                        values.push(Value::Integer(document));
                         filter(ReadFilter::LinksTo(key), values)
                     }
                 }
