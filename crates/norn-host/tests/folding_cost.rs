@@ -121,6 +121,7 @@ fn measure(targets: usize, siblings: usize) {
         &format!("replace spelling cost: N={targets}, S={siblings}, {case}"),
         &[
             ("write_dirents", spent.write_dirents.to_string()),
+            ("name_queries", spent.name_queries.to_string()),
             (
                 "walk_dirents (outside this bar)",
                 spent.walk_dirents.to_string(),
