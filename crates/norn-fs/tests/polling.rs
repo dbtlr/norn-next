@@ -108,7 +108,8 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
     // changes only ctime, so the same mode is reapplied until ctime moves.
     let old = fs::metadata(&target).unwrap();
     let mode = fs::Permissions::from_mode(old.mode() ^ 0o100);
-    let deadline = Instant::now() + Duration::from_secs(1);
+    // Two seconds cross a ctime tick even where ctime keeps whole seconds.
+    let deadline = Instant::now() + Duration::from_secs(2);
     let new = loop {
         fs::set_permissions(&target, mode.clone()).unwrap();
         let new = fs::metadata(&target).unwrap();
@@ -124,7 +125,8 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
     );
     assert_ne!(
         (old.ctime(), old.ctime_nsec()),
-        (new.ctime(), new.ctime_nsec())
+        (new.ctime(), new.ctime_nsec()),
+        "ctime did not move within two seconds of reapplied chmods"
     );
     assert!(
         tick(&watcher, &events, &clock, 6).contains(&target),
