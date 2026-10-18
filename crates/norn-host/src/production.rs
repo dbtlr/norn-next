@@ -17465,19 +17465,29 @@ mod tests {
         /// unregistration asked for over and over across that give-back is
         /// refused as held until the lock is back, and never as another
         /// maintainer: the only maintainer is this process.
+        ///
+        /// The link is made beside the root and exchanged with it in one
+        /// call, so no poll reads the root's name holding nothing in between:
+        /// a root read as absent classifies clean rather than refused, and
+        /// [`an_unregistration_after_a_removed_roots_coverage_loss_is_not_held`]
+        /// is the case that states that one.
         #[cfg(unix)]
         #[test]
         fn an_unregistration_across_an_identity_refusals_give_back_never_meets_its_own_lock() {
             for round in 0..5 {
                 let f = Fixture::new(&format!("unregister-identity-give-back-{round}"));
                 let host = attached_idle_under_a_busy_watcher(&f);
+                // Named after the root, so once the two are exchanged the link
+                // standing at the root's name resolves to itself.
+                let looping = f.root.join("vault-looping");
+                std::os::unix::fs::symlink(f.vault().file_name().unwrap(), &looping).unwrap();
 
                 let answer = std::thread::scope(|scope| {
                     let unregistering = scope.spawn(|| {
                         unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
                     });
-                    fs::remove_dir_all(f.vault()).unwrap();
-                    std::os::unix::fs::symlink(f.vault().file_name().unwrap(), f.vault()).unwrap();
+                    norn_testkit::churn::exchange(&looping, &f.vault())
+                        .expect("the root and the link beside it are exchanged");
                     unregistering.join().expect("the unregistration ran")
                 });
 
