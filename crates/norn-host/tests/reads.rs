@@ -1923,9 +1923,18 @@ fn rewrite_a_cafe_row(database: &Path, table: &str, set: &str) {
     );
 }
 
-/// Assert `read` is refused as an untrusted entry under the
-/// store-damaged-rebuilding reason, and answers once the entry rebuilds —
-/// never failing as a read on the way.
+/// Assert `read` is refused over the damage it meets, and answers once the
+/// entry rebuilds — never failing as a read on the way.
+///
+/// The first refusal is either of the two the host designs for read-met
+/// damage. A read that takes its entry's gate over a free entry publishes the
+/// damage and is refused as an untrusted entry under the
+/// store-damaged-rebuilding reason. A read that finds the gate or the entry
+/// held by other work is refused with its reader unavailable, and the damage
+/// is published under the next hold or when that work ends. A job leg
+/// publishes `Ready` before it ends, so the attach or the previous case's
+/// rebuild can still hold the entry when the read meets the damage, and this
+/// suite cannot wait for a leg to end.
 fn assert_untrusted_until_rebuilt<T>(
     what: &str,
     read: impl Fn() -> Result<T, norn_wire::ErrorEnvelope>,
@@ -1933,11 +1942,12 @@ fn assert_untrusted_until_rebuilt<T>(
     let Err(refused) = read() else {
         panic!("{what}: a read answered over damage");
     };
-    assert_eq!(
-        refused.detail(),
-        &ErrorDetail::entry_untrusted(UntrustedReason::store_damaged_rebuilding(
-            "the store is damaged"
-        )),
+    let over_a_free_entry = ErrorDetail::entry_untrusted(
+        UntrustedReason::store_damaged_rebuilding("the store is damaged"),
+    );
+    assert!(
+        refused.detail() == &over_a_free_entry
+            || refused.code() == &ReasonCode::HostReaderUnavailable,
         "{what}: {refused:?}"
     );
     wait_until(
