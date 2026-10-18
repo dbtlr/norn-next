@@ -96,7 +96,8 @@ judged unique by the same rule that reads it.**
 - **A written link keeps its form and changes only its path.** A move cascade, a link
   rewrite and a repair keep a link's family; its form, whether bare, `./` or `../`
   relative, rooted, or `vault://`; whether it spelled `.md`; its alias, anchor and embed
-  marker; and a Markdown destination's angle brackets or percent-escaping.
+  marker; and a Markdown destination's angle brackets or percent-escaping. The one change
+  of form is the `vault://` repair fix, which writes the `/` form.
   - A relative, rooted or `vault://` form writes the exact path to the target.
   - A suffix form writes the shortest suffix of the target's vault path that names the
     target alone from that document and spells at least as many segments as the link
