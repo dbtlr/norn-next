@@ -465,38 +465,56 @@ pub fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName, limit: 
 }
 
 /// What the reload an apply ran once it landed answers about the vault,
-/// asked once more where it lost its turn to the watcher: `None` where the
-/// vault serves under what landed, and the reload's refusal otherwise.
+/// asked again while it lost its turn: `None` where the vault serves under
+/// what landed, and the reload's own refusal otherwise.
 ///
-/// **A watcher fact can take the reload's turn.** `init` and `vault migrate`
+/// **Watcher work can take the reload's turn.** `init` and `vault migrate`
 /// reload once their apply lands, and a reload is refused unless the entry is
-/// `Ready`. A fact the watcher delivers first — the apply's own write seen
-/// back, or an edit the case made — leaves the entry warming over the
-/// reconcile it owes, and the reload is refused not ready with nothing of it
-/// run. The host does not promise the other order, so a case that pins what
-/// the reload itself decides waits for the entry to serve and asks
-/// `vault reload` again. Any other refusal is the reload's own answer.
+/// `Ready` with nothing working over it. A fact the watcher delivers first —
+/// the apply's own write seen back, or an edit the case made — leaves the
+/// entry warming over the reconcile it owes, and a poll in flight holds the
+/// entry's claim; either refuses the reload with nothing of it run. The host
+/// does not promise the other order, so a case that pins what the reload
+/// itself decides waits for the entry to serve and asks `vault reload` again
+/// until the reload runs. Any other refusal is the reload's own answer.
 pub fn reload_refusal_once_settled(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
     refused: Option<ErrorEnvelope>,
 ) -> Option<ErrorEnvelope> {
-    let lost_its_turn = refused.as_ref().is_some_and(|refused| {
+    let mut refused = refused;
+    wait_until(
+        &format!("a reload of `{name}` to run rather than lose its turn"),
+        state_budget(READY_LIMIT),
+        || {
+            if !reload_lost_its_turn(refused.as_ref()) {
+                return Observed::Met(refused.take());
+            }
+            let lost = format!("the reload was refused with {refused:?}");
+            wait_for_ready(host, name, READY_LIMIT);
+            refused = host
+                .vault_reload(&ReloadParams::new(VaultAddress::name(name.clone())))
+                .expect("the host answers a reload")
+                .err();
+            Observed::pending(lost)
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// Whether `refused` is a reload refusal that says nothing of the reload ran
+/// because watcher work held the entry: warming over a reconcile it owes, or
+/// busy under a claim.
+fn reload_lost_its_turn(refused: Option<&ErrorEnvelope>) -> bool {
+    refused.is_some_and(|refused| {
         matches!(
             refused.detail(),
             ErrorDetail::EntryNotReady {
                 state: NotReady::Warming { .. },
                 ..
-            }
+            } | ErrorDetail::ReloadBusy { .. }
         )
-    });
-    if !lost_its_turn {
-        return refused;
-    }
-    wait_for_ready(host, name, READY_LIMIT);
-    host.vault_reload(&ReloadParams::new(VaultAddress::name(name.clone())))
-        .expect("the host answers a reload")
-        .err()
+    })
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under
