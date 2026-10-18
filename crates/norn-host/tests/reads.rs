@@ -343,7 +343,7 @@ fn a_count_over_a_parked_vault_is_refused_with_the_parks_code() {
 
     let refused = wait_until(
         "the attach a count asked for to park the conflicting entry",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count(vault.name())) {
             Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
                 Observed::pending(format!("the count was refused with {refused:?}"))
@@ -431,7 +431,7 @@ fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
     .expect("correct the vault schema");
     let answered = wait_until(
         "a count grouping by a typed key to answer after the recovery",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count_by_created(vault.name())) {
             Ok(answered) => Observed::Met(answered),
             Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
@@ -485,7 +485,7 @@ fn attach_over_the_unreadable_schema(vault: &attach::Vault) -> attach::ServingHo
     let mut answering_since = None;
     wait_until(
         "counts to answer the cause with the watcher settled",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count(vault.name())) {
             Err(refused) if refused_with_the_unreadable_schema(&refused) => {
                 let since = *answering_since.get_or_insert_with(std::time::Instant::now);
@@ -557,7 +557,7 @@ fn a_count_is_served_once_the_unreadable_schema_is_corrected() {
     std::fs::write(&schema, attach::SCHEMA).expect("correct the vault schema");
     let answered = wait_until(
         "a count to be served after the schema is corrected",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count(vault.name())) {
             Ok(answered) => Observed::Met(answered),
             Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
@@ -624,7 +624,7 @@ fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
 
     let refused = wait_until(
         "a count to meet the damage over an entry nothing else holds",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count(vault.name())) {
             Err(refused) if refused.code() == &ReasonCode::HostReaderUnavailable => {
                 Observed::pending(format!("the count was refused with {refused:?}"))
@@ -644,7 +644,7 @@ fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
 
     let answered = wait_until(
         "the rebuild to put the entry back into service",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match host.count(&a_count(vault.name())) {
             Ok(answered) => Observed::Met(answered),
             Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {
@@ -1942,7 +1942,7 @@ fn assert_untrusted_until_rebuilt<T>(
     );
     wait_until(
         "the rebuild to put the entry back into service",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || match read() {
             Ok(answered) => Observed::Met(answered),
             Err(refused) if refused.code() == &ReasonCode::HostReadFailed => {

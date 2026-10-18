@@ -926,28 +926,24 @@ fn wait_undrained(
     what: &str,
     landed: impl Fn() -> (bool, String),
 ) {
-    wait_until(
-        what,
-        Budget::new(attach::READY_LIMIT, attach::STATE_PROBE),
-        || {
-            let (stands, read) = landed();
-            let state = serving.host.state(vault.name());
-            let drain_failed = matches!(
-                serving.engines.status(vault.name()),
-                SemanticStatus::On {
-                    last_drain_error: Some(_),
-                    ..
-                }
-            );
-            if stands && matches!(state, Ok(TrustState::Ready)) && drain_failed {
-                Observed::Met(())
-            } else {
-                Observed::pending(format!(
-                    "{read}, the entry is {state:?}, the drain failed: {drain_failed}"
-                ))
+    wait_until(what, attach::read_budget(attach::READY_LIMIT), || {
+        let (stands, read) = landed();
+        let state = serving.host.state(vault.name());
+        let drain_failed = matches!(
+            serving.engines.status(vault.name()),
+            SemanticStatus::On {
+                last_drain_error: Some(_),
+                ..
             }
-        },
-    )
+        );
+        if stands && matches!(state, Ok(TrustState::Ready)) && drain_failed {
+            Observed::Met(())
+        } else {
+            Observed::pending(format!(
+                "{read}, the entry is {state:?}, the drain failed: {drain_failed}"
+            ))
+        }
+    })
     .unwrap_or_else(|failure| panic!("{failure}"));
 }
 

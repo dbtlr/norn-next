@@ -5617,7 +5617,7 @@ fn moved_on_disk(host: &attach::ServingHost, vault: &attach::Vault, from: &str, 
     std::fs::rename(vault.path().join(FOLDER).join(from), destination).expect("move outside norn");
     wait_until(
         "the move and broken link are derived",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || {
             let mut store = vault.store();
             let snapshot = store.begin_request();
@@ -5892,7 +5892,7 @@ fn a_tombstone_no_live_document_holds_skips_as_no_holder() {
 fn wait_for_broken(host: &attach::ServingHost, vault: &attach::Vault) {
     wait_until(
         "the broken link is derived",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::read_budget(attach::READY_LIMIT),
         || {
             let rows = link_findings_of(host, vault, "zz-holder.md");
             if rows.iter().any(|row| row.kind == FindingKind::Broken) {
