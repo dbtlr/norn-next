@@ -44,8 +44,9 @@ judged unique by the same rule that reads it.**
   their target text is taken. A wikilink's target is read as written, after its alias and
   anchor are removed; nothing in it is percent-decoded, so `[[n422-space%20name]]` never
   names `n422-space name.md`: renaming that document rewrote the three other captured
-  links to it (M10, M11, W23) and left this one unchanged. A Markdown destination has its angle brackets
-  removed, its anchor and query cut off, and each segment percent-decoded (M10, M11, M12).
+  links to it (M10, M11, W23) and left this one unchanged. A Markdown destination has its
+  angle brackets removed, its anchor and query cut off, and each segment percent-decoded
+  (M10, M11, M12).
   A decoded separator stays a character inside its segment. From there the two families
   resolve identically.
 - **One comparison key on every root.** Paths and link targets compare by their NFC form
@@ -96,7 +97,7 @@ judged unique by the same rule that reads it.**
   rewrite and a repair keep a link's family; its form, whether bare, `./` or `../`
   relative, rooted, or `vault://`; whether it spelled `.md`; its alias, anchor and embed
   marker; and a Markdown destination's angle brackets or percent-escaping.
-  - A relative or rooted form writes the exact path to the target.
+  - A relative, rooted or `vault://` form writes the exact path to the target.
   - A suffix form writes the shortest suffix of the target's vault path that names the
     target alone from that document and spells at least as many segments as the link
     spelled, or the whole path where it has fewer. Uniqueness is judged by the reading
