@@ -17465,35 +17465,29 @@ mod tests {
         /// unregistration asked for over and over across that give-back is
         /// refused as held until the lock is back, and never as another
         /// maintainer: the only maintainer is this process.
+        ///
+        /// The link is made beside the root and exchanged with it in one
+        /// call, so no poll reads the root's name holding nothing in between:
+        /// a root read as absent classifies clean rather than refused, and
+        /// [`an_unregistration_after_a_removed_roots_coverage_loss_is_not_held`]
+        /// is the case that states that one.
         #[cfg(unix)]
         #[test]
         fn an_unregistration_across_an_identity_refusals_give_back_never_meets_its_own_lock() {
             for round in 0..5 {
                 let f = Fixture::new(&format!("unregister-identity-give-back-{round}"));
-                fs::write(f.vault().join("a.md"), "# A\n").unwrap();
-                let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
-                let host = crate::Host::new(
-                    crate::RegistryRead::from_entries([]),
-                    ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
-                    crate::LifecyclePolicy {
-                        idle_after: Duration::from_secs(600),
-                        worker_slots: 1,
-                        watch_poll_interval: Duration::from_millis(5),
-                        read_settle_bound: crate::READ_SETTLE_BOUND,
-                    },
-                )
-                .unwrap();
-                register(&host, &f.vault()).expect("the vault is registered");
-                let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
-                wait_state(&host, &notes(), norn_wire::TrustState::Ready);
-                drop(lease);
+                let host = attached_idle_under_a_busy_watcher(&f);
+                // Named after the root, so once the two are exchanged the link
+                // standing at the root's name resolves to itself.
+                let looping = f.root.join("vault-looping");
+                std::os::unix::fs::symlink(f.vault().file_name().unwrap(), &looping).unwrap();
 
                 let answer = std::thread::scope(|scope| {
                     let unregistering = scope.spawn(|| {
                         unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state())
                     });
-                    fs::remove_dir_all(f.vault()).unwrap();
-                    std::os::unix::fs::symlink(f.vault().file_name().unwrap(), f.vault()).unwrap();
+                    norn_testkit::churn::exchange(&looping, &f.vault())
+                        .expect("the root and the link beside it are exchanged");
                     unregistering.join().expect("the unregistration ran")
                 });
 
@@ -17503,6 +17497,81 @@ mod tests {
                     "round {round}"
                 );
             }
+        }
+
+        /// An idle attached vault whose root is removed, with nothing put in
+        /// its place, gives its coverage — and the maintainer lock inside it —
+        /// back when the watcher reports the loss. The root resolves to
+        /// nothing, which the registry reads as registrable, so no refusal is
+        /// what gives the coverage back; the loss is. An unregistration asked
+        /// for once the loss is published is admitted within the lifecycle
+        /// budget rather than held until the idle reaper's own clock, ten
+        /// minutes away, lets the entry go.
+        #[cfg(unix)]
+        #[test]
+        fn an_unregistration_after_a_removed_roots_coverage_loss_is_not_held() {
+            let f = Fixture::new("unregister-after-coverage-loss");
+            let host = attached_idle_under_a_busy_watcher(&f);
+
+            fs::remove_dir_all(f.vault()).unwrap();
+            wait_until(
+                "the removed root's coverage loss to be published",
+                lifecycle_budget(),
+                || match host.state(&notes()) {
+                    // Lost coverage is a state a poll does not walk out of, so
+                    // the surface answers it as the refusal its reason is
+                    // spelled in.
+                    Err(ref envelope)
+                        if matches!(
+                            envelope.detail(),
+                            norn_wire::ErrorDetail::EntryUntrusted {
+                                reason: norn_wire::UntrustedReason::WatcherLost {
+                                    cause: norn_wire::WatcherLossCause::CoverageLost,
+                                    ..
+                                },
+                                ..
+                            }
+                        ) =>
+                    {
+                        Observed::Met(())
+                    }
+                    state => Observed::Pending(format!("the state is {state:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            let answer =
+                unregister_once_idle(&host, &UnregisterParams::new(notes()).keeping_state());
+
+            assert_eq!(answer.map(|report| report.name), Ok(notes()));
+        }
+
+        /// A production host over `f`'s directories whose watcher is polled
+        /// every 5ms and whose idle reaper is ten minutes away, serving `f`'s
+        /// vault attached, `Ready` and demanded by nothing.
+        ///
+        /// The reaper is out of reach of every wait here, so an entry let go
+        /// of inside one is let go of by the lifecycle's own answer to what
+        /// the watcher reported rather than by an idle teardown.
+        fn attached_idle_under_a_busy_watcher(f: &Fixture) -> crate::Host<ProductionEntryOps> {
+            fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([]),
+                ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(600),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_millis(5),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
+                },
+            )
+            .unwrap();
+            register(&host, &f.vault()).expect("the vault is registered");
+            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            wait_state(&host, &notes(), norn_wire::TrustState::Ready);
+            drop(lease);
+            host
         }
 
         // ---- `vault set` over the production seam ----

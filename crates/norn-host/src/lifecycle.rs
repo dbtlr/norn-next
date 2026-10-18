@@ -1938,11 +1938,11 @@ impl<A: SnapshotSource> EntryState<A> {
     /// that stood when it was taken. A job leg makes its next job under
     /// [`Claim::hand_on`], which holds the gate, and the entry's lock goes back
     /// before `dispatch_handoff` takes it again for [`Claim::hand_off`]. A
-    /// refusal reaching the entry in that window — `refuse_identity_error`,
-    /// which the dispatcher thread reaches through
-    /// `park_on_current_classification` — opens the gate, so the hand-off takes
-    /// the slot through its open-gate arm and the job entering the channel is
-    /// held here by the slot alone.
+    /// give-back reaching the entry in that window — `give_back_entry_coverage`,
+    /// which `refuse_identity_error` and a coverage loss's own
+    /// `give_back_lost_coverage` both reach — opens the gate, so the hand-off
+    /// takes the slot through its open-gate arm and the job entering the
+    /// channel is held here by the slot alone.
     fn held_by_anything(&self) -> bool {
         self.coverage.in_hand()
             || self.coverage.out_with_leg()
@@ -2302,8 +2302,12 @@ pub(crate) fn watcher_lost(error: WatchError) -> UntrustedReason {
 /// path the entry is registered at is not the path the coverage was installed
 /// over any more, so what that path resolves to now, and which other names
 /// reach it, are open questions. A classification is what asks them, and every
-/// caller that reads this fact runs one. Every other watch failure is about
-/// coverage over a root that is still the entry's own.
+/// caller that reads this fact runs one through [`give_back_lost_coverage`] —
+/// which gives the coverage back too, whatever the classification finds,
+/// because coverage over a root that moved is coverage over nothing the entry
+/// is registered at. Every other watch failure is about coverage over a root
+/// that is still the entry's own, which the entry keeps for the recovery a
+/// demand asks for.
 fn root_moved(error: &WatchError) -> bool {
     matches!(error, WatchError::CoverageLost(_))
 }
@@ -3530,7 +3534,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 /// give back whatever coverage the entry is still holding.
 ///
 /// The park is [`park_identity_refusal`]'s write, so one fact has one spelling
-/// however it is found; what this path adds around it is the give-back below.
+/// however it is found; what this path adds around it is the give-back, which
+/// is [`give_back_entry_coverage`]'s.
 ///
 /// A conflict park standing over the entry stands through this one. The read
 /// that reaches here classified nothing — it failed on this root before it
@@ -3538,49 +3543,81 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 /// a conflict, and [`EntryState::parked`] ranks the conflict first for exactly
 /// that reason. A read that can reach the root again is what retires it.
 ///
-/// What the refusal gives back is what the entry itself holds, whatever leg is
+/// The close of the give-back answers a demand raised meanwhile, and leaves the
+/// park and the recovery standing — so the demand is answered with the park.
+fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
+    give_back_entry_coverage(shared, name, |state| {
+        state.pending.merge(Batch::rescan(RescanScope::Vault));
+        state.require_recovery();
+        park_identity_refusal(state, detail);
+        true
+    });
+}
+
+/// Give back the coverage an entry holds where a fact about its root means
+/// the entry may not go on holding it, leaving the entry untrusted and owing a
+/// recovery rather than tearing it down.
+///
+/// Two facts reach here: a root the registry cannot read
+/// ([`refuse_identity_error`]), and coverage that ended because the root
+/// stopped being covered ([`give_back_lost_coverage`]). **This is the one
+/// route either gives coverage back by**, so a refusal and a loss release
+/// alike, and the maintainer lock inside the coverage goes back on the same
+/// terms whichever fact sent it.
+///
+/// `verdict` is the fact's own write over the entry, run under the gate hold
+/// that takes the coverage, and it answers whether the give-back still stands:
+/// a fact that finds the entry moved on past the moment it was raised over
+/// leaves the entry to whatever moved it, and nothing here runs. The
+/// invalidation follows the verdict, so the verdict reads the entry as the
+/// fact left it.
+///
+/// What is given back is what the entry itself holds, whatever leg is
 /// registered against it: a leg standing over parked coverage holds none, so
-/// leaving the release to that leg would leave a refused entry serving the
-/// coverage every producer that reads parked coverage goes on taking. The
-/// registration ends with the taking, for the reason [`Claim::end_running_leg`]
-/// gives.
+/// leaving the release to that leg would leave the entry serving the coverage
+/// every producer that reads parked coverage goes on taking. The registration
+/// ends with the taking, for the reason [`Claim::end_running_leg`] gives.
 ///
 /// Coverage out with a leg is that leg's, and comes back where the leg ends:
-/// the invalidation above moves the entry past every leg's epoch, so each one
-/// hands its coverage up rather than parking it back here. A release already in
+/// the invalidation moves the entry past every leg's epoch, so each one hands
+/// its coverage up rather than parking it back here. A release already in
 /// flight holds the coverage the same way and publishes its own end.
 ///
 /// The entry stays untrusted and owing a recovery once the coverage is back,
-/// which is why the release here is the ops alone: this is a park with the
-/// resources given back under it, not a teardown, and a demand asking for
-/// coverage again is what serves the entry.
+/// which is why the release here is the ops alone: this is the resources given
+/// back under the entry's standing verdict, not a teardown, and a demand asking
+/// for coverage again is what serves the entry.
 ///
-/// **Coverage the refusal takes is out with the refusal until the ops have
-/// it.** It is taken under the gate as a release the entry began itself, with
-/// the release flag standing, and both are put down under the gate that
-/// follows the detach. So the entry reads as held for as long as the maintainer
-/// lock inside the coverage is still open — an unregistration asking in
-/// between is refused as held rather than meeting that lock as another
-/// maintainer — and a demand raised in between schedules nothing beside the
-/// detach. The close answers that demand, as [`finish_release`] does for a
-/// teardown, and leaves the park and the recovery standing.
-fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
+/// **Coverage this takes is out with the give-back until the ops have it.** It
+/// is taken under the gate as a release the entry began itself, with the
+/// release flag standing, and both are put down under the gate that follows the
+/// detach. So the entry reads as held for as long as the maintainer lock inside
+/// the coverage is still open — an unregistration asking in between is refused
+/// as held rather than meeting that lock as another maintainer — and a demand
+/// raised in between schedules nothing beside the detach. The close answers
+/// that demand, as [`finish_release`] does for a teardown, with whatever the
+/// entry's standing verdict leaves it owed.
+fn give_back_entry_coverage<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    name: &VaultName,
+    verdict: impl FnOnce(&mut EntryState<O::Attachment>) -> bool,
+) {
     let Some(entry) = shared.entries.get(name) else {
         return;
     };
     let taken = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if !verdict(&mut state) {
+            return;
+        }
         state.claim.invalidate();
-        state.pending.merge(Batch::rescan(RescanScope::Vault));
-        state.require_recovery();
         // The coverage reaches the ops on both routes below, so a rebuild the
         // entry owed is owed against a store it is not holding any more. What
-        // it owes from here is the recovery raised above, and a requirement
-        // left standing beside that one is one nothing clears: this path gives
-        // its coverage back without the release that would.
+        // it owes from here is the recovery the verdict stands on, and a
+        // requirement left standing beside that one is one nothing clears:
+        // this path gives its coverage back without the release that would.
         state.clear_rebuild();
-        park_identity_refusal(&mut state, detail);
-        // The refusal opens no release window, so the reader is let go of
+        // The give-back opens no release window, so the reader is let go of
         // here: the coverage reaches the ops on both routes below — given up
         // to them under this lock, or handed to them where the leg holding it
         // ends — and a handle the entry kept would outlast the store either
@@ -3589,7 +3626,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         let epoch = state.claim.epoch();
         match state.coverage.take(epoch) {
             // The entry holds its own coverage, whatever leg is registered
-            // against it. The refusal gives it back, and the registration ends
+            // against it. The give-back takes it, and the registration ends
             // with the taking: what would otherwise stand is a leg recorded as
             // holding coverage the entry no longer has.
             Some(attachment) => {
@@ -3626,6 +3663,37 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
     }
 }
 
+/// Read again the root of an entry whose coverage ended because the root
+/// stopped being covered, and give that coverage back whatever the read finds.
+///
+/// The read is [`park_on_classification_under_gate`]'s, under the attach gate,
+/// so a root that now resolves to another served root parks every name in the
+/// conflict and a root the registry cannot read parks the entry on the
+/// refusal, as wherever else a classification runs. Either refusal gives the
+/// coverage back itself, and moves the entry past `lost_at` as it does.
+///
+/// **A root that classifies clean is given back from too.** A root that is
+/// simply gone resolves to nothing, which the registry reads as registrable,
+/// and a root reached under one name is no conflict: no refusal follows, yet
+/// the coverage is dead all the same — its watcher watches nothing — and the
+/// maintainer lock inside it is held for as long as the entry keeps it. Kept,
+/// nothing would read the root again, because the watcher is what would, and
+/// the entry would stand held until the idle reaper. So the loss gives it back
+/// through [`give_back_entry_coverage`], raising no park: the entry stands
+/// untrusted on the loss the leg published, owing the recovery and the rescan
+/// the leg raised beside it, and a later demand re-attaches it.
+///
+/// `lost_at` is the epoch the leg that met the loss left the entry at. An
+/// entry standing anywhere else has moved on to work this loss did not
+/// schedule — a refusal's release above, or an acquisition a demand raised
+/// between the leg's hold and this one — and that work answers for the
+/// coverage, so nothing is given back from under it.
+fn give_back_lost_coverage<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, lost_at: u64) {
+    let _attach_guard = attach_gate(shared);
+    park_on_classification_under_gate(shared, name);
+    give_back_entry_coverage(shared, name, |state| state.claim.stands_at(lost_at));
+}
+
 /// Park an entry on the registry's own account of a root it cannot read, where
 /// the entry holds nothing for the refusal to give back.
 ///
@@ -3659,10 +3727,15 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
 ///
 /// The two acquisition legs read the root under the gate themselves, so the
 /// identity each claims and the conflict it is judged for come from one read.
-/// This helper instead classifies a root when the serving set changes or a
-/// watcher reports that coverage ended. None of these paths meets a standing
-/// registry park — a park gives the entry's coverage back, so the work a
-/// parked entry is owed once the park is withdrawn is always the attach.
+/// This helper instead classifies a root when the serving set changes, and
+/// [`give_back_lost_coverage`] runs the same read when a watcher reports that
+/// coverage ended. None of these paths meets a standing registry park — a
+/// park gives the entry's coverage back, and an entry holding no coverage has
+/// no watcher to report on — so the work a parked entry is owed once the park
+/// is withdrawn is always the attach. What this read leaves unrefused it also
+/// leaves holding whatever it held: giving back the coverage a loss ended is
+/// [`give_back_lost_coverage`]'s, which is why the watcher path calls that
+/// rather than this.
 ///
 /// Both refusals the read can raise are acted on under the attach gate, so a
 /// classification and the acquisition claims it is judged against cannot
@@ -6183,7 +6256,8 @@ fn poll_claimed_entry<O: EntryOps>(
     let mut schedule = None;
     let mut stale = None;
     let mut release = None;
-    let mut reclassify = false;
+    let mut root_moved_under_it = false;
+    let mut lost_at = None;
     {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.unpin_leg(Leg::Poll(epoch));
@@ -6267,13 +6341,15 @@ fn poll_claimed_entry<O: EntryOps>(
                 // A job that was waiting on this claim does not: the
                 // coverage it would have worked against is gone, and what
                 // installs coverage again is the recovery a demand asks
-                // for.
+                // for. Where the watch ended because the root moved, the
+                // coverage is given back below once this hold ends, and the
+                // demanded work that installs it again is an attach.
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.claim.drop_marker();
                     state.claim.end_poll(epoch);
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    reclassify = root_moved(&error);
+                    root_moved_under_it = root_moved(&error);
                     state.withdraw_trust(watcher_lost(error));
                     state.coverage.park_by(epoch, attachment);
                 }
@@ -6345,6 +6421,12 @@ fn poll_claimed_entry<O: EntryOps>(
                     schedule = schedule_due_detach(&mut state, name);
                 }
             }
+            // The epoch is read once this hold has scheduled all it will, so
+            // the give-back below finds the entry where this poll left it
+            // unless something else moved it on in between.
+            if root_moved_under_it {
+                lost_at = Some(state.claim.epoch());
+            }
         }
     }
     if let Some(attachment) = release {
@@ -6408,11 +6490,13 @@ fn poll_claimed_entry<O: EntryOps>(
             schedule = Some(job);
         }
     }
-    // The root under this entry's coverage moved, so it is read again
-    // here. A refusal found here supersedes whatever was scheduled above,
-    // and the dispatch below then reaches an entry holding no job.
-    if reclassify {
-        park_on_current_classification(shared, name);
+    // The root under this entry's coverage moved, so it is read again here
+    // and the coverage goes back. The give-back — a refusal's, or the loss's
+    // own where the read refuses nothing — supersedes whatever was scheduled
+    // above, so the dispatch below reaches an entry holding no job of this
+    // poll's, or the attach the give-back answered a standing demand with.
+    if let Some(lost_at) = lost_at {
+        give_back_lost_coverage(shared, name, lost_at);
     }
     if let Some(job) = schedule {
         let _ = job;
@@ -6947,7 +7031,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             state.control_root = shared.ops.control_root(&attachment);
             state.claim.release();
             let mut next = None;
-            let mut reclassify = false;
+            let mut lost_at = None;
             match result {
                 Ok(()) => {
                     let took_in_a_fact = !observed.is_empty() || handoff_saturated;
@@ -7025,9 +7109,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
-                    reclassify = root_moved(&error);
+                    let moved = root_moved(&error);
                     state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
+                    lost_at = moved.then(|| state.claim.epoch());
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.require_recovery();
@@ -7058,9 +7143,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             drop(attach_claims);
             // The watcher this leg drained reported that the root stopped
             // being covered, and this leg is the one caller that consumed the
-            // report: the classification rides the fact rather than the caller.
-            if reclassify {
-                park_on_current_classification(shared, &name);
+            // report: the classification and the give-back ride the fact
+            // rather than the caller.
+            if let Some(lost_at) = lost_at {
+                give_back_lost_coverage(shared, &name, lost_at);
             }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
@@ -7381,7 +7467,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return Some(attachment);
             }
             let mut next = None;
-            let mut reclassify = false;
+            let mut lost_at = None;
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
@@ -7441,9 +7527,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    reclassify = root_moved(&error);
+                    let moved = root_moved(&error);
                     state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
+                    lost_at = moved.then(|| state.claim.epoch());
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.coverage.park_by(epoch, attachment);
@@ -7478,9 +7565,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             drop(state);
             // The watcher this leg drained reported that the root stopped
             // being covered, and this leg is the one caller that consumed the
-            // report: the classification rides the fact rather than the caller.
-            if reclassify {
-                park_on_current_classification(shared, &name);
+            // report: the classification and the give-back ride the fact
+            // rather than the caller.
+            if let Some(lost_at) = lost_at {
+                give_back_lost_coverage(shared, &name, lost_at);
             }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
@@ -7513,8 +7601,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
 /// Answer a failed turn of derivation over coverage the leg holds: the policy
 /// the entry owes for what the turn met. A lost or contended maintainership
 /// releases the entry, a terminal watch or a refusing environment owes the
-/// recovery, and damaged derived state withdraws trust and hands the claim on
-/// to rung 3.
+/// recovery — a watch that ended because the root moved giving the coverage
+/// back as well, through [`give_back_lost_coverage`] — and damaged derived
+/// state withdraws trust and hands the claim on to rung 3.
 ///
 /// A reconcile turn and an apply's intake — which derives the facts delivered
 /// before it as a reconcile turn does — both end here, so the facts either
@@ -7559,16 +7648,17 @@ fn end_turn_on_failure<O: EntryOps>(
             state.claim.release();
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
-            let reclassify = root_moved(&error);
+            let moved = root_moved(&error);
             state.withdraw_trust(watcher_lost(error));
             let next = schedule_due_detach(&mut state, name);
+            let lost_at = moved.then(|| state.claim.epoch());
             drop(state);
             // The watcher this leg drained reported that the root
             // stopped being covered, and this leg is the one caller
-            // that consumed the report: the classification rides the
-            // fact rather than the caller.
-            if reclassify {
-                park_on_current_classification(shared, name);
+            // that consumed the report: the classification and the
+            // give-back ride the fact rather than the caller.
+            if let Some(lost_at) = lost_at {
+                give_back_lost_coverage(shared, name, lost_at);
             }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
@@ -8180,8 +8270,10 @@ fn run_reload_job<O: EntryOps>(
 
 /// Answer a runtime failure a reload-shaped leg met, and apply the policy the
 /// entry owes for it: a lost or contended maintainership releases the entry,
-/// a terminal watch or a refusing environment owes the recovery, and damaged
-/// derived state withdraws trust and hands the claim on to rung 3.
+/// a terminal watch or a refusing environment owes the recovery — a watch that
+/// ended because the root moved giving the coverage back as well, through
+/// [`give_back_lost_coverage`] — and damaged derived state withdraws trust and
+/// hands the claim on to rung 3.
 ///
 /// Each of these is a fact about the entry rather than about the candidate
 /// the leg read, so an activation and a dry run that meet one both answer it
@@ -8239,16 +8331,17 @@ fn apply_reload_runtime_failure<O: EntryOps>(
         }
         JobFailure::WatcherTerminal(error) => {
             let failure = JobFailure::WatcherTerminal(error.clone());
-            let reclassify = root_moved(&error);
+            let moved = root_moved(&error);
             record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
             state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.withdraw_trust(watcher_lost(error));
             state.claim.release();
+            let lost_at = moved.then(|| state.claim.epoch());
             drop(state);
-            if reclassify {
-                park_on_current_classification(shared, &name);
+            if let Some(lost_at) = lost_at {
+                give_back_lost_coverage(shared, &name, lost_at);
             }
             let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
             return None;
@@ -14723,6 +14816,295 @@ mod tests {
         drop((lease, host));
     }
 
+    /// **Coverage that ended is given back whatever the classification after
+    /// it finds.** A root that is simply gone resolves to nothing, which the
+    /// registry reads as registrable: the classification refuses nothing, so
+    /// no refusal is what gives the coverage back. The coverage is dead all
+    /// the same — the watcher inside it watches nothing — and the maintainer
+    /// lock inside it is this process's for as long as the entry keeps it.
+    ///
+    /// So the loss itself gives it back: the ops have the attachment once the
+    /// poll that met the loss returns, the entry stands untrusted on the loss
+    /// with no park it was never refused under, owing the recovery a later
+    /// demand asks for, and an unregistration then finds nothing holding it.
+    #[cfg(unix)]
+    #[test]
+    fn coverage_lost_over_a_root_that_classifies_clean_gives_the_coverage_back() {
+        let scratch = temp_base("coverage-lost-clean");
+        let root = scratch.join("notes");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            1,
+        );
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+
+        // The root goes away, and the watcher reports the coverage it had over
+        // that root has ended.
+        std::fs::remove_dir(&root).unwrap();
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(root.clone()));
+        poll_watchers(&host.shared);
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the entry kept coverage that ended over a root nothing refused"
+        );
+        assert_eq!(
+            entry_park(&host, &name),
+            None,
+            "a root that classifies against nothing parked the entry"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(lost(
+                WatcherLossCause::CoverageLost,
+                &format!("watch coverage was lost for {}", root.display()),
+            )),
+            "the entry stopped publishing the loss once it gave the coverage back"
+        );
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.recovery_required,
+                "the coverage went back and the recovery the loss owes went with it"
+            );
+            assert!(
+                !state.held_by_anything(),
+                "the entry is still held once the coverage is back"
+            );
+        }
+        host.unregister(&name, true)
+            .unwrap_or_else(|refusal| panic!("the unregistration was refused: {refusal:?}"));
+
+        drop(host);
+    }
+
+    /// The root every job-leg coverage-loss case below reports lost: the root
+    /// `Roots::Absent` registers, which resolves to nothing and so classifies
+    /// against nothing.
+    fn absent_root(name: &VaultName) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/tmp/norn-host-lifecycle-{name}"))
+    }
+
+    /// Arm the fake's watcher to report, on its next drain, that coverage over
+    /// `name`'s root ended.
+    fn report_coverage_lost(ops: &FakeOps, name: &VaultName) {
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(absent_root(name)));
+    }
+
+    /// **A job leg whose own drain meets the loss gives the coverage back as
+    /// the watcher poll does.** Each job-leg site answers the loss on its own
+    /// code, so each is driven here through the one leg that reaches it:
+    /// `drive` takes an entry attached, `Ready` and demanded by `lease`, holds
+    /// the leg open, arms the loss for that leg's drain, gives the lease back
+    /// and lets the leg end.
+    ///
+    /// The root classifies clean, so no refusal is what gives the coverage
+    /// back: what is required is that the leg's site does, leaving the entry
+    /// untrusted on the loss with no park, owing its recovery, held by nothing
+    /// and admitted for unregistration.
+    fn a_job_legs_coverage_loss_gives_the_coverage_back(
+        leg: &str,
+        drive: impl FnOnce(&Host<Arc<FakeOps>>, &Arc<FakeOps>, &VaultName, DemandLease<Arc<FakeOps>>),
+    ) {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        drive(&host, &ops, &name, lease);
+
+        wait_for_detaches(
+            &ops,
+            1,
+            &format!("the {leg} leg to give back coverage that ended over a root nothing refused"),
+        );
+        let entry = host.shared.entries.get(&name).unwrap();
+        // The ops have the attachment once `detach` returns, and the close
+        // that puts the release flag down follows under the gate.
+        wait_until(
+            &format!("the {leg} leg's give-back to let the entry go"),
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().held_by_anything() {
+                    Observed::pending("the entry is still held")
+                } else {
+                    Observed::Met(())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            entry_park(&host, &name),
+            None,
+            "the {leg} leg parked an entry whose root classifies against nothing"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(lost(
+                WatcherLossCause::CoverageLost,
+                &format!(
+                    "watch coverage was lost for {}",
+                    absent_root(&name).display()
+                ),
+            )),
+            "the {leg} leg stopped publishing the loss once it gave the coverage back"
+        );
+        assert!(
+            entry.gate.lock().unwrap().recovery_required,
+            "the {leg} leg gave the coverage back and the recovery the loss owes with it"
+        );
+        drop(entry);
+        host.unregister(&name, true).unwrap_or_else(|refusal| {
+            panic!("the unregistration after the {leg} leg's loss was refused: {refusal:?}")
+        });
+    }
+
+    /// The maintenance leg's site gives back the coverage its drain reported
+    /// lost.
+    #[test]
+    fn a_maintenance_legs_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back(
+            "maintenance",
+            |host, ops, name, lease| {
+                arrange_for(&ops.maintenance_due_at, name);
+                arrange_for(&ops.block_maintenance_at, name);
+                poll_watchers(&host.shared);
+                wait_for_flag("maintenance_started", &ops.maintenance_started);
+                report_coverage_lost(ops, name);
+                drop(lease);
+                ops.maintenance_release.store(true, Ordering::SeqCst);
+            },
+        );
+    }
+
+    /// The recovery leg's site gives back the coverage its drain reported
+    /// lost. The entry first owes a recovery over coverage it keeps — a
+    /// backend's loss — and the demand that answers it is what runs the leg.
+    #[test]
+    fn a_recovery_legs_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("recovery", |host, ops, name, lease| {
+            *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+            poll_watchers(&host.shared);
+            wait_for_state(host, name, backend_lost());
+            ops.block_recover.store(true, Ordering::SeqCst);
+            let recovering = host.demand(name, AttachMode::Durable).unwrap();
+            wait_for_flag("recover_started", &ops.recover_started);
+            report_coverage_lost(ops, name);
+            drop((lease, recovering));
+            ops.recover_release.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A reconcile turn's failure, which `end_turn_on_failure` answers, gives
+    /// back the coverage its drain reported lost. The turn is the one a polled
+    /// fact schedules.
+    #[test]
+    fn a_reconcile_turns_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("reconcile", |host, ops, name, lease| {
+            ops.block_reconcile.store(true, Ordering::SeqCst);
+            ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+            poll_watchers(&host.shared);
+            wait_for_flag("reconcile_started", &ops.reconcile_started);
+            report_coverage_lost(ops, name);
+            drop(lease);
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A schema reload's runtime failure, which
+    /// `apply_reload_runtime_failure` answers, gives back the coverage the
+    /// reload's own drain reported lost. The reload is answered with the loss
+    /// before the case gives its lease back, and the lease standing across the
+    /// give-back asks for nothing the loss's recovery is owed.
+    #[test]
+    fn a_reloads_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("reload", |host, ops, name, lease| {
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+            report_coverage_lost(ops, name);
+            let refusal = host
+                .reload(name)
+                .expect_err("a reload whose drain met a coverage loss succeeded");
+            assert!(
+                matches!(
+                    refusal,
+                    ReloadRefusal::Runtime(JobFailure::WatcherTerminal(WatchError::CoverageLost(
+                        _
+                    )))
+                ),
+                "the reload answered {refusal:?}"
+            );
+            drop(lease);
+        });
+    }
+
+    /// **A coverage loss given back late leaves alone coverage the entry has
+    /// installed since.** A site hands the give-back the epoch its own hold
+    /// left the entry at, and the give-back runs after that hold, behind the
+    /// attach gate. In between, the idle reaper can tear the entry down and a
+    /// demand can attach it again, so what the entry holds when the give-back
+    /// runs is fresh coverage over whatever the root is now — coverage the
+    /// loss says nothing about.
+    ///
+    /// The give-back is called here directly at the epoch a watcher poll's
+    /// hold leaves an idle entry at: the poll ends its own claim and, with no
+    /// demand standing, schedules nothing, so the epoch it hands on is the one
+    /// the entry stood at before the poll. The teardown and the attach run in
+    /// full first, which is the interleaving the gap admits, and the late
+    /// give-back must find the entry moved on: the fresh coverage stands, the
+    /// entry serves over it, and nothing more reaches the ops.
+    #[test]
+    fn a_late_coverage_loss_give_back_leaves_coverage_installed_since() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let lost_at = entry.gate.lock().unwrap().claim.epoch();
+
+        // The gap: the reaper tears the idle entry down, and a demand attaches
+        // it again over fresh coverage.
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        wait_for_detaches(&ops, 1, "the reaper to tear the idle entry down");
+        wait_for_published_label(&host, &name, TrustState::Unattached);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+
+        give_back_lost_coverage(&host.shared, &name, lost_at);
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "a late give-back took coverage a later attach installed"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.coverage.in_hand(),
+                "the entry no longer holds the coverage the later attach installed"
+            );
+            assert_eq!(
+                state.trust,
+                TrustState::Ready,
+                "the entry stopped serving over coverage the loss said nothing about"
+            );
+        }
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+
+        drop((lease, entry, host));
+    }
+
     /// A watcher report is spent by whichever caller drains the subscription
     /// first, and a job leg's own drain is such a caller. The classification
     /// rides the report rather than the caller, so the leg that consumes it
@@ -16391,19 +16773,18 @@ mod tests {
     /// coverage is gone is nothing the loss did not already say. The state a
     /// client reads long after the loss is the cause that ended coverage rather
     /// than something minted on top of it.
+    ///
+    /// The loss is a backend's, because that is the loss an entry keeps its
+    /// attachment through. Coverage that ended because the root moved is given
+    /// back with the loss, so no tick follows it to replace anything.
     #[test]
     fn a_published_watcher_cause_outlives_the_ticks_that_follow_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let held = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
-        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(
-            std::path::PathBuf::from("/tmp/norn-host-lifecycle-fixture"),
-        ));
-        let expected = lost(
-            WatcherLossCause::CoverageLost,
-            "watch coverage was lost for /tmp/norn-host-lifecycle-fixture",
-        );
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        let expected = backend_lost();
         wait_for_state(&host, &name, expected.clone());
         let polls_at_loss = *ops
             .polls
