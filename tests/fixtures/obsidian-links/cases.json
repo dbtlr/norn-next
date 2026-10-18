@@ -1,16 +1,6 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "probe_root": "artifacts/scratch/norn-422",
-  "renamed_on_install": [
-    {
-      "checked_in": "artifacts/scratch/norn-422/unicode/nfd/n422-th\u00e9.md",
-      "installed": "artifacts/scratch/norn-422/unicode/nfd/n422-the\u0301.md"
-    },
-    {
-      "checked_in": "artifacts/scratch/norn-422/unicode/pair-a/n422-r\u00e9sum\u00e9.md",
-      "installed": "artifacts/scratch/norn-422/unicode/pair-a/n422-re\u0301sume\u0301.md"
-    }
-  ],
   "cases": [
     {
       "id": "M01",

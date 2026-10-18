@@ -14,7 +14,7 @@ Install the probe into an existing Obsidian vault from the repository root:
 cargo run -p norn-testkit --bin norn-obsidian-probe -- <vault-root>
 ```
 
-The command copies `vault/` into `<vault-root>`, preserving every relative path, and renames the files `cases.json` lists under `renamed_on_install`.
+The command copies `vault/` into `<vault-root>`, preserving every relative path, and renames the files [install.json](install.json) lists under `renamed_on_install`.
 A plain copy of `vault/` is not an install, because it leaves those files composed.
 The destination must be fresh: the command refuses when `artifacts/scratch/norn-422` already exists.
 Keep the vault root unchanged. Do not open the scratch folder as a separate vault.
@@ -39,6 +39,7 @@ Source-local competitors distinguish relative resolution from vault-wide matchin
 
 `cases.json` spells every path at its intended code points, and two of them are decomposed (NFD) beside composed twins.
 Git does not keep a decomposed name portably, so those two files are checked in composed and the install renames them.
+`cases.json` is the baseline the recorded observations pin by hash, so the rename list lives in `install.json` instead.
 Filesystem and sync normalization can still change the names actually presented to Obsidian.
 Results without actual filename evidence do not settle NFC versus NFD behavior.
 A case-insensitive device does not establish case folding on a case-sensitive filesystem.

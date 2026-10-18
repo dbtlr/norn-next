@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "renamed_on_install": [
+    {
+      "checked_in": "artifacts/scratch/norn-422/unicode/nfd/n422-thé.md",
+      "installed": "artifacts/scratch/norn-422/unicode/nfd/n422-thé.md"
+    },
+    {
+      "checked_in": "artifacts/scratch/norn-422/unicode/pair-a/n422-résumé.md",
+      "installed": "artifacts/scratch/norn-422/unicode/pair-a/n422-résumé.md"
+    }
+  ]
+}
