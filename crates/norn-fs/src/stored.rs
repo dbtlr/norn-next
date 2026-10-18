@@ -100,7 +100,10 @@ mod platform {
     /// names it by whichever of its links it looked up last, so a lookup of
     /// another link — in this folder or another, by any process — between
     /// the open and the query would answer that link's spelling. A file with
-    /// one link, and a directory, has one name, and that is the answer.
+    /// one link has one name, and that is the answer. A directory is not
+    /// asked its link count, which does not count its names; it has one name
+    /// except as a hard-linked directory, which HFS+ allows and only Time
+    /// Machine makes, and that is outside this answer.
     fn query(entry: BorrowedFd<'_>) -> Option<OsString> {
         let stat = fstat(entry).ok()?;
         if FileType::from_raw_mode(stat.st_mode) != FileType::Directory && stat.st_nlink != 1 {
