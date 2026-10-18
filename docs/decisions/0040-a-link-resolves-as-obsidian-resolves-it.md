@@ -38,7 +38,8 @@ judged unique by the same rule that reads it.**
   healthy names the target Obsidian opens, and a link Obsidian resolves is never judged
   broken. Norn may report what Obsidian settles silently: an ambiguity stays a warning
   finding naming its candidates, though Obsidian opens one of them. Norn may suggest a more
-  explicit spelling, never require one.
+  explicit spelling, never require one. The one declared exception is the vault schema's
+  ambiguity-ignore globs, below.
 - **One rule reads both families.** A wikilink and a Markdown link differ only in how
   their target text is taken. A wikilink's target is read as written, after its alias and
   anchor are removed; nothing in it is percent-decoded, so `[[n422-space%20name]]` never
@@ -53,8 +54,7 @@ judged unique by the same rule that reads it.**
   precedence: `Note.md` and `note.md` on a root that tells them apart, or NFC and NFD
   spellings of `résumé.md` in one folder, make every link to either ambiguous. The same
   vault names therefore resolve identically on every platform. A root's proven case
-  behavior stays a fact the filesystem mechanics need and is no input to resolution. The
-  vault schema's ambiguity-ignore globs match under the same key.
+  behavior stays a fact the filesystem mechanics need and is no input to resolution.
 - **What a path names.** A Markdown document is named by its vault path with or without
   its `.md` (W01, W02, M01, M02). Any other vault file is named only with its extension,
   the text after the last dot of its last segment. Every form below reads both the same
@@ -71,10 +71,20 @@ judged unique by the same rule that reads it.**
     matches exactly, it names every path that the target is a right-to-left,
     segment-aligned suffix of (M08). A bare name is the one-segment case.
   - A `vault://` target stays a rooted name, read from the vault root under the same key
-    and naming rule, never as a suffix.
+    and naming rule, never as a suffix. Obsidian has no `vault://` scheme and cannot open
+    one, so a `vault://` link that resolves still carries a warning finding saying so,
+    and its derived repair fix writes the `/` form naming the same target. The link
+    keeps its place in the link graph, its backlinks and the cascades.
 
   A target given with no document holding it, such as a get's, has no folder, so its
   relative forms name nothing.
+- **Ambiguity-ignore globs are the schema author's declared exception.** A path under the
+  vault schema's ambiguity-ignore globs is no candidate for a target unless the target
+  reaches the ignored place, and it is dropped before the exact-path step. With
+  `archive/**` ignored, `[[twin]]` names `notes/twin.md` alone, while `[[archive/twin]]`
+  still names the archive copy. Obsidian has no such setting and may open the ignored
+  copy, so the glob is a tie-break; it stands because the vault's author wrote it, unlike
+  an order norn would guess. The globs match under the comparison key.
 - **One match is healthy, several are ambiguous, none is broken.** An ambiguous link
   carries its candidates and is never resolved by a tie-break, though Obsidian opens one
   candidate (W17, A01, A02, M05, M08, W12). A link whose last segment carries an extension
@@ -99,7 +109,9 @@ judged unique by the same rule that reads it.**
     it keeps spaces and encodes `%`, `#`, `?`, `<` and `>`.
 
   Every written link is read back by this rule as its target, or the write is skipped
-  with its reason. A link ambiguous before the change is not rewritten.
+  with its reason. A link ambiguous before the change is not rewritten. Norn writes no
+  new `vault://` link; a cascade keeps an existing one in its form, and its warning
+  stands until a repair writes the `/` form.
 
 ## Considered options
 
@@ -128,6 +140,15 @@ judged unique by the same rule that reads it.**
   no document stays unjudged until other files are indexed. Indexing them changes no
   clause of this rule, though it widens the glossary's resolution candidate and link
   health and ADR 0027's attachment clause from documents to vault files.
+- **Ambiguity-ignore globs silenced but unresolved, or removed.** Silencing the warning
+  without resolving would drop the link from backlinks and cascades; removing the globs
+  would return every archived twin to a warning the author already answered. Rejected
+  for the declared exception.
+- **A `vault://` link outside the vault, or a norn-only exception.** Reading it as
+  addressed elsewhere, like `https:`, would drop a link to a vault document from the link
+  graph without a word. Keeping it healthy as a declared exception would leave a link
+  norn calls healthy that Obsidian cannot open. Rejected for the warning: the link stays
+  in the graph, and the `/` form it is repaired to names the same target in both.
 - **Writing the form Obsidian writes.** Obsidian's rename rewrote `../targets/n422-space%20name.md`
   to the bare `n422-space%20renamed.md` (M10). Rejected: parity concerns what a link names,
   not how it is spelled, and preserving the author's form changes the least while naming
