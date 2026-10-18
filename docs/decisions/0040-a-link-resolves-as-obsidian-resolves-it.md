@@ -10,10 +10,12 @@ agents working through norn, so a link must mean the same thing to both. [ADR
 0038](0038-a-link-fix-never-matches-a-link-by-a-rule-obsidian-does-not-apply.md) stated this
 for wikilinks. The resolver had drifted from those semantics, and the Obsidian probe in
 `tests/fixtures/obsidian-links` (Obsidian 1.14.5 on iOS, cases cited below by id) records
-where. Obsidian reached `n422-Éclair.md` from `[[n422-éclair]]` (W09) and NFC and NFD
-spellings of one name from each other (W10, W11, M16, M17), where norn folded only ASCII
-case, only on a root proven to fold, and normalized nothing. Obsidian opened the image from
-`[[photo.png]]` (W13, M25), where norn stripped `.png` and reached `photo.md`. Obsidian
+where. Obsidian reached `n422-Éclair.md` from `[[n422-éclair]]` (W09), and links spelled
+in NFD and in NFC opened the fixture file spelled the other way (W10, W11, M16, M17), where
+norn folded only ASCII case, only on a root proven to fold, and normalized nothing; the
+device's own filename spellings were not captured, so these cases cannot tell Obsidian's
+matching from its filesystem's. Obsidian opened the image beside `photo.md` from a wikilink
+naming `photo.png` (W13), where norn stripped `.png` and reached `photo.md`. Obsidian
 preferred an exact vault path to a deeper suffix (W07, M23), where norn reported the two
 ambiguous. Obsidian resolved `./`, `../` and `/` wikilinks (W03–W05), where norn refused them.
 Obsidian read an unprefixed Markdown destination by the wikilink's suffix rule (M08 against
@@ -39,8 +41,9 @@ judged unique by the same rule that reads it.**
   explicit spelling, never require one.
 - **One rule reads both families.** A wikilink and a Markdown link differ only in how
   their target text is taken. A wikilink's target is read as written, after its alias and
-  anchor are removed; nothing in it is percent-decoded, so `[[n422-space%20name]]` names a
-  document spelled with `%20` (W24). A Markdown destination has its angle brackets
+  anchor are removed; nothing in it is percent-decoded, so `[[n422-space%20name]]` never
+  names `n422-space name.md`: renaming that document rewrote the three other captured
+  links to it (M10, M11, W23) and left this one unchanged. A Markdown destination has its angle brackets
   removed, its anchor and query cut off, and each segment percent-decoded (M10, M11, M12).
   A decoded separator stays a character inside its segment. From there the two families
   resolve identically.
@@ -48,15 +51,18 @@ judged unique by the same rule that reads it.**
   under Unicode default lowercasing, whatever the root's filesystem does with names.
   Names equal under that key are candidates for each other, and an exact spelling takes no
   precedence: `Note.md` and `note.md` on a root that tells them apart, or NFC and NFD
-  spellings of `résumé.md` anywhere (W12), make every link to either ambiguous. The same
+  spellings of `résumé.md` in one folder, make every link to either ambiguous. The same
   vault names therefore resolve identically on every platform. A root's proven case
   behavior stays a fact the filesystem mechanics need and is no input to resolution. The
   vault schema's ambiguity-ignore globs match under the same key.
 - **What a path names.** A Markdown document is named by its vault path with or without
-  its `.md` (W01, W02, M01, M02). Any other vault file is named only by its full path. No
-  other extension is stripped: `[[photo.png]]` never names `photo.md` (W13, M25),
-  `[[v1.2]]` never names `v1.md` (W14, M26), and `[[n422-photo.png]]` and `[[n422-v1.2]]`
-  name `n422-photo.png.md` and `n422-v1.2.md` (W15, W16, M24).
+  its `.md` (W01, W02, M01, M02). Any other vault file is named only with its extension,
+  the text after the last dot of its last segment. Every form below reads both the same
+  way. No other extension is stripped: a link naming `photo.png` never names `photo.md`
+  (W13, M25), and `[[n422-photo.png]]` and `[[n422-v1.2]]` name `n422-photo.png.md` and
+  `n422-v1.2.md` (W15, W16, M24). With `v1.2.md` present, a link naming `v1.2` opened it
+  rather than `v1.md` (W14, M26); that note was absent from the probe's baseline, so a
+  missing `v1.2` naming nothing is this rule's reading, not an observation.
 - **The form chooses where a target is read from.** These forms hold in both families:
   - A target opening with `./` or `../` is a path from its document's folder (W03, W04,
     M03, M04, M09). One that climbs above the vault root names nothing.
@@ -82,13 +88,15 @@ judged unique by the same rule that reads it.**
   marker; and a Markdown destination's angle brackets or percent-escaping.
   - A relative or rooted form writes the exact path to the target.
   - A suffix form writes the shortest suffix of the target's vault path that names the
-    target alone from that document, judged by the reading rule itself, so a spelling
-    unique to norn is unique to Obsidian. The full vault path names the target alone
-    unless the target has a twin under the comparison key, and then the link is skipped
-    with its reason.
-  - A Markdown destination outside angle brackets percent-encodes a space, `%`, and every
-    character that would end or change the destination, rather than refusing the
-    spelling. This is the escaping Obsidian's own rename wrote (M10).
+    target alone from that document and spells at least as many segments as the link
+    spelled, or the whole path where it has fewer. Uniqueness is judged by the reading
+    rule itself, so a spelling unique to norn is unique to Obsidian. The full vault path
+    names the target alone unless the target has a twin under the comparison key, and
+    then the link is skipped with its reason.
+  - A Markdown destination is percent-encoded rather than refused. Outside angle
+    brackets it encodes a space, `%`, and every character that would end or change the
+    destination; Obsidian's rename encoded a space as `%20` (M10). Inside angle brackets
+    it keeps spaces and encodes `%`, `#`, `?`, `<` and `>`.
 
   Every written link is read back by this rule as its target, or the write is skipped
   with its reason. A link ambiguous before the change is not rewritten.
@@ -101,8 +109,10 @@ judged unique by the same rule that reads it.**
   the filesystem resolves one vault differently on macOS and Linux, where a link must
   mean one thing in every copy of the vault.
 - **An exact spelling first, the folded key second.** `[[Note]]` would reach `Note.md`
-  silently beside `note.md`. Rejected: no probe shows Obsidian doing so, and the answer
-  would again depend on whether a filesystem keeps both names.
+  silently beside `note.md`. Rejected: no probe separates it from the folded key (W12's
+  NFC link opened its NFC twin, which exact spelling, the folded key's ambiguity and
+  Obsidian's tie-break all permit), and the answer would again depend on whether a
+  filesystem keeps both names.
 - **Obsidian's tie-break.** The probe's ambiguous cases are consistent with preferring the
   document's own folder and then the shortest path (W17, A01, A02, M05, M08). Rejected:
   the order is undocumented and confirmed only by these cases, and a reported ambiguity
@@ -115,8 +125,9 @@ judged unique by the same rule that reads it.**
   list would be a document name, so a missing `[[v1.2]]` would be broken. Rejected: which
   files Obsidian resolves depends on its "Detect all file extensions" setting, so a file
   outside the list would be reported broken where Obsidian opens it. A link that names
-  no document stays unjudged until other files are indexed, and indexing them needs no
-  change to this rule.
+  no document stays unjudged until other files are indexed. Indexing them changes no
+  clause of this rule, though it widens the glossary's resolution candidate and link
+  health and ADR 0027's attachment clause from documents to vault files.
 - **Writing the form Obsidian writes.** Obsidian's rename rewrote `../targets/n422-space%20name.md`
   to the bare `n422-space%20renamed.md` (M10). Rejected: parity concerns what a link names,
   not how it is spelled, and preserving the author's form changes the least while naming
@@ -138,11 +149,19 @@ judged unique by the same rule that reads it.**
 - The comparison key and the naming rule change what derivation writes for unchanged
   input, so they land behind one derivation-version change ([ADR
   0026](0026-a-derived-store-records-the-derivation-that-wrote-it.md)).
+- [ADR 0027](0027-link-health-rides-the-changeset.md)'s two key spaces stand, and links
+  move between them. An unprefixed target in either family, `[x](dir/t.md)` among them,
+  is suffix-addressed and keyed by the classes it names, with its exact vault path among
+  them. A `./`, `../` or `/` target in either family is path-addressed and keyed by the
+  path it spells. Both key spaces are taken under the comparison key, so a change reaches
+  every link whose resolution it can move.
 - The probe evidence is one platform: Obsidian 1.14.5 on iOS. Desktop behavior, a
   case-sensitive filesystem, the device's actual Unicode filename spellings, most rename
   rewrites and Obsidian's link-format settings were not observed. This rule is adopted
   for every platform without claiming Obsidian was observed applying each clause there.
   The probe becomes a parity corpus asserting norn's answer for each recorded case.
-- While norn indexes only Markdown documents, a link with a dotted name and no matching
-  document, such as a missing `[[v1.2]]`, goes unreported, though Obsidian shows it
-  unresolved.
+- While norn indexes only Markdown documents, a link whose last segment carries a dot and
+  that names no document goes unreported: a missing `[[v1.2]]`, and a missing
+  `[[Dr. Who]]`, whose `. Who` reads as an extension. A link naming `photo.png` resolves to
+  a document `photo.png.md` and is judged healthy even where a file `photo.png` also
+  stands; once files are indexed, the two are an ambiguity.
