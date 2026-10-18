@@ -89,8 +89,8 @@ pub struct ReadTally {
     /// counted by the two fields above or by nothing.
     ///
     /// A walk takes entries for two reasons and both are here: the pages it
-    /// enumerates, and the listing a descent on a folding root reads to confirm
-    /// one caller-supplied name. They share a field because they are one act
+    /// enumerates, and the listing a descent on a folding root whose volume
+    /// answers no stored name reads to confirm one caller-supplied name. They share a field because they are one act
     /// against one stream and because no bar reads this to mean paging alone —
     /// the crate's own paging bar counts a paging loop it drives itself, and
     /// the host's churn bounds are stated over documents opened and rows
@@ -316,7 +316,9 @@ pub(crate) fn count_dirents(entries: u64) {
     bump(|tally| tally.walk_dirents += entries);
 }
 
-/// Count one stored-name query, asked of one descriptor.
+/// Count one stored-name query, asked of one descriptor. Only macOS volumes
+/// answer one, so elsewhere nothing asks.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn count_name_query() {
     bump(|tally| tally.name_queries += 1);
 }

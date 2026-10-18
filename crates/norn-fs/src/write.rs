@@ -2868,8 +2868,13 @@ mod tests {
         }
         let folder = open(scratch.at(""), anchor_flags(), Mode::empty()).unwrap();
         let observed = |name: &str| {
-            observe(folder.as_fd(), OsStr::new(name), &scratch.at(name), &mut |_| {})
-                .expect("an observation")
+            observe(
+                folder.as_fd(),
+                OsStr::new(name),
+                &scratch.at(name),
+                &mut |_| {},
+            )
+            .expect("an observation")
         };
 
         let window = crate::reads::ReadWindow::open();
@@ -2884,13 +2889,22 @@ mod tests {
         .expect("a respell's observation");
         let tally = window.finish();
 
-        assert!(matches!(exact, Found::Regular { .. }), "the exact spelling is the target");
-        assert!(matches!(other, Found::OtherSpelling { .. }), "another case is not listed");
+        assert!(
+            matches!(exact, Found::Regular { .. }),
+            "the exact spelling is the target"
+        );
+        assert!(
+            matches!(other, Found::OtherSpelling { .. }),
+            "another case is not listed"
+        );
         let Some((spelling, found)) = respelled else {
             panic!("the respell found no entry")
         };
         assert_eq!(spelling, OsString::from("Note.md"));
-        assert!(matches!(found, Found::Regular { .. }), "the stored spelling is the target");
+        assert!(
+            matches!(found, Found::Regular { .. }),
+            "the stored spelling is the target"
+        );
         assert_eq!(tally.write_dirents, 0);
         assert_eq!(tally.walk_dirents, 0);
         // One for each observation, and three for the respell's: its own

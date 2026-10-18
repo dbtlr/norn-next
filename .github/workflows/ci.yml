@@ -162,18 +162,16 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
-      # The write kernel's spelling-listing cost needs a real folding root.
+      # Spelling confirmation's per-target cost needs a real folding root.
       # The suite refuses a distinct macOS scratch volume rather than skipping.
-      - name: Folding-root listing bar
+      - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
       - name: Host filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
-      # The counter bars on a folding root. Cases whose size-independence bar
-      # cannot hold while a folding root pays the listing confirmation stand
-      # down by name in the log (`stands_down_on_a_folding_root`); the rest
-      # measure what only this filesystem shows.
+      # The counter bars on a folding root, where each spelling is confirmed
+      # by a stored-name query rather than the distinct root's exact stat.
       - name: Counter bars on a folding root
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
@@ -266,7 +264,7 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
-      - name: Distinct-root listing control
+      - name: Distinct-root spelling control
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure

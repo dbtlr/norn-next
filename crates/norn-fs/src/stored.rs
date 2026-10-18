@@ -231,6 +231,7 @@ mod tests {
     /// reads the listing: a missing name, and a symbolic link, which the open
     /// does not follow.
     #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a link.
     fn an_entry_the_open_does_not_reach_has_no_stored_name() {
         let scratch = Scratch::new("stored-name-unopened");
         scratch.place("note.md", b"body");
@@ -247,8 +248,8 @@ mod tests {
         let scratch = Scratch::new("stored-name-count");
         scratch.place("note.md", b"body");
         let folder = open(scratch.at(""), anchor_flags(), Mode::empty()).expect("the folder");
-        let entry = openat(folder.as_fd(), "note.md", regular_flags(), Mode::empty())
-            .expect("the entry");
+        let entry =
+            openat(folder.as_fd(), "note.md", regular_flags(), Mode::empty()).expect("the entry");
         let window = crate::reads::ReadWindow::open();
         let answer = stored_name_of(folder.as_fd(), entry.as_fd());
         let tally = window.finish();

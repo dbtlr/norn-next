@@ -513,8 +513,8 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
-        name: "apply-spelling-listings-per-replaced-target",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET",
+        name: "apply-name-queries-per-replaced-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_NAME_QUERIES_PER_REPLACED_TARGET",
         armed: true,
     },
     ExitBar {

@@ -1,8 +1,11 @@
-//! The write kernel's spelling-listing cost, separate from content reads.
+//! What a plan pays to confirm its targets' spellings, separate from content
+//! reads.
 //!
-//! Fresh replacements keep folder width constant. Crossing target count
-//! with total sibling count exposes both axes of the accepted O(N x S)
-//! cost. The same workload on a root that distinguishes case pays zero.
+//! Fresh replacements keep folder width constant. Crossing target count with
+//! total sibling count shows the confirmation follows the targets and not the
+//! folder: on a folding macOS root each target costs a fixed number of
+//! stored-name queries and no directory entry, and the same workload on a
+//! root that distinguishes case asks nothing.
 #![cfg(unix)]
 #![cfg(feature = "induced-failure")]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own vault tree.
@@ -22,11 +25,11 @@ use norn_wire::{
 const BEFORE: &str = "# Document\n\nstatus draft\n";
 const AFTER: &str = "# Document\n\nstatus final\n";
 
-/// A whole listing in each of staging and publication is the declared limit.
+/// A replaced target's spellings cost the same whatever its folder's width.
 /// The host's job account excludes attachment and watcher-thread echo checks.
 #[test]
 #[ignore = "counter-lane case: wide-folder spelling cost on folding and distinct roots"]
-fn a_wide_replace_plan_pays_its_spelling_listing_limit() {
+fn a_wide_replace_plan_confirms_its_spellings_at_a_constant_cost_per_target() {
     baselines::assert_the_profile_the_bars_were_authored_on();
     for (targets, siblings) in [(32, 256), (128, 256), (32, 2048), (128, 2048)] {
         measure(targets, siblings);
@@ -51,9 +54,16 @@ fn measure(targets: usize, siblings: usize) {
     }
     let case = folding(&folder).expect("the measured volume's case behavior");
     // This panics on a distinct macOS scratch volume: its CI run must measure
-    // the folding branch. Other platforms exercise their detected branch.
+    // the folding branch. A folding root elsewhere answers no stored name and
+    // reads listings, which this bar does not state.
     if cfg!(target_os = "macos") {
         assert_eq!(case, Folding::Folded, "macOS must measure a folding root");
+    } else {
+        assert_eq!(
+            case,
+            Folding::Distinct,
+            "a folding root off macOS reads listings"
+        );
     }
     let folds = case == Folding::Folded;
     let vault = attach::Vault::adopt(&root);
@@ -112,26 +122,29 @@ fn measure(targets: usize, siblings: usize) {
             "sibling {at} at N={targets}, S={siblings}"
         );
     }
-    let limit = if folds {
-        baselines::APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET * targets as u64 * siblings as u64
+    let queries = if folds {
+        baselines::APPLY_NAME_QUERIES_PER_REPLACED_TARGET * targets as u64
     } else {
         0
     };
     norn_testkit::readings::record(
         &format!("replace spelling cost: N={targets}, S={siblings}, {case}"),
         &[
-            ("write_dirents", spent.write_dirents.to_string()),
             ("name_queries", spent.name_queries.to_string()),
-            (
-                "walk_dirents (outside this bar)",
-                spent.walk_dirents.to_string(),
-            ),
-            ("write_dirents limit", limit.to_string()),
+            ("name_queries expected", queries.to_string()),
+            ("write_dirents", spent.write_dirents.to_string()),
+            ("walk_dirents", spent.walk_dirents.to_string()),
         ],
     );
     assert!(
-        baselines::fits(spent.write_dirents, limit) && baselines::fits(limit, spent.write_dirents),
-        "N={targets}, S={siblings} on {case}: {} write dirents, expected exactly {limit}",
-        spent.write_dirents
+        baselines::fits(spent.name_queries, queries)
+            && baselines::fits(queries, spent.name_queries),
+        "N={targets}, S={siblings} on {case}: {} stored-name queries, expected exactly {queries}",
+        spent.name_queries
+    );
+    assert_eq!(
+        (spent.write_dirents, spent.walk_dirents),
+        (0, 0),
+        "N={targets}, S={siblings} on {case}: confirming spellings read directory entries"
     );
 }
