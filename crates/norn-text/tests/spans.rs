@@ -142,6 +142,24 @@ fn a_document_reports_its_block_ids_in_source_coordinates() {
     assert_eq!(block_ids[1].span.line, 6);
 }
 
+/// The view over one scan answers every question the accessors answer, in the
+/// same coordinates, so a caller asking several takes the body's traversal
+/// once.
+#[test]
+fn a_source_scan_answers_what_the_document_accessors_answer() {
+    let source = "---\ntitle: t\n---\n# One\nsee [[A]] and [b](c.md) #tag ^id\n";
+    let document = Document::parse(source);
+    let view = document.source_scan();
+    assert_eq!(view.headings(), document.headings());
+    assert_eq!(view.wikilinks(), document.wikilinks());
+    assert_eq!(view.links(), document.links());
+    assert_eq!(view.tags(), document.tags());
+    assert_eq!(view.block_ids(), document.block_ids());
+    assert_eq!(view.links().len(), 2);
+    assert_eq!(view.tags().len(), 1);
+    assert_eq!(view.block_ids().len(), 1);
+}
+
 /// A lone `\r` ends a line. Counting only `\n` reported line 1 for every
 /// construct in a CR-only document, which is a position that points at nothing.
 #[test]

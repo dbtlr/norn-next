@@ -212,6 +212,92 @@ impl From<SectionError> for EditError {
     }
 }
 
+/// One reading of a document's body whose answers are in source coordinates:
+/// a [`BodyScan`] and the origin it is one `body_start` from, taken from
+/// [`Document::source_scan`].
+///
+/// Each accessor rebases what the one scan reported onto the bytes the
+/// document was read from, with line and column counted from the start of
+/// the source, so a caller never adds an offset by hand and never builds a
+/// second scan of the same body to ask a second question.
+#[derive(Debug, Clone)]
+pub struct SourceScan<'a> {
+    source: &'a str,
+    body_start: usize,
+    scan: BodyScan<'a>,
+}
+
+impl SourceScan<'_> {
+    /// Every heading in the body, in source coordinates.
+    pub fn headings(&self) -> Vec<Heading> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .headings()
+            .iter()
+            .map(|heading| Heading {
+                span: cursor.span_at(heading.span.byte_offset + self.body_start),
+                body_offset: heading.body_offset + self.body_start,
+                ..heading.clone()
+            })
+            .collect()
+    }
+
+    /// Every `[[…]]` token in the body, code excluded, in source coordinates.
+    pub fn wikilinks(&self) -> Vec<Link> {
+        self.rebased(self.scan.wikilinks())
+    }
+
+    /// Every link token in the body, both families, in document order, code
+    /// excluded, in source coordinates.
+    pub fn links(&self) -> Vec<Link> {
+        self.rebased(self.scan.links())
+    }
+
+    /// Every `#tag` in the body, in document order, in source coordinates.
+    pub fn tags(&self) -> Vec<Tag> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .tags()
+            .into_iter()
+            .map(|tag| Tag {
+                span: tag
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..tag
+            })
+            .collect()
+    }
+
+    /// Every trailing block-id definition in the body, in document order, in
+    /// source coordinates. A definition's span is its `^` marker.
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .block_ids()
+            .into_iter()
+            .map(|block| BlockId {
+                span: cursor.span_at(block.span.byte_offset + self.body_start),
+                ..block
+            })
+            .collect()
+    }
+
+    /// Rebase link spans the body scan reports, offsets into the body, onto
+    /// the source.
+    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        links
+            .into_iter()
+            .map(|link| Link {
+                span: link
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..link
+            })
+            .collect()
+    }
+}
+
 /// A document read as syntax: its frontmatter block, its body, and where every
 /// top-level field's bytes are.
 ///
@@ -513,6 +599,20 @@ impl<'a> Document<'a> {
         BodyScan::new(self.body)
     }
 
+    /// One CommonMark reading of the body, answered in source coordinates.
+    ///
+    /// The accessors below each read the body afresh; a caller that asks
+    /// several questions of one document takes this once and asks the view,
+    /// so the body's traversal, and the heap it builds while it runs, is paid
+    /// once rather than once per question.
+    pub fn source_scan(&self) -> SourceScan<'a> {
+        SourceScan {
+            source: self.source,
+            body_start: self.body_start,
+            scan: self.scan_body(),
+        }
+    }
+
     /// Every heading in the body, in source coordinates.
     ///
     /// There are two origins in this crate and they are one `body_start`
@@ -521,27 +621,18 @@ impl<'a> Document<'a> {
     /// is how an offset from one origin gets used against the other, so the
     /// rebase is here and a caller never adds anything.
     pub fn headings(&self) -> Vec<Heading> {
-        let scan = self.scan_body();
-        let mut cursor = LineCursor::new(self.source);
-        scan.headings()
-            .iter()
-            .map(|heading| Heading {
-                span: cursor.span_at(heading.span.byte_offset + self.body_start),
-                body_offset: heading.body_offset + self.body_start,
-                ..heading.clone()
-            })
-            .collect()
+        self.source_scan().headings()
     }
 
     /// Every `[[…]]` token in the body, code excluded, in source coordinates.
     pub fn wikilinks(&self) -> Vec<Link> {
-        self.rebased(self.scan_body().wikilinks())
+        self.source_scan().wikilinks()
     }
 
     /// Every link token in the body, both families, in document order, code
     /// excluded, in source coordinates.
     pub fn links(&self) -> Vec<Link> {
-        self.rebased(self.scan_body().links())
+        self.source_scan().links()
     }
 
     /// Every `#tag` in the body, in document order, in source coordinates.
@@ -549,31 +640,13 @@ impl<'a> Document<'a> {
     /// Frontmatter tags are a separate answer: see
     /// [`Document::frontmatter_tags`].
     pub fn tags(&self) -> Vec<Tag> {
-        let mut cursor = LineCursor::new(self.source);
-        self.scan_body()
-            .tags()
-            .into_iter()
-            .map(|tag| Tag {
-                span: tag
-                    .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
-                ..tag
-            })
-            .collect()
+        self.source_scan().tags()
     }
 
     /// Every trailing block-id definition in the body, in document order, in
     /// source coordinates. A definition's span is its `^` marker.
     pub fn block_ids(&self) -> Vec<BlockId> {
-        let mut cursor = LineCursor::new(self.source);
-        self.scan_body()
-            .block_ids()
-            .into_iter()
-            .map(|block| BlockId {
-                span: cursor.span_at(block.span.byte_offset + self.body_start),
-                ..block
-            })
-            .collect()
+        self.source_scan().block_ids()
     }
 
     /// The tags the frontmatter `tags` field declares, in document order.
@@ -701,21 +774,6 @@ impl<'a> Document<'a> {
             }
         }
         links
-    }
-
-    /// Rebase link spans a body scan reports, offsets into the body, onto the
-    /// source.
-    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
-        let mut cursor = LineCursor::new(self.source);
-        links
-            .into_iter()
-            .map(|link| Link {
-                span: link
-                    .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
-                ..link
-            })
-            .collect()
     }
 
     /// Write `value` at `field`, returning the whole edited document.

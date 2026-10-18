@@ -723,6 +723,10 @@ pub(crate) fn map_document(
             cause: UnreadBlock::of(refusal),
             problem: refusal.problem(),
         });
+    // The body is read once, and before the facts take their own copy of it:
+    // the scan builds a tree of several bodies and frees it as it returns, so
+    // a copy made first would stand beside that tree.
+    let scan = document.source_scan();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -731,8 +735,8 @@ pub(crate) fn map_document(
         .iter()
         .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
-    facts.links = links_of(&document);
-    facts.headings = document
+    facts.links = links_of(&document, &scan);
+    facts.headings = scan
         .headings()
         .iter()
         .map(|h| HeadingFact {
@@ -745,7 +749,7 @@ pub(crate) fn map_document(
             inside_container: h.inside_container,
         })
         .collect();
-    facts.blocks = document
+    facts.blocks = scan
         .block_ids()
         .into_iter()
         .map(|b| BlockFact {
@@ -763,7 +767,7 @@ pub(crate) fn map_document(
             source: TagSource::Frontmatter,
             span: t.span.map(span),
         })
-        .chain(document.tags().into_iter().map(|t| TagFact {
+        .chain(scan.tags().into_iter().map(|t| TagFact {
             name: t.name,
             source: TagSource::Body,
             span: t.span.map(span),
@@ -1475,7 +1479,7 @@ pub(crate) fn frontmatter_field_links(bytes: &[u8]) -> Vec<(String, LinkFact)> {
 /// from its bytes: for a caller that parsed the document for another reason
 /// and reads its links off that one parse.
 pub(crate) fn parsed_links(document: &Document<'_>) -> Vec<LinkFact> {
-    links_of(document)
+    links_of(document, &document.source_scan())
 }
 
 /// The document `source` spells, as the text layer parses it: the one parse
@@ -1496,14 +1500,14 @@ thread_local! {
     pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The links `document` holds, each placed in the whole file: its
-/// frontmatter's wikilinks, then its body's.
-fn links_of(document: &Document<'_>) -> Vec<LinkFact> {
+/// The links `document`, whose body `scan` read, holds, each placed in the
+/// whole file: its frontmatter's wikilinks, then its body's.
+fn links_of(document: &Document<'_>, scan: &norn_text::SourceScan<'_>) -> Vec<LinkFact> {
     document
         .frontmatter_field_wikilinks()
         .into_iter()
         .map(map_frontmatter_link)
-        .chain(document.links().into_iter().map(map_link))
+        .chain(scan.links().into_iter().map(map_link))
         .collect()
 }
 
