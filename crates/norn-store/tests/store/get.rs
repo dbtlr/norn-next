@@ -11,11 +11,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use norn_store::{
-    BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
-    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkAnchor,
-    LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt,
-    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
-    Validation, induced_failure,
+    BODY_ROW_CEILING, BlockFact, CANDIDATE_HEAD, ContentModel, DocumentFacts, DocumentText,
+    FindStatement, FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten,
+    HeadingFact, LinkAnchor, LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal,
+    ReadStatement, SectionAt, Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource,
+    TargetAmbiguity, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -2337,7 +2337,150 @@ fn class_reads_seek_admitted_members_without_stepping_ignored_namesakes() {
             "find resolves index",
             "find links_to zz/index",
             "holder links column",
-            "ambiguous index changeset / health totals",
+            "ambiguous index changeset",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                small[slot] > 0,
+                "{name} recorded no VM steps under {order:?}, so the bar measures nothing"
+            );
+            assert_eq!(
+                small[slot], large[slot],
+                "{name} VM steps grew with ignored namesakes under {order:?}"
+            );
+        }
+    }
+}
+
+/// **A class whose head fills counts its admitted members by the stored
+/// admitting count, so its total costs no more beside ignored namesakes.**
+/// `CANDIDATE_HEAD + 1` admitted `index.md` documents fill the head of the
+/// class `index` opens, which runs the class total ([`FindStatement::ClassTotal`])
+/// and the link-health totals statement; both are read at 20 and at 2000
+/// ignored `archive/aNNNN/index.md` namesakes, under both path orders, and
+/// step the same.
+///
+/// The fixture does the work it measures: the get is shown to have run
+/// `ClassTotal`, the links-to find to have run it too, and the changeset's
+/// filed finding counts the admitted members alone, which only the totals
+/// statement of a filled head can say, since the head holds
+/// [`CANDIDATE_HEAD`] of them.
+#[test]
+fn filled_class_totals_seek_admitted_members_without_stepping_ignored_namesakes() {
+    const ADMITTED: usize = CANDIDATE_HEAD + 1;
+
+    /// The steps of, in turn: a get of `index`, a find of what links to
+    /// `index`, the holder's links column, and the changeset that re-decides
+    /// the holder's link.
+    fn measure(order: StoredPathOrder, ignored: usize) -> [u64; 4] {
+        let declared = ignoring(&["archive/**"]);
+        let scratch = Scratch::new("filled-class-totals");
+        let mut store = scratch.open_under(order);
+        store
+            .begin_request()
+            .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
+            .unwrap();
+        let mut documents: Vec<_> = (0..ignored)
+            .map(|n| crate::health::derived(&format!("archive/a{n:04}/index.md"), "ignored\n"))
+            .collect();
+        documents.extend(
+            (0..ADMITTED).map(|n| crate::health::derived(&format!("yy{n}/index.md"), "admitted\n")),
+        );
+        documents.push(crate::health::derived("holder.md", "[[index]]\n"));
+        store
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                documents.into_iter().map(norn_store::Change::Upsert),
+                &[],
+                &declared,
+            )
+            .unwrap();
+        let reader = Arc::new(store.open_reader().reader.unwrap());
+        let vault = Vault {
+            _scratch: scratch,
+            store,
+            reader,
+        };
+        let snapshot = vault.snapshot();
+        let mut measured = [0; 4];
+
+        let get = getting("index").with_columns([Column::path()]);
+        let before = snapshot.counters().vm_steps();
+        let plans = snapshot.get_plans(&get, &declared, &Text).unwrap();
+        measured[0] = snapshot.counters().vm_steps() - before;
+        let ran: Vec<_> = plans.iter().map(|plan| plan.statement).collect();
+        assert!(
+            ran.contains(&ReadStatement::Find(FindStatement::ClassTotal)),
+            "the get did not run the class total, so the bar measures none of it: {ran:?}"
+        );
+
+        let linking =
+            FindParams::new(address()).with_predicates([Predicate::links_to(target("index"))]);
+        let before = snapshot.counters().vm_steps();
+        let plans = snapshot.find_plans(&linking, &declared).unwrap();
+        measured[1] = snapshot.counters().vm_steps() - before;
+        let ran: Vec<_> = plans.iter().map(|plan| plan.statement).collect();
+        assert!(
+            ran.contains(&ReadStatement::Find(FindStatement::ClassTotal)),
+            "the links-to find did not run the class total: {ran:?}"
+        );
+
+        let holder = FindParams::new(address())
+            .with_predicates([Predicate::path("holder.md")])
+            .with_columns([Column::links()]);
+        let before = snapshot.counters().vm_steps();
+        let found = snapshot.find(&holder, &declared).unwrap();
+        measured[2] = snapshot.counters().vm_steps() - before;
+        let links = found.rows[0].links.as_ref().expect("a links column");
+        assert_eq!(
+            links.items[0].targets.total(),
+            ADMITTED as u64,
+            "the holder's link did not count the class's admitted members"
+        );
+
+        drop(snapshot);
+        let mut vault = vault;
+        let mut request = vault.store.begin_request();
+        request
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                [norn_store::Change::Upsert(crate::health::derived(
+                    "yy0/index.md",
+                    "changed\n",
+                ))],
+                &[],
+                &declared,
+            )
+            .unwrap();
+        measured[3] = request.read_steps();
+        let filed: Vec<u64> = request
+            .stored_findings(&crate::common::path("holder.md"))
+            .unwrap()
+            .into_iter()
+            .filter(|finding| finding.kind.starts_with("link/"))
+            .map(|finding| finding.candidates_total)
+            .collect();
+        assert_eq!(
+            filed,
+            [ADMITTED as u64],
+            "the changeset did not file the link's total over a filled head"
+        );
+        measured
+    }
+
+    let readings = [Sensitive, Folding].map(|order| (order, [20, 2000].map(|n| measure(order, n))));
+    for (order, steps) in &readings {
+        eprintln!("filled class VM steps {order:?}, n=20/2000: {steps:?}");
+    }
+    for (order, [small, large]) in readings {
+        for (slot, name) in [
+            "get index (filled head)",
+            "find links_to index (filled head)",
+            "holder links column (filled head)",
+            "ambiguous index changeset / link-health totals (filled head)",
         ]
         .into_iter()
         .enumerate()

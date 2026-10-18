@@ -57,22 +57,19 @@ impl Vault {
     /// The paths a find's `resolves` part keeps on this vault's root, the
     /// schema ignoring `ignored`, in path order.
     fn resolves(&mut self, target: &str, ignored: &[&str]) -> Vec<String> {
-        let declared = ignored
-            .iter()
-            .fold(ContentModel::under(SCHEMA), |declared, glob| {
-                declared.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
-            });
-        self.rederive(&declared);
-        let params = FindParams::new(address()).with_predicates([Predicate::resolves(
-            ResolutionTarget::new(target).expect("a target"),
-        )]);
-        let snapshot = self
-            .reader
-            .try_take()
-            .expect("a free handle")
-            .establish()
-            .expect("a snapshot");
-        assert_eq!(snapshot.path_order(), self.store.path_order());
+        self.resolves_beside(target, ignored, &[])
+    }
+
+    /// The paths a find keeps that has a `resolves` part for `target` beside
+    /// `others`, the schema ignoring `ignored`, in path order.
+    fn resolves_beside(
+        &mut self,
+        target: &str,
+        ignored: &[&str],
+        others: &[Predicate],
+    ) -> Vec<String> {
+        let (declared, params) = self.resolving(target, ignored, others);
+        let snapshot = self.snapshot();
         let found = snapshot
             .find(&params, &declared)
             .unwrap_or_else(|refusal| panic!("a find resolving `{target}`: {refusal}"));
@@ -82,6 +79,57 @@ impl Vault {
             .iter()
             .map(|row| row.path.as_str().to_string())
             .collect()
+    }
+
+    /// The text of every statement a find with a `resolves` part for `target`
+    /// beside `others` ran, the schema ignoring `ignored`.
+    fn resolving_statements(
+        &mut self,
+        target: &str,
+        ignored: &[&str],
+        others: &[Predicate],
+    ) -> Vec<String> {
+        let (declared, params) = self.resolving(target, ignored, others);
+        self.snapshot()
+            .find_plans(&params, &declared)
+            .unwrap_or_else(|refusal| panic!("a find resolving `{target}`: {refusal}"))
+            .into_iter()
+            .map(|plan| plan.plan.sql)
+            .collect()
+    }
+
+    /// The declaration ignoring `ignored`, with the vault healed under it, and
+    /// the find whose parts are a `resolves` part for `target` and `others`.
+    fn resolving(
+        &mut self,
+        target: &str,
+        ignored: &[&str],
+        others: &[Predicate],
+    ) -> (ContentModel, FindParams) {
+        let declared = ignored
+            .iter()
+            .fold(ContentModel::under(SCHEMA), |declared, glob| {
+                declared.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
+            });
+        self.rederive(&declared);
+        let params = FindParams::new(address()).with_predicates(
+            std::iter::once(Predicate::resolves(
+                ResolutionTarget::new(target).expect("a target"),
+            ))
+            .chain(others.iter().cloned()),
+        );
+        (declared, params)
+    }
+
+    fn snapshot(&self) -> norn_store::Snapshot {
+        let snapshot = self
+            .reader
+            .try_take()
+            .expect("a free handle")
+            .establish()
+            .expect("a snapshot");
+        assert_eq!(snapshot.path_order(), self.store.path_order());
+        snapshot
     }
 
     fn rederive(&mut self, declared: &ContentModel) {
@@ -244,6 +292,63 @@ fn an_ignored_place_resolves_only_where_the_target_names_it() {
         );
         // With nothing ignored, the archived documents are in the class.
         assert_eq!(vault.resolves("glossary", &[]).len(), 4, "under {order:?}");
+    }
+}
+
+/// **A `resolves` part another part drives is tested one document at a time,
+/// and tests the class the target opens.** With `archive/**` ignored and a path
+/// part driving the find, a one-segment target keeps the admitted document
+/// beside it and none of the ignored ones, while a target that names `archive`
+/// keeps the ignored document it names, on either root.
+#[test]
+fn a_resolves_part_beside_a_driving_part_judges_each_document_against_its_class() {
+    let archive = ["archive/**"];
+    let path_part = |glob: &str| [Predicate::path(glob)];
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            &format!("resolve-beside-{order:?}"),
+            order,
+            &["notes/index.md", "archive/x/index.md", "other/index.md"],
+        );
+        let statements = vault.resolving_statements("index", &archive, &path_part("notes/**"));
+        assert!(
+            statements
+                .iter()
+                .any(|sql| sql.contains("dr.id = d.id") && sql.contains("dr.admitting_segments")),
+            "the resolves part was not tested one document at a time under {order:?}: \
+             {statements:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("index", &archive, &path_part("notes/**")),
+            strings(&["notes/index.md"]),
+            "an admitted document the path part drives, under {order:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("index", &archive, &path_part("other/**")),
+            strings(&["other/index.md"]),
+            "an admitted document the path part drives, under {order:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("index", &archive, &path_part("archive/**")),
+            Vec::<String>::new(),
+            "an ignored document the target does not name, under {order:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("archive/x/index", &archive, &path_part("archive/**")),
+            strings(&["archive/x/index.md"]),
+            "an ignored document the target names, under {order:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("x/index", &archive, &path_part("archive/**")),
+            Vec::<String>::new(),
+            "an ignored document a target that does not spell `archive` passes over, \
+             under {order:?}"
+        );
+        assert_eq!(
+            vault.resolves_beside("archive/x/index", &archive, &path_part("notes/**")),
+            Vec::<String>::new(),
+            "a document outside the class the target opens, under {order:?}"
+        );
     }
 }
 
