@@ -5282,7 +5282,7 @@ fn reloaded_under(host: &attach::ServingHost, vault: &attach::Vault, schema: &st
     std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("rewrite the schema");
     wait_until(
         "the reload to activate the rewritten schema",
-        attach::state_budget(attach::READY_LIMIT),
+        attach::reload_budget(attach::READY_LIMIT),
         || match host.reload(vault.name()) {
             Ok(_) => Observed::Met(()),
             Err(ReloadRefusal::Unavailable(standing)) => {
