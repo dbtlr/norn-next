@@ -2666,13 +2666,14 @@ fn durability_of(synced: std::io::Result<()>) -> Durability {
 /// is at it, on a folder proven to fold case; `None` where no entry folds with
 /// `name`.
 ///
-/// **The spelling is the entry's own answer where it can give one**: a regular
-/// file at `name`, on a volume that names an entry by the spelling it stores
-/// ([`stored_name_of`](crate::stored::stored_name_of)), says in one query the
-/// spelling the listing would hand back, and a stored spelling that does not
-/// fold with `name` is one only the volume resolves, which the listing holds
-/// no folding entry for either. Anything else — nothing at `name`, another
-/// kind, a volume with no such answer — reads the listing.
+/// **The spelling is the entry's own answer where it can give one**: an entry
+/// with one name at `name`, on a volume that names an entry by the spelling
+/// it stores ([`stored_name_at`](crate::stored::stored_name_at)), says in one
+/// query the spelling the listing would hand back, and a stored spelling that
+/// does not fold with `name` is one only the volume resolves, which the
+/// listing holds no folding entry for either. Anything else — nothing at
+/// `name`, a link, a file with several links, a volume with no such answer —
+/// reads the listing.
 ///
 /// **The fold is proven here, on the folder the respell happens in**, from the
 /// entry itself: an alternate ASCII spelling of the listed name that resolves
@@ -2689,14 +2690,14 @@ fn observe_spelling(
     full: &Path,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Option<(OsString, Found)>, Refusal> {
-    let (spelling, stored) = match stored_spelling(folder, name, full) {
-        Some(stored) if fold_together(stored.as_bytes(), name.as_bytes()) => (stored, true),
+    let spelling = match crate::stored::stored_name_at(folder, name) {
+        Some(stored) if fold_together(stored.as_bytes(), name.as_bytes()) => stored,
         Some(_) => return Ok(None),
         None => {
             let mut listed = folded_entries(folder, name, full)?;
             match listed.len() {
                 0 => return Ok(None),
-                1 => (listed.remove(0), false),
+                1 => listed.remove(0),
                 _ => return Err(not_case_folding(full)),
             }
         }
@@ -2707,30 +2708,15 @@ fn observe_spelling(
         Err(_) => Lookup::Unanswered,
     };
     // A listing that holds one entry folding with the name holds no alternate
-    // spelling of it. A stored spelling read no listing, so the alternate is
-    // an entry of its own exactly where it is stored as itself.
-    let holds = |alternate: &OsStr| {
-        if stored {
-            stored_spelling(folder, alternate, full).map(|spelled| spelled == alternate)
-        } else {
-            Some(false)
-        }
-    };
-    if probe_case_behavior_by(&spelling, lookup, holds) != Some(CaseSensitivity::Insensitive) {
+    // spelling of it, and an entry that answered its stored spelling has one
+    // name, so an alternate resolving to it is no entry of its own either.
+    if probe_case_behavior_by(&spelling, lookup, |_| Some(false))
+        != Some(CaseSensitivity::Insensitive)
+    {
         return Err(not_case_folding(full));
     }
     let found = observe(folder, &spelling, full, disturb)?;
     Ok(Some((spelling, found)))
-}
-
-/// The spelling `folder` stores the regular file at `name` under, where the
-/// folder's volume answers it; `None` where it does not, or where no regular
-/// file opens at `name`.
-fn stored_spelling(folder: BorrowedFd<'_>, name: &OsStr, full: &Path) -> Option<OsString> {
-    let Ok(AtName::Regular(file, _)) = open_at_name(folder, name, full) else {
-        return None;
-    };
-    crate::stored::stored_name_of(folder, file.as_fd())
 }
 
 fn drifted(path: &Path, expected: ContentHash, observed: Option<PostState>) -> Refusal {
@@ -2907,9 +2893,9 @@ mod tests {
         );
         assert_eq!(tally.write_dirents, 0);
         assert_eq!(tally.walk_dirents, 0);
-        // One for each observation, and three for the respell's: its own
-        // name, the alternate its fold probe asks, and its observation.
-        assert_eq!(tally.name_queries, 5);
+        // One for each observation, and two for the respell's: its own name,
+        // and its observation.
+        assert_eq!(tally.name_queries, 4);
     }
 
     /// Stage `transition` at `relative` in `scratch`'s vault under `faults`.

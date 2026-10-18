@@ -25,8 +25,9 @@ use std::os::fd::BorrowedFd;
 /// **The descriptor is opened only where the answer can be had.** A folder on
 /// another volume opens nothing, so a caller pays the open only where it
 /// replaces a listing. An entry that cannot be opened — gone, a link, or not
-/// readable — answers `None`, and the caller reads the listing, which answers
-/// for it without opening it.
+/// readable — answers `None`, and so does a file with several links, which
+/// has no one name; the caller reads the listing, which answers for either
+/// without opening it.
 pub(crate) fn stored_name_at(folder: BorrowedFd<'_>, name: &OsStr) -> Option<OsString> {
     platform::stored_name_at(folder, name)
 }
@@ -36,7 +37,7 @@ pub(crate) fn stored_name_at(folder: BorrowedFd<'_>, name: &OsStr) -> Option<OsS
 ///
 /// `entry` is a descriptor the caller opened at a name in `folder`, so the
 /// answer is the stored spelling of that name's entry, whichever spelling
-/// opened it.
+/// opened it. A file with several links answers `None`.
 pub(crate) fn stored_name_of(folder: BorrowedFd<'_>, entry: BorrowedFd<'_>) -> Option<OsString> {
     platform::stored_name_of(folder, entry)
 }
@@ -47,7 +48,7 @@ mod platform {
     use std::os::fd::{AsFd, BorrowedFd};
     use std::os::unix::ffi::OsStrExt;
 
-    use rustix::fs::{Mode, fstatfs, getpath, openat};
+    use rustix::fs::{FileType, Mode, fstat, fstatfs, getpath, openat};
 
     use crate::open::regular_flags;
 
@@ -74,9 +75,8 @@ mod platform {
     ///
     /// **APFS and HFS+ do**: the path `F_GETPATH` hands back ends in the
     /// spelling the folder lists, whichever spelling opened the entry, the new
-    /// one after a case-only rename, the covered folder's own name at a mount
-    /// point, and for a file with several links the link the descriptor was
-    /// opened through. The folder is asked, not the entry, because a name is
+    /// one after a case-only rename, and the covered folder's own name at a
+    /// mount point. The folder is asked, not the entry, because a name is
     /// stored by the volume of the folder that holds it. Other volumes —
     /// exFAT, FAT, SMB, NFS — are not asked, since a path a volume builds from
     /// the spelling a lookup used would read back whatever the caller spelled.
@@ -93,8 +93,19 @@ mod platform {
         matches!(kind.as_slice(), b"apfs" | b"hfs")
     }
 
-    /// The last name of `entry`'s path, as its volume names it.
+    /// The last name of `entry`'s path, as its volume names it; `None` for a
+    /// file with several links.
+    ///
+    /// **A file with several links has no one name to answer.** The volume
+    /// names it by whichever of its links it looked up last, so a lookup of
+    /// another link — in this folder or another, by any process — between
+    /// the open and the query would answer that link's spelling. A file with
+    /// one link, and a directory, has one name, and that is the answer.
     fn query(entry: BorrowedFd<'_>) -> Option<OsString> {
+        let stat = fstat(entry).ok()?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory && stat.st_nlink != 1 {
+            return None;
+        }
         crate::reads::count_name_query();
         let path = getpath(entry).ok()?;
         let name = path.as_bytes().rsplit(|byte| *byte == b'/').next()?;
@@ -198,33 +209,26 @@ mod tests {
         );
     }
 
-    /// **A file with several links is named by the link it was opened
-    /// through**, so another folder's link spelled in another case never
-    /// answers for this one.
+    /// **A file with several links has no stored-name answer**, so its caller
+    /// reads the listing. The volume names such a file by whichever of its
+    /// links it looked up last, which need not be the link the descriptor
+    /// was opened through: after another folder's link is looked up, a
+    /// descriptor opened here would answer that folder's spelling.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: linking the arranged file.
-    fn a_linked_file_is_named_by_the_link_that_opened_it() {
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: linking and stating the arranged file.
+    fn a_file_with_several_links_has_no_stored_name() {
         let scratch = Scratch::new("stored-name-links");
-        if !folds_and_answers(&scratch, "a linked file is named by its own link") {
-            return;
-        }
         scratch.directory("vault/x");
         scratch.directory("vault/y");
         scratch.place("x/Note.md", b"body");
         std::fs::hard_link(scratch.at("x/Note.md"), scratch.at("y/NOTE.md")).expect("a link");
-        std::fs::hard_link(scratch.at("x/Note.md"), scratch.at("x/other.md")).expect("a link");
-        for (folder, asked, listed) in [
-            ("y", "note.md", "NOTE.md"),
-            ("x", "note.md", "Note.md"),
-            ("x", "OTHER.md", "other.md"),
-            ("y", "note.md", "NOTE.md"),
-        ] {
-            assert_eq!(
-                stored(&scratch, folder, asked).as_deref(),
-                Some(OsStr::new(listed)),
-                "{folder}/{asked}"
-            );
-        }
+        let folder = open(scratch.at("x"), anchor_flags(), Mode::empty()).expect("the folder");
+        let entry =
+            openat(folder.as_fd(), "Note.md", regular_flags(), Mode::empty()).expect("the entry");
+        std::fs::symlink_metadata(scratch.at("y/NOTE.md")).expect("the other link");
+        assert_eq!(stored_name_of(folder.as_fd(), entry.as_fd()), None);
+        assert_eq!(stored(&scratch, "x", "Note.md"), None);
+        assert_eq!(stored(&scratch, "y", "NOTE.md"), None);
     }
 
     /// **An entry the open does not reach has no answer**, so its caller
