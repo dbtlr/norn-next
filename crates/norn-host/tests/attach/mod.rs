@@ -94,6 +94,22 @@ pub fn state_budget(limit: Duration) -> Budget {
     Budget::new(limit, STATE_PROBE)
 }
 
+/// How long one look that asks the host for a read may take.
+///
+/// A read that meets an entry taking in a change waits for it to settle, up to
+/// [`norn_host::READ_SETTLE_BOUND`], and answers or refuses when it does, so a
+/// look at a read is a state look past that wait. A wait whose probe reads
+/// through the host bounds the probe with this rather than [`STATE_PROBE`]: a
+/// read that sat out a changeset in flight is the product working, and only a
+/// read that outlasts its own settle bound is a machine that stopped answering.
+pub const READ_PROBE: Duration = norn_host::READ_SETTLE_BOUND.saturating_add(STATE_PROBE);
+
+/// The budget a wait whose probe reads through the host obeys, under the
+/// caller's own runaway bound.
+pub fn read_budget(limit: Duration) -> Budget {
+    Budget::new(limit, READ_PROBE)
+}
+
 /// How long an entry nothing demands may sit attached before the host reaps it.
 ///
 /// Longer than any load these suites run, so an attachment is torn down when
