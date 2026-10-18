@@ -641,7 +641,9 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
         ReadFilter::Resolves(key) => {
             // Admission is part of each index seek, so a seek-only count
             // keeps it too. Streaming the runs lets a ceiling stop the read.
-            let ranges = (values.len() - 1) / 2;
+            // The exact-path step only narrows what the runs reach, so a
+            // seek-only count drops it and never counts fewer documents.
+            let ranges = (values.len() - resolve::TARGET_PARAMETERS) / 2;
             for _ in values {
                 next();
             }
@@ -653,7 +655,12 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                 )
             } else {
                 let rows = resolve::target_rows(key, ranges, first, None);
-                Rows::new(&format!("({rows}) AS dr"), "dr.id", "1".to_string())
+                let exact = if seek_only {
+                    "1".to_string()
+                } else {
+                    resolve::target_exact_first("dr", key, ranges, first)
+                };
+                Rows::new(&format!("({rows}) AS dr"), "dr.id", exact)
             }
         }
         ReadFilter::Tag => {
@@ -678,23 +685,34 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
             }
             let document = next();
             let counts = resolve::admitting_counts(&format!("lo.{link_key}"));
+            // The link's own suffix keys are its exact keys: the document
+            // is named where it stands at one, or where no admitted document
+            // does, and so is every other member it would share the link with.
+            let exact_keys = format!(
+                "SELECT le.{link_key} FROM link_keys AS le
+                 WHERE le.link = lk.link AND le.segments IS NOT NULL"
+            );
             Rows::new(
                 "link_keys AS lk",
                 "lk.document",
                 format!(
                     "lk.{link_key} IN ({listed})
-                       AND (lk.segments IS NULL OR {named_admitted})
+                       AND (lk.segments IS NULL OR ({named_admitted}
+                           AND EXISTS (SELECT 1 FROM documents AS dn
+                               WHERE dn.id = {document} AND {named_first})))
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lo
                            CROSS JOIN {counts} AS n CROSS JOIN documents AS dl
                            WHERE lo.link = lk.link AND lo.segments IS NOT NULL
                              AND {within}
-                             AND {other_in_class}
+                             AND {other_in_class} AND {other_first}
                              AND dl.id <> {document})
                        AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, documents AS dp
                            WHERE lp.link = lk.link AND lp.segments IS NULL
                              AND {other_at_path} AND dp.id <> {document})",
                     listed = listed.join(", "),
                     named_admitted = resolve::named_admitted(&document, "lk.segments"),
+                    named_first = resolve::exact_first("dn", key, &exact_keys, "lk.segments"),
+                    other_first = resolve::exact_first("dl", key, &exact_keys, "lo.segments"),
                     within = resolve::admitting_count_within("n", "lo.segments"),
                     other_in_class = resolve::range_admitted(
                         "dl",

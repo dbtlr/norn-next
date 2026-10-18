@@ -719,10 +719,10 @@ impl repair::Following for PlanSnapshot<'_> {
         let (protocol, target) = link.protocol_and_stem();
         match norn_wire::LinkAddress::of(link.syntax, protocol, target) {
             norn_wire::LinkAddress::Suffix(target) => {
-                if norn_store::suffix_probe(target).is_err() {
+                if norn_store::suffix_probe(&target).is_err() {
                     return Ok(Vec::new());
                 }
-                self.reading(|snapshot| snapshot.tombstones_by_suffix(target))?
+                self.reading(|snapshot| snapshot.tombstones_by_suffix(&target))?
                     .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
             }
             norn_wire::LinkAddress::Relative(_)

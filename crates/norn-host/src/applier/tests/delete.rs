@@ -581,7 +581,7 @@ fn a_moved_holder_of_a_rewriting_deletes_backlink_names_its_target_from_where_it
         let mut fixture = Fixture::new(&[
             ("x/a.md", "A\n"),
             ("x/c.md", "C\n"),
-            ("x/h.md", "[keep text](a.md#part \"Title\") [[a]]\n"),
+            ("x/h.md", "[keep text](./a.md#part \"Title\") [[a]]\n"),
         ]);
         let (delete, moved) = (rewriting("x/a.md", "x/c"), moving("x/h.md", "deep/h.md"));
         let operations = if delete_first {
@@ -605,8 +605,8 @@ fn a_moved_holder_of_a_rewriting_deletes_backlink_names_its_target_from_where_it
         assert_eq!(
             cascade,
             [
+                markdown("deep/h.md", "./a.md", "../x/c.md"),
                 wikilink("deep/h.md", "a", "c"),
-                markdown("deep/h.md", "a.md", "../x/c.md"),
             ],
             "delete first {delete_first}"
         );
@@ -806,7 +806,7 @@ fn forbidding_at(fixture: &Fixture, operations: Vec<Operation>, position: usize)
 
 /// **A link a cascade respells is judged by the text it had, so one whose
 /// text named the deleted document stays its backlink however it is
-/// respelled.** `v/h.md`'s `[y](a.md)` named `v/a.md`, and moving `v/h.md` to
+/// respelled.** `v/h.md`'s `[y](./a.md)` named `v/a.md`, and moving `v/h.md` to
 /// `w/h.md` respells it `../v/a.md` from there — alone, and beside `[[b]]`
 /// respelled `[[a]]` toward `v/b.md` moving into the deleted document's
 /// path. A plain delete of `v/a.md` is left unresolved for that one link;
@@ -816,11 +816,11 @@ fn forbidding_at(fixture: &Fixture, operations: Vec<Operation>, position: usize)
 fn a_backlink_a_moved_holder_respells_still_refuses_a_plain_delete() {
     let plans = [
         (
-            "[y](a.md)\n",
+            "[y](./a.md)\n",
             vec![deleting("v/a.md"), moving("v/h.md", "w/h.md")],
         ),
         (
-            "[[b]] [y](a.md)\n",
+            "[[b]] [y](./a.md)\n",
             vec![
                 deleting("v/a.md"),
                 moving("v/b.md", "v/a.md"),
@@ -848,7 +848,7 @@ fn a_backlink_a_moved_holder_respells_still_refuses_a_plain_delete() {
             plan.operations
                 .iter()
                 .flat_map(|operation| &operation.cascade)
-                .any(|rewrite| *rewrite == markdown("w/h.md", "a.md", "../v/a.md")),
+                .any(|rewrite| *rewrite == markdown("w/h.md", "./a.md", "../v/a.md")),
             "{:?}",
             plan.operations
         );

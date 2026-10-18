@@ -4942,10 +4942,11 @@ fn an_ambiguous_link_a_routes_move_makes_name_one_document_is_dropped() {
 
 /// **Two links of one address in one holder are two links: the route that
 /// resolves one drops that one's finding and not the other's.** `sub/h.md`
-/// holds a wikilink and a Markdown link written `tasks/zz-land.md`; the
-/// wikilink is read by suffix and the Markdown link from the holder's folder,
-/// so the route landing `loose/zz-land.md` at `tasks/zz-land.md` resolves the
-/// wikilink and leaves the Markdown link broken.
+/// holds a wikilink written `tasks/zz-land.md` and a Markdown link written
+/// `./tasks/zz-land.md`; the wikilink is read by suffix and the Markdown link
+/// from the holder's folder, so the route landing `loose/zz-land.md` at
+/// `tasks/zz-land.md` resolves the wikilink and leaves the Markdown link
+/// broken.
 #[test]
 fn only_the_link_a_route_resolves_is_dropped_when_two_syntaxes_share_an_address() {
     let (_sandbox, vault, host) = a_vault_under(
@@ -4955,7 +4956,7 @@ fn only_the_link_a_route_resolves_is_dropped_when_two_syntaxes_share_an_address(
             ("loose/zz-land.md", b"---\ntype: task\n---\n# Land\n"),
             (
                 "sub/h.md",
-                b"Wiki [[tasks/zz-land.md]].\n\nMark [m](tasks/zz-land.md).\n",
+                b"Wiki [[tasks/zz-land.md]].\n\nMark [m](./tasks/zz-land.md).\n",
             ),
         ],
     );
@@ -4990,7 +4991,7 @@ fn only_the_link_a_route_resolves_is_dropped_when_two_syntaxes_share_an_address(
                     .with_proposed(Operation::new(OperationKind::rewrite_link(
                         at("sub/h.md"),
                         norn_wire::LinkFamily::Markdown,
-                        "tasks/zz-land.md",
+                        "./tasks/zz-land.md",
                         "../tasks/zz-land.md"
                     )))
                     .with_note("similarity 1.00 (trigram, cutoff 0.50)")
@@ -5185,7 +5186,7 @@ const TWO_ROUTES: &str = "version: 1\nrules:\n  tasks:\n    match: {frontmatter:
 
 /// **A routed holder's relative link the cascade respells, and a second
 /// route's landing makes resolve, is dropped.** `loose/zz-h.md` is routed to
-/// `tasks/` and holds `[m](zz-peer.md)`, which names `loose/zz-peer.md` and
+/// `tasks/` and holds `[m](./zz-peer.md)`, which names `loose/zz-peer.md` and
 /// finds nothing there. The holder's move respells the link to
 /// `../loose/zz-peer.md`, and the note `elsewhere/zz-peer.md` is routed to
 /// `loose/zz-peer.md`, so the respelled link resolves once the plan lands. The
@@ -5199,7 +5200,7 @@ fn a_routed_holders_respelled_link_a_second_route_resolves_is_dropped() {
         &[
             (
                 "loose/zz-h.md",
-                b"---\ntype: task\n---\nSee [m](zz-peer.md).\n",
+                b"---\ntype: task\n---\nSee [m](./zz-peer.md).\n",
             ),
             ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
         ],
@@ -5225,8 +5226,8 @@ fn a_routed_holders_respelled_link_a_second_route_resolves_is_dropped() {
 }
 
 /// **A link the cascade leaves as written beside a respelled twin keeps its
-/// finding.** `loose/zz-h.md` is routed to `tasks/` and holds `[m](zz-peer.md)`
-/// and `[n](zz\-peer.md)`, two links of one address that find nothing at
+/// finding.** `loose/zz-h.md` is routed to `tasks/` and holds `[m](./zz-peer.md)`
+/// and `[n](./zz\-peer.md)`, two links of one address that find nothing at
 /// `loose/`; the note `elsewhere/zz-peer.md` is routed to `loose/zz-peer.md`.
 /// The holder's move respells `[m]` to `../loose/zz-peer.md`, which resolves
 /// once the plan lands, but the text layer leaves the escaped `[n]` as
@@ -5242,7 +5243,7 @@ fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_findin
         &[
             (
                 "loose/zz-h.md",
-                b"---\ntype: task\n---\nSee [m](zz-peer.md) and [n](zz\\-peer.md).\n",
+                b"---\ntype: task\n---\nSee [m](./zz-peer.md) and [n](./zz\\-peer.md).\n",
             ),
             ("elsewhere/zz-peer.md", b"---\ntype: note\n---\n# Peer\n"),
         ],
@@ -5266,7 +5267,7 @@ fn a_link_the_cascade_leaves_as_written_beside_a_respelled_twin_keeps_its_findin
         "the escaped link still names nothing, so its finding stays skipped: {skipped:?}"
     );
     assert!(written(&vault, "tasks/zz-h.md").contains("../loose/zz-peer.md"));
-    assert!(written(&vault, "tasks/zz-h.md").contains("zz\\-peer.md"));
+    assert!(written(&vault, "tasks/zz-h.md").contains("./zz\\-peer.md"));
     assert!(
         !link_findings_of(&host, &vault, "tasks/zz-h.md").is_empty(),
         "the validator still reports the escaped link"
@@ -6360,7 +6361,10 @@ fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-follow-routed-destination",
         TASKED,
-        &[("old.md", target), ("zz-holder.md", b"See [x](old.md).\n")],
+        &[
+            ("old.md", target),
+            ("zz-holder.md", b"See [x](./old.md).\n"),
+        ],
     );
     let _lease = attach::attach_and_wait(&host, vault.name());
     moved_on_disk(&host, &vault, "old.md", "loose/new.md");
@@ -6378,8 +6382,8 @@ fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_
         OperationKind::rewrite_link(
             at("zz-holder.md"),
             norn_wire::LinkFamily::Markdown,
-            "old.md",
-            "tasks/new.md",
+            "./old.md",
+            "./tasks/new.md",
         )
     );
     let hash = norn_wire::ContentHash::new(format!(
@@ -6400,7 +6404,7 @@ fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_
                 norn_wire::LinkKey::new(
                     at("zz-holder.md"),
                     norn_wire::LinkFamily::Markdown,
-                    "tasks/new.md"
+                    "./tasks/new.md"
                 ),
                 norn_wire::Resolves::one(at("tasks/new.md")),
             )),
@@ -6423,7 +6427,10 @@ fn a_follow_to_a_document_a_route_of_the_batch_moves_is_spelled_toward_where_it_
         PlanDocument::resolved(plan),
     )));
     assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
-    assert_eq!(written(&vault, "zz-holder.md"), "See [x](tasks/new.md).\n");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "See [x](./tasks/new.md).\n"
+    );
     assert!(stands(&vault, "tasks/new.md"));
     assert!(!stands(&vault, "loose/new.md"));
 }

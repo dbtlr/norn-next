@@ -28,8 +28,8 @@ use norn_wire::{
     FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
     Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict,
     IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
-    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAddressKind,
+    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
     ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
     NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
@@ -4307,19 +4307,19 @@ fn a_links_health_is_the_count_of_what_it_resolves_to() {
     assert_eq!(rows[3].health(), LinkHealth::NotJudged);
 }
 
-/// **A link's address is selected protocol first and family second.** A
-/// protocol other than `vault` addresses no document, and a `vault://` stem is
-/// read from the vault root under its family's rules: a wikilink's as a name,
-/// kept as written, and a Markdown link's as a path, its query cut off. With
-/// no protocol, an empty target names the document holding the link, a
-/// wikilink's target is a suffix address — a colon in it is a character like
-/// any other — and a Markdown target is a path: from the vault root where it opens with the separator, and from the
-/// holding document's directory otherwise, its query cut off. A Markdown
-/// target opening with a URI scheme, `://` or not, addresses no document; a
-/// scheme opens with a letter and ends at the first colon, before any
-/// separator.
+/// **A link's family decides how its target is taken, and its form where it
+/// is read from, alike in both families (ADR 0040).** A protocol other than
+/// `vault`, and a Markdown destination opening with a URI scheme, address no
+/// document; a scheme opens with a letter and ends at the first colon, before
+/// any separator, and a wikilink's colon is a character like any other. A
+/// wikilink's target is kept as written. A Markdown destination loses its
+/// query and has each segment percent-decoded; a segment decoding to a
+/// separator, or to a `.` or `..` step from an escape, names nothing. Then a
+/// `vault://` target is a rooted name, an empty target the holding document,
+/// a first segment of `.` or `..` a path from the holder's folder, a leading
+/// `/` a path from the root, and anything else a suffix address.
 #[test]
-fn a_links_address_is_selected_protocol_first_and_family_second() {
+fn a_links_family_takes_its_target_and_its_form_chooses_where_it_is_read() {
     use LinkFamily::{Markdown, Wikilink};
     for (family, protocol, target, address) in [
         (
@@ -4338,25 +4338,54 @@ fn a_links_address_is_selected_protocol_first_and_family_second() {
             Wikilink,
             Some("vault"),
             "notes/x",
-            LinkAddress::RootedName("notes/x"),
+            LinkAddress::RootedName("notes/x".into()),
         ),
         (
             Wikilink,
             Some("vault"),
             "notes/my%20x.md?raw=1",
-            LinkAddress::RootedName("notes/my%20x.md?raw=1"),
+            LinkAddress::RootedName("notes/my%20x.md?raw=1".into()),
         ),
         (
             Markdown,
             Some("vault"),
-            "notes/x.md?raw=1",
-            LinkAddress::Rooted("notes/x.md"),
+            "notes/my%20x.md?raw=1",
+            LinkAddress::RootedName("notes/my x.md".into()),
         ),
         (Wikilink, None, "", LinkAddress::HoldingDocument),
         (Markdown, None, "", LinkAddress::HoldingDocument),
         (Markdown, None, "?x=1", LinkAddress::HoldingDocument),
-        (Wikilink, None, "notes/x", LinkAddress::Suffix("notes/x")),
-        (Wikilink, None, "mailto:x", LinkAddress::Suffix("mailto:x")),
+        (
+            Wikilink,
+            None,
+            "notes/x",
+            LinkAddress::Suffix("notes/x".into()),
+        ),
+        (
+            Wikilink,
+            None,
+            "mailto:x",
+            LinkAddress::Suffix("mailto:x".into()),
+        ),
+        (
+            Wikilink,
+            None,
+            "space%20name",
+            LinkAddress::Suffix("space%20name".into()),
+        ),
+        (Wikilink, None, "./x", LinkAddress::Relative("./x".into())),
+        (
+            Wikilink,
+            None,
+            "../t/x",
+            LinkAddress::Relative("../t/x".into()),
+        ),
+        (
+            Wikilink,
+            None,
+            "/a/b/x",
+            LinkAddress::Rooted("a/b/x".into()),
+        ),
         (
             Markdown,
             None,
@@ -4374,13 +4403,66 @@ fn a_links_address_is_selected_protocol_first_and_family_second() {
             Markdown,
             None,
             "a/b:c.md",
-            LinkAddress::Relative("a/b:c.md"),
+            LinkAddress::Suffix("a/b:c.md".into()),
         ),
-        (Markdown, None, "1a:b.md", LinkAddress::Relative("1a:b.md")),
-        (Markdown, None, ":b.md", LinkAddress::Relative(":b.md")),
-        (Markdown, None, "q.md?x=1", LinkAddress::Relative("q.md")),
-        (Markdown, None, "../x.md", LinkAddress::Relative("../x.md")),
-        (Markdown, None, "/x.md", LinkAddress::Rooted("x.md")),
+        (
+            Markdown,
+            None,
+            "1a:b.md",
+            LinkAddress::Suffix("1a:b.md".into()),
+        ),
+        (Markdown, None, ":b.md", LinkAddress::Suffix(":b.md".into())),
+        (
+            Markdown,
+            None,
+            "q.md?x=1",
+            LinkAddress::Suffix("q.md".into()),
+        ),
+        (Markdown, None, "t", LinkAddress::Suffix("t".into())),
+        (
+            Markdown,
+            None,
+            "../x.md",
+            LinkAddress::Relative("../x.md".into()),
+        ),
+        (
+            Markdown,
+            None,
+            "./x.md",
+            LinkAddress::Relative("./x.md".into()),
+        ),
+        (Markdown, None, "/x.md", LinkAddress::Rooted("x.md".into())),
+        (
+            Markdown,
+            None,
+            "../t/space%20name.md",
+            LinkAddress::Relative("../t/space name.md".into()),
+        ),
+        (
+            Markdown,
+            None,
+            "../t/percent%25name.md",
+            LinkAddress::Relative("../t/percent%name.md".into()),
+        ),
+        (
+            Markdown,
+            None,
+            "100%.md",
+            LinkAddress::Suffix("100%.md".into()),
+        ),
+        (
+            Markdown,
+            None,
+            "a%2Fb.md",
+            LinkAddress::Unnameable("a%2Fb.md"),
+        ),
+        (
+            Markdown,
+            None,
+            "%2E%2E/x.md",
+            LinkAddress::Unnameable("%2E%2E/x.md"),
+        ),
+        (Markdown, None, "%FF.md", LinkAddress::Unnameable("%FF.md")),
     ] {
         assert_eq!(
             LinkAddress::of(family, protocol, target),
@@ -4388,6 +4470,25 @@ fn a_links_address_is_selected_protocol_first_and_family_second() {
             "{family:?} {protocol:?} `{target}`"
         );
     }
+}
+
+/// **A `.` or `..` step names a folder, not an attachment.** A target ending
+/// in one carries no extension, so where it names no document it is broken
+/// rather than unjudged.
+#[test]
+fn a_folder_step_leaf_names_no_attachment() {
+    use LinkFamily::{Markdown, Wikilink};
+    for (family, target) in [(Wikilink, "../../.."), (Markdown, "./.."), (Wikilink, ".")] {
+        assert_eq!(
+            LinkAddress::of(family, None, target).kind(),
+            LinkAddressKind::Document,
+            "{family:?} `{target}`"
+        );
+    }
+    assert_eq!(
+        LinkAddress::of(Markdown, None, "../photo.png").kind(),
+        LinkAddressKind::Attachment
+    );
 }
 
 /// **A link is judged by resolving it first.** A link addressed elsewhere —

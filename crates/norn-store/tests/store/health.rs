@@ -276,8 +276,10 @@ const SOURCE: &[(&str, Option<FindingKind>, Option<FindingKind>)] = {
         ("[note](../x/my%20note.md)", None, None),
         // Above the vault root: no key at all, and a document target.
         ("[escape](../../escape.md)", Some(Broken), Some(Broken)),
-        // Never reduced, and no extension: a document target.
-        ("[bare](../x/y)", Some(Broken), Some(Broken)),
+        // Without `.md`, a path still names its document (ADR 0040), and
+        // one naming none, with no extension, is a broken document target.
+        ("[bare](../x/y)", None, None),
+        ("[bare gone](../x/z)", Some(Broken), Some(Broken)),
         ("[web](https://example.com)", None, None),
         // An attachment resolving to nothing is not judged.
         ("[[picture.png]]", None, None),
@@ -701,6 +703,74 @@ fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
     }
 }
 
+/// **The exact path comes first across a link's keys, however many stand
+/// there** (ADR 0040). On a root that tells spellings apart, eight case
+/// variants of `c/abc.md` and `c/abc.md.md` all stand at an exact path of
+/// `[[c/abc.md]]` — one under each of its two keys — so the link names those
+/// nine and not `d/c/abc.md` or `d/c/abc.md.md`; the head fills with exact
+/// members, so the count is the exact-path count, and the finding agrees
+/// with the links column. `[[x.md]]` names `x.md.md` alone, exact under one
+/// key, though its other key's class holds only the deeper `a/x.md`.
+#[test]
+fn the_exact_path_comes_first_across_a_links_keys() {
+    let mut documents: Vec<String> = (0..8u8)
+        .map(|bits| {
+            let name: String = "abc"
+                .chars()
+                .enumerate()
+                .map(|(at, letter)| {
+                    if bits & (1 << at) == 0 {
+                        letter
+                    } else {
+                        letter.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            format!("c/{name}.md")
+        })
+        .collect();
+    documents.extend(["c/abc.md.md", "d/c/abc.md", "d/c/abc.md.md"].map(String::from));
+    let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
+    let (finding, row) =
+        judged_beside_the_links_column("health-exact-twins", Sensitive, &documents, "[[c/abc.md]]");
+    assert_eq!(finding.kind, FindingKind::Ambiguous);
+    assert_eq!((finding.candidates_total, row.targets.total()), (9, 9));
+    assert_eq!(finding_head(&finding), row_head(&row));
+    assert!(
+        finding
+            .candidates
+            .iter()
+            .all(|candidate| candidate.path.as_str().starts_with("c/")),
+        "{:?}",
+        finding.candidates
+    );
+
+    for order in [Sensitive, Folding] {
+        let mut judging = Judging::new(
+            &format!("health-exact-sibling-{order:?}"),
+            order,
+            &[
+                derived("x.md.md", "x\n"),
+                derived("a/x.md", "x\n"),
+                derived("h.md", &body_of(&["[[x.md]]", "[[x]]"])),
+            ],
+        );
+        assert_eq!(judging.by_ordinal("h.md"), BTreeMap::new(), "{order:?}");
+        let names: Vec<Vec<String>> = judging
+            .links("h.md")
+            .iter()
+            .map(|row| {
+                row.targets
+                    .candidates()
+                    .iter()
+                    .map(|candidate| candidate.path.as_str().to_string())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(names, [vec!["x.md.md"], vec!["a/x.md"]], "{order:?}");
+    }
+}
+
 /// A class head follows the comparison-key ladder rather than original
 /// path order. `F/A.md` sorts first as a path but last as a suffix key.
 #[test]
@@ -1078,7 +1148,7 @@ fn a_judgment_taken_in_chunks_resolves_each_key_once() {
     documents.extend((0..10).map(|at| {
         derived(
             &format!("h/{at}.md"),
-            &body_of(&["[[hub]]", "[p](../m/0/hub.md#Nope)"]),
+            &body_of(&["[[hub]]", "[p](../m/0/hub#Nope)"]),
         )
     }));
     let mut judging = Judging::new("health-chunks", Sensitive, &documents);
@@ -1327,13 +1397,27 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             seek("dc", Access::RowId, "(rowid=?)"),
             seek("dp", Access::Index(path_index), "(path_key=?)"),
         ],
+        // The exact-path count and the exact-path-first step each seek the
+        // documents at a key's exact path by equality on the class index.
         ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(admitted_index), &range),
+            seek(
+                "de",
+                Access::Index("documents_suffix_key"),
+                "(suffix_key=?)",
+            ),
             seek("dp", Access::Index(path_index), "(path_key=?)"),
         ],
-        ExplainedStatement::LinkHealthSuffixes => {
-            vec![seek("dl", Access::Index(admitted_index), &range)]
-        }
+        // The exact-path-first step seeks the documents at a key's exact
+        // path by equality on the suffix-key index.
+        ExplainedStatement::LinkHealthSuffixes => vec![
+            seek("dl", Access::Index(admitted_index), &range),
+            seek(
+                "de",
+                Access::Index("documents_suffix_key"),
+                "(suffix_key=?)",
+            ),
+        ],
         ExplainedStatement::LinkHealthAnchors => vec![
             seek("l", Access::RowId, "(rowid=?)"),
             seek(

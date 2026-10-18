@@ -606,35 +606,37 @@ fn a_link_reached_by_two_affected_classes_files_one_finding() {
 /// A link ending in `.md` is rejudged when either document-name class
 /// changes. Adding its `.md.md` twin makes it ambiguous; removing the
 /// twin restores the missing-anchor finding, and adding the heading heals it.
+/// Neither document stands at the link's exact path, which would name it
+/// alone.
 #[test]
 fn a_link_ending_in_md_is_rejudged_when_either_document_name_class_changes() {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("redecide-dotted-{order:?}"), order);
-        vault.write(&[("h.md", "[[v1.md#Intro]]\n"), ("v1.md", "one\n")]);
+        vault.write(&[("h.md", "[[v1.md#Intro]]\n"), ("a/v1.md", "one\n")]);
         assert_eq!(
             vault.findings("h.md"),
-            [missing_anchor(0, "v1.md")],
+            [missing_anchor(0, "a/v1.md")],
             "{order:?}"
         );
 
         vault.write(&[("x/v1.md.md", "one point two\n")]);
         assert_eq!(
             vault.findings("h.md"),
-            [ambiguous(0, &["x/v1.md.md", "v1.md"], 2)],
+            [ambiguous(0, &["x/v1.md.md", "a/v1.md"], 2)],
             "{order:?}"
         );
         vault.kill("x/v1.md.md");
         assert_eq!(
             vault.findings("h.md"),
-            [missing_anchor(0, "v1.md")],
+            [missing_anchor(0, "a/v1.md")],
             "{order:?}"
         );
-        vault.write(&[("v1.md", "# Intro\n")]);
+        vault.write(&[("a/v1.md", "# Intro\n")]);
         assert_eq!(vault.findings("h.md"), [], "{order:?}");
         vault.write(&[("y/v1.md", "one\n")]);
         assert_eq!(
             vault.findings("h.md"),
-            [ambiguous(0, &["v1.md", "y/v1.md"], 2)],
+            [ambiguous(0, &["a/v1.md", "y/v1.md"], 2)],
             "{order:?}"
         );
     }
@@ -1941,5 +1943,61 @@ fn comparison_twins_rejudge_link_health_when_created_and_removed() {
             vault.kill(twin);
             assert_eq!(vault.findings("holder.md"), []);
         }
+    }
+}
+
+/// **Link health re-decides a suffix link when a document appears or
+/// disappears at its exact vault path** (ADR 0040, ADR 0027), in both
+/// families. Creating `a/x.md` beside `deep/a/x.md` and `other/a/x.md` turns
+/// `[[a/x]]` and `[x](a/x.md)` from ambiguous to naming it alone, and
+/// deleting it restores the ambiguity. `[[b/y]]`, naming `deep/b/y.md` alone,
+/// moves to `b/y.md` when that is created, and back when it is deleted.
+#[test]
+fn an_exact_path_document_appearing_or_leaving_rejudges_its_suffix_links() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-exact-{order:?}"), order);
+        vault.write(&[
+            ("deep/a/x.md", "x\n"),
+            ("other/a/x.md", "x\n"),
+            ("deep/b/y.md", "y\n"),
+            ("h.md", "[[a/x]] [x](a/x.md) [[b/y]]\n"),
+        ]);
+        let deeper = [
+            ambiguous(0, &["deep/a/x.md", "other/a/x.md"], 2),
+            ambiguous(1, &["deep/a/x.md", "other/a/x.md"], 2),
+        ];
+        assert_eq!(vault.findings("h.md"), deeper, "{order:?}");
+        assert_eq!(vault.backlinks("/deep/b/y"), ["h.md"], "{order:?}");
+
+        vault.write(&[("a/x.md", "x\n"), ("b/y.md", "y\n")]);
+        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+        assert_eq!(vault.backlinks("/a/x"), ["h.md"], "{order:?}");
+        assert_eq!(vault.backlinks("/b/y"), ["h.md"], "{order:?}");
+        assert!(vault.backlinks("/deep/b/y").is_empty(), "{order:?}");
+
+        vault.kill("a/x.md");
+        vault.kill("b/y.md");
+        assert_eq!(vault.findings("h.md"), deeper, "{order:?}");
+        assert_eq!(vault.backlinks("/deep/b/y"), ["h.md"], "{order:?}");
+    }
+}
+
+/// **A Markdown destination is read as written in the body**: an
+/// angle-bracketed destination keeps its literal space, a percent-encoded
+/// one is decoded, and either names `t/space name.md` from `src/h.md`; a
+/// decoded separator names nothing, so that link is broken.
+#[test]
+fn a_written_markdown_destination_is_decoded_as_its_brackets_say() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-decoded-{order:?}"), order);
+        vault.write(&[
+            ("t/space name.md", "s\n"),
+            (
+                "src/h.md",
+                "[a](<../t/space name.md>) [b](../t/space%20name.md) [c](t%2Fspace%20name.md)\n",
+            ),
+        ]);
+        assert_eq!(vault.findings("src/h.md"), [broken(2)], "{order:?}");
+        assert_eq!(vault.backlinks("/t/space name"), ["src/h.md"], "{order:?}");
     }
 }

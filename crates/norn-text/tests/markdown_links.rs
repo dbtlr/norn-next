@@ -41,17 +41,16 @@ fn an_inline_link_decomposes_into_the_link_fact() {
     assert!(!link.embed);
 }
 
-/// A protocol-free target reaches its document by its family's standard, and
-/// the fact says which one a resolver should use. A wikilink stem is a suffix
-/// address; a Markdown destination is a path relative to the document it was
-/// written in.
+/// A protocol-free target reaches its document by its form, in either
+/// family (ADR 0040): the fact says no protocol was written, and the reading
+/// of a `./`, `/` or unprefixed target is the resolver's, alike for both.
 #[test]
-fn a_protocol_free_target_resolves_by_its_family() {
+fn a_protocol_free_target_resolves_by_its_form_in_either_family() {
     let wikilink = BodyScan::new("[[norn-links]]\n").wikilinks().remove(0);
     let markdown = only("[Links](./norn-links.md)\n");
 
-    assert_eq!(wikilink.resolution(), Resolution::Suffix);
-    assert_eq!(markdown.resolution(), Resolution::RelativePath);
+    assert_eq!(wikilink.resolution(), Resolution::Form);
+    assert_eq!(markdown.resolution(), Resolution::Form);
 }
 
 /// A written protocol shadows the family, because the family says which

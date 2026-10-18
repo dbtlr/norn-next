@@ -76,14 +76,15 @@ fn names_every_file_left_behind() {
 
 /// **Relative links between documents one folder move carries together
 /// stay as written**: each still names the same document from where both
-/// land, so the move generates no cascade, while a link from outside the
-/// folder follows.
+/// land, so the move generates no cascade, while a path link from outside
+/// the folder follows, and a suffix link the move leaves naming the same
+/// document stays (ADR 0040).
 #[test]
 fn relative_links_between_co_moved_documents_stay() {
     let mut fixture = Fixture::new(&[
-        ("notes/a.md", "[b](sub/b.md) [[b]]\n"),
+        ("notes/a.md", "[b](./sub/b.md) [[b]]\n"),
         ("notes/sub/b.md", "[a](../a.md) [[a]]\n"),
-        ("h.md", "[a](notes/a.md)\n"),
+        ("h.md", "[a](./notes/a.md) [s](notes/a.md)\n"),
     ]);
     let resolution = fixture.expanded(vec![moving_folder("notes", "archive/notes")]);
     let cascades: Vec<_> = resolution
@@ -98,8 +99,8 @@ fn relative_links_between_co_moved_documents_stay() {
             vec![norn_wire::LinkRewrite::new(
                 path("h.md"),
                 norn_wire::LinkFamily::Markdown,
-                "notes/a.md",
-                "archive/notes/a.md",
+                "./notes/a.md",
+                "./archive/notes/a.md",
             )],
             vec![],
         ]
@@ -107,7 +108,7 @@ fn relative_links_between_co_moved_documents_stay() {
     applied(fixture.apply(resolution.plan));
     assert_eq!(
         fixture.read("archive/notes/a.md").as_deref(),
-        Some("[b](sub/b.md) [[b]]\n")
+        Some("[b](./sub/b.md) [[b]]\n")
     );
     assert_eq!(
         fixture.read("archive/notes/sub/b.md").as_deref(),

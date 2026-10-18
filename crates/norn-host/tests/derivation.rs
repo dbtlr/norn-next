@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(16),
-    "d012f726ad2aafab855dac9fa3307ea1e3a45ed4602e5e5b4edfb389c89e021b",
+    "f0f233bb781a920cd6274a04b0ead1bce6ad45dffa0f60647dcb18c8a444a96b",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -948,15 +948,17 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "notes/Deep%20Note.md",
-            &["notes/deep note.md"][..],
-            "a percent-encoded Markdown link is keyed by the path it decodes to",
+            &["deep note.md/notes/", "deep note/notes/"][..],
+            "an unprefixed percent-encoded Markdown link is keyed by the suffix classes its \
+             decoded target opens",
         ),
         (
             deep,
             None,
             "../Notes.md",
-            &["notes.md"],
-            "a Markdown link climbing a directory is keyed by the path it joins to",
+            &["notes.md", "notes.md.md"],
+            "a Markdown link climbing a directory is keyed by the paths it joins to, `.md` \
+             optional",
         ),
         (
             glossary,
@@ -983,8 +985,8 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "assets/pic.png",
-            &["assets/pic.png"],
-            "a Markdown link naming an attachment is keyed by its path",
+            &["pic.png/assets/"],
+            "an unprefixed Markdown link naming an attachment is keyed by its suffix",
         ),
         (
             glossary,
@@ -997,16 +999,15 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "/Notes.md",
-            &["notes.md"],
-            "a rooted Markdown link is keyed by the path from the vault root",
+            &["notes.md", "notes.md.md"],
+            "a rooted Markdown link is keyed by the paths from the vault root",
         ),
         (
             glossary,
             Some("vault"),
             "notes",
-            &["notes"],
-            "a vault Markdown link is keyed by the one path from the vault root it spells, \
-             never reduced",
+            &["notes.md"],
+            "a vault Markdown link is keyed by the root path the naming rule reads",
         ),
         (
             glossary,
@@ -1026,7 +1027,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "Notes.md?view=raw",
-            &["notes.md"],
+            &["notes.md/", "notes/"],
             "a Markdown link's query is not part of its key",
         ),
         (
@@ -1048,7 +1049,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             None,
             "../relative",
             &[],
-            "a wikilink no suffix address reads is keyed by nothing",
+            "a relative wikilink climbing out of the vault names no path",
         ),
         (
             glossary,

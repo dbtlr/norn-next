@@ -2021,17 +2021,18 @@ fn link_entry(
 }
 
 /// **A move respells the path links it would break, and applies.**
-/// `[x](notes/a.md)` in `b.md` names the moved document's source, and is
-/// respelled to name it at `archive/a.md`; `[y](c.md)` in the moved document
-/// named `notes/c.md` from `notes/`, and is respelled to name it from
-/// `archive/`. Each rewritten link is a written entry keyed as the plan
+/// `[x](./notes/a.md)` in `b.md` names the moved document's source, and is
+/// respelled to name it at `archive/a.md`; `[y](./c.md)` in the moved
+/// document named `notes/c.md` from `notes/`, and is respelled to name it
+/// from `archive/`. An unprefixed destination is a suffix address, which the
+/// move breaks neither way (ADR 0040), so the links are written as paths. Each rewritten link is a written entry keyed as the plan
 /// leaves it, and the store after the apply is a build from zero.
 #[test]
 fn a_move_respells_the_path_links_it_would_break_and_applies() {
     let mut fixture = Fixture::new(&[
-        ("notes/a.md", "[y](c.md)\n"),
+        ("notes/a.md", "[y](./c.md)\n"),
         ("notes/c.md", "c\n"),
-        ("b.md", "[x](notes/a.md)\n"),
+        ("b.md", "[x](./notes/a.md)\n"),
     ]);
     let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
     let markdown = |holder: &str, address: &str, before, after| {
@@ -2047,14 +2048,14 @@ fn a_move_respells_the_path_links_it_would_break_and_applies() {
             norn_wire::LinkRewrite::new(
                 path("archive/a.md"),
                 norn_wire::LinkFamily::Markdown,
-                "c.md",
+                "./c.md",
                 "../notes/c.md"
             ),
             norn_wire::LinkRewrite::new(
                 path("b.md"),
                 norn_wire::LinkFamily::Markdown,
-                "notes/a.md",
-                "archive/a.md"
+                "./notes/a.md",
+                "./archive/a.md"
             ),
         ]
     );
@@ -2069,7 +2070,7 @@ fn a_move_respells_the_path_links_it_would_break_and_applies() {
             ),
             markdown(
                 "b.md",
-                "archive/a.md",
+                "./archive/a.md",
                 norn_wire::Resolves::none(),
                 norn_wire::Resolves::one(path("archive/a.md")),
             ),
@@ -2080,7 +2081,10 @@ fn a_move_respells_the_path_links_it_would_break_and_applies() {
         fixture.read("archive/a.md").as_deref(),
         Some("[y](../notes/c.md)\n")
     );
-    assert_eq!(fixture.read("b.md").as_deref(), Some("[x](archive/a.md)\n"));
+    assert_eq!(
+        fixture.read("b.md").as_deref(),
+        Some("[x](./archive/a.md)\n")
+    );
     fixture.assert_store_is_a_build_from_zero();
 }
 

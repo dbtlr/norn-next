@@ -79,15 +79,16 @@
 //! # Links, tags and what addresses what
 //!
 //! Two written forms produce a [`Link`], and one fact shape carries both:
-//! `[[…]]` and the inline Markdown link `[title](target)`. They differ in how
-//! a resolver reads the stem, and the fact says which through
+//! `[[…]]` and the inline Markdown link `[title](target)`. Whether a written
+//! protocol decides what the stem addresses, the fact says through
 //! [`Link::resolution`].
 //!
-//! **Dispatch is protocol-first, family-second.** A recognized `protocol://`
+//! **Dispatch is protocol-first, form-second.** A recognized `protocol://`
 //! prefix shadows the family, because the family says which grammar the author
-//! wrote and the protocol says what the address is; a protocol-free target
-//! falls through to its family, where a wikilink stem is a path suffix and a
-//! Markdown one a path relative to the containing document. A wikilink
+//! wrote and the protocol says what the address is; a protocol-free target is
+//! read by its form, alike in both families (ADR 0040): `./` and `../` from
+//! the containing document's folder, `/` from the vault root, and anything
+//! else as a path suffix. A wikilink
 //! `#anchor` is written as heading *text* and a Markdown `#fragment` as a
 //! heading *slug* ([`Heading::slug`]), and the one section resolver reads
 //! either by all its readings ([`anchor_readings`]). A Markdown fragment is

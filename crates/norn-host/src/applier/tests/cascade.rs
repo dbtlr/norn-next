@@ -303,13 +303,15 @@ fn a_backlink_the_text_layer_cannot_respell_is_left_with_its_reason() {
 
 /// **A moved document's relative links reach the same files, attachments
 /// included**: each is read from where the document stood and respelled from
-/// where it lands, an anchor-only link and a wikilink left as they are.
+/// where it lands, while an anchor-only link, a wikilink and an unprefixed
+/// Markdown destination — a suffix address, which reaches the same file from
+/// anywhere (ADR 0040) — are left as they are.
 #[test]
 fn a_moved_documents_relative_links_reach_the_same_files_attachments_included() {
     let mut fixture = Fixture::new(&[
         (
             "notes/a.md",
-            "# H\n[i](img.png) [c](./c.md) [s](#H) [[c]]\n",
+            "# H\n[i](./img.png) [c](./c.md) [s](#H) [[c]] [u](img.png) [v](c.md)\n",
         ),
         ("notes/img.png", "png"),
         ("notes/c.md", "C\n"),
@@ -319,12 +321,15 @@ fn a_moved_documents_relative_links_reach_the_same_files_attachments_included() 
         cascades,
         [vec![
             markdown("archive/deep/a.md", "./c.md", "../../notes/c.md"),
-            markdown("archive/deep/a.md", "img.png", "../../notes/img.png"),
+            markdown("archive/deep/a.md", "./img.png", "../../notes/img.png"),
         ]]
     );
     assert_eq!(
         fixture.read("archive/deep/a.md").as_deref(),
-        Some("# H\n[i](../../notes/img.png) [c](../../notes/c.md) [s](#H) [[c]]\n")
+        Some(
+            "# H\n[i](../../notes/img.png) [c](../../notes/c.md) [s](#H) [[c]] [u](img.png) \
+             [v](c.md)\n"
+        )
     );
 }
 
@@ -364,7 +369,9 @@ fn an_unresolved_edit_on_a_holder_leaves_the_move_unresolved() {
 /// **A planned cascade recomposes, and its set reproduces**: the applier's
 /// judgment of the plan — every holder recomposed from its before-state, the
 /// change set computed again — answers the same plan and the same link
-/// advisories its planning did, and the plan lands as previewed.
+/// advisories its planning did, and the plan lands as previewed. The
+/// unprefixed Markdown destination is a suffix address, respelled to the
+/// shortest suffix naming the moved document alone (ADR 0040).
 #[test]
 fn a_planned_cascade_recomposes_and_its_set_reproduces() {
     let mut fixture = Fixture::new(&[
@@ -393,7 +400,7 @@ fn a_planned_cascade_recomposes_and_its_set_reproduces() {
     applied(fixture.apply(resolution.plan));
     assert_eq!(
         fixture.read("h.md").as_deref(),
-        Some("[[z/q]] [[a]] [u](w/c2.md)\n")
+        Some("[[z/q]] [[a]] [u](c2.md)\n")
     );
     assert_eq!(fixture.read("z/q.md").as_deref(), Some("A [[c2]]\n"));
     fixture.assert_store_is_a_build_from_zero();
@@ -625,52 +632,49 @@ fn an_own_relative_link_follows_its_target_under_the_comparison_key() {
 /// **A refreshed move's crossing rewrites land as one batch too**: another
 /// writer edits the moved document after the preview, the refusal's fresh
 /// plan generates the cascade again from what it holds now, and each of its
-/// relative links still names the file it named — `x.md` the nested one,
+/// relative links still names the file it named — `./x.md` the nested one,
 /// `../x.md` the root's.
 #[test]
 fn a_refreshed_moves_crossing_rewrites_each_name_the_file_they_named() {
     let mut fixture = Fixture::new(&[
-        ("old/a.md", "[nested](x.md) [root](../x.md)\n"),
+        ("old/a.md", "[nested](./x.md) [root](../x.md)\n"),
         ("old/x.md", "Nested\n"),
         ("x.md", "Root\n"),
     ]);
     let plan = fixture.plan(vec![moving("old/a.md", "a.md")]);
-    fixture.foreign("old/a.md", "foreign [nested](x.md) [root](../x.md)\n");
+    fixture.foreign("old/a.md", "foreign [nested](./x.md) [root](../x.md)\n");
     let refused = super::refused(fixture.apply(plan));
     applied(fixture.apply(refused.plan));
     assert_eq!(
         fixture.read("a.md").as_deref(),
-        Some("foreign [nested](old/x.md) [root](x.md)\n")
+        Some("foreign [nested](./old/x.md) [root](./x.md)\n")
     );
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **Each syntax's candidate is judged as that syntax reads it**: `b.md` as
-/// a Markdown link from the root names the root's `b.md` alone, while as a
-/// wikilink it is a suffix `y/b.md` answers too, so the wikilink has no
-/// spelling naming the moved document alone and is left as written, said
-/// to be unrepresentable, while the Markdown link is respelled.
+/// **Each syntax's candidate is judged as that syntax reads it**, and an
+/// unprefixed Markdown destination reads as a wikilink does (ADR 0040): with
+/// `y/b.md` standing, `b.md` names it and the moved document alike in both
+/// syntaxes, so each link takes the next spelling, `x/b.md`, which names the
+/// moved document alone; each candidate is asked once per syntax, and each
+/// answer keyed by its own.
 #[test]
 fn a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax() {
     for written in ["[[a.md]] [t](a.md)\n", "[t](a.md) [[a.md]]\n"] {
         let mut fixture = Fixture::new(&[("a.md", "A\n"), ("y/b.md", "Y\n"), ("h.md", written)]);
-        let resolution = fixture.resolution(vec![moving("a.md", "b.md")]);
+        let resolution = fixture.resolution(vec![moving("a.md", "x/b.md")]);
         assert_eq!(
             resolution.plan.operations[0].cascade,
-            [markdown("h.md", "a.md", "b.md")]
+            [
+                markdown("h.md", "a.md", "x/b.md"),
+                wikilink("h.md", "a.md", "x/b.md")
+            ]
         );
-        assert_eq!(
-            resolution.forecast.links,
-            vec![LinkAdvisory::skipped_unrepresentable(key(
-                "h.md",
-                LinkFamily::Wikilink,
-                "a.md"
-            ))]
-        );
+        assert_eq!(resolution.forecast.links, vec![]);
         applied(fixture.apply(resolution.plan));
         assert_eq!(
             fixture.read("h.md").as_deref(),
-            Some(written.replace("(a.md)", "(b.md)").as_str())
+            Some(written.replace("a.md", "x/b.md").as_str())
         );
     }
 }

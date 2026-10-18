@@ -137,12 +137,14 @@ fn a_target_deleted_since_planning_refuses_the_plan() {
 }
 
 /// **A competing target created since planning refuses the plan.** The
-/// condition records `[[a]]` resolving to one document; another writer
-/// created a second `a.md` in another folder, so the address names several.
+/// condition records `[[a]]` resolving to one document, `x/a.md`; another
+/// writer created a second `a.md` in another folder, so the address names
+/// several. Neither stands at the address's exact path, `a.md`, which would
+/// name it alone (ADR 0040).
 #[test]
 fn a_competing_target_created_since_planning_refuses_the_plan() {
-    let mut fixture = Fixture::new(&FILES);
-    let condition = a_resolving(Resolves::one(path("a.md")));
+    let mut fixture = Fixture::new(&[("x/a.md", "A\n"), ("b.md", "[[a]]\n"), ("c.md", "draft\n")]);
+    let condition = a_resolving(Resolves::one(path("x/a.md")));
     let plan = carrying(&editing_c(&fixture), condition.clone());
     fixture.foreign("other/a.md", "another\n");
     fixture.refuses_with(&plan, &[failed(condition)]);
@@ -206,15 +208,15 @@ fn an_address_is_judged_without_the_document_the_plan_deletes() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
 }
 
-/// **A holder the plan moves is judged from where it lands.** `[z](c.md)` in
+/// **A holder the plan moves is judged from where it lands.** `[z](./c.md)` in
 /// `notes/b.md` is broken there, and resolves to `archive/c.md` from
 /// `archive/b.md` once the plan has moved its holder, so a condition on the
 /// holder's landing path recording `archive/c.md` holds and one recording
 /// none, what the address resolves to from where the holder stood, does not.
 #[test]
 fn a_relative_address_is_judged_from_where_the_plan_moves_its_holder() {
-    let files = [("notes/b.md", "[z](c.md)\n"), ("archive/c.md", "C\n")];
-    let key = || LinkKey::new(path("archive/b.md"), LinkFamily::Markdown, "c.md");
+    let files = [("notes/b.md", "[z](./c.md)\n"), ("archive/c.md", "C\n")];
+    let key = || LinkKey::new(path("archive/b.md"), LinkFamily::Markdown, "./c.md");
     let holds = PlanCondition::address_resolution(key(), Resolves::one(path("archive/c.md")));
     let mut fixture = Fixture::new(&files);
     let plan = carrying(
@@ -236,7 +238,7 @@ fn a_relative_address_is_judged_from_where_the_plan_moves_its_holder() {
         from_the_source.clone(),
     );
     fixture.refuses_with(&plan, &[failed(from_the_source)]);
-    assert_eq!(fixture.read("notes/b.md").as_deref(), Some("[z](c.md)\n"));
+    assert_eq!(fixture.read("notes/b.md").as_deref(), Some("[z](./c.md)\n"));
 }
 
 /// **The fresh plan of a refusal carries the conditions as recorded, and they

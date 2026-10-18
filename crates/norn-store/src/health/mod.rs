@@ -42,7 +42,11 @@
 //!
 //! A link's total is the sum over its keys, and its head the merge of its
 //! keys' heads in ladder order, cut to [`CANDIDATE_HEAD`]; the keys' classes
-//! are disjoint, so the merge is the head of the whole. So **each distinct key
+//! are disjoint, so the merge is the head of the whole. The exact path comes
+//! first (ADR 0040): where any of a link's keys counts a member standing at
+//! the key's exact path, the link's total is those exact counts and its head
+//! their members ([`crate::resolve::exact_members`]), which lead each key's
+//! head in ladder order. So **each distinct key
 //! is resolved once**, however many of the links carry it: one statement reads
 //! every distinct key's head ([`statement::heads_sql`]), and one counts the
 //! keys whose head filled ([`statement::totals_sql`]). What a key names is
@@ -191,11 +195,13 @@ impl Named {
     }
 }
 
-/// What one key names: the head of it in ladder order, and how many.
+/// What one key names: the head of it in ladder order, how many, and how
+/// many of them stand at the key's exact path.
 #[derive(Debug, Default)]
 struct Summary {
     head: Vec<Named>,
     total: u64,
+    exact: u64,
 }
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
@@ -228,10 +234,11 @@ pub struct KeySummaries {
     /// How each candidate a finding carried is named, by its document's row
     /// id: at most the heads of the keys resolved.
     names: HashMap<i64, CandidateName>,
-    /// The exact total of each key resolved whose head filled, which
-    /// forgetting the key leaves: a key resolved again reads its head alone,
-    /// so what a key names is counted once per set.
-    totals: HashMap<Key, u64>,
+    /// The exact total of each key resolved whose head filled, beside its
+    /// exact-path count, which forgetting the key leaves: a key resolved
+    /// again reads its head alone, so what a key names is counted once per
+    /// set.
+    totals: HashMap<Key, (u64, u64)>,
     resolved: u64,
     candidates: u64,
 }
@@ -1002,11 +1009,20 @@ fn resolve_keys(
         for (index, summary) in heads.iter_mut().enumerate() {
             summary.head.sort_by(Named::ladder);
             summary.total = summary.head.len() as u64;
+            let key = listed[arm][index];
+            summary.exact = match key {
+                (text, Some(_)) => summary
+                    .head
+                    .iter()
+                    .filter(|named| named.rung == *text)
+                    .count() as u64,
+                (_, None) => 0,
+            };
             if summary.head.len() < CANDIDATE_HEAD {
                 continue;
             }
-            match summaries.totals.get(listed[arm][index]) {
-                Some(total) => summary.total = *total,
+            match summaries.totals.get(key) {
+                Some((total, exact)) => (summary.total, summary.exact) = (*total, *exact),
                 None => filled[arm].push(index),
             }
         }
@@ -1023,12 +1039,12 @@ fn resolve_keys(
                 Ok(Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, usize>(1)?,
-                    row.get::<_, u64>(2)?,
+                    (row.get::<_, u64>(2)?, row.get::<_, u64>(3)?),
                 )))
             },
             "counting what a judgment's keys name",
         )?;
-        for (arm, at, total) in totals {
+        for (arm, at, (total, exact)) in totals {
             let index = usize::try_from(arm)
                 .ok()
                 .and_then(|arm| filled.get(arm))
@@ -1037,7 +1053,8 @@ fn resolve_keys(
                 .ok_or_else(|| StoreError::Damaged {
                     what: format!("a count answered a key it was not asked, {arm}:{at}"),
                 })?;
-            summary(&mut read, arm, index)?.total = total;
+            let summary = summary(&mut read, arm, index)?;
+            (summary.total, summary.exact) = (total, exact);
         }
     }
 
@@ -1047,7 +1064,9 @@ fn resolve_keys(
             // Each arm's counted positions were listed in order.
             if counted.binary_search(&index).is_ok() {
                 summaries.candidates += summary.total;
-                summaries.totals.insert(key.clone(), summary.total);
+                summaries
+                    .totals
+                    .insert(key.clone(), (summary.total, summary.exact));
             } else {
                 summaries.candidates += summary.head.len() as u64;
             }
@@ -1059,28 +1078,42 @@ fn resolve_keys(
 
 /// What resolving `held` against its keys' summaries found, and `None` where
 /// its health raises nothing.
+///
+/// The exact path comes first: where the link's keys count members at their
+/// exact paths, the link names those alone, and its head is the exact members
+/// its keys' heads lead with.
 fn verdict(held: &Held, summaries: &KeySummaries) -> Result<Option<Verdict>, StoreError> {
     let read = held
         .keys
         .iter()
         .map(|key| summaries.of(key))
         .collect::<Result<Vec<&Summary>, StoreError>>()?;
-    let total: u64 = read.iter().map(|summary| summary.total).sum();
+    let exact: u64 = read.iter().map(|summary| summary.exact).sum();
+    let total: u64 = if exact > 0 {
+        exact
+    } else {
+        read.iter().map(|summary| summary.total).sum()
+    };
+    let exact_keys: Vec<&str> = held
+        .keys
+        .iter()
+        .filter(|(_, segments)| segments.is_some())
+        .map(|(text, _)| text.as_str())
+        .collect();
+    let mut head: Vec<Named> = resolve::exact_members(
+        &exact_keys,
+        read.iter()
+            .flat_map(|summary| &summary.head)
+            .map(|named| (named.rung.as_str(), named.clone())),
+    );
+    head.sort_by(Named::ladder);
     Ok(match LinkHealth::of_address(held.link.address, total) {
         LinkHealth::Broken => Some(Verdict::Broken),
         LinkHealth::Ambiguous => {
-            let mut head: Vec<Named> = read
-                .iter()
-                .flat_map(|summary| summary.head.iter().cloned())
-                .collect();
-            head.sort_by(Named::ladder);
             head.truncate(CANDIDATE_HEAD);
             Some(Verdict::Ambiguous { head, total })
         }
-        LinkHealth::Healthy => read
-            .iter()
-            .find_map(|summary| summary.head.first().cloned())
-            .map(Verdict::One),
+        LinkHealth::Healthy => head.into_iter().next().map(Verdict::One),
         LinkHealth::NotJudged => None,
         // The wire's health is non-exhaustive, so a health it adds compiles
         // here; it stops the judgment rather than raising nothing.

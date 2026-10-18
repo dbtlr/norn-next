@@ -1001,11 +1001,14 @@ pub(crate) fn compose_class_total(class: &TargetClass) -> (String, Vec<Value>) {
 
 /// One range of one suffix spelling's class, as
 /// [`FindStatement::CandidateSuffixes`] reads it: the range's bounds in the key
-/// comparison key space, and how many segments the spelling spells.
+/// comparison key space, how many segments the spelling spells, and the
+/// spelling's exact keys — the lower bound of each of its ranges — which the
+/// exact-path-first step reads ([`resolve::exact_first`]).
 pub(crate) struct SpellingRange<'a> {
     pub(crate) lower: &'a str,
     pub(crate) upper: &'a str,
     pub(crate) segments: usize,
+    pub(crate) exact_keys: Vec<&'a str>,
 }
 
 /// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two
@@ -1017,7 +1020,10 @@ pub(crate) struct SpellingRange<'a> {
 /// cut at two documents in ladder order. The bounded heads are merged and
 /// cut at two before their documents are emitted, each reached by row id.
 /// A range costs at most two members per admitting count, however large the
-/// class. Every class range uses [`resolve::range_rows`].
+/// class. Every class range uses [`resolve::range_rows`], less the deeper
+/// members where a document stands at one of the spelling's exact paths
+/// ([`resolve::exact_first`]), an equality seek per exact key. Exact members
+/// lead each run, so the cut at two keeps them.
 pub(crate) fn compose_candidate_suffixes(
     ranges: &[SpellingRange<'_>],
 ) -> Result<(String, Vec<Value>), StoreError> {
@@ -1030,6 +1036,13 @@ pub(crate) fn compose_candidate_suffixes(
                     FrontmatterValue::String(range.upper.to_string()),
                     FrontmatterValue::Int(
                         i64::try_from(range.segments).expect("a segment count fits i64"),
+                    ),
+                    FrontmatterValue::Sequence(
+                        range
+                            .exact_keys
+                            .iter()
+                            .map(|key| FrontmatterValue::String((*key).to_string()))
+                            .collect(),
                     ),
                 ])
             })
@@ -1044,11 +1057,17 @@ pub(crate) fn compose_candidate_suffixes(
         "json_extract(j.value, '$[2]')",
         Some("2"),
     );
+    let exact_first = resolve::exact_first(
+        "dr",
+        SuffixKey::Comparison,
+        "SELECT value FROM json_each(json_extract(j.value, '$[3]'))",
+        "json_extract(j.value, '$[2]')",
+    );
     Ok((
         format!(
             "SELECT j.key, dc.id FROM json_each(?1) AS j
         CROSS JOIN documents AS dc
-        WHERE dc.id IN (SELECT id FROM ({class}))"
+        WHERE dc.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
         ),
         vec![Value::Text(listed)],
     ))
@@ -1069,11 +1088,19 @@ pub(crate) fn compose_candidate_suffixes(
 /// their disjoint counts. A path key's rows share one comparison key, so
 /// their original path spellings break ties, independently of filesystem
 /// case behavior.
+///
+/// **The exact path comes first** ([`resolve::exact_first`]): a class row is
+/// exact where its suffix key is the key that reached it, and where any of a
+/// link's rows is exact, the link keeps those alone, its total their count
+/// ([`resolve::exact_count`]). Exact members lead each key's runs, so every
+/// one its bounded head can hold is read. A path key's rows are none of them
+/// exact, and a link holds path keys or suffix keys, never both.
 pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<Value>) {
     let key = SuffixKey::Comparison;
     let link_key = resolve::link_key_column(key);
     let class = resolve::link_key_rows(key, "keyed.key", "keyed.segments", Some("?2"));
     let total = resolve::link_key_total(key, "keyed.key", "keyed.segments");
+    let exact = resolve::exact_count(key, "keyed.key", "keyed.segments");
     let path = resolve::link_key_path("dp", key, "keyed.key");
     let rung = format!("dc.{}", key.column());
     let ladder = resolve::ladder("reached.rung", "reached.path");
@@ -1083,25 +1110,33 @@ pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<V
              keyed(key, segments) AS MATERIALIZED (
                  SELECT DISTINCT lk.{link_key}, lk.segments
                  FROM page CROSS JOIN link_keys AS lk WHERE lk.link = page.link),
-             totals(key, total) AS MATERIALIZED (
-                 SELECT keyed.key, CASE WHEN keyed.segments IS NOT NULL THEN ({total})
-                     ELSE (SELECT COUNT(*) FROM documents AS dp WHERE {path}) END FROM keyed),
-             reached(key, id, path, rung) AS MATERIALIZED (
-                 SELECT keyed.key, dc.id, dc.path, {rung}
+             totals(key, total, exact) AS MATERIALIZED (
+                 SELECT keyed.key,
+                     CASE WHEN keyed.segments IS NOT NULL THEN ({total})
+                         ELSE (SELECT COUNT(*) FROM documents AS dp WHERE {path}) END,
+                     CASE WHEN keyed.segments IS NOT NULL THEN ({exact}) ELSE 0 END
+                 FROM keyed),
+             reached(key, id, path, rung, exact) AS MATERIALIZED (
+                 SELECT keyed.key, dc.id, dc.path, {rung}, {rung} = keyed.key
                  FROM keyed CROSS JOIN documents AS dc
                  WHERE keyed.segments IS NOT NULL AND dc.id IN (SELECT id FROM ({class}))
                  UNION ALL
-                 SELECT keyed.key, dc.id, dc.path, keyed.key
+                 SELECT keyed.key, dc.id, dc.path, keyed.key, 0
                  FROM keyed CROSS JOIN documents AS dc
                  WHERE keyed.segments IS NULL AND dc.id IN (
                      SELECT dp.id FROM documents AS dp WHERE {path} ORDER BY dp.path LIMIT ?2)),
-             ranked(link, id, path, place, total) AS (
-                 SELECT lr.link, reached.id, reached.path,
-                        ROW_NUMBER() OVER (PARTITION BY lr.link ORDER BY {ladder}),
-                        (SELECT SUM(t.total) FROM link_keys AS lt CROSS JOIN totals AS t
-                         WHERE lt.link = lr.link AND t.key = lt.{link_key})
+             linked(link, id, path, rung, exact, preferred) AS (
+                 SELECT lr.link, reached.id, reached.path, reached.rung, reached.exact,
+                        MAX(reached.exact) OVER (PARTITION BY lr.link)
                  FROM page CROSS JOIN link_keys AS lr CROSS JOIN reached
-                 WHERE lr.link = page.link AND reached.key = lr.{link_key})
+                 WHERE lr.link = page.link AND reached.key = lr.{link_key}),
+             ranked(link, id, path, place, total) AS (
+                 SELECT reached.link, reached.id, reached.path,
+                        ROW_NUMBER() OVER (PARTITION BY reached.link ORDER BY {ladder}),
+                        (SELECT CASE WHEN SUM(t.exact) > 0 THEN SUM(t.exact) ELSE SUM(t.total) END
+                         FROM link_keys AS lt CROSS JOIN totals AS t
+                         WHERE lt.link = reached.link AND t.key = lt.{link_key})
+                 FROM linked AS reached WHERE reached.exact = reached.preferred)
              SELECT link, id, path, total FROM ranked WHERE place <= ?2
              ORDER BY link, place"
         ),

@@ -2067,8 +2067,9 @@ fn a_set_where_with_a_typed_bound_matches_what_a_find_answers() {
 }
 
 /// **A move previews its link cascade, then applies the plan it previewed.**
-/// The linker names the moved document by its bare stem and by a relative
-/// path; the preview writes nothing and carries both rewrites on the move,
+/// The linker names the moved document by its bare stem and by an
+/// unprefixed Markdown destination, a suffix address (ADR 0040); the preview
+/// writes nothing and carries both rewrites on the move,
 /// and the apply lands the previewed plan, the document at its new path and
 /// both links naming it there.
 #[test]
@@ -2107,7 +2108,7 @@ fn a_move_previews_its_cascade_then_applies_it() {
                 path("move-gate/linker.md"),
                 LinkFamily::Markdown,
                 "move-gate-subject.md",
-                "archive/move-gate-moved.md",
+                "move-gate-moved.md",
             ),
             LinkRewrite::new(
                 path("move-gate/linker.md"),
@@ -2125,7 +2126,7 @@ fn a_move_previews_its_cascade_then_applies_it() {
     assert_eq!(changeset, ChangesetOutcome::Committed);
     assert_eq!(
         read(&vault, "move-gate/linker.md"),
-        "See [[move-gate-moved]] and [s](archive/move-gate-moved.md).\n"
+        "See [[move-gate-moved]] and [s](move-gate-moved.md).\n"
     );
     assert_eq!(
         read(&vault, "move-gate/archive/move-gate-moved.md"),
@@ -2143,7 +2144,7 @@ fn a_folder_move_previews_what_it_leaves_behind() {
     let (_sandbox, vault) = a_vault(
         "host-verbs-move-folder",
         &[
-            ("move-folder/a.md", "[b](b.md)\n"),
+            ("move-folder/a.md", "[b](./b.md)\n"),
             ("move-folder/b.md", "# B\n"),
             ("move-folder/diagram.png", "png"),
         ],
@@ -2183,7 +2184,7 @@ fn a_folder_move_previews_what_it_leaves_behind() {
     );
     let (landed, _, _) = applied(host.move_path(moving(ApplyMode::Apply)));
     assert_eq!(landed, plan);
-    assert_eq!(read(&vault, "moved/move-folder/a.md"), "[b](b.md)\n");
+    assert_eq!(read(&vault, "moved/move-folder/a.md"), "[b](./b.md)\n");
     assert_eq!(read(&vault, "move-folder/diagram.png"), "png");
     assert!(!vault.path().join("move-folder/a.md").exists());
 }
@@ -2282,7 +2283,7 @@ fn a_delete_rewriting_its_links_previews_its_cascade_then_applies_it() {
                 path("delete-gate/linker.md"),
                 LinkFamily::Markdown,
                 "delete-gate-subject.md",
-                "kept/delete-gate-target.md",
+                "delete-gate-target.md",
             ),
             LinkRewrite::new(
                 path("delete-gate/linker.md"),
@@ -2300,7 +2301,7 @@ fn a_delete_rewriting_its_links_previews_its_cascade_then_applies_it() {
     assert_eq!(changeset, ChangesetOutcome::Committed);
     assert_eq!(
         read(&vault, "delete-gate/linker.md"),
-        "See [[delete-gate-target]] and [s](kept/delete-gate-target.md).\n"
+        "See [[delete-gate-target]] and [s](delete-gate-target.md).\n"
     );
     assert_eq!(
         read(&vault, "delete-gate/holder.md"),
