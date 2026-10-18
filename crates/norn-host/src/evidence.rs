@@ -73,6 +73,7 @@ pub struct JobEvidence {
     stats: AtomicU64,
     walk_dirents: AtomicU64,
     write_dirents: AtomicU64,
+    name_queries: AtomicU64,
     target_reads: AtomicU64,
     shadow_reads: AtomicU64,
     documents_derived: AtomicU64,
@@ -131,6 +132,10 @@ pub struct EvidenceReading {
     /// Directory entries the write kernel reads to judge a target's spelling
     /// ([`norn_fs::reads::ReadTally::write_dirents`]), separate from the walk.
     pub write_dirents: u64,
+    /// Stored-name queries a folding root confirmed a spelling with in place
+    /// of a listing ([`norn_fs::reads::ReadTally::name_queries`]), walk and
+    /// write kernel alike.
+    pub name_queries: u64,
     /// Vault files the write kernel read and hashed through its own open: a
     /// target judged by staging, by publication's verification and by a
     /// landing's confirmation, and a create's source copied into its shadow
@@ -292,6 +297,7 @@ impl EvidenceReading {
             stats: self.stats.saturating_sub(earlier.stats),
             walk_dirents: self.walk_dirents.saturating_sub(earlier.walk_dirents),
             write_dirents: self.write_dirents.saturating_sub(earlier.write_dirents),
+            name_queries: self.name_queries.saturating_sub(earlier.name_queries),
             target_reads: self.target_reads.saturating_sub(earlier.target_reads),
             shadow_reads: self.shadow_reads.saturating_sub(earlier.shadow_reads),
             documents_derived: self
@@ -424,6 +430,7 @@ impl JobEvidence {
             stats: get(&self.stats),
             walk_dirents: get(&self.walk_dirents),
             write_dirents: get(&self.write_dirents),
+            name_queries: get(&self.name_queries),
             target_reads: get(&self.target_reads),
             shadow_reads: get(&self.shadow_reads),
             documents_derived: get(&self.documents_derived),
@@ -539,6 +546,8 @@ impl JobEvidence {
             .fetch_add(reads.walk_dirents, Ordering::Relaxed);
         self.write_dirents
             .fetch_add(reads.write_dirents, Ordering::Relaxed);
+        self.name_queries
+            .fetch_add(reads.name_queries, Ordering::Relaxed);
         self.target_reads
             .fetch_add(reads.target_reads, Ordering::Relaxed);
         self.shadow_reads

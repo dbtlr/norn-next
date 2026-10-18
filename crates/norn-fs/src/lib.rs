@@ -115,6 +115,7 @@ mod read;
 mod refusal;
 #[cfg(test)]
 mod scratch;
+mod stored;
 
 pub use exclusion::{Excluded, ExclusionError, Exclusions};
 pub use gitignore::fallback_ignored;

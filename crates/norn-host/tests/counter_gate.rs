@@ -145,28 +145,6 @@ use norn_wire::{
     VaultName,
 };
 
-/// Whether `case` stands down because the scratch root (the volume its vaults
-/// are built on) folds case.
-///
-/// On a folding root the host confirms each spelling it lists against the
-/// directory, so the `walk_dirents` count of the cases that call this
-/// grows with the vault and the size-independence bars cannot hold there. They
-/// hold on a distinct root, which the ubuntu counter job measures. The stand-down
-/// is stated on standard error and as a workflow notice naming the case and the
-/// reason, so a run that skipped it says so in its log and its annotations.
-fn stands_down_on_a_folding_root(case: &str) -> bool {
-    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let folds = norn_testkit::churn::folding(root).expect("the scratch volume's case behavior")
-        == norn_testkit::churn::Folding::Folded;
-    if folds {
-        eprintln!(
-            "\n::notice title=counter_gate skipped::{case}: skipped, the scratch root folds case \
-             and the folding-root confirmation cost (NORN-387) breaks its size-independence bar"
-        );
-    }
-    folds
-}
-
 /// The document the size-independence pair writes at both scales.
 ///
 /// Named where no generated tree places one: the pair compares what one write
@@ -1890,9 +1868,6 @@ fn moved_hub_path() -> String {
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
-    if stands_down_on_a_folding_root("a_hub_moves_cascade_follows_its_in_links_at_both_scales") {
-        return;
-    }
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
 
@@ -2501,11 +2476,6 @@ fn moved_in_place_hub_path() -> String {
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales() {
-    if stands_down_on_a_folding_root(
-        "an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales",
-    ) {
-        return;
-    }
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -2730,9 +2700,6 @@ const WHERE_FOLDER: &str = "apply-gate";
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_where_apply_costs_the_same_at_both_scales() {
-    if stands_down_on_a_folding_root("a_where_apply_costs_the_same_at_both_scales") {
-        return;
-    }
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -2877,11 +2844,6 @@ const MASS_DELETE_STEM: &str = "mass-gate";
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales() {
-    if stands_down_on_a_folding_root(
-        "a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales",
-    ) {
-        return;
-    }
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -4278,11 +4240,6 @@ fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) ->
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_a_continuation_pays_none_of_it()
  {
-    if stands_down_on_a_folding_root(
-        "a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_a_continuation_pays_none_of_it",
-    ) {
-        return;
-    }
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
     let gate = Gate {
@@ -4700,11 +4657,6 @@ fn read_the_continuations(
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing() {
-    if stands_down_on_a_folding_root(
-        "a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing",
-    ) {
-        return;
-    }
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
 
@@ -4875,11 +4827,6 @@ const ROUTE_LINKS: usize = 10;
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_routes_cascade_costs_the_links_it_touches_and_not_the_vault_through_a_repair() {
-    if stands_down_on_a_folding_root(
-        "a_routes_cascade_costs_the_links_it_touches_and_not_the_vault_through_a_repair",
-    ) {
-        return;
-    }
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
     let links = ROUTE_LINKS as u64;

@@ -195,7 +195,9 @@ impl Vault {
     /// folds beyond ASCII a stat answers for every spelling the volume
     /// resolves, and this crate's fold equates only ASCII case — so the entry
     /// is the one spelling its directory lists, and every name of the path, the
-    /// last one included, is confirmed against the listing that renders it. A
+    /// last one included, is confirmed at the spelling its directory lists —
+    /// asked of the entry where the volume answers its stored name, and of the
+    /// listing that renders it where it does not. A
     /// caller converging derived state reads `Missing` at the other spellings,
     /// which is what a derivation from zero over this tree holds there.
     pub fn reach(&self, relative: &Path) -> Result<Reach, WalkError> {
@@ -245,7 +247,8 @@ impl Vault {
             }
             Err(source) => return Err(environment_errno("stating", &access, source)),
         };
-        let Some(spelling) = self.listed_spelling(&directory, name, &access)? else {
+        let kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
+        let Some(spelling) = self.listed_spelling(&directory, name, &kind, &access)? else {
             return Ok(Reach::Stands {
                 kind: PathKind::Missing,
                 at: subtree,
@@ -259,7 +262,7 @@ impl Vault {
         }
         listed.push(spelling);
         Ok(Reach::Stands {
-            kind: match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
+            kind: match kind {
                 EntryKind::Directory => PathKind::Directory,
                 EntryKind::File => PathKind::RegularFile,
                 EntryKind::Symlink | EntryKind::Special(_) => PathKind::Other,
@@ -360,22 +363,47 @@ impl Vault {
         Ok(Descent::Reached { directory, listed })
     }
 
-    /// The spelling `directory` lists for `name`: on a root that folds, the one
-    /// its listing holds under this root's key, or `None` where it holds none;
-    /// on a root that tells spellings apart, `name` itself, which the stat that
-    /// precedes this has already proven.
+    /// The spelling `directory` lists for `name`, the entry the preceding stat
+    /// read as `kind`: on a root that folds, the one its listing holds under
+    /// this root's key, or `None` where it holds none; on a root that tells
+    /// spellings apart, `name` itself, which the stat has already proven.
+    ///
+    /// **A folding root asks the entry before it reads the listing.** Where the
+    /// folder's volume answers the spelling it stores an entry under
+    /// ([`stored_name_at`](crate::stored::stored_name_at)), that one query is
+    /// the listing's answer: the volume folds every spelling this root's key
+    /// equates, so the entry the stat stood at is the one entry the listing
+    /// could hold under the key, and it is listed at its stored spelling. A
+    /// stored spelling the key does not read as `name` is a spelling only the
+    /// volume resolves, which the listing holds nothing at either. Only a
+    /// directory or a regular file is asked, since asking opens the entry; a
+    /// link, a special file, and every volume with no such answer read the
+    /// listing.
     fn listed_spelling(
         &self,
         directory: &Arc<OwnedFd>,
         name: &OsStr,
+        kind: &EntryKind,
         access: &Path,
     ) -> Result<Option<OsString>, WalkError> {
         match self.case_sensitivity() {
             CaseSensitivity::Insensitive => {
+                if matches!(kind, EntryKind::Directory | EntryKind::File)
+                    && let Some(stored) = crate::stored::stored_name_at(directory.as_fd(), name)
+                {
+                    return Ok(self.keys_alike(&stored, name).then_some(stored));
+                }
                 spelling_in_listing(&self.normalizer, directory, name, access)
             }
             CaseSensitivity::Sensitive => Ok(Some(name.to_owned())),
         }
+    }
+
+    /// Whether this root's key reads `listed` as `name`.
+    fn keys_alike(&self, listed: &OsStr, name: &OsStr) -> bool {
+        let mut keys = ChildKeys::under(&self.normalizer, Path::new(""));
+        let wanted = keys.of(name.as_bytes()).to_vec();
+        keys.of(listed.as_bytes()) == wanted
     }
 
     /// Whether `name` is one of Norn's shadow basenames on this root.
@@ -496,11 +524,12 @@ enum Stop {
 /// **What proves it depends on what the root folds.** Where spellings are told
 /// apart the stat is exact and is the whole proof. Where they are folded the
 /// volume resolves spellings this crate reads as other identities, so the stat
-/// answers at every one of them and the parent's listing is asked as well: the
-/// component stands only where the listing holds an entry this root's key reads
-/// as that name — see [`spelling_in_listing`], which is O(siblings) in wall
-/// time. A spelling only the volume resolves names no document, so the descent
-/// reads it as the absence it is.
+/// answers at every one of them and the spelling the parent lists is asked as
+/// well: the component stands only where the parent lists an entry this root's
+/// key reads as that name — see [`Vault::listed_spelling`], one stored-name
+/// query where the volume answers one and otherwise [`spelling_in_listing`],
+/// which is O(siblings) in wall time. A spelling only the volume resolves
+/// names no document, so the descent reads it as the absence it is.
 ///
 /// A Norn shadow basename is never entered, and a symbolic link is a fact about
 /// a name rather than an edge to follow. Absence and a non-directory entry are
@@ -524,31 +553,30 @@ fn pass_component(
         }
         Err(source) => return Err(environment_errno("stating", access, source)),
     };
-    let listed = match vault.listed_spelling(directory, name, access)? {
+    let kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
+    let listed = match vault.listed_spelling(directory, name, &kind, access)? {
         Some(listed) => listed,
         None => return Ok(Passage::Stopped(Stop::Vanished)),
     };
     if vault.names_a_shadow(name) {
         return Ok(Passage::Stopped(Stop::Skipped(SkipReason::Shadow)));
     }
-    Ok(
-        match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
-            EntryKind::Directory => Passage::Through(listed),
-            EntryKind::File | EntryKind::Special(_) => Passage::Stopped(Stop::NotADirectory),
-            EntryKind::Symlink => Passage::Stopped(
-                match classify_link(
-                    &vault.root_fd,
-                    path.as_path(),
-                    directory,
-                    name,
-                    &vault.normalizer,
-                )? {
-                    Some(kind) => Stop::Skipped(SkipReason::SymbolicLink(kind)),
-                    None => Stop::Vanished,
-                },
-            ),
-        },
-    )
+    Ok(match kind {
+        EntryKind::Directory => Passage::Through(listed),
+        EntryKind::File | EntryKind::Special(_) => Passage::Stopped(Stop::NotADirectory),
+        EntryKind::Symlink => Passage::Stopped(
+            match classify_link(
+                &vault.root_fd,
+                path.as_path(),
+                directory,
+                name,
+                &vault.normalizer,
+            )? {
+                Some(kind) => Stop::Skipped(SkipReason::SymbolicLink(kind)),
+                None => Stop::Vanished,
+            },
+        ),
+    })
 }
 
 /// The spelling `directory` lists for the entry this root reads as `name`, or
@@ -568,8 +596,9 @@ fn pass_component(
 ///
 /// **The cost is one listing per component**, which is O(siblings) in wall
 /// time: a directory is read until the entry is found and read whole to
-/// establish that none is. Only a folding root pays it — where a stat is exact
-/// the descent never asks.
+/// establish that none is. Only a folding root whose volume answers no stored
+/// name pays it — where a stat is exact the descent never asks, and where the
+/// entry answers its stored name the descent asks the entry instead.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
 fn spelling_in_listing(
     normalizer: &PathNormalizer,
@@ -2558,10 +2587,11 @@ mod tests {
         );
     }
 
-    /// **A folding root reads one listing per name, once.** The confirmation a
-    /// fold makes necessary is O(siblings) per component, so reaching one
-    /// caller-supplied path must read each name above the last one exactly once
-    /// and the last name's own parent exactly once.
+    /// **A folding root confirms each name once.** Where the volume answers
+    /// an entry's stored spelling — macOS, whose suite runs on APFS — each name
+    /// is one stored-name query and no listing is read; elsewhere each name is
+    /// one listing of its parent, read once. Reaching a two-name path asks
+    /// three names either way: each name above the last one, and the last.
     ///
     /// Every directory in the tree holds one entry, so each listing that is
     /// taken counts one entry and the tally is the number of listings.
@@ -2569,7 +2599,7 @@ mod tests {
     /// The sensitivity is supplied rather than detected, so this binds on every
     /// host — including the ones whose own volumes tell spellings apart.
     #[test]
-    fn a_folding_root_reads_each_name_s_listing_once_to_reach_a_path() {
+    fn a_folding_root_confirms_each_name_once_to_reach_a_path() {
         let scratch = Scratch::new("walk-descent-folding-cost");
         scratch.directory("vault/notes/deep");
         scratch.place("notes/deep/note.md", b"body");
@@ -2601,10 +2631,17 @@ mod tests {
             ),
             "the walk reaches this name and a document is at it"
         );
+        let (queries, dirents) = if cfg!(target_os = "macos") {
+            (3, 0)
+        } else {
+            (0, 3)
+        };
         assert_eq!(
-            tally.walk_dirents, 3,
-            "reaching a two-name path on a folding root read {} directory \
-             entries, where one listing per name is three",
+            (tally.name_queries, tally.walk_dirents),
+            (queries, dirents),
+            "reaching a two-name path on a folding root asked {} stored names and \
+             read {} directory entries, where one confirmation per name is three",
+            tally.name_queries,
             tally.walk_dirents
         );
     }

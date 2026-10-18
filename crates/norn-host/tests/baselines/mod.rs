@@ -1666,23 +1666,25 @@ pub const APPLY_DOCUMENT_READS_PER_REPLACED_TARGET: u64 = 3;
 /// does. Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
 pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
 
-/// Complete sibling listings per freshly replaced target on a folding root.
-/// Staging checks the before-state's spelling once, and publication checks it
-/// again before the rename. Each pass reads every non-dot entry, so N targets
-/// in a folder holding S total entries cost exactly 2 x N x S write dirents.
-/// A root that distinguishes case pays zero. This is a declared listing
-/// limit, separate from the per-target content-read budgets above.
+/// Stored-name queries per freshly replaced target one folder below the vault
+/// root, on a folding root whose volume answers them (APFS or HFS+ on macOS):
+/// six. **Planning** reaches the target twice, and each reach confirms the
+/// folder's name and the target's own (four); **staging** judges the
+/// before-state's spelling once and **publication** again before the rename
+/// (two). No confirmation reads a sibling, so the count, and the directory
+/// entries the job reads to confirm spellings — zero — are the same whatever
+/// the folder's width. A root that tells spellings apart asks none.
 ///
 /// `folding_cost.rs` crosses 32 and 128 targets with 256 and 2048 siblings.
-/// Observed on hosted macOS ARM64 (`macos-15`), CI run 37231397772 at
-/// 9318cef: 16,384, 65,536, 131,072 and 524,288 write dirents, respectively.
-/// The same run's Linux control (`ubuntu-latest`) read zero at all four sizes.
-/// Reproduce with `LANE_FEATURES=induced-failure .github/scripts/lane-suite.sh
-/// norn-host folding_cost --nocapture --test-threads=1` on a folding volume.
-/// The job-thread tally excludes the walk's path confirmation, normalization
-/// probes and watcher-thread echoes. This bar covers fresh replacements, not
-/// creates, removals, respells or interrupted-plan reapplication.
-pub const APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET: u64 = 2;
+/// Observed on hosted macOS ARM64 (`macos-15`), CI run 39169536679 at
+/// e94635a: 192 and 768 queries at both widths, with zero walk and write
+/// dirents at all four sizes. Reproduce with `LANE_FEATURES=induced-failure
+/// .github/scripts/lane-suite.sh norn-host folding_cost --nocapture
+/// --test-threads=1` on a folding volume. The job-thread tally excludes
+/// normalization probes and watcher-thread echoes. This bar covers fresh
+/// replacements, not creates, removals, respells or interrupted-plan
+/// reapplication.
+pub const APPLY_NAME_QUERIES_PER_REPLACED_TARGET: u64 = 6;
 
 /// A created document's document reads: one — **the changeset's read-back**
 /// of the landed file. Planning and the recomposition find the name holding
