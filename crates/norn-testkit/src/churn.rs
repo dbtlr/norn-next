@@ -141,6 +141,59 @@ pub fn runs_where_the_volume_folds(folding: Folding, case: &str) -> bool {
     false
 }
 
+/// Exchange what the names `a` and `b` hold, in one call.
+///
+/// This is the swap a tool that moves a tree into place performs: afterwards
+/// each name holds what the other held, and **no instant separates the two
+/// halves**, so nothing reading either name meets it absent in between. A
+/// removal followed by a create is the same end state with that gap in it, and
+/// a case whose subject is what a reader makes of the name in place of the old
+/// one is a case the gap answers differently.
+///
+/// Both names must stand, and they may hold different kinds — a directory and
+/// a link exchange like two directories do. The standard library spells no
+/// exchange, so this is `renameat2` with `RENAME_EXCHANGE` on Linux and
+/// `renamex_np` with `RENAME_SWAP` on macOS; a platform with neither answers
+/// [`io::ErrorKind::Unsupported`].
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let a = CString::new(a.as_os_str().as_bytes())?;
+    let b = CString::new(b.as_os_str().as_bytes())?;
+    // SAFETY: both pointers are NUL-terminated strings that outlive the call,
+    // and the call reads them and nothing else of this process's memory.
+    #[cfg(target_os = "linux")]
+    let answered = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "macos")]
+    let answered = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if answered == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// [`exchange`] where the platform spells no exchange.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    let _ = (a, b);
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform has no call that exchanges two names",
+    ))
+}
+
 /// One thing done to a tree.
 ///
 /// Each variant is a single filesystem act, because a step is what a suite may
@@ -1419,6 +1472,49 @@ mod tests {
             Folding::Distinct,
             "a_case_stated_over_folding"
         ));
+    }
+
+    /// **An exchange leaves each name holding what the other held**, a
+    /// directory and a link alike, so the link the second name held answers
+    /// at the first and the directory's contents at the second.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_exchange_swaps_a_directory_with_a_link() {
+        let tree = scratch("exchange");
+        let directory = tree.join("vault");
+        let link = tree.join("vault-link");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("a.md"), b"# A\n").unwrap();
+        std::os::unix::fs::symlink("elsewhere", &link).unwrap();
+
+        exchange(&directory, &link).expect("the two names are exchanged");
+
+        assert_eq!(
+            fs::read_link(&directory).unwrap(),
+            Path::new("elsewhere"),
+            "the first name does not hold the link the second held"
+        );
+        assert_eq!(
+            fs::read(link.join("a.md")).unwrap(),
+            b"# A\n",
+            "the second name does not hold the directory the first held"
+        );
+    }
+
+    /// An exchange with a name that holds nothing is refused, and leaves the
+    /// name that stood where it stood.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_exchange_with_a_missing_name_is_refused() {
+        let tree = scratch("exchange-missing");
+        let standing = tree.join("standing");
+        fs::write(&standing, b"kept").unwrap();
+
+        let refusal = exchange(&standing, &tree.join("missing"))
+            .expect_err("an exchange with nothing is refused");
+
+        assert_eq!(refusal.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read(&standing).unwrap(), b"kept");
     }
 
     /// **The roll of families is the driver's own source rather than a
