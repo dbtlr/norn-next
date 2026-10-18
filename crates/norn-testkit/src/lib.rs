@@ -31,6 +31,10 @@
 //! documents a fixture profile generates, without the suite holding a
 //! temporary tree to get them.
 //!
+//! [`obsidian_probe`] is assistance too: it installs the recorded Obsidian
+//! link probe with every name at the code points its case table states,
+//! which a git checkout cannot carry for a decomposed name.
+//!
 //! [`equivalence`] is the judgment two derived stores are held to: it projects
 //! every derived fact a store holds, compares two projections and names the
 //! first field they disagree about, and states what each store answers for on
@@ -125,6 +129,7 @@ pub mod invariants;
 pub mod isolation;
 mod json;
 pub mod lanes;
+pub mod obsidian_probe;
 mod poll;
 #[cfg(unix)]
 pub mod process;

@@ -11,6 +11,10 @@ publish.workspace = true
 name = "norn-process"
 path = "src/bin/norn-process.rs"
 
+[[bin]]
+name = "norn-obsidian-probe"
+path = "src/bin/norn-obsidian-probe.rs"
+
 # `norn-fixtures` is the generator whose profiles name the two scales a
 # size-independence pair is run at. `libc` is the child-process accounting the
 # process harness reads its peak resident set from.
