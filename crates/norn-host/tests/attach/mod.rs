@@ -483,9 +483,11 @@ pub fn reload_refusal_once_settled(
     refused: Option<ErrorEnvelope>,
 ) -> Option<ErrorEnvelope> {
     let mut refused = refused;
+    // A probe here is not one look at a published state: it waits out the
+    // entry's reconcile and runs a reload, so its bound is that work's.
     wait_until(
         &format!("a reload of `{name}` to run rather than lose its turn"),
-        state_budget(READY_LIMIT),
+        Budget::new(READY_LIMIT, READY_LIMIT),
         || {
             if !reload_lost_its_turn(refused.as_ref()) {
                 return Observed::Met(refused.take());
