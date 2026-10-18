@@ -81,7 +81,7 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
         "three unchanged ticks over 50 files must read no content"
     );
 
-    // Each edit below also moves ctime on a nanosecond-timestamp volume; the
+    // Each edit below can also move ctime on a nanosecond-timestamp volume; the
     // whole-second case holds size, mtime and inode to a change of their own.
     fs::write(&target, b"longer content").unwrap();
     assert!(tick(&watcher, &events, &clock, 4).contains(&target), "size");
@@ -102,9 +102,21 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
     );
     assert_eq!(watcher.content_reads() - before, 2);
 
+    // Linux before 6.13 stamps ctime from a coarse clock, so a chmod in the
+    // same tick as the edit above leaves ctime where it was. Reapplying the
+    // same mode changes nothing but ctime, so it is repeated until ctime moves.
     let old = fs::metadata(&target).unwrap();
-    fs::set_permissions(&target, fs::Permissions::from_mode(old.mode() ^ 0o100)).unwrap();
-    let new = fs::metadata(&target).unwrap();
+    let mode = fs::Permissions::from_mode(old.mode() ^ 0o100);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let new = loop {
+        fs::set_permissions(&target, mode.clone()).unwrap();
+        let new = fs::metadata(&target).unwrap();
+        let moved = (old.ctime(), old.ctime_nsec()) != (new.ctime(), new.ctime_nsec());
+        if moved || Instant::now() >= deadline {
+            break new;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
     assert_eq!(
         (old.len(), old.modified().unwrap(), old.ino()),
         (new.len(), new.modified().unwrap(), new.ino())
