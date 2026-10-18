@@ -157,6 +157,8 @@ fn a_preview_on_a_vault_with_no_schema_plans_one_starter_listing_every_observed_
 /// findings are as they were**: the schema on disk is the previewed content,
 /// the fingerprint the vault serves is that content's, the advisory that the
 /// schema is absent is gone, and the broken link's finding stands as it did.
+/// A reload that lost its turn to the watcher is asked again once the entry
+/// serves.
 #[test]
 fn an_init_applied_lands_the_starter_and_the_vault_reloads_under_it_findings_unchanged() {
     let (_sandbox, vault) = a_vault("host-init-apply", FILES);
@@ -173,13 +175,19 @@ fn an_init_applied_lands_the_starter_and_the_vault_reloads_under_it_findings_unc
     ));
 
     let InitReport::Scaffolded {
-        report: scaffolded, ..
+        report: scaffolded,
+        reload_refused,
+        ..
     } = host
         .init(&params(&vault, ApplyMode::Apply))
         .expect("an init applies")
     else {
         panic!("an init apply answered another outcome");
     };
+    assert_eq!(
+        attach::reload_refusal_once_settled(&host, vault.name(), reload_refused),
+        None
+    );
     let ApplyReport::Applied { targets, .. } = *scaffolded else {
         panic!("an init apply answered {scaffolded:?}");
     };
@@ -365,7 +373,8 @@ fn an_init_over_a_standing_schema_answers_before_reading_the_field_universe() {
 /// landed**: the starter is written, and init answers the apply's landing
 /// with the reload's refusal beside it — here a vault config the reload
 /// cannot read — so the caller learns the schema stands on disk, not yet in
-/// service.
+/// service. A reload that lost its turn to the watcher is asked again once
+/// the entry serves, since that refusal is not the reload's own.
 #[test]
 fn an_init_whose_reload_refuses_answers_the_landed_write_beside_the_refusal() {
     let (_sandbox, vault) = a_vault("host-init-reload-refused", FILES);
@@ -390,8 +399,13 @@ fn an_init_whose_reload_refuses_answers_the_landed_write_beside_the_refusal() {
         targets,
         vec![AppliedTarget::new(schema(), TargetResult::Wrote)]
     );
-    let refused = reload_refused.expect("the reload's refusal is answered beside the landing");
-    assert_eq!(refused.code(), &ReasonCode::VaultReloadFailed);
+    let refused = attach::reload_refusal_once_settled(&host, vault.name(), reload_refused)
+        .expect("the reload's refusal is answered beside the landing");
+    assert_eq!(
+        refused.code(),
+        &ReasonCode::VaultReloadFailed,
+        "{refused:?}"
+    );
     assert!(
         vault.path().join(SCHEMA).is_file(),
         "the starter did not land"

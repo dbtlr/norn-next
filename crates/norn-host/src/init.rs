@@ -292,7 +292,11 @@ where
                 // The schema landed whatever the reload answers, so a refused
                 // reload is answered beside the landing; a host gone before
                 // its reload ran answers the landing alone, since the next
-                // attach reads the schema the apply wrote.
+                // attach reads the schema the apply wrote. The apply's own
+                // write, seen back by the watcher before this reload is
+                // admitted, can leave the entry warming over its reconcile;
+                // the reload is then refused not ready with nothing of it run,
+                // and the caller's `vault reload` is what activates the schema.
                 if let Err(refusal) = self.reload(&name)
                     && let Ok(refused) = refusal.answer(&name)
                 {
