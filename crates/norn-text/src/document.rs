@@ -20,7 +20,7 @@ use crate::frontmatter::render::{
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
-use crate::link::{Link, parse_wikilinks_in_text};
+use crate::link::{BlockId, Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
 use crate::tag::{Tag, frontmatter_tag_name};
@@ -555,6 +555,20 @@ impl<'a> Document<'a> {
                     .span
                     .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
                 ..tag
+            })
+            .collect()
+    }
+
+    /// Every trailing block-id definition in the body, in document order, in
+    /// source coordinates. A definition's span is its `^` marker.
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan_body()
+            .block_ids()
+            .into_iter()
+            .map(|block| BlockId {
+                span: cursor.span_at(block.span.byte_offset + self.body_start),
+                ..block
             })
             .collect()
     }

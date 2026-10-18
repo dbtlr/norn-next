@@ -12,11 +12,13 @@
 //! would buy nothing: there is no invariant between two fields of a fact that
 //! the store does not check where it writes them.
 //!
-//! # Spans are body-relative, and a fact carries no ordinal
+//! # Spans are positions in the whole file, and a fact carries no ordinal
 //!
-//! A span is the position the text layer reported, which is relative to the
-//! document body; `documents.body_offset` is the frame that turns one into a
-//! document offset.
+//! A span is a position in the whole file, frontmatter included: its byte
+//! offset counts from the file's first byte and its line and column from the
+//! file's first line. The stored body is the body alone, so
+//! `documents.body_offset` is what a reader takes away from a span's byte
+//! offset to index it.
 //!
 //! Order is the position in the slice. A fact carries no ordinal of its own
 //! because the store assigns one from the slice index, which is exactly the
@@ -41,7 +43,8 @@ use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath, PathKey};
 
-/// A position in a document body: 1-based line and column, 0-based byte offset.
+/// A position in the whole file, frontmatter included: 1-based line and
+/// column, 0-based byte offset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
     pub line: u64,
@@ -205,7 +208,8 @@ pub struct HeadingFact {
     /// anchor as written matches this.
     pub slug: String,
     pub span: Span,
-    /// Where the heading construct ends and the section body begins.
+    /// Where the heading construct ends and the section body begins, as a byte
+    /// offset in the whole file like [`HeadingFact::span`].
     pub body_offset: u64,
     /// Whether the heading sits inside a blockquote or a list item, which is
     /// what makes a section replace addressed at it unsafe.
@@ -278,8 +282,8 @@ pub struct DocumentFacts {
     pub byte_length: u64,
     /// The document's body, frontmatter block excluded.
     pub body: String,
-    /// Where `body` begins in the document, which is the frame every span here
-    /// is relative to.
+    /// Where `body` begins in the document: the offset between the whole file,
+    /// whose positions every span here is, and `body`.
     pub body_offset: u64,
     /// The frontmatter value tree, or `None` where there is no projection to
     /// make — no block, or a block that did not parse. Private, and set with

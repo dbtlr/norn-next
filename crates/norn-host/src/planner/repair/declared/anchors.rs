@@ -38,7 +38,7 @@ pub(super) fn fixes<R: Reading>(
     for link in original
         .frontmatter_wikilinks()
         .into_iter()
-        .chain(original.scan_body().links())
+        .chain(original.links())
     {
         let address = match &link.protocol {
             Some(protocol) => format!("{protocol}://{}", link.target),
@@ -219,7 +219,7 @@ mod tests {
         let rows: Vec<_> = parsed
             .frontmatter_wikilinks()
             .into_iter()
-            .chain(parsed.scan_body().links())
+            .chain(parsed.links())
             .enumerate()
             .map(|(ordinal, link)| {
                 let span = link.span.unwrap();
@@ -302,6 +302,23 @@ mod tests {
                 .field,
             "status"
         );
+    }
+
+    /// A finding's span is a position in the whole file, so a body link behind
+    /// a frontmatter block is found by it and its anchor is fixed.
+    #[test]
+    fn a_body_link_behind_frontmatter_is_found_by_its_whole_file_span() {
+        let planned = planned(
+            "---\ntitle: t\n---\n[[target#Important Headinh]]\n",
+            "# Important Heading\n",
+            Confidence::Suggested,
+            false,
+        );
+        assert!(planned.skipped.is_empty(), "{:?}", planned.skipped);
+        assert!(matches!(
+            &planned.operations[0].kind,
+            OperationKind::RewriteAnchor { to, .. } if to == "Important Heading"
+        ));
     }
 
     /// A Markdown heading with an empty slug cannot be a wire-valid proposal.

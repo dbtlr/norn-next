@@ -162,16 +162,17 @@ impl JsonSchema for DocumentPath {
     }
 }
 
-/// A position in a document body: 1-based line and column, 0-based byte
-/// offset.
+/// A position in the whole file, frontmatter included: 1-based line and
+/// column, 0-based byte offset.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct Span {
-    /// The 1-based line the position is on.
+    /// The 1-based line the position is on, counted from the first line of the
+    /// file.
     pub line: u64,
     /// The 1-based column the position is at.
     pub column: u64,
-    /// The 0-based byte offset of the position from the start of the body.
+    /// The 0-based byte offset of the position from the start of the file.
     pub byte_offset: u64,
 }
 
@@ -766,7 +767,7 @@ pub struct LinkRow {
     /// empty anchor, `note#` or `note#^`, names no place, so its link row
     /// shows no anchor.
     pub anchor: Option<Anchor>,
-    /// Where the link stands, and `null` for a frontmatter link whose
+    /// Where the link stands in the file, and `null` for a frontmatter link whose
     /// position cannot be named: one written in a flow sequence, an escaped,
     /// folded or block scalar, or a nested value, whose bytes are not its
     /// text, or one in a block whose fields cannot be told apart.
@@ -892,7 +893,7 @@ pub struct HeadingRow {
     /// The heading's anchor form, its document-order dedupe suffix included.
     /// An inline Markdown fragment addresses this.
     pub slug: String,
-    /// Where the heading stands in the document body.
+    /// Where the heading stands in the file.
     pub span: Span,
 }
 
@@ -915,8 +916,8 @@ impl HeadingRow {
 pub struct BlockRow {
     /// The identifier, without its `^`.
     pub id: String,
-    /// Where the definition stands, and `null` where its position cannot be
-    /// named.
+    /// Where the definition stands in the file, and `null` where its position
+    /// cannot be named.
     pub span: Option<Span>,
 }
 
@@ -952,8 +953,8 @@ pub struct TagRow {
     pub name: String,
     /// Which home it was read from.
     pub source: TagSource,
-    /// Where it stands in the document body, and `null` where its bytes cannot
-    /// be named as one span.
+    /// Where it stands in the file, and `null` where its bytes cannot be named
+    /// as one span.
     pub span: Option<Span>,
 }
 

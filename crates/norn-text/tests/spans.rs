@@ -115,6 +115,33 @@ fn a_document_reports_its_constructs_in_source_coordinates() {
     assert_eq!(links[0].span.expect("a placed link").column, 5);
 }
 
+/// A block-id definition is a body construct like the rest, so a `Document`
+/// reports its `^` marker in source coordinates too, and the marker's offset
+/// indexes the source rather than the body.
+#[test]
+fn a_document_reports_its_block_ids_in_source_coordinates() {
+    let source = "---\ntitle: t\n---\nfirst ^a\n\nsecond ^b\n";
+    let document = Document::parse(source);
+    let scan = document.scan_body();
+
+    let block_ids = document.block_ids();
+    assert_eq!(block_ids.len(), 2);
+    for (source_side, body_side) in block_ids.iter().zip(scan.block_ids()) {
+        assert_eq!(source_side.id, body_side.id);
+        assert_eq!(
+            source_side.span.byte_offset,
+            body_side.span.byte_offset + document.body_start()
+        );
+        assert!(
+            source[source_side.span.byte_offset..].starts_with(&format!("^{}", source_side.id))
+        );
+    }
+    // The marker's line is its line in the document, not in the body.
+    assert_eq!(block_ids[0].span.line, 4);
+    assert_eq!(block_ids[0].span.column, 7);
+    assert_eq!(block_ids[1].span.line, 6);
+}
+
 /// A lone `\r` ends a line. Counting only `\n` reported line 1 for every
 /// construct in a CR-only document, which is a position that points at nothing.
 #[test]

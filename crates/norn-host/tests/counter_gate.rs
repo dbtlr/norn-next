@@ -5250,12 +5250,13 @@ impl norn_store::DocumentText for NoText {
         &self,
         _: &[norn_store::HeadingFact],
         _: &str,
+        _: usize,
         _: &str,
     ) -> Option<norn_store::SectionAt> {
         unreachable!("a get of a whole record cuts no section")
     }
 
-    fn block(&self, _: &str, _: usize) -> std::ops::Range<usize> {
+    fn block(&self, _: &str, _: usize, _: u64) -> std::ops::Range<usize> {
         unreachable!("a get of a whole record cuts no block")
     }
 }
