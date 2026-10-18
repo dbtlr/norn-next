@@ -2342,6 +2342,10 @@ fn class_reads_seek_admitted_members_without_stepping_ignored_namesakes() {
         .into_iter()
         .enumerate()
         {
+            assert!(
+                small[slot] > 0,
+                "{name} recorded no VM steps under {order:?}, so the bar measures nothing"
+            );
             assert_eq!(
                 small[slot], large[slot],
                 "{name} VM steps grew with ignored namesakes under {order:?}"
