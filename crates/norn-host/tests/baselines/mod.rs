@@ -1676,8 +1676,8 @@ pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
 /// the folder's width. A root that tells spellings apart asks none.
 ///
 /// `folding_cost.rs` crosses 32 and 128 targets with 256 and 2048 siblings.
-/// Observed on a macOS ARM64 APFS volume at the commit that introduced the
-/// query: 192 and 768 queries at both widths, with zero walk and write
+/// Observed on hosted macOS ARM64 (`macos-15`), CI run 39169536679 at
+/// e94635a: 192 and 768 queries at both widths, with zero walk and write
 /// dirents at all four sizes. Reproduce with `LANE_FEATURES=induced-failure
 /// .github/scripts/lane-suite.sh norn-host folding_cost --nocapture
 /// --test-threads=1` on a folding volume. The job-thread tally excludes
