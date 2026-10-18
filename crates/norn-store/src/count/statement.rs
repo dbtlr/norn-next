@@ -9,7 +9,7 @@
 
 use norn_db::rusqlite::types::Value;
 
-use crate::read::{Binder, FieldOrder, Filter};
+use crate::read::{Binder, Driver, FieldOrder, Filter};
 
 /// Every statement shape the count builder runs, named.
 ///
@@ -33,21 +33,25 @@ pub enum CountStatement {
     Total,
     /// The tallies whose leading member is `null`: the documents carrying no
     /// value under the leading key, grouped by the rest of the tuple. It walks
-    /// the documents — every one, with no filter that keeps what it seeks —
-    /// and probes each for a value under the leading key by its document, so
-    /// no read of the leading key's rows passes a document that does not hold
-    /// it. The member names what the leading key is read from.
+    /// the documents — the matched ones whenever a part keeps what it seeks,
+    /// every one otherwise — and probes each for a value under the leading key,
+    /// so no read of the leading key's rows passes a document that does not
+    /// hold it. The member names what the leading key is read from.
     NullLead(GroupMember),
     /// The tallies whose leading member holds a value, grouped by the whole
-    /// tuple. With no filter that keeps what it seeks, a seek of the leading
-    /// member's value index from the page's position; with one, the matched
-    /// documents each reaching their leading values by the document. The
-    /// member names what the leading key is read from.
+    /// tuple. A part keeping at most the page drive's budget drives from its
+    /// matched documents, each reaching its leading values by the document;
+    /// otherwise a seek of the leading value index tests every part at each
+    /// document, within the walk's window. The member names what the leading
+    /// key is read from.
     ValuedLead(GroupMember),
+    /// One leading value at an offset past a section's position, read from
+    /// its value index with no document part: where a walk's window ends.
+    ValuedWindow(GroupMember),
 }
 
 /// How many statement shapes [`CountStatement::all`] holds.
-pub const COUNT_STATEMENTS: usize = 3;
+pub const COUNT_STATEMENTS: usize = 4;
 
 impl CountStatement {
     /// Every statement shape, in slot order.
@@ -59,6 +63,7 @@ impl CountStatement {
             Self::Total,
             Self::NullLead(GroupMember::Field(FieldOrder::Raw)),
             Self::ValuedLead(GroupMember::Field(FieldOrder::Raw)),
+            Self::ValuedWindow(GroupMember::Field(FieldOrder::Raw)),
         ]
     }
 
@@ -69,6 +74,7 @@ impl CountStatement {
             Self::Total => 0,
             Self::NullLead(_) => 1,
             Self::ValuedLead(_) => 2,
+            Self::ValuedWindow(_) => 3,
         };
         assert!(
             slot < COUNT_STATEMENTS,
@@ -215,6 +221,14 @@ pub(crate) struct Tallies<'a> {
     /// statement resumes after. `None` starts at its first tally.
     pub(crate) after: Option<&'a [Option<String>]>,
     pub(crate) filters: &'a [Filter],
+    pub(crate) driver: Driver,
+    /// A round resumes past this whole leading group, independently of the
+    /// tuple position the page started at.
+    pub(crate) past: Option<&'a str>,
+    /// The leading group the walk reads through, every row at it included.
+    pub(crate) until: Option<&'a str>,
+    /// Source rows passed before a window reads its one leading value.
+    pub(crate) offset: usize,
     pub(crate) rows: usize,
 }
 
@@ -231,22 +245,28 @@ pub(crate) struct Tallies<'a> {
 /// **Where a statement resumes is a bound on the grouped tuple.** Each member
 /// compares as its sort column with `null` read as the integer `0`, which
 /// SQLite orders before every text, and an unset position binds `-1` to every
-/// member, which orders before that; so the text does not branch on whether
-/// the statement resumes. The valued section's leading member is also a seek:
-/// its index is searched from the position's leading value, the empty text
-/// where none is set.
+/// member, which orders before that. The valued section's leading member is
+/// also a seek: a single-key continuation and a resumed round seek strictly
+/// past their position; a tuple with trailing members includes its leading
+/// value so those members can resume within it. An unset position starts at
+/// the empty text.
 ///
-/// **A statement narrowed by a filter that keeps what it seeks is driven from
-/// that seek**: the matched documents are the outer loop and every member is
-/// reached by its document, so the statement's cost is the matched set's, not
-/// the vault's. A statement with no filter, or narrowed only by filters that
-/// exclude, reads its own leading rows and tests each against them.
+/// **The page drive chooses which part drives a grouped statement.** A part
+/// keeping at most its budget drives from its matched documents: the outer
+/// loop, every member reached by its document, every other part tested there.
+/// Otherwise the statement walks its leading index from the position and
+/// tests every part at each document, through the window's leading value
+/// inclusive. A round resumes past that whole leading group. A window reads
+/// one value at an offset on the same seek, narrowed by no part and grouped
+/// by nothing.
 pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
-    let driven = tallies
-        .filters
-        .iter()
-        .any(|filter| !filter.shape().excludes());
+    let driving = match tallies.driver {
+        Driver::Matched(at) => Some(at),
+        Driver::Walked => None,
+        Driver::Ordered(_) => unreachable!("a grouped order is not a path order"),
+    };
+    let driven = driving.is_some();
     let alias = |at: usize| format!("g{}", at + 1);
     let (grouped, lead): (Vec<(usize, Member<'_>)>, Option<Member<'_>>) = match tallies.statement {
         CountStatement::Total => (Vec::new(), None),
@@ -260,7 +280,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                 .collect(),
             tallies.members.first().copied(),
         ),
-        CountStatement::ValuedLead(_) => (
+        CountStatement::ValuedLead(_) | CountStatement::ValuedWindow(_) => (
             tallies.members.iter().copied().enumerate().collect(),
             tallies.members.first().copied(),
         ),
@@ -287,14 +307,26 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                 Some("d.path"),
             )
         }
-        (CountStatement::ValuedLead(_), Some(lead)) => {
+        (CountStatement::ValuedLead(_) | CountStatement::ValuedWindow(_), Some(lead)) => {
             let (table, sort) = (lead.shape.table(), lead.shape.sort());
             let from_position = binder.bind(Value::Text(
                 tallies
-                    .after
-                    .and_then(|after| after.first().cloned().flatten())
+                    .past
+                    .map(str::to_string)
+                    .or_else(|| {
+                        tallies
+                            .after
+                            .and_then(|after| after.first().cloned().flatten())
+                    })
                     .unwrap_or_default(),
             ));
+            let comparison = if tallies.past.is_some()
+                || (tallies.members.len() == 1 && tallies.after.is_some())
+            {
+                ">"
+            } else {
+                ">="
+            };
             if driven {
                 let key = match lead.shape {
                     GroupMember::Field(_) => {
@@ -306,7 +338,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                     format!(
                         "FROM documents AS d
                      CROSS JOIN {table} AS g1
-                       ON g1.document = d.id{key} AND +g1.{sort} >= {from_position}"
+                       ON g1.document = d.id{key} AND +g1.{sort} {comparison} {from_position}"
                     ),
                     "d.id".to_string(),
                     Some("d.path"),
@@ -315,7 +347,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                 if let GroupMember::Field(_) = lead.shape {
                     conditions.push(format!("g1.key = {}", binder.bind(key_value(lead.key))));
                 }
-                conditions.push(format!("g1.{sort} >= {from_position}"));
+                conditions.push(format!("g1.{sort} {comparison} {from_position}"));
                 (
                     format!("FROM {table} AS g1"),
                     "g1.document".to_string(),
@@ -323,10 +355,39 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                 )
             }
         }
-        (CountStatement::NullLead(_) | CountStatement::ValuedLead(_), None) => {
+        (
+            CountStatement::NullLead(_)
+            | CountStatement::ValuedLead(_)
+            | CountStatement::ValuedWindow(_),
+            None,
+        ) => {
             unreachable!("a grouped section groups by a leading member")
         }
     };
+    if let Some(lead) = lead
+        && matches!(
+            tallies.statement,
+            CountStatement::ValuedLead(_) | CountStatement::ValuedWindow(_)
+        )
+    {
+        let sort = lead.shape.sort();
+        if let Some(until) = tallies.until {
+            let until = binder.bind(Value::Text(until.to_string()));
+            conditions.push(format!("g1.{sort} <= {until}"));
+        }
+        if matches!(tallies.statement, CountStatement::ValuedWindow(_)) {
+            let offset = binder.bind(Value::Integer(
+                i64::try_from(tallies.offset).expect("a window offset fits i64"),
+            ));
+            return (
+                format!(
+                    "SELECT g1.{sort} {from} WHERE {} ORDER BY g1.{sort} LIMIT 1 OFFSET {offset}",
+                    conditions.join(" AND "),
+                ),
+                binder.into_values(),
+            );
+        }
+    }
     let joins: String = grouped
         .iter()
         .filter(|(at, _)| matches!(tallies.statement, CountStatement::NullLead(_)) || *at > 0)
@@ -339,12 +400,13 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
             )
         })
         .collect();
-    conditions.extend(
-        tallies
-            .filters
-            .iter()
-            .map(|filter| filter.spell(&id, &mut binder)),
-    );
+    conditions.extend(tallies.filters.iter().enumerate().map(|(at, filter)| {
+        if matches!(tallies.statement, CountStatement::Total) || driving == Some(at) {
+            filter.spell(&id, &mut binder)
+        } else {
+            filter.test(&id, &mut binder)
+        }
+    }));
 
     let sorts: Vec<String> = grouped
         .iter()
@@ -360,6 +422,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
         CountStatement::NullLead(_) | CountStatement::ValuedLead(_) => {
             format!("COUNT(DISTINCT {id})")
         }
+        CountStatement::ValuedWindow(_) => unreachable!("a window reads its leading value alone"),
     });
 
     let mut having = vec!["COUNT(*) > 0".to_string()];

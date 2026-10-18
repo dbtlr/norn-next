@@ -3673,10 +3673,11 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
 /// by construction:
 ///
 /// - **count-by-field**, a count grouped by `type` and narrowed by a path part
-///   to the planted neighborhood. A part that seeks what it keeps drives the
-///   tallies, so the work is the documents it admits. An unnarrowed ungrouped
-///   count is not held: it is the b-tree's own count of `documents` and steps
-///   no row, so its readings stand still while the pages it counts grow.
+///   to the planted neighborhood. The part drives the tallies once the page
+///   asks it within the ceiling, so the work is the documents it admits. An
+///   unnarrowed ungrouped count is not held: it is the b-tree's own count of
+///   `documents` and steps no row, so its readings stand still while the
+///   pages it counts grow.
 /// - **suffix / stem resolve**, a get of the whole record of a document named
 ///   by its bare stem, one segment of suffix: the class seek, the one document
 ///   and its collections' heads.
@@ -5128,7 +5129,7 @@ const READ_SHAPES: &[ReadShape] = &[
         name: "count-by-field",
         bounded: |reader| count(reader, [Predicate::path(format!("{PLANTED}/fixed/**"))]),
         working: &["count_statements", "count_tallies_read", "count_vm_steps"],
-        statements: 5,
+        statements: 6,
         control: |reader| count(reader, []),
         grows: &["count_full_scan_steps", "vm_steps"],
     },

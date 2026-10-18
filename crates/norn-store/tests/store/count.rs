@@ -1242,6 +1242,9 @@ fn statement_barred_by(statement: CountStatement) -> &'static str {
         CountStatement::ValuedLead(_) => {
             "a_valued_section_seeks_its_leading_index_from_the_pages_position"
         }
+        CountStatement::ValuedWindow(_) => {
+            "a_walked_valued_section_seeks_its_position_and_tests_each_document"
+        }
     }
 }
 
@@ -1251,7 +1254,7 @@ fn statement_barred_by(statement: CountStatement) -> &'static str {
 /// member a leading key is read from.
 #[test]
 fn the_count_bars_cover_every_statement_once() {
-    let per_bar: [Vec<CountStatement>; 3] = [
+    let per_bar: [Vec<CountStatement>; 4] = [
         vec![CountStatement::Total],
         LEAD_BARS
             .iter()
@@ -1260,6 +1263,10 @@ fn the_count_bars_cover_every_statement_once() {
         LEAD_BARS
             .iter()
             .map(|bar| CountStatement::ValuedLead(bar.member))
+            .collect(),
+        LEAD_BARS
+            .iter()
+            .map(|bar| CountStatement::ValuedWindow(bar.member))
             .collect(),
     ];
     let mut slots: Vec<usize> = Vec::new();
@@ -1290,6 +1297,7 @@ fn the_count_bars_cover_every_statement_once() {
             "a_null_lead_section_probes_each_document_for_its_leading_key_by_the_document",
             "a_valued_section_seeks_its_leading_index_from_the_pages_position",
             "an_ungrouped_count_counts_the_documents_or_reaches_them_by_its_filters_seek",
+            "a_walked_valued_section_seeks_its_position_and_tests_each_document",
         ]
         .into_iter()
         .collect()
@@ -1506,8 +1514,8 @@ fn judge_valued_driven(plan: &QueryPlan, bar: &LeadBar) {
 /// below by the page's position, on a first page and a continuation alike;
 /// grouped by one key the groups stream off that index in order and nothing
 /// sorts. Every trailing member is reached by the document. With a filter
-/// that keeps what it seeks, the matched documents drive the section and reach
-/// their leading values by the document.
+/// that keeps what it seeks within the page drive's budget, the matched
+/// documents drive the section and reach their leading values by the document.
 ///
 /// Controls: a continuation's plan rebuilt without its position bound fails;
 /// each value index dropped, the section reads something else; the tag's
@@ -1871,6 +1879,8 @@ fn a_count_runs(statement: ReadStatement) -> bool {
                     | FindStatement::BareDirectory
                     | FindStatement::MatchProbe
                     | FindStatement::OffsetSpellings
+                    | FindStatement::PartCeiling
+                    | FindStatement::DocumentSpan
             )
     )
 }
@@ -1957,7 +1967,7 @@ fn payload_narrowing() -> Vec<Vec<Predicate>> {
 /// it.
 #[test]
 fn no_statement_a_count_runs_reads_a_documents_payload() {
-    let counting_store = Counting::new("count-payload");
+    let counting_store = Counting::with_bulk("count-payload", 100);
     let mut shapes: Vec<CountParams> = Vec::new();
     for by in work_groupings() {
         for predicates in payload_narrowing() {
@@ -1970,6 +1980,13 @@ fn no_statement_a_count_runs_reads_a_documents_payload() {
         let crossed = counting(vec![(bar.key)(), GroupKey::tag(), field("aliases")]);
         shapes.push(counting_store.resumed(&crossed, &[Some(bar.label), None, None]));
         shapes.push(counting_store.resumed(&crossed, &[None, None, Some("x")]));
+    }
+    for bar in LEAD_BARS {
+        shapes.push(
+            counting(vec![(bar.key)()])
+                .with_limit(1)
+                .with_predicates([Predicate::tag("bulk")]),
+        );
     }
     let mut reached: Vec<ReadStatement> = Vec::new();
     for params in &shapes {
@@ -2039,4 +2056,564 @@ fn a_counts_work_reads_out_every_count_by_name() {
             ("count_vm_steps", 5),
         ]
     );
+}
+
+/// The valued continuation with most documents kept by both parts. The
+/// distinct numeric values leave nearly one group per matched document.
+fn broad_continuation(store: &Counting) -> CountParams {
+    let params = counting(vec![field("n")])
+        .with_predicates([
+            Predicate::equal_to("status", "filed"),
+            Predicate::tag("bulk"),
+        ])
+        .with_limit(5);
+    let first = store.count(&params);
+    params.with_after(first.next.expect("more distinct groups"))
+}
+
+/// The matched-document shape, forced independently of the page's choice:
+/// every matched document reaches its values before grouping and sorting.
+fn forced_matched_work(store: &Counting) -> norn_store::CountWork {
+    use norn_db::rusqlite::StatementStatus;
+    let connection =
+        norn_db::connect_read_only(&store._scratch.database()).expect("the fixture's database");
+    let mut statement = connection.prepare(
+        "SELECT MIN(g1.raw), COUNT(DISTINCT d.id)
+         FROM documents AS d CROSS JOIN document_fields AS g1
+           ON g1.document = d.id AND g1.key = 'n' AND +g1.typed >= ?1
+         WHERE d.id IN (SELECT fv.document FROM document_fields AS fv WHERE fv.key = 'status' AND fv.raw = 'filed')
+           AND d.id IN (SELECT tg.document FROM document_tags AS tg WHERE tg.folded_name = 'bulk')
+         GROUP BY g1.typed HAVING COALESCE(g1.typed, 0) > ?1 ORDER BY g1.typed LIMIT 6",
+    ).expect("the forced matched shape");
+    let position = decimal_order().sort_key("4").expect("a numeric position");
+    let tallies = statement
+        .query_map([position], |_| Ok(()))
+        .expect("running the control")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("reading the control");
+    norn_store::CountWork {
+        statements: 1,
+        tallies_read: tallies.len() as u64,
+        full_scan_steps: statement.get_status(StatementStatus::FullscanStep) as u64,
+        sorts: statement.get_status(StatementStatus::Sort) as u64,
+        vm_steps: statement.get_status(StatementStatus::VmStep) as u64,
+    }
+}
+
+/// A continuation's work stays bounded as the matched set grows. The
+/// matched-document control grows with it and fails the same work bar.
+#[test]
+fn a_broadly_filtered_grouped_continuation_costs_its_page() {
+    let small = Counting::with_bulk("count-broad-small", 512);
+    let large = Counting::with_bulk("count-broad-large", 2048);
+    let judge = |small: norn_store::CountWork, large: norn_store::CountWork| {
+        assert_eq!(
+            small.vm_steps, large.vm_steps,
+            "a continuation grew with the matched set: {small:?} then {large:?}"
+        );
+    };
+    let control = (forced_matched_work(&small), forced_matched_work(&large));
+    eprintln!("forced matched at 512 and 2048: {control:?}");
+    assert!(control.1.vm_steps > control.0.vm_steps * 3);
+    failure_of("a continuation forced from the matched set", || {
+        judge(control.0, control.1)
+    });
+    let work = (
+        small.count(&broad_continuation(&small)).work,
+        large.count(&broad_continuation(&large)).work,
+    );
+    eprintln!("grouped continuation at 512 and 2048: {work:?}");
+    judge(work.0, work.1);
+}
+
+/// A walked section streams its leading value index between its position
+/// and window, testing both broad parts at each holding document. Rebuilding
+/// either test as a value-index seek or the lead as a scan fails the bar.
+#[test]
+fn a_walked_valued_section_seeks_its_position_and_tests_each_document() {
+    let store = Counting::with_bulk("count-walked-plan", 512);
+    let judge = |plan: &QueryPlan, bar: &LeadBar| {
+        plan.assert_no_full_scan();
+        rows_of(plan, "g1").assert_searches_through(bar.member.table(), Access::Index(bar.index));
+        let constraint = match bar.member {
+            GroupMember::Field(FieldOrder::Raw) => "(key=? AND raw>? AND raw<?)",
+            GroupMember::Field(FieldOrder::Typed) => "(key=? AND typed>? AND typed<?)",
+            GroupMember::Tag => "(folded_name>? AND folded_name<?)",
+        };
+        rows_of(plan, "g1").assert_search_constraint(bar.member.table(), constraint);
+        judge_by_document(plan, "fv", GroupMember::Field(FieldOrder::Raw));
+        rows_of(plan, "tg").assert_searches_through(
+            "document_tags",
+            Access::Index("document_tags_document_ordinal"),
+        );
+        rows_of(plan, "tg").assert_search_constraint("document_tags", "(document=?)");
+        assert!(!sorts_the_page(plan));
+    };
+    for bar in LEAD_BARS {
+        let params = counting(vec![(bar.key)()]).with_limit(1).with_predicates([
+            Predicate::equal_to("status", "filed"),
+            Predicate::tag("bulk"),
+        ]);
+        let label = if bar.member == GroupMember::Tag {
+            "a"
+        } else {
+            bar.label
+        };
+        let continued = store.resumed(&params, &[Some(label)]);
+        let plans = store.plans(&continued);
+        let window = plans
+            .iter()
+            .find(|plan| {
+                plan.statement == ReadStatement::Count(CountStatement::ValuedWindow(bar.member))
+            })
+            .expect("a walk reads its window");
+        judge_valued(&plan(window), bar, true);
+        assert!(window.filters.is_empty());
+        reads_of(&window.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
+        let walked = plans
+            .iter()
+            .find(|plan| {
+                plan.statement == ReadStatement::Count(CountStatement::ValuedLead(bar.member))
+            })
+            .map(plan)
+            .expect("a walked tally section");
+        judge(&walked, bar);
+        let scanned = rewritten(&walked, |detail| {
+            if detail.starts_with("SEARCH g1 ") {
+                "SCAN g1".to_string()
+            } else {
+                detail.to_string()
+            }
+        });
+        failure_of("a walked section scanning its leading rows", || {
+            judge(&scanned, bar)
+        });
+        for alias in ["fv", "tg"] {
+            let set = rewritten(&walked, |detail| {
+                if detail.starts_with(&format!("SEARCH {alias} ")) {
+                    format!("SEARCH {alias} USING INDEX wrong_value_index (value=?)")
+                } else {
+                    detail.to_string()
+                }
+            });
+            failure_of("a walked part reading its whole matched set", || {
+                judge(&set, bar)
+            });
+        }
+    }
+}
+
+/// A part within the first ceiling drives from its matches before any
+/// window is read, with the same work beside either vault size.
+#[test]
+fn a_small_part_drives_a_grouped_page_from_its_matches() {
+    let small = Counting::with_bulk("count-small-part-small", 512);
+    let large = Counting::with_bulk("count-small-part-large", 2048);
+    let params = counting(vec![field("n")]).with_limit(2).with_predicates([
+        Predicate::tag("draft"),
+        Predicate::equal_to("status", "open"),
+    ]);
+    judge_narrow(&small, &large, &params);
+    for store in [&small, &large] {
+        let plans = store.plans(&params);
+        let valued = plan_of(
+            &plans,
+            CountStatement::ValuedLead(GroupMember::Field(FieldOrder::Typed)),
+        );
+        judge_valued_driven(&valued, &LEAD_BARS[1]);
+        assert!(!plans.iter().any(|plan| matches!(
+            plan.statement,
+            ReadStatement::Count(CountStatement::ValuedWindow(_))
+                | ReadStatement::Find(FindStatement::DocumentSpan)
+        )));
+    }
+}
+
+/// A window inside a repeated leading value finishes the whole group,
+/// preserving distinct-document counts and labels through later rounds.
+#[test]
+fn a_walk_finishes_each_leading_group_before_resuming() {
+    let documents = (0..320)
+        .map(|at| {
+            tagged(
+                document(&format!("walk/{at:04}.md"), &format!("hash-{at}"), "body\n")
+                    .with_frontmatter(
+                        Some(map(vec![
+                            (
+                                "n",
+                                texts(&[&format!("{:02}", at / 32), &(at / 32).to_string()]),
+                            ),
+                            (
+                                "status",
+                                string(if at % 4 == 0 { "closed" } else { "filed" }),
+                            ),
+                            ("aliases", string(&format!("a{}", at % 3))),
+                        ])),
+                        &declared(),
+                    ),
+                &[
+                    if at % 2 == 0 { "Work" } else { "work" },
+                    &format!("g{}", at / 32),
+                ],
+            )
+        })
+        .collect();
+    let store = Counting::with_documents("count-walk-groups", documents);
+    for by in [
+        vec![field("n")],
+        vec![GroupKey::tag()],
+        vec![field("n"), field("aliases")],
+    ] {
+        let params = counting(by.clone()).with_predicates([
+            Predicate::equal_to("status", "filed"),
+            Predicate::tag("work"),
+        ]);
+        let whole = store.count(&params.clone().with_limit(1000)).tallies;
+        if by == vec![field("n")] {
+            assert_eq!(
+                whole,
+                (0..10)
+                    .map(|at| tally(
+                        &[Some(&if at == 0 {
+                            "0".to_string()
+                        } else {
+                            format!("{at:02}")
+                        })],
+                        24
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for limit in [1, 2, 3] {
+            assert_eq!(drained(&store, &params, limit), whole);
+        }
+    }
+}
+
+/// After an empty window, a part within the doubled budget drives the rest
+/// from its small matched set, including the tuple the walk resumes past.
+#[test]
+fn a_part_within_a_walks_budget_drives_the_rest_of_the_page() {
+    let fixture = |label: &str, bulk| {
+        let mut store = Counting::with_bulk(label, bulk);
+        let documents = (10000..10009)
+            .map(|at| {
+                tagged(
+                    document(&format!("late/{at}.md"), &format!("hash-{at}"), "body\n")
+                        .with_frontmatter(
+                            Some(map(vec![
+                                ("status", string("filed")),
+                                ("n", string(&at.to_string())),
+                            ])),
+                            &declared(),
+                        ),
+                    &["small"],
+                )
+            })
+            .collect::<Vec<_>>();
+        write_documents(&mut store.store.begin_request(), &documents);
+        store
+    };
+    let small = fixture("count-later-driver-small", 512);
+    let large = fixture("count-later-driver-large", 2048);
+    let params = counting(vec![field("n")]).with_limit(1).with_predicates([
+        Predicate::equal_to("status", "filed"),
+        Predicate::tag("small"),
+    ]);
+    let params = small.resumed(&params, &[Some("100")]);
+    judge_narrow(&small, &large, &params);
+    assert_eq!(
+        small.count(&params).tallies,
+        vec![tally(&[Some("10000")], 1)]
+    );
+    for store in [&small, &large] {
+        let plans = store.plans(&params);
+        let valued = plans
+            .iter()
+            .filter(|plan| {
+                plan.statement
+                    == ReadStatement::Count(CountStatement::ValuedLead(GroupMember::Field(
+                        FieldOrder::Typed,
+                    )))
+            })
+            .map(plan)
+            .collect::<Vec<_>>();
+        assert_eq!(valued.len(), 2, "one window, then the matched set");
+        valued[0].assert_no_full_scan();
+        rows_of(&valued[0], "g1")
+            .assert_searches_through("document_fields", Access::Index("document_fields_typed"));
+        rows_of(&valued[0], "g1")
+            .assert_search_constraint("document_fields", "(key=? AND typed>? AND typed<?)");
+        assert!(!sorts_the_page(&valued[0]));
+        judge_valued_driven(&valued[1], &LEAD_BARS[1]);
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.statement == ReadStatement::Find(FindStatement::DocumentSpan))
+        );
+    }
+}
+
+/// A null section with a broad, fixed match costs that match even when the
+/// valued section walks. The per-document null control costs the vault.
+#[test]
+fn a_broad_null_section_costs_its_matches_while_the_vault_grows() {
+    use norn_db::rusqlite::StatementStatus;
+    let fixture = |label: &str, vault: usize| {
+        let documents = (0..vault - 7)
+            .map(|at| {
+                let matched = at < 512;
+                let mut fields = vec![("status", string(if matched { "kept" } else { "other" }))];
+                if matched && at >= 32 {
+                    fields.push(("n", string(&(at - 32).to_string())));
+                }
+                tagged(
+                    document(
+                        &format!("fixed/{at:05}.md"),
+                        &format!("hash-{at}"),
+                        "body\n",
+                    )
+                    .with_frontmatter(Some(map(fields)), &declared()),
+                    &[if matched { "kept" } else { "other" }],
+                )
+            })
+            .collect();
+        Counting::with_documents(label, documents)
+    };
+    let small = fixture("count-null-fixed-small", 2048);
+    let large = fixture("count-null-fixed-large", 8192);
+    let params = counting(vec![field("n")]).with_limit(5).with_predicates([
+        Predicate::equal_to("status", "kept"),
+        Predicate::tag("kept"),
+    ]);
+    let judge = |small: norn_store::CountWork, large: norn_store::CountWork| {
+        assert_eq!(small, large, "a fixed null match grew with the vault");
+    };
+    let control = |store: &Counting| {
+        let connection =
+            norn_db::connect_read_only(&store._scratch.database()).expect("the fixture's database");
+        let mut statement = connection
+            .prepare(
+                "SELECT COUNT(DISTINCT d.id) FROM documents AS d
+             WHERE NOT EXISTS (SELECT 1 FROM document_fields AS m
+                 WHERE m.document = d.id AND m.key = 'n' AND +m.typed IS NOT NULL)
+               AND EXISTS (SELECT 1 FROM document_fields AS fv
+                 WHERE fv.document = d.id AND fv.key = 'status' AND +fv.raw = 'kept')
+               AND EXISTS (SELECT 1 FROM document_tags AS tg
+                 WHERE tg.document = d.id AND +tg.folded_name = 'kept')
+             HAVING COUNT(*) > 0 LIMIT 6",
+            )
+            .expect("the walked null control");
+        let tallies = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("running the control")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reading the control");
+        assert_eq!(tallies, vec![32]);
+        norn_store::CountWork {
+            statements: 1,
+            tallies_read: tallies.len() as u64,
+            full_scan_steps: statement.get_status(StatementStatus::FullscanStep) as u64,
+            sorts: statement.get_status(StatementStatus::Sort) as u64,
+            vm_steps: statement.get_status(StatementStatus::VmStep) as u64,
+        }
+    };
+    let controls = (control(&small), control(&large));
+    eprintln!("walked null control at 2048 and 8192: {controls:?}");
+    assert!(controls.1.vm_steps > controls.0.vm_steps * 3);
+    failure_of("a null section walking the vault", || {
+        judge(controls.0, controls.1)
+    });
+    let (at_small, at_large) = (small.count(&params), large.count(&params));
+    assert_eq!(at_small.tallies, at_large.tallies);
+    assert_eq!(at_small.tallies.first(), Some(&tally(&[None], 32)));
+    eprintln!(
+        "first grouped page at 2048 and 8192: {:?}",
+        (at_small.work, at_large.work)
+    );
+    judge(at_small.work, at_large.work);
+    assert_eq!(at_large.work.full_scan_steps, 0);
+    for store in [&small, &large] {
+        let plans = store.plans(&params);
+        assert!(
+            plans.iter().any(|plan| matches!(
+                plan.statement,
+                ReadStatement::Count(CountStatement::ValuedWindow(_))
+            )),
+            "the broad matched set must leave the valued section to walk"
+        );
+        judge_null(
+            &plan_of(
+                &plans,
+                CountStatement::NullLead(GroupMember::Field(FieldOrder::Typed)),
+            ),
+            GroupMember::Field(FieldOrder::Typed),
+            true,
+        );
+    }
+}
+
+/// The null section finds a small keeping part in either request order,
+/// even where every other document holds the broad part's value.
+#[test]
+fn a_null_section_drives_from_a_small_part_in_either_predicate_order() {
+    use norn_db::rusqlite::StatementStatus;
+    let fixture = |label: &str, vault: usize| {
+        let documents = (0..vault - 7)
+            .map(|at| {
+                let mut fields = vec![("status", string("filed"))];
+                if at < 32 {
+                    fields.push(("n", string(&at.to_string())));
+                }
+                tagged(
+                    document(
+                        &format!("parts/{at:05}.md"),
+                        &format!("hash-{at}"),
+                        "body\n",
+                    )
+                    .with_frontmatter(Some(map(fields)), &declared()),
+                    &[if at < 64 { "small" } else { "other" }],
+                )
+            })
+            .collect();
+        Counting::with_documents(label, documents)
+    };
+    let small = fixture("count-null-parts-small", 2048);
+    let large = fixture("count-null-parts-large", 8192);
+    let judge = |small, large| assert_eq!(small, large, "a null driver followed the broad part");
+    let control = |store: &Counting| {
+        let connection =
+            norn_db::connect_read_only(&store._scratch.database()).expect("the fixture's database");
+        let mut statement = connection
+            .prepare(
+                "SELECT COUNT(DISTINCT d.id) FROM documents AS d
+             WHERE NOT EXISTS (SELECT 1 FROM document_fields AS m
+                 WHERE m.document = d.id AND m.key = 'n' AND +m.typed IS NOT NULL)
+               AND d.id IN (SELECT fv.document FROM document_fields AS fv
+                 WHERE fv.key = 'status' AND fv.raw = 'filed')
+               AND EXISTS (SELECT 1 FROM document_tags AS tg
+                 WHERE tg.document = d.id AND +tg.folded_name = 'small')
+             HAVING COUNT(*) > 0 LIMIT 6",
+            )
+            .expect("the broad-first null control");
+        let rows = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("running the control")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reading the control");
+        assert_eq!(rows, vec![32]);
+        statement.get_status(StatementStatus::VmStep) as u64
+    };
+    let controls = (control(&small), control(&large));
+    eprintln!("broad-first null control at 2048 and 8192: {controls:?}");
+    assert!(controls.1 > controls.0 * 3);
+    failure_of("a null section driven by its first broad part", || {
+        judge(controls.0, controls.1)
+    });
+    for predicates in [
+        vec![
+            Predicate::equal_to("status", "filed"),
+            Predicate::tag("small"),
+        ],
+        vec![
+            Predicate::tag("small"),
+            Predicate::equal_to("status", "filed"),
+        ],
+    ] {
+        let params = counting(vec![field("n")])
+            .with_limit(5)
+            .with_predicates(predicates);
+        let (at_small, at_large) = (small.count(&params), large.count(&params));
+        eprintln!(
+            "null part order {:?} at 2048 and 8192: {:?}",
+            params.predicates,
+            (at_small.work, at_large.work)
+        );
+        assert_eq!(at_small.tallies, at_large.tallies);
+        assert_eq!(at_small.tallies.first(), Some(&tally(&[None], 32)));
+        judge(at_small.work.vm_steps, at_large.work.vm_steps);
+        assert_eq!(at_small.work, at_large.work);
+        assert_eq!(at_large.work.full_scan_steps, 0);
+        for store in [&small, &large] {
+            let null = plan_of(
+                &store.plans(&params),
+                CountStatement::NullLead(GroupMember::Field(FieldOrder::Typed)),
+            );
+            judge_null(&null, GroupMember::Field(FieldOrder::Typed), true);
+            rows_of(&null, "tg").assert_searches_through(
+                "document_tags",
+                Access::Index("document_tags_folded_name"),
+            );
+        }
+    }
+}
+
+/// A single-key continuation skips every row of its position's group, even
+/// where that group holds nearly the whole vault.
+#[test]
+fn a_single_key_continuation_skips_its_whole_position_group() {
+    let fixture = |label: &str, size: usize| {
+        let documents = (0..size)
+            .map(|at| {
+                let value = if at < size - 16 {
+                    0
+                } else {
+                    at - (size - 16) + 1
+                };
+                tagged(
+                    document(
+                        &format!("dominant/{at:05}.md"),
+                        &format!("hash-{at}"),
+                        "body\n",
+                    )
+                    .with_frontmatter(
+                        Some(map(vec![
+                            ("status", string("filed")),
+                            ("n", string(&value.to_string())),
+                        ])),
+                        &declared(),
+                    ),
+                    &["bulk"],
+                )
+            })
+            .collect();
+        Counting::with_documents(label, documents)
+    };
+    let small = fixture("count-position-group-small", 512);
+    let large = fixture("count-position-group-large", 2048);
+    let params = counting(vec![field("n")]).with_limit(5).with_predicates([
+        Predicate::equal_to("status", "filed"),
+        Predicate::tag("bulk"),
+    ]);
+    let params = small.resumed(&params, &[Some("0")]);
+    let (at_small, at_large) = (small.count(&params), large.count(&params));
+    let expected = (1..=5)
+        .map(|at| tally(&[Some(&at.to_string())], 1))
+        .collect::<Vec<_>>();
+    assert_eq!(at_small.tallies, expected);
+    assert_eq!(at_large.tallies, expected);
+    eprintln!(
+        "continuation past dominant group at 512 and 2048: {:?}",
+        (at_small.work, at_large.work)
+    );
+    assert_eq!(
+        at_small.work, at_large.work,
+        "a continuation re-read its position's group"
+    );
+    assert_eq!(at_large.work.full_scan_steps, 0);
+    for store in [&small, &large] {
+        let plans = store.plans(&params);
+        assert!(plans.iter().any(|plan| matches!(
+            plan.statement,
+            ReadStatement::Count(CountStatement::ValuedWindow(_))
+        )));
+        judge_valued(
+            &plan_of(
+                &plans,
+                CountStatement::ValuedLead(GroupMember::Field(FieldOrder::Typed)),
+            ),
+            &LEAD_BARS[1],
+            true,
+        );
+    }
 }

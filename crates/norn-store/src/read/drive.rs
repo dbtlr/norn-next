@@ -31,8 +31,8 @@
 //! walk leaves the page short). A page
 //! asked at the ceiling that no part drives walks on unbounded.
 //!
-//! **A window is counted in the page's own rows**, read by the seek that
-//! walks them, so it costs the rows the walk passes and never what stands
+//! **A window is counted in the section's source rows**, read by the seek
+//! that walks them, so it costs the rows the walk passes and never what stands
 //! between them. A find's rows are documents: its path page, and a field
 //! sort's missing section, which walks every document in path order passing
 //! the ones that carry the key, read the window's end off the documents in
@@ -45,12 +45,15 @@
 //! page's order, an arm holding fewer than the budget bounds nothing, and
 //! where none holds that many the walk reads to the section's end. The walk
 //! reads every row of every arm up to that path, every row at it included,
-//! and the next round resumes past the path.
+//! and the next round resumes past the path. A count's rows are complete
+//! tallies: its window counts the leading value index's source rows and ends
+//! at a leading sort key, the walk reads every row at it to finish the group,
+//! and the next round resumes past that whole leading group.
 //!
 //! **What a page costs.** The first count costs at most the rows the page
 //! reads, one document past them per part asked. The budget is one number
-//! read in two units: a window counts it in the page's rows on each arm, and
-//! a part's count in documents. Each row stands at one document, so the
+//! read in two units: a window counts it in source rows on each arm, and
+//! a part's count in documents. Each source row stands at one document, so the
 //! budget's rows on an arm stand at no more than the budget's documents, and
 //! a part keeping at most the budget drives the rest of the page from that
 //! many documents and the rows they hold. A round costs its budget on each
@@ -64,6 +67,13 @@
 //! its documents among the rows its seek reaches alone over-counts where the
 //! seek reaches documents the part then rejects, and is only ever taken to
 //! keep more than it does.
+//!
+//! A section with no order to walk — a count's `null` section — asks the
+//! keeping parts at doubling caps instead ([`Snapshot::matched_driver`]),
+//! from the page's scale to the document span. Its probes cost about the
+//! smallest part's seek per part asked, and a part fitting the cap drives;
+//! with no keeping part it walks documents. It has no window, so its `read`
+//! chooses this driver even where the page's driver walks.
 //!
 //! - **A part spread through the vault**, keeping a share of its documents,
 //!   leaves a page to walk its rows over that share; the rounds stop at the
@@ -160,8 +170,10 @@ pub(crate) enum Driver {
 ///
 /// A section is one statement's reach in the page's order and the place it
 /// resumes past; a row is what the statement hands back. A bound is a place in
-/// that order a walk's window ends at — a document's place, which a section
-/// reads up to, every row at it included, and resumes past.
+/// that order a walk's window ends at — a document's place, or a count's
+/// leading group — which a section reads up to, every row at it included,
+/// and resumes past. A count returns tallies and budgets source value rows,
+/// so finding a window never requires grouping the values it passes.
 pub(crate) trait Paged {
     type Section: Clone;
     type Row;
@@ -169,7 +181,9 @@ pub(crate) trait Paged {
 
     /// At most `rows` of `section`'s rows, driven by `driver`, and where
     /// `until` names one, none past it in the page's order: the walk's
-    /// window, which only a walked read is given.
+    /// window, which only a walked read is given. A section with no order to
+    /// walk may choose a matched driver when given `Walked`: a count's `null`
+    /// section asks the keeping parts at doubling caps instead of walking.
     fn read(
         &self,
         snapshot: &Snapshot,
@@ -180,11 +194,12 @@ pub(crate) trait Paged {
         rows: usize,
     ) -> Result<Vec<Self::Row>, StoreError>;
 
-    /// Where a walk of `offset + 1` of `section`'s rows past its place ends,
-    /// in the page's own rows narrowed by no document part: on each arm the
-    /// section reads, the place of its row `offset` rows past the section's,
+    /// Where a walk of `offset + 1` source rows past `section`'s place ends,
+    /// narrowed by no document part: on each arm the section reads, the place
+    /// of its row `offset` rows past the section's,
     /// and the earliest of those in the page's order — or `None` where no arm
-    /// holds more than `offset` past it.
+    /// holds more than `offset` past it, or the section has no order to walk,
+    /// as a count's `null` section does: its `read` may choose a matched driver.
     fn window(
         &self,
         snapshot: &Snapshot,
@@ -364,7 +379,9 @@ impl Snapshot {
             settled if queue.is_empty() => settled,
             // A part keeping no more documents than the page reads drives it
             // from what it matched before anything is walked.
-            Settled::Unasked if let Some(at) = self.first_within(parts, scale, lookups)? => {
+            Settled::Unasked
+                if let Some(at) = self.first_within(parts, scale, &mut lookups.ran)? =>
+            {
                 let driver = Driver::Matched(at);
                 self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
                 Settled::Driver(driver)
@@ -478,7 +495,7 @@ impl Snapshot {
             // Where every part was counted at this cap or past it and kept
             // more, the page asks nothing again.
             let within = if cap > round.asked {
-                self.first_within(parts, cap, lookups)?
+                self.first_within(parts, cap, &mut lookups.ran)?
             } else {
                 None
             };
@@ -504,16 +521,12 @@ impl Snapshot {
         &self,
         parts: &[&Filter],
         cap: usize,
-        lookups: &mut Lookups,
+        record: &mut Vec<Ran>,
     ) -> Result<Option<usize>, StoreError> {
         for (at, part) in keeping(parts) {
             let probe = Ran::new(FindStatement::PartCeiling, part.kept_within(cap))
                 .narrowed_by(vec![part.shape()]);
-            if self.ask(
-                &mut lookups.ran,
-                probe,
-                "asking how many documents a part keeps",
-            )? {
+            if self.ask(record, probe, "asking how many documents a part keeps")? {
                 return Ok(Some(at));
             }
         }
@@ -526,10 +539,51 @@ impl Snapshot {
     /// the square root of `rows` times the vault's greatest document row id.
     /// One [`FindStatement::DocumentSpan`].
     fn drive_ceiling(&self, rows: usize, lookups: &mut Lookups) -> Result<usize, StoreError> {
+        let span = self.document_span(&mut lookups.ran)?;
+        Ok(rows
+            .saturating_mul(MATCHED_DRIVE_FACTOR)
+            .max(rows.saturating_mul(span).isqrt()))
+    }
+
+    /// A driver for a section with no order to walk: ask the keeping parts
+    /// at caps doubling from `scale`, and take the first within one. The
+    /// cap costs at most twice the smallest part's seek, or `scale` where
+    /// that is greater, per part asked. The document span bounds the caps;
+    /// where no part fits by then, the first keeping part drives, since a
+    /// seek counting rows it rejects may over-count the documents it keeps.
+    pub(crate) fn matched_driver(
+        &self,
+        parts: &[&Filter],
+        scale: usize,
+        record: &mut Vec<Ran>,
+    ) -> Result<Driver, StoreError> {
+        let Some((first, _)) = keeping(parts).next() else {
+            return Ok(Driver::Walked);
+        };
+        let mut cap = scale.max(1);
+        let mut span = None;
+        loop {
+            if let Some(at) = self.first_within(parts, cap, record)? {
+                return Ok(Driver::Matched(at));
+            }
+            let span = match span {
+                Some(span) => span,
+                None => *span.insert(self.document_span(record)?.max(1)),
+            };
+            if cap >= span {
+                return Ok(Driver::Matched(first));
+            }
+            cap = cap.saturating_mul(2).min(span);
+        }
+    }
+
+    /// The vault's greatest document row id, read by one
+    /// [`FindStatement::DocumentSpan`]: an upper bound on its documents.
+    fn document_span(&self, record: &mut Vec<Ran>) -> Result<usize, StoreError> {
         const OPERATION: &str = "reading how many documents the vault may hold";
         let span: i64 = self
             .run_statement(
-                &mut lookups.ran,
+                record,
                 Ran::new(FindStatement::DocumentSpan, compose_document_span()),
                 |row| row.get(0),
             )
@@ -537,10 +591,7 @@ impl Snapshot {
             .into_iter()
             .next()
             .unwrap_or(0);
-        let span = usize::try_from(span).unwrap_or(0);
-        Ok(rows
-            .saturating_mul(MATCHED_DRIVE_FACTOR)
-            .max(rows.saturating_mul(span).isqrt()))
+        Ok(usize::try_from(span).unwrap_or(0))
     }
 }
 
