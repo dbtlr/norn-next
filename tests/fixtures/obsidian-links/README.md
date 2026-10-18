@@ -37,4 +37,5 @@ A case-insensitive device does not establish case folding on a case-sensitive fi
 Record these limitations and repeat affected cases on a suitable filesystem before calling them confirmed.
 
 This is a manual external-application probe, not an automated assertion of current Norn behavior.
-NORN-422 remains incomplete until every case has observed read and rename results, with required filesystem evidence.
+The iOS recording provides exploratory evidence for the resolution ADR.
+Cross-platform behavior and unobserved link-writing combinations remain outside its verified coverage.

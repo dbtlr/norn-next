@@ -24,10 +24,11 @@ The rename before-values come from the checked-in fixture, rather than an immedi
 The after-values come from file readback; their destinations were checked by opening the links.
 The unchanged W24 opens the separate literal-percent-name document.
 
-## Remaining evidence
+## Evidence limits
 
 The exact iOS version, filesystem case sensitivity, device-side Unicode spellings, and link settings are unknown.
 These observations cannot separate application normalization from filesystem or sync behavior.
 The other 49 cases have no captured rename source text.
 All six link-creation setting combinations remain unobserved.
-NORN-422 remains incomplete; this record supports the next observations without replacing them with predicted outcomes.
+These limits do not turn unobserved behavior into a confirmed result.
+The resolution ADR can use this record while distinguishing its observations from assumptions that need other evidence.
