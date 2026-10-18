@@ -14885,6 +14885,226 @@ mod tests {
         drop(host);
     }
 
+    /// The root every job-leg coverage-loss case below reports lost: the root
+    /// `Roots::Absent` registers, which resolves to nothing and so classifies
+    /// against nothing.
+    fn absent_root(name: &VaultName) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/tmp/norn-host-lifecycle-{name}"))
+    }
+
+    /// Arm the fake's watcher to report, on its next drain, that coverage over
+    /// `name`'s root ended.
+    fn report_coverage_lost(ops: &FakeOps, name: &VaultName) {
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(absent_root(name)));
+    }
+
+    /// **A job leg whose own drain meets the loss gives the coverage back as
+    /// the watcher poll does.** Each job-leg site answers the loss on its own
+    /// code, so each is driven here through the one leg that reaches it:
+    /// `drive` takes an entry attached, `Ready` and demanded by `lease`, holds
+    /// the leg open, arms the loss for that leg's drain, gives the lease back
+    /// and lets the leg end.
+    ///
+    /// The root classifies clean, so no refusal is what gives the coverage
+    /// back: what is required is that the leg's site does, leaving the entry
+    /// untrusted on the loss with no park, owing its recovery, held by nothing
+    /// and admitted for unregistration.
+    fn a_job_legs_coverage_loss_gives_the_coverage_back(
+        leg: &str,
+        drive: impl FnOnce(&Host<Arc<FakeOps>>, &Arc<FakeOps>, &VaultName, DemandLease<Arc<FakeOps>>),
+    ) {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        drive(&host, &ops, &name, lease);
+
+        wait_for_detaches(
+            &ops,
+            1,
+            &format!("the {leg} leg to give back coverage that ended over a root nothing refused"),
+        );
+        let entry = host.shared.entries.get(&name).unwrap();
+        // The ops have the attachment once `detach` returns, and the close
+        // that puts the release flag down follows under the gate.
+        wait_until(
+            &format!("the {leg} leg's give-back to let the entry go"),
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().held_by_anything() {
+                    Observed::pending("the entry is still held")
+                } else {
+                    Observed::Met(())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            entry_park(&host, &name),
+            None,
+            "the {leg} leg parked an entry whose root classifies against nothing"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(lost(
+                WatcherLossCause::CoverageLost,
+                &format!(
+                    "watch coverage was lost for {}",
+                    absent_root(&name).display()
+                ),
+            )),
+            "the {leg} leg stopped publishing the loss once it gave the coverage back"
+        );
+        assert!(
+            entry.gate.lock().unwrap().recovery_required,
+            "the {leg} leg gave the coverage back and the recovery the loss owes with it"
+        );
+        drop(entry);
+        host.unregister(&name, true).unwrap_or_else(|refusal| {
+            panic!("the unregistration after the {leg} leg's loss was refused: {refusal:?}")
+        });
+    }
+
+    /// The maintenance leg's site gives back the coverage its drain reported
+    /// lost.
+    #[test]
+    fn a_maintenance_legs_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back(
+            "maintenance",
+            |host, ops, name, lease| {
+                arrange_for(&ops.maintenance_due_at, name);
+                arrange_for(&ops.block_maintenance_at, name);
+                poll_watchers(&host.shared);
+                wait_for_flag("maintenance_started", &ops.maintenance_started);
+                report_coverage_lost(ops, name);
+                drop(lease);
+                ops.maintenance_release.store(true, Ordering::SeqCst);
+            },
+        );
+    }
+
+    /// The recovery leg's site gives back the coverage its drain reported
+    /// lost. The entry first owes a recovery over coverage it keeps — a
+    /// backend's loss — and the demand that answers it is what runs the leg.
+    #[test]
+    fn a_recovery_legs_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("recovery", |host, ops, name, lease| {
+            *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+            poll_watchers(&host.shared);
+            wait_for_state(host, name, backend_lost());
+            ops.block_recover.store(true, Ordering::SeqCst);
+            let recovering = host.demand(name, AttachMode::Durable).unwrap();
+            wait_for_flag("recover_started", &ops.recover_started);
+            report_coverage_lost(ops, name);
+            drop((lease, recovering));
+            ops.recover_release.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A reconcile turn's failure, which `end_turn_on_failure` answers, gives
+    /// back the coverage its drain reported lost. The turn is the one a polled
+    /// fact schedules.
+    #[test]
+    fn a_reconcile_turns_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("reconcile", |host, ops, name, lease| {
+            ops.block_reconcile.store(true, Ordering::SeqCst);
+            ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+            poll_watchers(&host.shared);
+            wait_for_flag("reconcile_started", &ops.reconcile_started);
+            report_coverage_lost(ops, name);
+            drop(lease);
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A schema reload's runtime failure, which
+    /// `apply_reload_runtime_failure` answers, gives back the coverage the
+    /// reload's own drain reported lost. The reload is answered with the loss
+    /// before the case gives its lease back, and the lease standing across the
+    /// give-back asks for nothing the loss's recovery is owed.
+    #[test]
+    fn a_reloads_coverage_loss_gives_the_coverage_back() {
+        a_job_legs_coverage_loss_gives_the_coverage_back("reload", |host, ops, name, lease| {
+            ops.reload_supported.store(true, Ordering::SeqCst);
+            ops.reload_schema_changed.store(true, Ordering::SeqCst);
+            report_coverage_lost(ops, name);
+            let refusal = host
+                .reload(name)
+                .expect_err("a reload whose drain met a coverage loss succeeded");
+            assert!(
+                matches!(
+                    refusal,
+                    ReloadRefusal::Runtime(JobFailure::WatcherTerminal(WatchError::CoverageLost(
+                        _
+                    )))
+                ),
+                "the reload answered {refusal:?}"
+            );
+            drop(lease);
+        });
+    }
+
+    /// **A coverage loss given back late leaves alone coverage the entry has
+    /// installed since.** A site hands the give-back the epoch its own hold
+    /// left the entry at, and the give-back runs after that hold, behind the
+    /// attach gate. In between, the idle reaper can tear the entry down and a
+    /// demand can attach it again, so what the entry holds when the give-back
+    /// runs is fresh coverage over whatever the root is now — coverage the
+    /// loss says nothing about.
+    ///
+    /// The give-back is called here directly at the epoch a watcher poll's
+    /// hold leaves an idle entry at: the poll ends its own claim and, with no
+    /// demand standing, schedules nothing, so the epoch it hands on is the one
+    /// the entry stood at before the poll. The teardown and the attach run in
+    /// full first, which is the interleaving the gap admits, and the late
+    /// give-back must find the entry moved on: the fresh coverage stands, the
+    /// entry serves over it, and nothing more reaches the ops.
+    #[test]
+    fn a_late_coverage_loss_give_back_leaves_coverage_installed_since() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let lost_at = entry.gate.lock().unwrap().claim.epoch();
+
+        // The gap: the reaper tears the idle entry down, and a demand attaches
+        // it again over fresh coverage.
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        wait_for_detaches(&ops, 1, "the reaper to tear the idle entry down");
+        wait_for_published_label(&host, &name, TrustState::Unattached);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+
+        give_back_lost_coverage(&host.shared, &name, lost_at);
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "a late give-back took coverage a later attach installed"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.coverage.in_hand(),
+                "the entry no longer holds the coverage the later attach installed"
+            );
+            assert_eq!(
+                state.trust,
+                TrustState::Ready,
+                "the entry stopped serving over coverage the loss said nothing about"
+            );
+        }
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+
+        drop((lease, entry, host));
+    }
+
     /// A watcher report is spent by whichever caller drains the subscription
     /// first, and a job leg's own drain is such a caller. The classification
     /// rides the report rather than the caller, so the leg that consumes it
