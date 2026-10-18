@@ -44,7 +44,10 @@ use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::{Budget, Observed, wait_until};
-use norn_wire::{ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName};
+use norn_wire::{
+    ErrorDetail, ErrorEnvelope, NotReady, ReasonCode, ReloadParams, TrustState, UntrustedReason,
+    VaultAddress, VaultName,
+};
 
 /// The seed every generated tree is drawn at. One value, so two readings
 /// differ by the profile alone.
@@ -435,9 +438,18 @@ pub fn attach_and_wait(
     let lease = host
         .demand(name, AttachMode::Durable)
         .expect("request attachment");
+    wait_for_ready(host, name, READY_LIMIT);
+    lease
+}
+
+/// Wait until the entry under `name` serves the vault, failing past `limit`.
+///
+/// It asks for nothing: what is waited on is a convergence some demand or
+/// some job already set going.
+pub fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName, limit: Duration) {
     wait_until(
         &format!("the entry under `{name}` to serve the vault"),
-        state_budget(READY_LIMIT),
+        state_budget(limit),
         || match host.state(name) {
             Ok(TrustState::Ready) => Observed::Met(()),
             observed => {
@@ -450,7 +462,41 @@ pub fn attach_and_wait(
         },
     )
     .unwrap_or_else(|failure| panic!("{failure}"));
-    lease
+}
+
+/// What the reload an apply ran once it landed answers about the vault,
+/// asked once more where it lost its turn to the watcher: `None` where the
+/// vault serves under what landed, and the reload's refusal otherwise.
+///
+/// **A watcher fact can take the reload's turn.** `init` and `vault migrate`
+/// reload once their apply lands, and a reload is refused unless the entry is
+/// `Ready`. A fact the watcher delivers first — the apply's own write seen
+/// back, or an edit the case made — leaves the entry warming over the
+/// reconcile it owes, and the reload is refused not ready with nothing of it
+/// run. The host does not promise the other order, so a case that pins what
+/// the reload itself decides waits for the entry to serve and asks
+/// `vault reload` again. Any other refusal is the reload's own answer.
+pub fn reload_refusal_once_settled(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    refused: Option<ErrorEnvelope>,
+) -> Option<ErrorEnvelope> {
+    let lost_its_turn = refused.as_ref().is_some_and(|refused| {
+        matches!(
+            refused.detail(),
+            ErrorDetail::EntryNotReady {
+                state: NotReady::Warming { .. },
+                ..
+            }
+        )
+    });
+    if !lost_its_turn {
+        return refused;
+    }
+    wait_for_ready(host, name, READY_LIMIT);
+    host.vault_reload(&ReloadParams::new(VaultAddress::name(name.clone())))
+        .expect("the host answers a reload")
+        .err()
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under

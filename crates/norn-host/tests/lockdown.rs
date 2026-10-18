@@ -128,7 +128,7 @@ use norn_wire::{
 };
 
 use attach::{
-    assert_stands_across, state_budget, untrusted_reason,
+    assert_stands_across, state_budget, untrusted_reason, wait_for_ready,
     wait_for_withdrawn_trust as withdrawn_trust_inside,
 };
 
@@ -1771,7 +1771,7 @@ fn a_stream_that_ended_resumes_through_a_recovery(vault: &Vault) {
     let recovery = serving
         .demand(vault.name(), AttachMode::Durable)
         .expect("demand the recovery");
-    wait_for_ready(&serving, vault.name());
+    wait_for_ready(&serving, vault.name(), WAIT_LIMIT);
     let spent = serving.evidence().since(lost_at);
     assert_eq!(
         spent.recoveries_run, 1,
@@ -2248,33 +2248,8 @@ fn attach_and_wait(
     let lease = host
         .demand(name, AttachMode::Durable)
         .expect("request the attachment");
-    wait_for_ready(host, name);
+    wait_for_ready(host, name, WAIT_LIMIT);
     lease
-}
-
-/// Wait until the entry serves the vault.
-///
-/// Separate from the demand that asks for it, because the demand a recovery is
-/// asked for by is raised over an entry that is already attached: what is waited
-/// on there is the same convergence, reached from a state a fresh demand never
-/// stands in.
-fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    wait_until(
-        &format!("the entry under `{name}` to serve the vault"),
-        state_budget(WAIT_LIMIT),
-        || {
-            let observed = host.state(name);
-            if observed == Ok(TrustState::Ready) {
-                return Observed::Met(());
-            }
-            assert!(
-                !names_no_vault(&observed),
-                "the host serves no vault under `{name}`: {observed:?}"
-            );
-            Observed::pending(format!("the state is {observed:?}"))
-        },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// Wait until the work that followed `opening` wrote a derived row and the

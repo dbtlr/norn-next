@@ -311,7 +311,8 @@ mod over_test_ladders {
 
     /// **An apply lands both rewrites and the vault reloads under them**,
     /// and a migration run again is already current, previewed or applied,
-    /// with both files byte-identical to what landed.
+    /// with both files byte-identical to what landed. A reload that lost its
+    /// turn to the watcher is asked again once the entry serves.
     #[test]
     fn an_apply_lands_both_rewrites_and_a_rerun_is_already_current() {
         let (_sandbox, vault) = a_vault(
@@ -329,7 +330,10 @@ mod over_test_ladders {
         else {
             panic!("a migrate apply answered another outcome");
         };
-        assert_eq!(reload_refused, None);
+        assert_eq!(
+            attach::reload_refusal_once_settled(&host, vault.name(), reload_refused),
+            None
+        );
         let ApplyReport::Applied { targets, .. } = *report else {
             panic!("a migrate apply answered {report:?}");
         };

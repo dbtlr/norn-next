@@ -192,7 +192,11 @@ where
                 // What landed stands whatever the reload answers, so a
                 // refused reload is answered beside the landing; a host gone
                 // before its reload ran answers the landing alone, since the
-                // next attach reads what the apply wrote.
+                // next attach reads what the apply wrote. The apply's own
+                // writes, seen back by the watcher before this reload is
+                // admitted, can leave the entry warming over their reconcile;
+                // the reload is then refused not ready with nothing of it run,
+                // and the caller's `vault reload` is what activates them.
                 if let Err(refusal) = self.reload(&name)
                     && let Ok(refused) = refusal.answer(&name)
                 {
