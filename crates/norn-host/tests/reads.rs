@@ -1471,6 +1471,52 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
     // answered.
 }
 
+/// **A tag query finds a document whose frontmatter block the field layer
+/// refused to split.** The explicit-key merge directive `? <<` leaves no
+/// attributable field bytes, but the block still parses to a value, so the
+/// tags its `tags` field holds are the document's tags, unplaced; a find on the
+/// tag answers the document, and a get of its tags answers the row with no
+/// span.
+#[test]
+fn a_tag_query_finds_a_document_whose_refused_block_holds_the_tag() {
+    let (_sandbox, vault, host) = a_verb_vault(
+        "host-reads-refused-block-tags",
+        &[(
+            "zz-refused/zz-refused.md",
+            "---\nbase: &b {title: x}\n? <<\n: *b\ntags: [zzrefusedtag]\n---\nbody\n",
+        )],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let found = host
+        .find(
+            &FindParams::new(address(vault.name()))
+                .with_predicates([Predicate::tag("zzrefusedtag")]),
+        )
+        .expect("a find on a tag answers");
+    assert_eq!(
+        paths_of(&found.answer.report),
+        ["zz-refused/zz-refused.md"],
+        "a refused block's tag was not found"
+    );
+
+    let GetReport::Collection { page, .. } = got(
+        &host,
+        &vault,
+        &GetParams::new(address(vault.name()), a_target("zz-refused/zz-refused"))
+            .with_collection(CollectionSelector::Tags),
+    ) else {
+        panic!("a get of a document's tags answered no collection");
+    };
+    let norn_wire::CollectionPage::Tags { page, .. } = page else {
+        panic!("a get of a document's tags answered another collection");
+    };
+    let [row] = page.rows.as_slice() else {
+        panic!("the refused block's tags were {:?}", page.rows);
+    };
+    assert_eq!((row.name.as_str(), row.span), ("zzrefusedtag", None));
+}
+
 /// **A part a verb could not apply reaches the answer through the host.** A
 /// get of a section or a block its document does not carry answers the
 /// document's record with exactly that part unsatisfied; a find and a count

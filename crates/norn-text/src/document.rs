@@ -66,7 +66,8 @@ pub enum EditError {
     /// The block parses, and its field spans cannot be trusted: the scanner
     /// and the parser disagree somewhere in it, so no field in it is
     /// addressable. The value model still reads whole; the reads built on
-    /// field spans report nothing. No edit is attempted.
+    /// field spans report no field text, and a tag or link the value holds is
+    /// reported with no place. No edit is attempted.
     ///
     /// `cause` names which disagreement it was, because the three shapes ask
     /// for three different edits to the block.
@@ -269,7 +270,8 @@ impl<'a> Document<'a> {
                 Diagnostic::warning(
                     DiagnosticCode::FrontmatterNotEditable,
                     "the frontmatter block's field spans cannot be trusted, so field edits refuse \
-                     and no field text is reported; the block still reads whole",
+                     and no field text is reported, and a tag or link it holds has no place; the \
+                     block still reads whole",
                 )
                 .with_detail(cause.problem()),
             );
@@ -359,8 +361,8 @@ impl<'a> Document<'a> {
     /// where it did not.
     ///
     /// A refused split reaches a reader as absence — no fields, no field
-    /// texts, no frontmatter tags or wikilinks — and this is the state that
-    /// separates that absence from a block holding nothing, the same way
+    /// texts, and a frontmatter tag or wikilink with no place — and this is
+    /// the state that separates that absence from a block holding nothing, the same way
     /// [`Document::frontmatter_refusal`] separates an unread block from a
     /// document carrying none. It is the cause
     /// [`EditError::FrontmatterNotEditable`] carries, readable without
@@ -390,7 +392,8 @@ impl<'a> Document<'a> {
     /// not a field's text and is not reported here, and neither is any string
     /// of a block whose split was refused. A frontmatter value's links are
     /// read through [`Document::frontmatter_wikilinks`], which reads those
-    /// too.
+    /// too, and its `tags` entry through [`Document::frontmatter_tags`], which
+    /// reads a refused block's from the parsed value.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
         self.frontmatter_texts(Depth::Fields)
     }
@@ -582,7 +585,17 @@ impl<'a> Document<'a> {
     /// tag and no complaint; judging it is validation's venue, not this
     /// crate's. No other field is scanned, and no field is scanned for body
     /// tokens.
+    ///
+    /// A block whose split the field layer refused
+    /// ([`Document::split_refusal`]) still parses to a value, and its `tags`
+    /// entry is read from that value: a string, or the strings of a sequence,
+    /// each tag unplaced — its `span` is `None` — since no byte in such a
+    /// block is attributable to a field. A string nested deeper under `tags`
+    /// is not the field's own and is not read.
     pub fn frontmatter_tags(&self) -> Vec<Tag> {
+        if self.split_refusal.is_some() {
+            return self.refused_frontmatter_tags();
+        }
         let mut cursor = LineCursor::new(self.source);
         self.field_texts()
             .into_iter()
@@ -594,6 +607,24 @@ impl<'a> Document<'a> {
                     span: text.range.map(|range| cursor.span_at(range.start)),
                 })
             })
+            .collect()
+    }
+
+    /// The unplaced tags of a block whose split was refused, read from the
+    /// parsed `tags` entry.
+    fn refused_frontmatter_tags(&self) -> Vec<Tag> {
+        let Some(Value::Map(map)) = &self.frontmatter else {
+            return Vec::new();
+        };
+        let entries: Vec<&str> = match map.get(TAGS_FIELD) {
+            Some(Value::String(text)) => vec![text],
+            Some(Value::Sequence(items)) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        entries
+            .into_iter()
+            .filter_map(frontmatter_tag_name)
+            .map(|name| Tag { name, span: None })
             .collect()
     }
 
@@ -633,8 +664,8 @@ impl<'a> Document<'a> {
     /// ([`Document::split_refusal`]) still parses to a value, and the index
     /// projects that value's fields, so its links are reported too — every
     /// one unplaced, a literal one included, since no byte in such a block is
-    /// attributable to a field. Its tags are not: [`Document::frontmatter_tags`]
-    /// reads the `tags` field's own texts, which a refused split withholds.
+    /// attributable to a field. Its tags are reported unplaced as well, from
+    /// the `tags` entry of the value: see [`Document::frontmatter_tags`].
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         self.frontmatter_field_wikilinks()
             .into_iter()

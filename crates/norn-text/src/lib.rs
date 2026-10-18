@@ -116,7 +116,8 @@
 //! [`Document::frontmatter_wikilinks`] is that surface, reporting every token
 //! any string the value holds carries, placed where the source names its
 //! bytes and with no span where it cannot, and [`Document::frontmatter_tags`]
-//! is the tag half.
+//! is the tag half, which reads a block whose field split was refused from
+//! its parsed `tags` entry, every tag with no span.
 //!
 //! # Code is opaque
 //!
