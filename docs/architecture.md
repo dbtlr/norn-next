@@ -1042,18 +1042,23 @@ key the declaration gives a typed order groups by typed equality. A member is `n
 where the document carries no scalar value under its key — and, under a key with a typed
 order, where no scalar it carries reads as that type. A grouping by a key with a dated
 order is advised as a grouping where the key holds both offset spellings, since it decides
-which dates are one tally. It names three
+which dates are one tally. It names four
 statements under the same discipline, each carrying a plan bar with a negative control
 and held by a census to exactly one bar: the ungrouped total, the count of `documents`
 or of the rows a filter's seek reaches by row id; the tallies whose leading member is
-`null`, a walk of the documents that probes each for a value under the leading key by
-the document; and the tallies whose leading member holds a value, a seek of the leading
-member's value index — `(key, raw)`, `(key, typed)` or the tag's folded name — from the page's
-position, where a filter that keeps what it seeks instead drives the statement from the
-matched documents. Every trailing member is reached by the document. A work bar reads
+`null`, probing each document for a value under the leading key, driven by a keeping
+part whenever one exists; the tallies whose leading member holds a value; and the window
+read, one unfiltered value-index entry at the walk's budget. The valued section uses the
+shared per-request drive: a part within the ceiling drives from its matched documents
+when the budget reaches them; otherwise it walks the leading member's value index —
+`(key, raw)`, `(key, typed)` or the tag's folded name — from the page's position, testing
+parts per document, in windows ending at a whole leading group. Every trailing member is
+reached by the document. A work bar reads
 the same statements' SQLite counters over two vault sizes: a count narrowed to the same
 documents costs the same at both and steps through no full scan, and an unfiltered
-grouped count is linear in the vault — its `null` section walks every document once. A
+grouped count is linear in the vault — its `null` section walks every document once;
+a broad filtered single-key continuation costs the same as its matched set grows, and a
+fixed broad match costs the same first page as unmatched documents grow the vault. A
 second pair holds the documents and their groups fixed and grows their bodies from 64 bytes
 to 16 KiB: every count costs the same over both, and none runs a page of document rows or a
 hydration to count it. The counters count steps and not the bytes a step reads, so a payload

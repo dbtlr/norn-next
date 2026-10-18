@@ -31,8 +31,8 @@
 //! walk leaves the page short). A page
 //! asked at the ceiling that no part drives walks on unbounded.
 //!
-//! **A window is counted in the page's own rows**, read by the seek that
-//! walks them, so it costs the rows the walk passes and never what stands
+//! **A window is counted in the section's source rows**, read by the seek
+//! that walks them, so it costs the rows the walk passes and never what stands
 //! between them. A find's rows are documents: its path page, and a field
 //! sort's missing section, which walks every document in path order passing
 //! the ones that carry the key, read the window's end off the documents in
@@ -45,12 +45,15 @@
 //! page's order, an arm holding fewer than the budget bounds nothing, and
 //! where none holds that many the walk reads to the section's end. The walk
 //! reads every row of every arm up to that path, every row at it included,
-//! and the next round resumes past the path.
+//! and the next round resumes past the path. A count's rows are complete
+//! tallies: its window counts the leading value index's source rows and ends
+//! at a leading sort key, the walk reads every row at it to finish the group,
+//! and the next round resumes past that whole leading group.
 //!
 //! **What a page costs.** The first count costs at most the rows the page
 //! reads, one document past them per part asked. The budget is one number
-//! read in two units: a window counts it in the page's rows on each arm, and
-//! a part's count in documents. Each row stands at one document, so the
+//! read in two units: a window counts it in source rows on each arm, and
+//! a part's count in documents. Each source row stands at one document, so the
 //! budget's rows on an arm stand at no more than the budget's documents, and
 //! a part keeping at most the budget drives the rest of the page from that
 //! many documents and the rows they hold. A round costs its budget on each
@@ -160,8 +163,10 @@ pub(crate) enum Driver {
 ///
 /// A section is one statement's reach in the page's order and the place it
 /// resumes past; a row is what the statement hands back. A bound is a place in
-/// that order a walk's window ends at — a document's place, which a section
-/// reads up to, every row at it included, and resumes past.
+/// that order a walk's window ends at — a document's place, or a count's
+/// leading group — which a section reads up to, every row at it included,
+/// and resumes past. A count returns tallies and budgets source value rows,
+/// so finding a window never requires grouping the values it passes.
 pub(crate) trait Paged {
     type Section: Clone;
     type Row;
@@ -180,9 +185,9 @@ pub(crate) trait Paged {
         rows: usize,
     ) -> Result<Vec<Self::Row>, StoreError>;
 
-    /// Where a walk of `offset + 1` of `section`'s rows past its place ends,
-    /// in the page's own rows narrowed by no document part: on each arm the
-    /// section reads, the place of its row `offset` rows past the section's,
+    /// Where a walk of `offset + 1` source rows past `section`'s place ends,
+    /// narrowed by no document part: on each arm the section reads, the place
+    /// of its row `offset` rows past the section's,
     /// and the earliest of those in the page's order — or `None` where no arm
     /// holds more than `offset` past it.
     fn window(

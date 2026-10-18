@@ -57,7 +57,7 @@
 //! # A grouped page is two sections
 //!
 //! The tallies whose leading member is `null` stand first: a walk of the
-//! documents — the matched ones where a filter keeps what it seeks — probing
+//! documents — the matched ones where a part keeps what it seeks — probing
 //! each for a value under the leading key. Then the tallies whose leading
 //! member holds a value: a seek of the leading member's value index from the
 //! page's position where no filter drives the page, and the matched
@@ -68,9 +68,22 @@
 //! documents.** Its valued section reads the leading key's rows from the
 //! page's position on — and, grouped by one key, stops at the page's bound —
 //! and its `null` section walks every document, since a document holding no
-//! value is found by no seek of the rows that hold one. **A filter that keeps
-//! what it seeks drives both**, so a narrowing part narrows the count's cost
-//! to the documents it matches.
+//! value is found by no seek of the rows that hold one.
+//!
+//! **The page drive chooses how valued groups are read** ([`Snapshot::drive_page`]):
+//! a part keeping at most the budget drives from its matched documents;
+//! otherwise the page walks the leading value index and tests every part per
+//! document. Its window counts value rows, not groups, and ends at a leading
+//! sort key, including every row there so a tally is complete. The budget
+//! doubles to the shared ceiling; past it the walk continues without a bound.
+//! [`Settled`] carries the choice and the round across the request's reads;
+//! a cursor continues the tuple position, and its request chooses afresh.
+//! A broad part's single-key valued drain walks each value row a bounded
+//! number of times; a small part's cost follows what it matched. Groupings of
+//! several keys still sort the tuples a section reads. A `null` section is
+//! driven by a keeping part whenever one exists, so its cost follows that
+//! part's matched documents; otherwise it walks the vault. With one key it
+//! is one tally, read once per drain.
 //!
 //! # A conjunction means what it means to a find
 //!
@@ -102,8 +115,9 @@ use norn_wire::{
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::read::{
-    Compared, Conjunction, DateComparison, FieldOrder, KeyPlace, Lookups, PageRefusal, Ran,
-    ReadFilter, ReadStatement, Report, ResolvesPart, Stepped, page_limit,
+    Compared, Conjunction, DateComparison, Driver, FieldOrder, Filter, KeyPlace, Lookups,
+    PageRefusal, Paged, Ran, ReadFilter, ReadStatement, Report, ResolvesPart, Settled, Stepped,
+    page_limit,
 };
 use crate::store::Snapshot;
 
@@ -150,12 +164,12 @@ impl Counted {
 
 /// What one count read, by kind.
 ///
-/// **The tally counters are the tally statements' cost as SQLite ran them**,
+/// **The tally counters are the page drive's cost as SQLite ran it**,
 /// read off each statement's own status once its rows are read and summed over
-/// the tally statements the count ran — never the probes its conjunction's
-/// compilation ran. They are counters rather than a plan's words, so a pair of
-/// counts over two vault sizes reads whether a count's work grows with the
-/// vault by comparing them.
+/// the tally statements, walk windows and driver probes the page ran — never
+/// the probes its conjunction's compilation ran. They are counters rather
+/// than a plan's words, so a pair of counts over two vault sizes reads whether
+/// a count's work grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CountWork {
     /// The statements the count ran, each counted on the snapshot as it ran.
@@ -163,13 +177,13 @@ pub struct CountWork {
     /// The tallies the tally statements handed back: one past the bound where
     /// a next page exists.
     pub tallies_read: u64,
-    /// Steps the tally statements took through a loop no constraint bounds —
+    /// Steps the page drive took through a loop no constraint bounds —
     /// a table or an index read end to end.
     pub full_scan_steps: u64,
-    /// Sorts the tally statements ran: a temporary B-tree an order filled
+    /// Sorts the page drive ran: a temporary B-tree an order filled
     /// because no index handed its rows back in that order.
     pub sorts: u64,
-    /// Virtual-machine operations the tally statements ran: the whole of what
+    /// Virtual-machine operations the page drive ran: the whole of what
     /// SQLite did for the tallies, whatever it did it on.
     pub vm_steps: u64,
 }
@@ -189,7 +203,7 @@ impl CountWork {
         .into_iter()
     }
 
-    /// Add what SQLite counted stepping the tally statements.
+    /// Add what SQLite counted stepping the page drive.
     fn stepped(&mut self, stepped: Stepped) {
         self.full_scan_steps += stepped.full_scan_steps;
         self.sorts += stepped.sorts;
@@ -365,9 +379,9 @@ impl Snapshot {
     /// One page of tallies: at most `limit`, and the tally the next page
     /// continues after.
     ///
-    /// `work` takes what the tally statements cost: the tallies they handed
-    /// back — one past the bound where a next page exists — and what SQLite
-    /// counted stepping them.
+    /// `work` takes the tallies read — one past the bound where a next page
+    /// exists — and what SQLite counted stepping the page drive, windows and
+    /// probes included.
     fn page_tallies(
         &self,
         members: &[Member<'_>],
@@ -389,27 +403,41 @@ impl Snapshot {
             };
             return Ok((tallies, None));
         }
-        let shapes: Vec<ReadFilter> = conjunction
-            .filters
-            .iter()
-            .map(|filter| filter.shape())
+        let paged = CountPages {
+            members,
+            filters: &conjunction.filters,
+        };
+        let sections: Vec<_> = sections
+            .into_iter()
+            .map(|(statement, after)| CountSection {
+                statement,
+                after: after.map(<[Option<String>]>::to_vec),
+                past: None,
+            })
             .collect();
-        let page = self.read_page(
-            sections,
-            limit,
-            &mut lookups.ran,
-            |record, (statement, after), rows| {
-                let composed = compose_tallies(&Tallies {
-                    statement,
-                    members,
-                    after,
-                    filters: &conjunction.filters,
-                    rows,
-                });
-                let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
-                self.read_tallies(record, section, members)
-            },
-        )?;
+        let page = if members.is_empty() {
+            self.read_page(
+                sections,
+                limit,
+                &mut lookups.ran,
+                |record, section, rows| {
+                    paged.read(self, record, &section, Driver::Walked, None, rows)
+                },
+            )?
+        } else {
+            let parts: Vec<&Filter> = conjunction.filters.iter().collect();
+            self.drive_page(
+                &paged,
+                &parts,
+                None,
+                limit + 1,
+                sections,
+                limit + 1,
+                Settled::Unasked,
+                lookups,
+            )?
+            .into_page(limit)
+        };
         work.tallies_read = page.read;
         work.stepped(page.stepped);
         Ok((page.rows, page.next))
@@ -429,6 +457,7 @@ impl Snapshot {
             ReadStatement::Count(CountStatement::NullLead(_)) => (true, width - 1),
             ReadStatement::Count(CountStatement::ValuedLead(_)) => (false, width),
             ReadStatement::Count(CountStatement::Total)
+            | ReadStatement::Count(CountStatement::ValuedWindow(_))
             | ReadStatement::Find(_)
             | ReadStatement::Validate(_)
             | ReadStatement::Describe(_)
@@ -544,5 +573,101 @@ fn sections<'a>(
             sections
         }
         Some(at) => vec![(valued, Some(at))],
+    }
+}
+
+/// A tally section's tuple position and the leading group a round passed.
+#[derive(Clone)]
+struct CountSection {
+    statement: CountStatement,
+    after: Option<Vec<Option<String>>>,
+    past: Option<String>,
+}
+
+/// A count's rows are complete tallies in tuple order, not documents in path
+/// order. Its walk budgets the leading index's value rows, before any part
+/// tests them: a window ends at one leading sort key, reads every row at it,
+/// and resumes past that whole group, so no tally or label is split between
+/// rounds. Trailing members stay within the leading group's window. A null
+/// section has no leading value to seek: a keeping part always drives its
+/// document probes, even where the valued section walks.
+struct CountPages<'a> {
+    members: &'a [Member<'a>],
+    filters: &'a [Filter],
+}
+
+impl Paged for CountPages<'_> {
+    type Section = CountSection;
+    type Row = Tally;
+    type Bound = String;
+
+    fn read(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &CountSection,
+        driver: Driver,
+        until: Option<&String>,
+        rows: usize,
+    ) -> Result<Vec<Tally>, StoreError> {
+        let driver = if matches!(section.statement, CountStatement::NullLead(_))
+            && driver == Driver::Walked
+        {
+            self.filters
+                .iter()
+                .position(|part| !part.shape().excludes())
+                .map_or(driver, Driver::Matched)
+        } else {
+            driver
+        };
+        let composed = compose_tallies(&Tallies {
+            statement: section.statement,
+            members: self.members,
+            after: section.after.as_deref(),
+            filters: self.filters,
+            driver,
+            past: section.past.as_deref(),
+            until: until.map(String::as_str),
+            rows,
+            offset: 0,
+        });
+        let read = Ran::new(section.statement, composed)
+            .narrowed_by(self.filters.iter().map(Filter::shape).collect());
+        snapshot.read_tallies(record, read, self.members)
+    }
+
+    fn window(
+        &self,
+        snapshot: &Snapshot,
+        record: &mut Vec<Ran>,
+        section: &CountSection,
+        offset: usize,
+    ) -> Result<Option<String>, StoreError> {
+        let CountStatement::ValuedLead(member) = section.statement else {
+            return Ok(None);
+        };
+        let statement = CountStatement::ValuedWindow(member);
+        let composed = compose_tallies(&Tallies {
+            statement,
+            members: self.members,
+            after: section.after.as_deref(),
+            filters: &[],
+            driver: Driver::Walked,
+            past: section.past.as_deref(),
+            until: None,
+            rows: 1,
+            offset,
+        });
+        snapshot
+            .run_statement(record, Ran::new(statement, composed), |row| row.get(0))
+            .map(|rows| rows.into_iter().next())
+            .map_err(|problem| error::sql("reading a tally walk's window", problem))
+    }
+
+    fn resumed(&self, section: &CountSection, bound: &String) -> CountSection {
+        CountSection {
+            past: Some(bound.clone()),
+            ..section.clone()
+        }
     }
 }
