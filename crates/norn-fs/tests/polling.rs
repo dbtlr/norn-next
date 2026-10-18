@@ -102,9 +102,10 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
     );
     assert_eq!(watcher.content_reads() - before, 2);
 
-    // Linux before 6.13 stamps ctime from a coarse clock, so a chmod in the
-    // same tick as the edit above leaves ctime where it was. Reapplying the
-    // same mode changes nothing but ctime, so it is repeated until ctime moves.
+    // Linux stamps ctime from a coarse clock (before 6.13, or on a filesystem
+    // without multigrain timestamps), so a chmod in the same tick as the edit
+    // above leaves ctime where it was. Of the fields polling compares, a chmod
+    // changes only ctime, so the same mode is reapplied until ctime moves.
     let old = fs::metadata(&target).unwrap();
     let mode = fs::Permissions::from_mode(old.mode() ^ 0o100);
     let deadline = Instant::now() + Duration::from_secs(1);
