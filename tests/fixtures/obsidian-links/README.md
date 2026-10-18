@@ -3,6 +3,9 @@
 This probe collects Obsidian observations for NORN-422. It contains no accepted resolution expectations yet.
 The resolution ADR and Norn implementation follow separately.
 
+[Obsidian 1.14.5 on iPhone](observations/ios-1.14.5/README.md) records the first opening pass and one captured rename.
+Those observations include changed inputs and an opening error; they do not certify the original tree or other platforms.
+
 ## Install the probe
 
 Copy the contents of `vault/` into an existing Obsidian vault, preserving every relative path.
