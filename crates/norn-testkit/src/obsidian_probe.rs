@@ -78,8 +78,8 @@ impl Probe {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the probe's own case table.
     pub fn load(dir: &Path) -> Result<Probe, String> {
         let path = dir.join("cases.json");
-        let text =
-            fs::read_to_string(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let text = fs::read_to_string(&path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
         let table: Table = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;
         if table.schema_version != SCHEMA_VERSION {
@@ -156,7 +156,11 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             copy_tree(&source, &target)?;
         } else if kind.is_file() {
             fs::copy(&source, &target).map_err(|error| {
-                format!("copying {} to {}: {error}", source.display(), target.display())
+                format!(
+                    "copying {} to {}: {error}",
+                    source.display(),
+                    target.display()
+                )
             })?;
         } else {
             return Err(format!(
@@ -215,10 +219,17 @@ mod tests {
             .iter()
             .filter(|path| !listed_exactly(scratch.root(), path))
             .collect();
-        assert!(unlisted.is_empty(), "installed under other bytes: {unlisted:?}");
         assert!(
-            named.iter().any(|path| path.contains("pair-a/n422-re\u{301}sume\u{301}.md"))
-                && named.iter().any(|path| path.contains("pair-b/n422-r\u{e9}sum\u{e9}.md")),
+            unlisted.is_empty(),
+            "installed under other bytes: {unlisted:?}"
+        );
+        assert!(
+            named
+                .iter()
+                .any(|path| path.contains("pair-a/n422-re\u{301}sume\u{301}.md"))
+                && named
+                    .iter()
+                    .any(|path| path.contains("pair-b/n422-r\u{e9}sum\u{e9}.md")),
             "the table keeps its decomposed and composed twins"
         );
     }
@@ -232,7 +243,10 @@ mod tests {
         assert!(!probe.renamed_on_install().is_empty());
         for rename in probe.renamed_on_install() {
             assert_ne!(rename.checked_in, rename.installed);
-            assert!(named.contains(&rename.installed), "{rename:?} names no case path");
+            assert!(
+                named.contains(&rename.installed),
+                "{rename:?} names no case path"
+            );
             assert!(
                 !rename.checked_in.contains('\u{301}'),
                 "{rename:?} checks in a decomposed name"
@@ -251,9 +265,16 @@ mod tests {
         fs::create_dir_all(earlier.parent().unwrap()).unwrap();
         fs::write(&earlier, b"an earlier run").unwrap();
 
-        let refused = probe.install(scratch.root()).expect_err("an install over a probe");
+        let refused = probe
+            .install(scratch.root())
+            .expect_err("an install over a probe");
         assert!(refused.contains("already holds a probe"), "{refused}");
         assert_eq!(fs::read(&earlier).unwrap(), b"an earlier run");
-        assert!(!scratch.join(probe.probe_root()).join("n422-start.md").exists());
+        assert!(
+            !scratch
+                .join(probe.probe_root())
+                .join("n422-start.md")
+                .exists()
+        );
     }
 }

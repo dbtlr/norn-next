@@ -8,8 +8,15 @@ Those observations include changed inputs and an opening error; they do not cert
 
 ## Install the probe
 
-Copy the contents of `vault/` into an existing Obsidian vault, preserving every relative path.
-Use a fresh destination: `artifacts/scratch/norn-422` must not already exist.
+Install the probe into an existing Obsidian vault from the repository root:
+
+```sh
+cargo run -p norn-testkit --bin norn-obsidian-probe -- <vault-root>
+```
+
+The command copies `vault/` into `<vault-root>`, preserving every relative path, and renames the files `cases.json` lists under `renamed_on_install`.
+A plain copy of `vault/` is not an install, because it leaves those files composed.
+The destination must be fresh: the command refuses when `artifacts/scratch/norn-422` already exists.
 Keep the vault root unchanged. Do not open the scratch folder as a separate vault.
 No Obsidian settings, plugins, or existing documents need installation or replacement.
 
@@ -30,8 +37,9 @@ That prefix is an input to rooted and exact-path probes. Moving the folder chang
 Full-path cases distinguish a vault path from a deeper suffix with the same trailing path.
 Source-local competitors distinguish relative resolution from vault-wide matching.
 
-Unicode filenames are checked in with their intended code points.
-Filesystem and sync normalization can change the names actually presented to Obsidian.
+`cases.json` spells every path at its intended code points, and two of them are decomposed (NFD) beside composed twins.
+Git does not keep a decomposed name portably, so those two files are checked in composed and the install renames them.
+Filesystem and sync normalization can still change the names actually presented to Obsidian.
 Results without actual filename evidence do not settle NFC versus NFD behavior.
 A case-insensitive device does not establish case folding on a case-sensitive filesystem.
 Record these limitations and repeat affected cases on a suitable filesystem before calling them confirmed.

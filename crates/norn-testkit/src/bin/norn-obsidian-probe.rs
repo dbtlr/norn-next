@@ -17,6 +17,7 @@ struct Cli {
     vault: PathBuf,
 }
 
+#[allow(clippy::disallowed_macros)] // This command line reports where it installed the probe.
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let installed = Probe::workspace().and_then(|probe| {
