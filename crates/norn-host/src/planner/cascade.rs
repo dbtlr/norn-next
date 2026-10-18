@@ -329,7 +329,14 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     let mut retargeting: BTreeMap<usize, usize> = BTreeMap::new();
     let mut selected: BTreeSet<usize> = BTreeSet::new();
     let mut overlapping: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
+    // The stored document each judged link named before the plan, as the
+    // one reading of a link resolved it: what a moved document's own
+    // relative link named ([`Cascade::own_relative_links`]).
+    let mut named_before: BTreeMap<EntryKey, String> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
+        if let Resolves::One { path } = &change.before {
+            named_before.insert(change_key(&change), path.as_str().to_string());
+        }
         if change.written && !cascade.kept.contains(&change_key(&change)) {
             return;
         }
@@ -422,7 +429,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     }
 
     let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> =
-        cascade.own_relative_links(&targets);
+        cascade.own_relative_links(&targets, &named_before);
 
     // Every spelling each breaking link could take, probed from its holder
     // in one judgment; a link written twice in one holder is one key, asked
@@ -766,9 +773,18 @@ impl<'a> Cascade<'a> {
     /// each on the move that lands its holder: read from where the document
     /// stood, spelled from where it lands. The links are `targets`' own, read
     /// once for the change set's probes too.
+    ///
+    /// **What a link named is the reading's answer, never its spelling.** A
+    /// link names a stored document under the comparison key (ADR 0040), so
+    /// `../Note.md` names `a/note.md`; `named_before` holds the stored path the
+    /// change set's judgment resolved each link to before the plan, and the
+    /// plan's operations are consulted by that path, whose spelling is the
+    /// file's own. A link that named no document is read by its spelling,
+    /// which no document stands at for an operation to carry.
     fn own_relative_links(
         &self,
         targets: &[Target<'_>],
+        named_before: &BTreeMap<EntryKey, String>,
     ) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
         let held: BTreeMap<&DocumentPath, &[LinkFact]> = targets
             .iter()
@@ -807,9 +823,14 @@ impl<'a> Cascade<'a> {
                 if !relative {
                     continue;
                 }
-                let [named] = &norn_store::named_paths(link, &source)[..] else {
-                    continue;
+                let named = match named_before.get(&entry(landed, link)) {
+                    Some(stored) => stored.clone(),
+                    None => match &norn_store::named_paths(link, &source)[..] {
+                        [spelled] => spelled.clone(),
+                        _ => continue,
+                    },
                 };
+                let named = &named;
                 let destination = self.final_document(&holder, link, Named::One(named));
                 if destination
                     .as_ref()
@@ -823,7 +844,10 @@ impl<'a> Cascade<'a> {
                     .unwrap_or_else(|| named.clone());
                 // A spelling that still reaches the file from where the
                 // document lands is kept, however short another would be.
-                if norn_store::named_paths(link, &holder) == [named.as_str()] {
+                let reaches = |path: &String| {
+                    norn_store::comparison_key(path) == norn_store::comparison_key(&named)
+                };
+                if norn_store::named_paths(link, &holder).iter().any(reaches) {
                     continue;
                 }
                 let Some(respelled) = norn_store::relative_spelling(&holder, &named, &link.target)
