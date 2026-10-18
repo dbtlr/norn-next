@@ -130,16 +130,29 @@ impl Probe {
     /// gained a link or a special file refuses too.
     ///
     /// **A failed install leaves no probe behind.** Everything it writes is
-    /// under the probe's root, which did not stand before it began, so it
-    /// removes that root on failure and the same install can run again.
+    /// under the probe's root, which it created itself, so it removes that
+    /// root on failure and the same install can run again. The folders above
+    /// the root are made where missing and kept.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: installing the probe tree a person or a suite names.
     pub fn install(&self, vault: &Path) -> Result<(), String> {
         let root = vault.join(&self.table.probe_root);
-        if fs::symlink_metadata(&root).is_ok() {
-            return Err(format!(
-                "{} already holds a probe; install into a vault without one",
-                root.display()
-            ));
+        // Claiming the root with one create is the check: a second install
+        // into the same vault, or anything already standing there, a link
+        // included, refuses here rather than sharing a root whose cleanup
+        // would remove the other's tree.
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+        }
+        match fs::create_dir(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(format!(
+                    "{} already holds a probe; install into a vault without one",
+                    root.display()
+                ));
+            }
+            Err(error) => return Err(format!("creating {}: {error}", root.display())),
         }
         let installed = copy_tree(&self.dir.join("vault").join(&self.table.probe_root), &root)
             .and_then(|()| {
