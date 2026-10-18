@@ -1514,8 +1514,8 @@ fn judge_valued_driven(plan: &QueryPlan, bar: &LeadBar) {
 /// below by the page's position, on a first page and a continuation alike;
 /// grouped by one key the groups stream off that index in order and nothing
 /// sorts. Every trailing member is reached by the document. With a filter
-/// that keeps what it seeks, the matched documents drive the section and reach
-/// their leading values by the document.
+/// that keeps what it seeks within the page drive's budget, the matched
+/// documents drive the section and reach their leading values by the document.
 ///
 /// Controls: a continuation's plan rebuilt without its position bound fails;
 /// each value index dropped, the section reads something else; the tag's
@@ -2107,8 +2107,8 @@ fn a_broadly_filtered_grouped_continuation_costs_its_page() {
     let small = Counting::with_bulk("count-broad-small", 512);
     let large = Counting::with_bulk("count-broad-large", 2048);
     let judge = |small: norn_store::CountWork, large: norn_store::CountWork| {
-        assert!(
-            large.vm_steps <= small.vm_steps * 2,
+        assert_eq!(
+            small.vm_steps, large.vm_steps,
             "a continuation grew with the matched set: {small:?} then {large:?}"
         );
     };
@@ -2448,6 +2448,171 @@ fn a_broad_null_section_costs_its_matches_while_the_vault_grows() {
                 CountStatement::NullLead(GroupMember::Field(FieldOrder::Typed)),
             ),
             GroupMember::Field(FieldOrder::Typed),
+            true,
+        );
+    }
+}
+
+/// The null section finds a small keeping part in either request order,
+/// even where every other document holds the broad part's value.
+#[test]
+fn a_null_section_drives_from_a_small_part_in_either_predicate_order() {
+    use norn_db::rusqlite::StatementStatus;
+    let fixture = |label: &str, vault: usize| {
+        let documents = (0..vault - 7)
+            .map(|at| {
+                let mut fields = vec![("status", string("filed"))];
+                if at < 32 {
+                    fields.push(("n", string(&at.to_string())));
+                }
+                tagged(
+                    document(
+                        &format!("parts/{at:05}.md"),
+                        &format!("hash-{at}"),
+                        "body\n",
+                    )
+                    .with_frontmatter(Some(map(fields)), &declared()),
+                    &[if at < 64 { "small" } else { "other" }],
+                )
+            })
+            .collect();
+        Counting::with_documents(label, documents)
+    };
+    let small = fixture("count-null-parts-small", 2048);
+    let large = fixture("count-null-parts-large", 8192);
+    let judge = |small, large| assert_eq!(small, large, "a null driver followed the broad part");
+    let control = |store: &Counting| {
+        let connection =
+            norn_db::connect_read_only(&store._scratch.database()).expect("the fixture's database");
+        let mut statement = connection
+            .prepare(
+                "SELECT COUNT(DISTINCT d.id) FROM documents AS d
+             WHERE NOT EXISTS (SELECT 1 FROM document_fields AS m
+                 WHERE m.document = d.id AND m.key = 'n' AND +m.typed IS NOT NULL)
+               AND d.id IN (SELECT fv.document FROM document_fields AS fv
+                 WHERE fv.key = 'status' AND fv.raw = 'filed')
+               AND EXISTS (SELECT 1 FROM document_tags AS tg
+                 WHERE tg.document = d.id AND +tg.folded_name = 'small')
+             HAVING COUNT(*) > 0 LIMIT 6",
+            )
+            .expect("the broad-first null control");
+        let rows = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("running the control")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reading the control");
+        assert_eq!(rows, vec![32]);
+        statement.get_status(StatementStatus::VmStep) as u64
+    };
+    let controls = (control(&small), control(&large));
+    eprintln!("broad-first null control at 2048 and 8192: {controls:?}");
+    assert!(controls.1 > controls.0 * 3);
+    failure_of("a null section driven by its first broad part", || {
+        judge(controls.0, controls.1)
+    });
+    for predicates in [
+        vec![
+            Predicate::equal_to("status", "filed"),
+            Predicate::tag("small"),
+        ],
+        vec![
+            Predicate::tag("small"),
+            Predicate::equal_to("status", "filed"),
+        ],
+    ] {
+        let params = counting(vec![field("n")])
+            .with_limit(5)
+            .with_predicates(predicates);
+        let (at_small, at_large) = (small.count(&params), large.count(&params));
+        eprintln!(
+            "null part order {:?} at 2048 and 8192: {:?}",
+            params.predicates,
+            (at_small.work, at_large.work)
+        );
+        assert_eq!(at_small.tallies, at_large.tallies);
+        assert_eq!(at_small.tallies.first(), Some(&tally(&[None], 32)));
+        judge(at_small.work.vm_steps, at_large.work.vm_steps);
+        assert_eq!(at_small.work, at_large.work);
+        assert_eq!(at_large.work.full_scan_steps, 0);
+        for store in [&small, &large] {
+            let null = plan_of(
+                &store.plans(&params),
+                CountStatement::NullLead(GroupMember::Field(FieldOrder::Typed)),
+            );
+            judge_null(&null, GroupMember::Field(FieldOrder::Typed), true);
+            rows_of(&null, "tg").assert_searches_through(
+                "document_tags",
+                Access::Index("document_tags_folded_name"),
+            );
+        }
+    }
+}
+
+/// A single-key continuation skips every row of its position's group, even
+/// where that group holds nearly the whole vault.
+#[test]
+fn a_single_key_continuation_skips_its_whole_position_group() {
+    let fixture = |label: &str, size: usize| {
+        let documents = (0..size)
+            .map(|at| {
+                let value = if at < size - 16 {
+                    0
+                } else {
+                    at - (size - 16) + 1
+                };
+                tagged(
+                    document(
+                        &format!("dominant/{at:05}.md"),
+                        &format!("hash-{at}"),
+                        "body\n",
+                    )
+                    .with_frontmatter(
+                        Some(map(vec![
+                            ("status", string("filed")),
+                            ("n", string(&value.to_string())),
+                        ])),
+                        &declared(),
+                    ),
+                    &["bulk"],
+                )
+            })
+            .collect();
+        Counting::with_documents(label, documents)
+    };
+    let small = fixture("count-position-group-small", 512);
+    let large = fixture("count-position-group-large", 2048);
+    let params = counting(vec![field("n")]).with_limit(5).with_predicates([
+        Predicate::equal_to("status", "filed"),
+        Predicate::tag("bulk"),
+    ]);
+    let params = small.resumed(&params, &[Some("0")]);
+    let (at_small, at_large) = (small.count(&params), large.count(&params));
+    let expected = (1..=5)
+        .map(|at| tally(&[Some(&at.to_string())], 1))
+        .collect::<Vec<_>>();
+    assert_eq!(at_small.tallies, expected);
+    assert_eq!(at_large.tallies, expected);
+    eprintln!(
+        "continuation past dominant group at 512 and 2048: {:?}",
+        (at_small.work, at_large.work)
+    );
+    assert_eq!(
+        at_small.work, at_large.work,
+        "a continuation re-read its position's group"
+    );
+    assert_eq!(at_large.work.full_scan_steps, 0);
+    for store in [&small, &large] {
+        let plans = store.plans(&params);
+        assert!(plans.iter().any(|plan| matches!(
+            plan.statement,
+            ReadStatement::Count(CountStatement::ValuedWindow(_))
+        )));
+        judge_valued(
+            &plan_of(
+                &plans,
+                CountStatement::ValuedLead(GroupMember::Field(FieldOrder::Typed)),
+            ),
+            &LEAD_BARS[1],
             true,
         );
     }

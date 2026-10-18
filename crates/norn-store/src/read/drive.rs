@@ -68,6 +68,13 @@
 //! seek reaches documents the part then rejects, and is only ever taken to
 //! keep more than it does.
 //!
+//! A section with no order to walk — a count's `null` section — asks the
+//! keeping parts at doubling caps instead ([`Snapshot::matched_driver`]),
+//! from the page's scale to the document span. Its probes cost about the
+//! smallest part's seek per part asked, and a part fitting the cap drives;
+//! with no keeping part it walks documents. It has no window, so its `read`
+//! chooses this driver even where the page's driver walks.
+//!
 //! - **A part spread through the vault**, keeping a share of its documents,
 //!   leaves a page to walk its rows over that share; the rounds stop at the
 //!   first budget past that walk, so the page costs about the walk it needs —
@@ -174,7 +181,9 @@ pub(crate) trait Paged {
 
     /// At most `rows` of `section`'s rows, driven by `driver`, and where
     /// `until` names one, none past it in the page's order: the walk's
-    /// window, which only a walked read is given.
+    /// window, which only a walked read is given. A section with no order to
+    /// walk may choose a matched driver when given `Walked`: a count's `null`
+    /// section asks the keeping parts at doubling caps instead of walking.
     fn read(
         &self,
         snapshot: &Snapshot,
@@ -189,7 +198,8 @@ pub(crate) trait Paged {
     /// narrowed by no document part: on each arm the section reads, the place
     /// of its row `offset` rows past the section's,
     /// and the earliest of those in the page's order — or `None` where no arm
-    /// holds more than `offset` past it.
+    /// holds more than `offset` past it, or the section has no order to walk,
+    /// as a count's `null` section does: its `read` may choose a matched driver.
     fn window(
         &self,
         snapshot: &Snapshot,
@@ -369,7 +379,9 @@ impl Snapshot {
             settled if queue.is_empty() => settled,
             // A part keeping no more documents than the page reads drives it
             // from what it matched before anything is walked.
-            Settled::Unasked if let Some(at) = self.first_within(parts, scale, lookups)? => {
+            Settled::Unasked
+                if let Some(at) = self.first_within(parts, scale, &mut lookups.ran)? =>
+            {
                 let driver = Driver::Matched(at);
                 self.read_rest(paged, rows, driver, &mut found, &mut queue, lookups)?;
                 Settled::Driver(driver)
@@ -483,7 +495,7 @@ impl Snapshot {
             // Where every part was counted at this cap or past it and kept
             // more, the page asks nothing again.
             let within = if cap > round.asked {
-                self.first_within(parts, cap, lookups)?
+                self.first_within(parts, cap, &mut lookups.ran)?
             } else {
                 None
             };
@@ -509,16 +521,12 @@ impl Snapshot {
         &self,
         parts: &[&Filter],
         cap: usize,
-        lookups: &mut Lookups,
+        record: &mut Vec<Ran>,
     ) -> Result<Option<usize>, StoreError> {
         for (at, part) in keeping(parts) {
             let probe = Ran::new(FindStatement::PartCeiling, part.kept_within(cap))
                 .narrowed_by(vec![part.shape()]);
-            if self.ask(
-                &mut lookups.ran,
-                probe,
-                "asking how many documents a part keeps",
-            )? {
+            if self.ask(record, probe, "asking how many documents a part keeps")? {
                 return Ok(Some(at));
             }
         }
@@ -531,10 +539,51 @@ impl Snapshot {
     /// the square root of `rows` times the vault's greatest document row id.
     /// One [`FindStatement::DocumentSpan`].
     fn drive_ceiling(&self, rows: usize, lookups: &mut Lookups) -> Result<usize, StoreError> {
+        let span = self.document_span(&mut lookups.ran)?;
+        Ok(rows
+            .saturating_mul(MATCHED_DRIVE_FACTOR)
+            .max(rows.saturating_mul(span).isqrt()))
+    }
+
+    /// A driver for a section with no order to walk: ask the keeping parts
+    /// at caps doubling from `scale`, and take the first within one. The
+    /// cap costs at most twice the smallest part's seek, or `scale` where
+    /// that is greater, per part asked. The document span bounds the caps;
+    /// where no part fits by then, the first keeping part drives, since a
+    /// seek counting rows it rejects may over-count the documents it keeps.
+    pub(crate) fn matched_driver(
+        &self,
+        parts: &[&Filter],
+        scale: usize,
+        record: &mut Vec<Ran>,
+    ) -> Result<Driver, StoreError> {
+        let Some((first, _)) = keeping(parts).next() else {
+            return Ok(Driver::Walked);
+        };
+        let mut cap = scale.max(1);
+        let mut span = None;
+        loop {
+            if let Some(at) = self.first_within(parts, cap, record)? {
+                return Ok(Driver::Matched(at));
+            }
+            let span = match span {
+                Some(span) => span,
+                None => *span.insert(self.document_span(record)?.max(1)),
+            };
+            if cap >= span {
+                return Ok(Driver::Matched(first));
+            }
+            cap = cap.saturating_mul(2).min(span);
+        }
+    }
+
+    /// The vault's greatest document row id, read by one
+    /// [`FindStatement::DocumentSpan`]: an upper bound on its documents.
+    fn document_span(&self, record: &mut Vec<Ran>) -> Result<usize, StoreError> {
         const OPERATION: &str = "reading how many documents the vault may hold";
         let span: i64 = self
             .run_statement(
-                &mut lookups.ran,
+                record,
                 Ran::new(FindStatement::DocumentSpan, compose_document_span()),
                 |row| row.get(0),
             )
@@ -542,10 +591,7 @@ impl Snapshot {
             .into_iter()
             .next()
             .unwrap_or(0);
-        let span = usize::try_from(span).unwrap_or(0);
-        Ok(rows
-            .saturating_mul(MATCHED_DRIVE_FACTOR)
-            .max(rows.saturating_mul(span).isqrt()))
+        Ok(usize::try_from(span).unwrap_or(0))
     }
 }
 

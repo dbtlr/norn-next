@@ -76,14 +76,16 @@
 //! document. Its window counts value rows, not groups, and ends at a leading
 //! sort key, including every row there so a tally is complete. The budget
 //! doubles to the shared ceiling; past it the walk continues without a bound.
-//! [`Settled`] carries the choice and the round across the request's reads;
-//! a cursor continues the tuple position, and its request chooses afresh.
+//! A count reads once per request; each cursor continues the tuple position
+//! and chooses its driver afresh.
 //! A broad part's single-key valued drain walks each value row a bounded
 //! number of times; a small part's cost follows what it matched. Groupings of
 //! several keys still sort the tuples a section reads. A `null` section is
-//! driven by a keeping part whenever one exists, so its cost follows that
-//! part's matched documents; otherwise it walks the vault. With one key it
-//! is one tally, read once per drain.
+//! driven by a keeping part found by asking at doubling caps, so its cost
+//! follows the smallest part's seek, within the cap's factor of two or the
+//! page's scale. The probes may count rows a part later rejects; with no
+//! keeping part it walks the vault. With one key it is one tally, read once
+//! per drain.
 //!
 //! # A conjunction means what it means to a find
 //!
@@ -589,8 +591,8 @@ struct CountSection {
 /// tests them: a window ends at one leading sort key, reads every row at it,
 /// and resumes past that whole group, so no tally or label is split between
 /// rounds. Trailing members stay within the leading group's window. A null
-/// section has no leading value to seek: a keeping part always drives its
-/// document probes, even where the valued section walks.
+/// section has no leading value to seek: it asks for a small keeping part
+/// to drive its document probes, even where the valued section walks.
 struct CountPages<'a> {
     members: &'a [Member<'a>],
     filters: &'a [Filter],
@@ -613,10 +615,8 @@ impl Paged for CountPages<'_> {
         let driver = if matches!(section.statement, CountStatement::NullLead(_))
             && driver == Driver::Walked
         {
-            self.filters
-                .iter()
-                .position(|part| !part.shape().excludes())
-                .map_or(driver, Driver::Matched)
+            let parts: Vec<&Filter> = self.filters.iter().collect();
+            snapshot.matched_driver(&parts, rows, record)?
         } else {
             driver
         };

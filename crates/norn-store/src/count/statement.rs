@@ -245,10 +245,11 @@ pub(crate) struct Tallies<'a> {
 /// **Where a statement resumes is a bound on the grouped tuple.** Each member
 /// compares as its sort column with `null` read as the integer `0`, which
 /// SQLite orders before every text, and an unset position binds `-1` to every
-/// member, which orders before that; so the text does not branch on whether
-/// the statement resumes. The valued section's leading member is also a seek:
-/// its index is searched from the position's leading value, the empty text
-/// where none is set.
+/// member, which orders before that. The valued section's leading member is
+/// also a seek: a single-key continuation and a resumed round seek strictly
+/// past their position; a tuple with trailing members includes its leading
+/// value so those members can resume within it. An unset position starts at
+/// the empty text.
 ///
 /// **The page drive chooses which part drives a grouped statement.** A part
 /// keeping at most its budget drives from its matched documents: the outer
@@ -320,7 +321,7 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
                     .unwrap_or_default(),
             ));
             let comparison = if tallies.past.is_some()
-                || (!driven && tallies.members.len() == 1 && tallies.after.is_some())
+                || (tallies.members.len() == 1 && tallies.after.is_some())
             {
                 ">"
             } else {

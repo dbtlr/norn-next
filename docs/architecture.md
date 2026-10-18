@@ -1047,8 +1047,9 @@ statements under the same discipline, each carrying a plan bar with a negative c
 and held by a census to exactly one bar: the ungrouped total, the count of `documents`
 or of the rows a filter's seek reaches by row id; the tallies whose leading member is
 `null`, probing each document for a value under the leading key, driven by a keeping
-part whenever one exists; the tallies whose leading member holds a value; and the window
-read, one unfiltered value-index entry at the walk's budget. The valued section uses the
+part found at doubling caps so its cost follows the smallest part's seek, which may
+count documents the part later rejects; the tallies whose leading member holds a value;
+and the window read, one unfiltered value-index entry at the walk's budget. The valued section uses the
 shared per-request drive: a part within the ceiling drives from its matched documents
 when the budget reaches them; otherwise it walks the leading member's value index —
 `(key, raw)`, `(key, typed)` or the tag's folded name — from the page's position, testing
