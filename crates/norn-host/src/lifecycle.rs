@@ -14723,6 +14723,75 @@ mod tests {
         drop((lease, host));
     }
 
+    /// **Coverage that ended is given back whatever the classification after
+    /// it finds.** A root that is simply gone resolves to nothing, which the
+    /// registry reads as registrable: the classification refuses nothing, so
+    /// no refusal is what gives the coverage back. The coverage is dead all
+    /// the same — the watcher inside it watches nothing — and the maintainer
+    /// lock inside it is this process's for as long as the entry keeps it.
+    ///
+    /// So the loss itself gives it back: the ops have the attachment once the
+    /// poll that met the loss returns, the entry stands untrusted on the loss
+    /// with no park it was never refused under, owing the recovery a later
+    /// demand asks for, and an unregistration then finds nothing holding it.
+    #[cfg(unix)]
+    #[test]
+    fn coverage_lost_over_a_root_that_classifies_clean_gives_the_coverage_back() {
+        let scratch = temp_base("coverage-lost-clean");
+        let root = scratch.join("notes");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            1,
+        );
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+
+        // The root goes away, and the watcher reports the coverage it had over
+        // that root has ended.
+        std::fs::remove_dir(&root).unwrap();
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(root.clone()));
+        poll_watchers(&host.shared);
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the entry kept coverage that ended over a root nothing refused"
+        );
+        assert_eq!(
+            entry_park(&host, &name),
+            None,
+            "a root that classifies against nothing parked the entry"
+        );
+        assert_eq!(
+            host.state(&name),
+            answered(lost(
+                WatcherLossCause::CoverageLost,
+                &format!("watch coverage was lost for {}", root.display()),
+            )),
+            "the entry stopped publishing the loss once it gave the coverage back"
+        );
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.recovery_required,
+                "the coverage went back and the recovery the loss owes went with it"
+            );
+            assert!(
+                !state.held_by_anything(),
+                "the entry is still held once the coverage is back"
+            );
+        }
+        host.unregister(&name, true)
+            .unwrap_or_else(|refusal| panic!("the unregistration was refused: {refusal:?}"));
+
+        drop(host);
+    }
+
     /// A watcher report is spent by whichever caller drains the subscription
     /// first, and a job leg's own drain is such a caller. The classification
     /// rides the report rather than the caller, so the leg that consumes it
