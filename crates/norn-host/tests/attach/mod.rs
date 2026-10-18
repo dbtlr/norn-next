@@ -496,7 +496,11 @@ pub fn reload_refusal_once_settled(
                 .vault_reload(&ReloadParams::new(VaultAddress::name(name.clone())))
                 .expect("the host answers a reload")
                 .err();
-            Observed::pending(lost)
+            if reload_lost_its_turn(refused.as_ref()) {
+                Observed::pending(lost)
+            } else {
+                Observed::Met(refused.take())
+            }
         },
     )
     .unwrap_or_else(|failure| panic!("{failure}"))
