@@ -2097,6 +2097,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "link/broken",
         "link/ambiguous",
         "link/missing-anchor",
+        "link/vault-scheme",
         "document/misplaced",
         "document/rules-conflict",
         "field/required-missing",
@@ -2164,6 +2165,7 @@ fn the_two_scopes_partition_the_finding_kinds() {
             "link/ambiguous",
             "link/broken",
             "link/missing-anchor",
+            "link/vault-scheme",
         ]
     );
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
@@ -2193,17 +2195,18 @@ fn schema_kinds_are_document_scoped_warnings() {
     }
 }
 
-/// ADR 0027's three link-health kinds are each about one link in a document
-/// that still derives whole, so each stands beside that document's row rather
-/// than withheld in its place, and each is a warning rather than an error: a
-/// broken, ambiguous, or anchor-missing link deserves attention, not the
-/// correction a document norn cannot read demands.
+/// The link-health kinds are each about one link in a document that still
+/// derives whole, so each stands beside that document's row rather than
+/// withheld in its place, and each is a warning rather than an error: a
+/// broken, ambiguous, anchor-missing or `vault://` link deserves attention,
+/// not the correction a document norn cannot read demands.
 #[test]
 fn link_kinds_are_document_scoped_warnings() {
     for kind in [
         FindingKind::Broken,
         FindingKind::Ambiguous,
         FindingKind::MissingAnchor,
+        FindingKind::VaultScheme,
     ] {
         assert_eq!(kind.scope(), FindingScope::Document, "{kind}");
         assert_eq!(kind.default_severity(), Severity::Warning, "{kind}");
@@ -6171,7 +6174,7 @@ fn every_validate_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","predicates":"##,
             PINNED_PREDICATES,
-            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","link/vault-scheme","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]

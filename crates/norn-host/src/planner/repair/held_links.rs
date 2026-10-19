@@ -33,7 +33,8 @@
 //! finding only where it still resolves to several documents; a
 //! `link/missing-anchor` finding is about a link resolving to one document,
 //! so it is dropped where the link resolves to none or to several, and stands
-//! where it resolves to one document.
+//! where it resolves to one document; a `link/vault-scheme` finding is about
+//! a `vault://` link resolving to one document, and holds on the same terms.
 //!
 //! **Declared limit: a missing anchor whose link now names another single
 //! document stands.** A link resolving to the document it named — at its path,
@@ -251,6 +252,9 @@ fn holds_after(kind: FindingKind, after: &Resolves) -> bool {
         // the document it named — at its path or at its own route's
         // destination — or, as the declared limit says, another.
         FindingKind::MissingAnchor => matches!(after, Resolves::One { .. }),
+        // A `vault://` link that still resolves to one document keeps its
+        // warning, whichever document that is.
+        FindingKind::VaultScheme => matches!(after, Resolves::One { .. }),
         _ => true,
     }
 }

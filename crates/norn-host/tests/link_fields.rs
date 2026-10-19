@@ -17,7 +17,7 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     DescribeParams, Facet, FacetKind, FieldShape, FieldType, FindParams, FindReport, FindingKind,
-    Predicate, ValidateParams, ValidateReport, VaultAddress, VaultName,
+    Predicate, Severity, ValidateParams, ValidateReport, VaultAddress, VaultName,
 };
 
 const SCHEMA: &str = "\
@@ -63,6 +63,11 @@ const DOCUMENTS: &[(&str, &str)] = &[
     (
         "zz-links/aliased.md",
         "---\nproject: \"[[zz-link-target|The Target]]\"\n---\nbody\n",
+    ),
+    (
+        "zz-links/vault-scheme.md",
+        "[[vault://zz-link-target]]\n\n[[vault://zz-link-target#No Such Heading]]\n\n\
+         [[vault://zz-nowhere]]\n\n[[/zz-link-target]]\n",
     ),
     (
         "zz-links/elsewhere.md",
@@ -233,6 +238,71 @@ fn a_resolving_link_with_its_heading_draws_no_finding() {
             "`{clean}` drew {seen:?}"
         );
     }
+}
+
+/// A `vault://` link that names one document is a warning saying Obsidian
+/// cannot open it, and only that link: the same document named by a rooted `/`
+/// link draws nothing, a `vault://` link to a missing heading is the missing
+/// anchor alone, and one to nothing is broken.
+#[test]
+fn a_vault_scheme_link_to_one_document_is_a_warning_naming_it() {
+    let (_sandbox, vault, host) = a_link_vault("host-link-vault-scheme");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let answered = host
+        .validate(
+            &ValidateParams::new(address(vault.name()))
+                .with_kinds([
+                    FindingKind::VaultScheme,
+                    FindingKind::MissingAnchor,
+                    FindingKind::Broken,
+                ])
+                .with_limit(1000),
+        )
+        .expect("an attached vault answers a validate");
+    let ValidateReport::Findings { page, .. } = &answered.answer.report else {
+        panic!("a validate answered {:?}", answered.answer.report);
+    };
+    let mut seen: Vec<_> = page
+        .rows
+        .iter()
+        .filter(|row| row.path.as_str() == "zz-links/vault-scheme.md")
+        .map(|row| {
+            (
+                row.kind,
+                row.severity,
+                row.target.clone().expect("a link finding names its link"),
+                row.head
+                    .candidates()
+                    .iter()
+                    .map(|candidate| candidate.path.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    seen.sort_by(|left, right| left.2.cmp(&right.2));
+    assert_eq!(
+        seen,
+        [
+            (
+                FindingKind::VaultScheme,
+                Severity::Warning,
+                "vault://zz-link-target".to_string(),
+                vec!["zz-link-target.md".to_string()]
+            ),
+            (
+                FindingKind::MissingAnchor,
+                Severity::Warning,
+                "vault://zz-link-target#No Such Heading".to_string(),
+                vec!["zz-link-target.md".to_string()]
+            ),
+            (
+                FindingKind::Broken,
+                Severity::Warning,
+                "vault://zz-nowhere".to_string(),
+                Vec::new()
+            ),
+        ]
+    );
 }
 
 #[test]

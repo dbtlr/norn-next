@@ -253,7 +253,7 @@ fn targets() -> Vec<DocumentFacts> {
 /// Each link `src/a.md` holds, in order, beside the kind of finding it raises
 /// on a root that tells spellings apart and on one that folds ASCII case.
 const SOURCE: &[(&str, Option<FindingKind>, Option<FindingKind>)] = {
-    use FindingKind::{Ambiguous, Broken, MissingAnchor};
+    use FindingKind::{Ambiguous, Broken, MissingAnchor, VaultScheme};
     &[
         // One document, `archive/glossary.md` being an ignored place.
         ("[[glossary]]", None, None),
@@ -299,6 +299,27 @@ const SOURCE: &[(&str, Option<FindingKind>, Option<FindingKind>)] = {
         ("![[missing]]", Some(Broken), Some(Broken)),
         ("[[Glossary#heading]]", None, None),
         ("[frag](../notes/glossary.md#Heading)", None, None),
+        // A `vault://` link of either family naming one document is
+        // resolved, and Obsidian cannot open it. Broken, ambiguous and
+        // missing-anchor keep their own kinds.
+        ("[[vault://x/y.md]]", Some(VaultScheme), Some(VaultScheme)),
+        (
+            "[rooted](vault://x/y.md)",
+            Some(VaultScheme),
+            Some(VaultScheme),
+        ),
+        ("![[vault://x/y]]", Some(VaultScheme), Some(VaultScheme)),
+        ("[[vault://nowhere.md]]", Some(Broken), Some(Broken)),
+        (
+            "[[vault://notes/glossary.md#Heading]]",
+            Some(VaultScheme),
+            Some(VaultScheme),
+        ),
+        (
+            "[[vault://notes/glossary.md#Nope]]",
+            Some(MissingAnchor),
+            Some(MissingAnchor),
+        ),
     ]
 };
 
@@ -384,7 +405,10 @@ fn judgment_agrees_with_the_links_column_health() {
                         assert_eq!(kind, Some(FindingKind::Ambiguous), "{context}");
                     }
                     LinkHealth::Healthy => assert!(
-                        matches!(kind, None | Some(FindingKind::MissingAnchor)),
+                        matches!(
+                            kind,
+                            None | Some(FindingKind::MissingAnchor | FindingKind::VaultScheme)
+                        ),
                         "{context}: {kind:?}"
                     ),
                     LinkHealth::NotJudged => assert_eq!(kind, None, "{context}"),
@@ -403,7 +427,9 @@ fn judgment_agrees_with_the_links_column_health() {
                             "{context}"
                         );
                     }
-                    FindingKind::Ambiguous | FindingKind::MissingAnchor => {
+                    FindingKind::Ambiguous
+                    | FindingKind::MissingAnchor
+                    | FindingKind::VaultScheme => {
                         assert_eq!(finding_head(finding), row_head(row), "{context}");
                         assert_eq!(finding.candidates_total, row.targets.total(), "{context}");
                     }
@@ -420,7 +446,8 @@ fn judgment_agrees_with_the_links_column_health() {
                 None,
                 Some(FindingKind::Broken.as_str()),
                 Some(FindingKind::Ambiguous.as_str()),
-                Some(FindingKind::MissingAnchor.as_str())
+                Some(FindingKind::MissingAnchor.as_str()),
+                Some(FindingKind::VaultScheme.as_str())
             ]
             .into_iter()
             .collect(),
@@ -499,6 +526,83 @@ fn an_embed_carries_the_same_kinds() {
             Some(FindingKind::MissingAnchor),
             None
         ]
+    );
+}
+
+/// **A `vault://` link naming one document files a vault-scheme finding, in
+/// either family, and only then.** Obsidian cannot open a `vault://` link, so
+/// one that resolves is warned about; the same document named by a bare, a
+/// rooted `/` or a relative link raises nothing. A `vault://` link that is
+/// broken or ambiguous keeps that kind, and one whose anchor the document
+/// lacks files the missing anchor alone: the store holds one finding per link,
+/// so a missing anchor takes precedence over the scheme. The finding names the
+/// one document, is a warning, and is read back by a validate with its
+/// message.
+#[test]
+fn a_vault_scheme_link_naming_one_document_files_a_vault_scheme_finding() {
+    let mut documents = targets();
+    documents.push(derived(
+        "src/v.md",
+        &body_of(&[
+            "[[vault://x/y.md]]",
+            "[rooted](vault://x/y.md)",
+            "[[x/y]]",
+            "[bare](/x/y.md)",
+            "[rel](../x/y.md)",
+            "[[vault://missing.md]]",
+            "[[vault://notes/dup.md]]",
+            "[[vault://v1.md]]",
+            "[[vault://notes/glossary.md#Nope]]",
+            "[gone](vault://notes/glossary.md#Nope)",
+            "[[vault://notes/glossary.md#Heading]]",
+        ]),
+    ));
+    let mut judging = Judging::new("health-vault-scheme", Sensitive, &documents);
+    let findings = judging.by_ordinal("src/v.md");
+    let kinds: Vec<Option<FindingKind>> = (0..11)
+        .map(|ordinal| findings.get(&ordinal).map(|finding| finding.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            Some(FindingKind::VaultScheme),
+            Some(FindingKind::VaultScheme),
+            None,
+            None,
+            None,
+            Some(FindingKind::Broken),
+            Some(FindingKind::VaultScheme),
+            Some(FindingKind::Ambiguous),
+            Some(FindingKind::MissingAnchor),
+            Some(FindingKind::MissingAnchor),
+            Some(FindingKind::VaultScheme),
+        ]
+    );
+    let scheme = &findings[&0];
+    assert_eq!(scheme.severity, Severity::Warning);
+    assert_eq!(scheme.target.as_deref(), Some("vault://x/y.md"));
+    assert_eq!(scheme.candidates_total, 1);
+    assert_eq!(
+        scheme
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>(),
+        ["x/y.md"]
+    );
+
+    let (judged, _) = judging.judged(&["src/v.md"]);
+    assert_filed(&judging.request(), "src/v.md", &judged);
+    let rows = judging.validated();
+    let read = rows
+        .iter()
+        .find(|row| {
+            row.kind == FindingKind::VaultScheme && row.target.as_deref() == Some("vault://x/y.md")
+        })
+        .unwrap_or_else(|| panic!("no vault-scheme finding read back: {rows:?}"));
+    assert_eq!(
+        read.message,
+        "the link resolves through `vault://`, a scheme Obsidian cannot open; the `/` form names the same document in both"
     );
 }
 
