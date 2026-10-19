@@ -31,7 +31,6 @@ use norn_wire::{
     ValidateReport, VaultAddress,
 };
 use serde_json::Value;
-use unicode_normalization::UnicodeNormalization;
 
 /// The probe's vault-relative folder, which rooted and exact-path cases name.
 const PROBE_ROOT: &str = "artifacts/scratch/norn-422";
@@ -48,9 +47,11 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or_else(|e| panic!("parsing the fixture file {}: {e}", path.display()))
 }
 
-/// A path in its composed form, the form this corpus compares paths in.
-fn nfc(path: &str) -> String {
-    path.nfc().collect()
+/// A path under the store's comparison key, the one function that decides
+/// whether two paths are the same, so a filesystem that changes a name's
+/// normalization does not fail the corpus.
+fn under_the_key(path: &str) -> String {
+    norn_store::comparison_key(path)
 }
 
 // ---- the recorded cases ----
@@ -122,7 +123,7 @@ fn observations() -> BTreeMap<String, Observed> {
 // ---- an answer, and what is expected ----
 
 /// What a link resolves to, as the corpus compares it. Paths are vault-relative
-/// and composed.
+/// and compared under the store's comparison key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Answer {
     Healthy(String),
@@ -133,15 +134,15 @@ enum Answer {
 }
 
 fn healthy(path: &str) -> Answer {
-    Answer::Healthy(nfc(path))
+    Answer::Healthy(under_the_key(path))
 }
 
 fn missing_anchor(path: &str) -> Answer {
-    Answer::MissingAnchor(nfc(path))
+    Answer::MissingAnchor(under_the_key(path))
 }
 
 fn ambiguous(paths: &[&str]) -> Answer {
-    Answer::Ambiguous(paths.iter().map(|path| nfc(path)).collect())
+    Answer::Ambiguous(paths.iter().map(|path| under_the_key(path)).collect())
 }
 
 /// A path inside the probe's folder.
@@ -227,7 +228,7 @@ fn expectations() -> BTreeMap<&'static str, Answer> {
 /// holds it among its candidates; a broken link is one Obsidian opened nothing
 /// for; and a link not judged names a file that is not a Markdown document.
 fn compatible(expected: &Answer, observed: &Observed) -> Result<(), String> {
-    let destination = observed.destination.as_deref().map(nfc);
+    let destination = observed.destination.as_deref().map(under_the_key);
     match expected {
         Answer::Healthy(target) if destination.as_ref() == Some(target) => Ok(()),
         Answer::MissingAnchor(target)
@@ -381,7 +382,7 @@ fn answer_of(
         .targets
         .candidates()
         .iter()
-        .map(|candidate| nfc(candidate.path.as_str()))
+        .map(|candidate| under_the_key(candidate.path.as_str()))
         .collect();
     assert_eq!(
         heads.len() as u64,

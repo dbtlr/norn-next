@@ -70,6 +70,3 @@ norn-fixtures = { path = "../norn-fixtures" }
 norn-fs = { path = "../norn-fs", features = ["test-support"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }
-# The parity corpus compares vault paths in their composed form, so a filesystem
-# that changes a file name's normalization does not fail it.
-unicode-normalization = { workspace = true }

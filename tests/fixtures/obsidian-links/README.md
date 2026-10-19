@@ -45,8 +45,8 @@ Results without actual filename evidence do not settle NFC versus NFD behavior.
 A case-insensitive device does not establish case folding on a case-sensitive filesystem.
 Record these limitations and repeat affected cases on a suitable filesystem before calling them confirmed.
 
-This is a manual external-application probe, not an automated assertion of current Norn behavior.
+The observations are manual external-application observations of Obsidian, not assertions about Norn.
 The iOS recording provides exploratory evidence for the resolution ADR.
 Cross-platform behavior and unobserved link-writing combinations remain outside its verified coverage.
 
-The parity corpus, `crates/norn-host/tests/obsidian_parity.rs`, asserts norn's answer for each recorded case against an authored expectation that agrees with these observations.
+`crates/norn-host/tests/obsidian_parity.rs` asserts norn's answer for each recorded case against an authored expectation, and checks that expectation for compatibility with these observations.
