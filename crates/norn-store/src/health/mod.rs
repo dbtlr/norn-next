@@ -106,7 +106,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
-use norn_wire::{FindingKind, LinkHealth};
+use norn_wire::{FindingKind, LinkHealth, VAULT_PROTOCOL};
 
 use crate::error::StoreError;
 use crate::facts::{CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink};
@@ -136,9 +136,6 @@ const MISSING_ANCHOR: &str = "the document the link names holds no place its anc
 /// The message every vault-scheme link's finding carries.
 const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsidian cannot open; \
      the `/` form names the same document in both";
-
-/// The protocol a `vault://` link stores.
-const VAULT_PROTOCOL: &str = "vault";
 
 /// Which links a judgment judges.
 ///
