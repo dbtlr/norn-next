@@ -762,6 +762,80 @@ fn a_plan_refuses_the_schema_violations_it_introduces() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// A refusal before anything is published has landed nothing, so the fresh
+/// plan it answers lists no unresolved operation: a create that violates the
+/// schema and a move into a folder that does not exist yet are both resolved
+/// again, in either order and whether the create stands beside the move or
+/// inside the folder it makes, and neither is dropped. A preview of the plan
+/// answers exactly what its apply does.
+#[test]
+fn a_schema_refusal_before_publication_resolves_every_operation_again() {
+    let violation = |at: &str| {
+        norn_wire::RefusedCheck::violation(norn_wire::SchemaViolation::new(
+            path(at),
+            norn_wire::FindingKind::UndeclaredTag,
+            Some("other".to_string()),
+            String::new(),
+        ))
+    };
+    let orders: Vec<(&str, [Operation; 2])> = ["d.md", "archive/d.md"]
+        .into_iter()
+        .flat_map(|created| {
+            let create = || creating(created, "# D\n#other\n");
+            let place = || moving("inbox/c.md", "archive/c.md");
+            [
+                (created, [create(), place()]),
+                (created, [place(), create()]),
+            ]
+        })
+        .collect();
+    for (created, operations) in orders {
+        let mut fixture = Fixture::with_schema(
+            TAG_SCHEMA,
+            &[("a.md", "# A\n#project\n"), ("inbox/c.md", "# C\n")],
+        );
+        let before = fixture.tree();
+        let plan = fixture.plan(operations.to_vec());
+        let previewed = fixture
+            .preview(plan.clone())
+            .expect_err("a preview of a schema-refused plan is refused");
+        let answered = fixture
+            .apply(plan.clone())
+            .into_wire()
+            .expect("a refusal is answered")
+            .expect_err("an apply of a schema-refused plan is refused");
+        assert_eq!(previewed, answered, "{operations:?}");
+        let refused = refused(fixture.apply(plan));
+        let checks: Vec<_> = refused
+            .checks
+            .iter()
+            .map(|check| match check {
+                norn_wire::RefusedCheck::SchemaViolation { violation, .. } => {
+                    norn_wire::RefusedCheck::violation(norn_wire::SchemaViolation::new(
+                        violation.path.clone(),
+                        violation.kind,
+                        violation.target.clone(),
+                        String::new(),
+                    ))
+                }
+                other => other.clone(),
+            })
+            .collect();
+        assert_eq!(checks, vec![violation(created)], "{operations:?}");
+        assert_eq!(fixture.tree(), before, "nothing was published");
+        assert_eq!(fixture.read("inbox/c.md").as_deref(), Some("# C\n"));
+        assert!(refused.unresolved.is_empty(), "{:?}", refused.unresolved);
+        assert_eq!(refused.plan.operations.len(), operations.len());
+        for operation in &operations {
+            assert!(
+                refused.plan.operations.contains(operation),
+                "{operation:?} is resolved again in {:?}",
+                refused.plan.operations
+            );
+        }
+    }
+}
+
 /// A move's source found gone while its destination is not at its after-state
 /// was taken by another writer, since the applier removes a source only after
 /// its destination durably landed: the source is drift, and the move is left
