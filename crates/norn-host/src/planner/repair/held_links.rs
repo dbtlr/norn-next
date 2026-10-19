@@ -372,6 +372,7 @@ mod tests {
             FindingKind::Broken,
             FindingKind::Ambiguous,
             FindingKind::MissingAnchor,
+            FindingKind::VaultScheme,
         ] {
             let other = [changed(
                 "h.md",
@@ -386,6 +387,34 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// **A `vault://` link's warning stands only where the link still resolves
+    /// to one document**, whichever document that is: left naming none or
+    /// several, the link raises another finding instead, and the warning is
+    /// dropped.
+    #[test]
+    fn a_vault_scheme_warning_stands_only_where_the_link_still_names_one_document() {
+        assert!(!kept_after(
+            FindingKind::VaultScheme,
+            one("a.md"),
+            Resolves::none()
+        ));
+        assert!(!kept_after(
+            FindingKind::VaultScheme,
+            one("a.md"),
+            Resolves::several()
+        ));
+        assert!(kept_after(
+            FindingKind::VaultScheme,
+            one("a.md"),
+            one("b.md")
+        ));
+        assert!(kept_after(
+            FindingKind::VaultScheme,
+            one("a.md"),
+            one("a.md")
+        ));
     }
 
     /// **A broken link stands only where it still resolves to none.**

@@ -223,14 +223,19 @@ fn expectations() -> BTreeMap<&'static str, Answer> {
 /// Whether `expected` is an answer Obsidian's recorded behavior permits,
 /// or the reason it is not.
 ///
-/// A healthy link names the document Obsidian opened; a link with a missing
-/// anchor names it too, and Obsidian reported the anchor missing; an ambiguity
-/// holds it among its candidates; a broken link is one Obsidian opened nothing
-/// for; and a link not judged names a file that is not a Markdown document.
+/// A healthy link names the document Obsidian opened with nothing missing; a
+/// link with a missing anchor names it too, and Obsidian reported the anchor
+/// missing; an ambiguity holds it among its candidates; a broken link is one
+/// Obsidian opened nothing for; and a link not judged names a file that is not
+/// a Markdown document.
 fn compatible(expected: &Answer, observed: &Observed) -> Result<(), String> {
     let destination = observed.destination.as_deref().map(under_the_key);
     match expected {
-        Answer::Healthy(target) if destination.as_ref() == Some(target) => Ok(()),
+        Answer::Healthy(target)
+            if observed.outcome == "opened" && destination.as_ref() == Some(target) =>
+        {
+            Ok(())
+        }
         Answer::MissingAnchor(target)
             if observed.outcome == "opened_document_with_missing_anchor"
                 && destination.as_ref() == Some(target) =>
@@ -258,6 +263,25 @@ fn compatible(expected: &Answer, observed: &Observed) -> Result<(), String> {
             "expected {expected:?}, which Obsidian's recorded `{observed}` does not permit"
         )),
     }
+}
+
+/// **A healthy expectation needs Obsidian to have opened the document with
+/// nothing missing**: over a recorded missing anchor at the same destination
+/// it is incompatible, and only the missing-anchor answer is.
+#[test]
+fn a_healthy_expectation_is_incompatible_with_a_recorded_missing_anchor() {
+    let observed = |outcome: &str| Observed {
+        link: "[[n422-anchors#Nope]]".to_string(),
+        outcome: outcome.to_string(),
+        destination: Some("artifacts/scratch/norn-422/n422-anchors.md".to_string()),
+    };
+    let target = under_the_key("artifacts/scratch/norn-422/n422-anchors.md");
+    let missing = observed("opened_document_with_missing_anchor");
+    assert!(compatible(&Answer::Healthy(target.clone()), &missing).is_err());
+    assert!(compatible(&Answer::MissingAnchor(target.clone()), &missing).is_ok());
+    let opened = observed("opened");
+    assert!(compatible(&Answer::Healthy(target.clone()), &opened).is_ok());
+    assert!(compatible(&Answer::MissingAnchor(target), &opened).is_err());
 }
 
 #[test]
