@@ -18,8 +18,9 @@
 //! the schema declares the field with or against the combined constraint of
 //! the schema rules selecting the document, per ADR 0035; the field is the
 //! finding's `target`. `link/…` is a fact about one link a document holds —
-//! broken, ambiguous, or missing the heading or block its target names — per
-//! ADR 0027; the document it stands in still derives whole.
+//! broken, ambiguous, missing the heading or block its target names, or
+//! resolving through a `vault://` scheme Obsidian cannot open — per ADR 0027
+//! and ADR 0040; the document it stands in still derives whole.
 //!
 //! **Rule judgment in derivation files the schema-judged kinds.** The nine
 //! kinds — the seven `field/…` kinds, `document/misplaced` and
@@ -178,6 +179,18 @@ pub enum FindingKind {
     /// derives whole; the link is the finding's `target`.
     #[serde(rename = "link/missing-anchor")]
     MissingAnchor,
+    /// `link/vault-scheme` — a link in the document resolves through
+    /// `vault://`, a scheme Obsidian cannot open; the `/` form names the same
+    /// document in both. It is filed for a `vault://` link of either family
+    /// that names exactly one document, per ADR 0040, and it is the link's
+    /// only finding: a broken or ambiguous `vault://` link keeps that kind,
+    /// and one whose target lacks its `#heading` or `#^block` files
+    /// `link/missing-anchor` alone, because the store holds one finding per
+    /// link and the missing anchor takes precedence. The document derives
+    /// whole; the link is the finding's `target`, and its row carries the one
+    /// document it resolves to.
+    #[serde(rename = "link/vault-scheme")]
+    VaultScheme,
     /// `document/misplaced` — the document stands at a path the rules
     /// selecting it do not allow: a document stands only where every rule
     /// stating allowed paths allows it. The finding cites every rule stating
@@ -277,7 +290,7 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 19] = [
+    pub const ALL: [FindingKind; 20] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
@@ -288,6 +301,7 @@ impl FindingKind {
         FindingKind::Broken,
         FindingKind::Ambiguous,
         FindingKind::MissingAnchor,
+        FindingKind::VaultScheme,
         FindingKind::Misplaced,
         FindingKind::DocumentRulesConflict,
         FindingKind::RequiredMissing,
@@ -312,6 +326,7 @@ impl FindingKind {
             FindingKind::Broken => "link/broken",
             FindingKind::Ambiguous => "link/ambiguous",
             FindingKind::MissingAnchor => "link/missing-anchor",
+            FindingKind::VaultScheme => "link/vault-scheme",
             FindingKind::Misplaced => "document/misplaced",
             FindingKind::DocumentRulesConflict => "document/rules-conflict",
             FindingKind::RequiredMissing => "field/required-missing",
@@ -348,7 +363,8 @@ impl FindingKind {
             FindingKind::UndeclaredTag
             | FindingKind::Broken
             | FindingKind::Ambiguous
-            | FindingKind::MissingAnchor => Severity::Warning,
+            | FindingKind::MissingAnchor
+            | FindingKind::VaultScheme => Severity::Warning,
             // Judged against the rules selecting the document: the floor a
             // rule stating no severity is reported at.
             FindingKind::Misplaced
@@ -390,6 +406,7 @@ impl FindingKind {
             | FindingKind::Broken
             | FindingKind::Ambiguous
             | FindingKind::MissingAnchor
+            | FindingKind::VaultScheme
             // A schema judgment reads a document that derived whole — its path
             // and its frontmatter — so the finding stands beside the row it
             // judged.

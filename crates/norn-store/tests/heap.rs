@@ -31,7 +31,7 @@ const LINKS_PER_HOLDER: usize = 100;
 /// past this bound, and a chunk's links held for every chunk is far past it.
 const FLAT: usize = 16 * 1024;
 
-/// The links a hub write re-decides, and what it files about them.
+/// The links a hub write re-decides, each of which it files a finding about.
 #[derive(Clone, Copy)]
 struct Shape {
     label: &'static str,
@@ -39,8 +39,6 @@ struct Shape {
     protocol: Option<&'static str>,
     /// The `n`th link's target.
     target: fn(usize) -> String,
-    /// Whether the write files a finding about every link, or about none.
-    filed: bool,
     /// How many documents the stem `hub` names before the write.
     hubs: usize,
 }
@@ -98,7 +96,6 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
         label,
         protocol,
         target,
-        filed,
         hubs,
     } = shape;
     let scratch = Scratch::new(&format!("norn-store-heap-{label}-{links}"));
@@ -151,7 +148,7 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
     );
     assert_eq!(
         counters.get("findings_written"),
-        Some(if filed { links as u64 } else { 0 }),
+        Some(links as u64),
         "{label}"
     );
     peak
@@ -170,7 +167,8 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
 /// - every link is `[[dNNNNN/hub.md]]`, held under one key in `hub/`
 ///   and another in `hub.md/`, and each is filed broken;
 /// - every link is `[[vault://new/hub.md]]`, held under the paths
-///   `new/hub.md` and `new/hub.md.md`, and each names the one document.
+///   `new/hub.md` and `new/hub.md.md`, and each names the one document, so
+///   each is filed a vault-scheme finding.
 ///
 /// The re-decision reads, judges and files one chunk at a time, and keeps
 /// what a key names only while the chunk just filed holds it, so the heap the
@@ -185,35 +183,30 @@ fn a_hub_write_holds_heap_within_a_chunk() {
             label: "one-key",
             protocol: None,
             target: |_| "hub".to_string(),
-            filed: true,
             hubs: 1,
         },
         Shape {
             label: "filled-key",
             protocol: None,
             target: |_| "hub".to_string(),
-            filed: true,
             hubs: 8,
         },
         Shape {
             label: "distinct-keys",
             protocol: None,
             target: |n| format!("d{n:05}/hub"),
-            filed: true,
             hubs: 1,
         },
         Shape {
             label: "cross-class-keys",
             protocol: None,
             target: |n| format!("d{n:05}/hub.md"),
-            filed: true,
             hubs: 1,
         },
         Shape {
             label: "cross-path-keys",
             protocol: Some("vault"),
             target: |_| "new/hub.md".to_string(),
-            filed: false,
             hubs: 1,
         },
     ];

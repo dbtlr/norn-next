@@ -1,7 +1,7 @@
 # Observe Obsidian link resolution
 
-This probe collects Obsidian observations for NORN-422. It contains no accepted resolution expectations yet.
-The resolution ADR and Norn implementation follow separately.
+This probe collects Obsidian observations for NORN-422.
+[ADR 0040](../../../docs/decisions/0040-a-link-resolves-as-obsidian-resolves-it.md) records the resolution rule, and the parity suite named below holds norn to it.
 
 [Obsidian 1.14.5 on iPhone](observations/ios-1.14.5/README.md) records the first opening pass and one captured rename.
 Those observations include changed inputs and an opening error; they do not certify the original tree or other platforms.
@@ -45,6 +45,8 @@ Results without actual filename evidence do not settle NFC versus NFD behavior.
 A case-insensitive device does not establish case folding on a case-sensitive filesystem.
 Record these limitations and repeat affected cases on a suitable filesystem before calling them confirmed.
 
-This is a manual external-application probe, not an automated assertion of current Norn behavior.
+The observations are manual external-application observations of Obsidian, not assertions about Norn.
 The iOS recording provides exploratory evidence for the resolution ADR.
 Cross-platform behavior and unobserved link-writing combinations remain outside its verified coverage.
+
+`crates/norn-host/tests/obsidian_parity.rs` asserts norn's answer for each recorded case against an authored expectation, and checks that expectation for compatibility with these observations.

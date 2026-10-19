@@ -196,6 +196,15 @@ fn missing_anchor(ordinal: u64, at: &str) -> Filed {
     )
 }
 
+fn vault_scheme(ordinal: u64, at: &str) -> Filed {
+    (
+        FindingKind::VaultScheme.as_str().to_string(),
+        ordinal,
+        vec![at.to_string()],
+        1,
+    )
+}
+
 /// A counter's reading in `counters`.
 fn counted(counters: &DerivationCounters, name: &str) -> u64 {
     counters
@@ -649,7 +658,11 @@ fn a_rooted_name_is_redecided_through_its_one_changed_path() {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("redecide-rooted-{order:?}"), order);
         vault.write(&[("h.md", "[[vault://v1.md]]\n"), ("v1.md.md", "x\n")]);
-        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+        assert_eq!(
+            vault.findings("h.md"),
+            [vault_scheme(0, "v1.md.md")],
+            "{order:?}"
+        );
 
         vault.write(&[("v1.md", "one\n")]);
         assert_eq!(
@@ -658,7 +671,66 @@ fn a_rooted_name_is_redecided_through_its_one_changed_path() {
             "{order:?}"
         );
         vault.kill("v1.md");
-        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+        assert_eq!(
+            vault.findings("h.md"),
+            [vault_scheme(0, "v1.md.md")],
+            "{order:?}"
+        );
+    }
+}
+
+/// **A vault-scheme finding rides the changeset like the other link-health
+/// kinds.** A `vault://` link of either family is broken until its target is
+/// created, files a vault-scheme finding while the target stands, is broken
+/// again when the target is deleted, and follows the target's heading: the
+/// anchor it names makes the finding a vault-scheme one, and losing it makes
+/// the missing anchor stand alone. Rewriting the link as a `/` link heals it.
+#[test]
+fn a_vault_scheme_finding_rides_the_changeset() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-vault-scheme-{order:?}"), order);
+        vault.write(&[(
+            "h.md",
+            "[[vault://dir/t.md]]\n\n[m](vault://dir/t.md)\n\n[[vault://dir/t.md#Intro]]\n",
+        )]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [broken(0), broken(1), broken(2)],
+            "{order:?}"
+        );
+
+        let counters = vault.write(&[("dir/t.md", "# Intro\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [
+                vault_scheme(0, "dir/t.md"),
+                vault_scheme(1, "dir/t.md"),
+                vault_scheme(2, "dir/t.md"),
+            ],
+            "{order:?}"
+        );
+        assert_eq!(counted(&counters, "findings_written"), 3, "{order:?}");
+
+        vault.write(&[("dir/t.md", "# Other\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [
+                vault_scheme(0, "dir/t.md"),
+                vault_scheme(1, "dir/t.md"),
+                missing_anchor(2, "dir/t.md"),
+            ],
+            "{order:?}"
+        );
+
+        vault.write(&[("h.md", "[[/dir/t.md]]\n\n[m](vault://dir/t.md)\n")]);
+        assert_eq!(
+            vault.findings("h.md"),
+            [vault_scheme(1, "dir/t.md")],
+            "{order:?}"
+        );
+
+        vault.kill("dir/t.md");
+        assert_eq!(vault.findings("h.md"), [broken(0), broken(1)], "{order:?}");
     }
 }
 
@@ -1285,6 +1357,7 @@ fn incremental_equals_rebuild_including_finding_order() {
         FindingKind::Broken,
         FindingKind::Ambiguous,
         FindingKind::MissingAnchor,
+        FindingKind::VaultScheme,
     ] {
         assert!(
             kinds.contains(kind.as_str()),

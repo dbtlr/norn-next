@@ -1305,7 +1305,11 @@ extension than `.md` is removed. A
 same-document anchor names its own document. A link is
 judged by resolving it first: one document is healthy and more are ambiguous, and none is
 broken unless the target's last segment carries an extension other than `.md`, which names
-an attachment and is not judged. A
+an attachment and is not judged. A healthy link written through `vault://` also files a
+`link/vault-scheme` warning, since Obsidian has no such scheme and cannot open it; the link
+keeps its place in the link graph, its backlinks and the cascades, and a `vault://` link
+whose target lacks its anchor files the missing anchor alone, as the store holds one finding
+per link. A
 heading or block anchor is carried as written and not checked on the row. So a row's links
 column and a get's links page carry, for each link, the head of the documents it names now —
 at most five, in the ladder's order, each by its minimal disambiguating suffix, with the
@@ -2419,7 +2423,9 @@ since a `COMMIT` or `ROLLBACK` composed over the connection is refused at prepar
 precondition a read observed is the applier's to check again at the write.
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
-matches only `**/norn/glossary.md`; stem resolution is the one-segment case. This is *the*
+matches only `**/norn/glossary.md`; stem resolution is the one-segment case. A target's exact
+vault path is read first, and a `./`, `../`, `/` or `vault://` target is a path, never a
+suffix, as below. This is *the*
 grammar across every target surface: CLI, MCP, wikilinks, filters. It is expressed as
 `norn-wire` resolution types; `norn-text` parses link *syntax* only; execution is a store
 builder with its own `EXPLAIN` bar and index support. Candidates emit as minimal
@@ -2534,12 +2540,12 @@ Beside it, the link index holds each link under the keys its target spells in th
 documents' own key space — a function of the link and its document's path, never of what
 the vault holds — and backlinks are equality seeks of those keys, each link confirmed at the
 read to name one document alone. How a target resolves **derives from
-the fact, protocol first and family second**: a written `protocol://` prefix shadows the
-family, because the family says which grammar the author wrote and the protocol says what
-the address is. A protocol-free wikilink target resolves as a suffix address, while a
-protocol-free inline Markdown target resolves as a relative filesystem path against the
-containing document — vault-root-relative when the path is rooted, and containment-bounded
-either way.
+the fact, protocol first and the target's form second**: a written `protocol://` prefix
+shadows the family, because the family says which grammar the author wrote and the protocol
+says what the address is. A protocol-free target resolves by its form, alike in both families: opening
+with `./` or `../` it is a path from the containing document's folder, opening with `/` a
+path from the vault root, and otherwise a suffix address, and a path climbing above the
+vault root names nothing.
 
 **Derivation — attach, heal, watch.** Pure host composition. Cold attach walks
 `fs.walk → text.parse → store.upsert`. Warm operation is watcher facts from `norn-fs`
@@ -3040,9 +3046,9 @@ fixes write is resolved in one judgment of the link index over the settled route
 heads of those naming several in one more, so the cost follows the links written and the
 routes, never their product, and a batch writing no link reads nothing for it. **A broken link
 follows a recorded move where the answer is unique.** A selected `link/broken` finding's stored
-link is read against tombstones: a suffix wikilink by its suffix, a relative or rooted Markdown
-link by the exact path it names from its holder, and a `vault://` wikilink by both root paths
-its name can reduce to. The deaths are pooled, distinct by path and in path order, naming at
+link is read against tombstones: a suffix-addressed link of either family by its suffix, a
+`./`, `../` or `/` link of either family by the exact path it names from its holder, and a
+`vault://` link of either family by both root paths its name can reduce to. The deaths are pooled, distinct by path and in path order, naming at
 most the first two. Quarantine tombstones are excluded, and ambiguity-ignore does not narrow
 this read. Exactly one tombstone with a recorded content hash and exactly one live document
 holding that hash gives a derived fix. No tombstone, or an address to which no read applies,

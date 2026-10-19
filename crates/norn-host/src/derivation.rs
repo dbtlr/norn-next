@@ -400,8 +400,8 @@ const CAUSES: [Cause; 16] = [
 /// The finding kinds no cause above carries.
 ///
 /// Quarantine, the unread block, the tag facet and rule judgment are the
-/// producers recording findings today. Link health's three kinds — broken,
-/// ambiguous, missing anchor — are named here because they have no cause in
+/// producers recording findings today. Link health's four kinds — broken,
+/// ambiguous, missing anchor, vault scheme — are named here because they have no cause in
 /// this crate: ADR 0027 rules the store to judge link health in SQL and file
 /// those findings itself, inside the changeset, over per-document facts this
 /// crate's derivation already writes, so no per-document act here ever
@@ -409,10 +409,11 @@ const CAUSES: [Cause; 16] = [
 /// is the one line that keeps the classification below a reading of the
 /// registry rather than a claim that every kind the registry holds is this
 /// crate's.
-const KINDS_NO_CAUSE_CARRIES: [FindingKind; 3] = [
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 4] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,
     FindingKind::MissingAnchor,
+    FindingKind::VaultScheme,
 ];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is

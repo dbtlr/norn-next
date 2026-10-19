@@ -806,6 +806,7 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "link/broken",
             "link/ambiguous",
             "link/missing-anchor",
+            "link/vault-scheme",
             "document/misplaced",
             "document/rules-conflict",
             "field/required-missing",

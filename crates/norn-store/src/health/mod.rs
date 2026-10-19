@@ -106,7 +106,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
-use norn_wire::{FindingKind, LinkHealth};
+use norn_wire::{FindingKind, LinkHealth, VAULT_PROTOCOL};
 
 use crate::error::StoreError;
 use crate::facts::{CANDIDATE_HEAD, CandidateFact, FindingFacts, LinkAnchor, LinkFact, StoredLink};
@@ -117,10 +117,11 @@ use crate::resolve::{self, AmbiguityIgnore};
 
 /// The kinds the store judges and files itself, and no caller records or
 /// discards.
-pub(crate) const LINK_HEALTH_KINDS: [FindingKind; 3] = [
+pub(crate) const LINK_HEALTH_KINDS: [FindingKind; 4] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,
     FindingKind::MissingAnchor,
+    FindingKind::VaultScheme,
 ];
 
 /// The message every broken link's finding carries.
@@ -131,6 +132,10 @@ const AMBIGUOUS: &str = "the link names more than one document";
 
 /// The message every missing anchor's finding carries.
 const MISSING_ANCHOR: &str = "the document the link names holds no place its anchor names";
+
+/// The message every vault-scheme link's finding carries.
+const VAULT_SCHEME: &str = "the link resolves through `vault://`, a scheme Obsidian cannot open; \
+     the `/` form names the same document in both";
 
 /// Which links a judgment judges.
 ///
@@ -829,7 +834,7 @@ fn judge_links(
             Some(Verdict::Ambiguous { head, .. }) => {
                 named.extend(head.iter().map(|one| (one.id, one.path.as_str())));
             }
-            Some(Verdict::One(one)) if missing.contains(&at) => {
+            Some(Verdict::One(one)) if missing.contains(&at) || is_vault_scheme(&links[at]) => {
                 named.insert(one.id, one.path.as_str());
             }
             _ => {}
@@ -852,11 +857,22 @@ fn judge_links(
             Some(Verdict::One(one)) if missing.contains(&at) => {
                 (FindingKind::MissingAnchor, vec![one], 1, MISSING_ANCHOR)
             }
+            // One finding stands per link, so the missing anchor above takes
+            // precedence over the scheme.
+            Some(Verdict::One(one)) if is_vault_scheme(held) => {
+                (FindingKind::VaultScheme, vec![one], 1, VAULT_SCHEME)
+            }
             Some(Verdict::One(_)) | None => continue,
         };
         findings.push(finding(held, kind, &head, total, message, names)?);
     }
     Ok(findings)
+}
+
+/// Whether `held` was written through `vault://`, a scheme Obsidian cannot
+/// open, whichever family wrote it.
+fn is_vault_scheme(held: &Held) -> bool {
+    held.link.fact.protocol.as_deref() == Some(VAULT_PROTOCOL)
 }
 
 /// The links one read of [`statement::links_sql`] in the shape `selected`

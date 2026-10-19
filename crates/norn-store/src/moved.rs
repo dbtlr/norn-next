@@ -3,8 +3,9 @@
 //!
 //! A document moved outside norn leaves a death at its old path and a live row
 //! at its new one holding the same bytes. Following a broken link through that
-//! move is two reads: the death the link's old target names — by its wikilink
-//! suffix, or by its exact path for a Markdown or `vault://` link — and the
+//! move is two reads: the death the link's old target names — by its suffix
+//! for a suffix-addressed link, or by its exact path for a `./`, `../`, `/` or
+//! `vault://` link, in either family — and the
 //! live documents holding the death's last content hash. **Each stops at two
 //! rows**, because a follow decides only between one and more than one: one
 //! death and one holder is a move, and two of either is ambiguous.
