@@ -52,7 +52,10 @@ pub enum Backlinks {
     Forbidden,
     /// Every link naming the document is rewritten to name this one.
     RewrittenTo(ResolutionTarget),
-    /// Every link naming the document is left broken.
+    /// Every link naming the document is left as written: broken where it
+    /// names nothing once the document is gone, and retargeted where it then
+    /// names another — a suffix link reaching a deeper document once the one
+    /// at its exact path is deleted (ADR 0040) — each said in the forecast.
     LeftBroken,
 }
 

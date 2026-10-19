@@ -119,8 +119,8 @@ use norn_store::{
 };
 use norn_text::RewriteSkip;
 use norn_wire::{
-    Backlinks, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth,
-    LinkKey, Operation, OperationKind, PlanCondition, Resolves,
+    Backlinks, DocumentPath, FileState, LinkAddress, LinkAddressKind, LinkAdvisory, LinkFamily,
+    LinkHealth, LinkKey, Operation, OperationKind, PlanCondition, Resolves,
 };
 
 use super::compose::{After, Composition, Kept, Skipped};
@@ -568,26 +568,69 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         if let Some(removal) = removal {
             named.insert(removal.position);
         }
-        let left_behind = unwritten
-            && decider(
-                &change.holder,
-                &change.link,
-                Named::of(&change),
-                lineage,
-                &indexed,
-                normalizer,
-            )
-            .is_some_and(|decider| {
-                respells(
-                    decider,
-                    &change.before,
-                    &change.after,
+        // The operation deciding what the link names after the plan, and
+        // whether its cascade respells the link for it.
+        let decided = unwritten
+            .then(|| {
+                decider(
+                    &change.holder,
+                    &change.link,
+                    Named::of(&change),
                     lineage,
-                    &rewritten_to,
                     &indexed,
                     normalizer,
                 )
+            })
+            .flatten();
+        let respelled = |decider| {
+            respells(
+                decider,
+                &change.before,
+                &change.after,
+                lineage,
+                &rewritten_to,
+                &indexed,
+                normalizer,
+            )
+        };
+        // A link a delete rewriting its links, or a wikilink rewrite, would
+        // respell and already names what that operation names: the plan
+        // took it where its author said.
+        let fulfilled = decided.is_some_and(|decided| {
+            let names_a_destination = match decided {
+                Decider::Removal(removal) => removal.rewrite_to().is_some(),
+                Decider::Retarget(_) => true,
+                Decider::Authored(_) | Decider::Move { .. } => false,
+            };
+            names_a_destination && !respelled(decided)
+        });
+        // A link the plan leaves naming another document than the one it
+        // named, and not that document where a move carries it. Where its
+        // holder moved and it is a relative path, the move alone changed what
+        // it names, and the cascade had no spelling to keep it: a wikilink
+        // written as a path is given none yet, and a Markdown one whose
+        // spelling does not read back is left too.
+        let names_another = unwritten
+            && !fulfilled
+            && names_another(&change.before, &change.after, lineage, normalizer);
+        let holder_moved = normalizer
+            .normalize(Path::new(change.holder.as_str()))
+            .ok()
+            .is_some_and(|holder| {
+                lineage
+                    .source(&holder)
+                    .is_some_and(|drawn| drawn.from != holder)
             });
+        let relative = matches!(
+            LinkAddress::of(
+                wire_family(change.link.family),
+                change.link.protocol.as_deref(),
+                &change.link.target
+            ),
+            LinkAddress::Relative(_)
+        );
+        let relative_left = names_another && holder_moved && relative;
+        let left_behind = relative_left || decided.is_some_and(respelled);
         // Links held under one key share its places, so the places are read
         // once per key, however many documents the key names and however
         // the links of several keys interleave.
@@ -605,6 +648,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             named_removed: false,
             left_behind: false,
             ambiguous_among_moved: false,
+            names_another: false,
         });
         held.written |= change.written;
         held.unwritten |= unwritten;
@@ -612,6 +656,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         held.named_removed |= removal.is_some();
         held.left_behind |= left_behind;
         held.ambiguous_among_moved |= ambiguous_among_moved;
+        held.names_another |= names_another;
     })?;
     // A link a rewrite writes names the document a delete removes where the
     // text it had resolved before the plan to exactly that document, read
@@ -1011,6 +1056,40 @@ pub(crate) fn left_behind<'l>(
     match after {
         Resolves::One { path } if identity(path).as_ref() == Some(to) => None,
         _ => Some((to, drawn)),
+    }
+}
+
+/// **Whether a link names another document after the plan**: it resolved
+/// before the plan to exactly one document, and after it resolves to anything
+/// but that document, where it stood or where a move of the plan carries it
+/// — none, several, or one other. With the exact path first (ADR 0040), a
+/// document appearing at a suffix link's exact path, or leaving it, moves the
+/// link between documents without breaking it; a link that still names its
+/// document, followed or left in place, does not.
+///
+/// A path the plan vacates and refills is the same path on both sides, so a
+/// link resolving there is not read as naming another here: which document
+/// stands there is [`left_behind`]'s question.
+pub(crate) fn names_another(
+    before: &Resolves,
+    after: &Resolves,
+    lineage: &Lineage,
+    normalizer: &PathNormalizer,
+) -> bool {
+    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let Resolves::One { path } = before else {
+        return false;
+    };
+    let Some(named) = identity(path) else {
+        return false;
+    };
+    match after {
+        Resolves::One { path } => {
+            let now = identity(path);
+            let followed = lineage.carried_to(&named).map(|(to, _)| to);
+            now.as_ref() != Some(&named) && now.as_ref() != followed
+        }
+        Resolves::None {} | Resolves::Several {} => true,
     }
 }
 
@@ -1535,12 +1614,17 @@ struct Judged {
     /// not name it where it lands, a document a delete of the plan removes
     /// rewriting the links naming it, and does not name the delete's target,
     /// or is a wikilink a wikilink rewrite of the plan retargets, and does
-    /// not name its `new`: its cascade left it as written.
+    /// not name its `new`; or it is a relative path its holder's move leaves
+    /// naming another document: its cascade left it as written.
     left_behind: bool,
     /// The link was ambiguous before the plan, and one of the documents it
     /// could name is one a move of the plan carries away, a delete removes
     /// rewriting the links naming it, or a wikilink rewrite's `old` names.
     ambiguous_among_moved: bool,
+    /// The link, which the plan does not write, named one document before
+    /// the plan and names something else after it, neither that document nor
+    /// that document where a move carries it ([`names_another`]).
+    names_another: bool,
 }
 
 impl Judged {
@@ -1568,10 +1652,13 @@ impl Judged {
     /// **Otherwise each side is read as link health judges it**
     /// ([`LinkHealth::of_address`]): a link healthy or ambiguous before and
     /// broken after is left broken; one ambiguous after and not before is
-    /// made ambiguous; and an ambiguous link the plan does not write — the
+    /// made ambiguous; an ambiguous link the plan does not write — the
     /// key holding one, whatever else it holds — is retargeted where it is healthy after, or ambiguous after with members
     /// the plan moved — the last having no entry, since several on both
-    /// sides is no change the set records. A side link health does not judge
+    /// sides is no change the set records; and a healthy link the plan does
+    /// not write is retargeted where it names another document after
+    /// ([`names_another`]), as a document appearing at or leaving its exact
+    /// path makes it. A side link health does not judge
     /// — an attachment's address resolving to no document — is never broken,
     /// so a link going there is recorded and not advised on.
     fn advisory(&self, skip: Option<RewriteSkip>) -> Option<LinkAdvisory> {
@@ -1603,6 +1690,9 @@ impl Judged {
                 Some(LinkAdvisory::made_ambiguous(key))
             }
             (LinkHealth::Ambiguous, LinkHealth::Healthy) if self.unwritten => {
+                Some(LinkAdvisory::retargeted(key))
+            }
+            (LinkHealth::Healthy, LinkHealth::Healthy) if self.names_another => {
                 Some(LinkAdvisory::retargeted(key))
             }
             (LinkHealth::Ambiguous, LinkHealth::Ambiguous)
@@ -3140,6 +3230,7 @@ mod tests {
                 named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
+                names_another: false,
             }
             .advisory(None)
         };
@@ -3174,6 +3265,7 @@ mod tests {
                 named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
+                names_another: false,
             }
             .advisory(None)
         };

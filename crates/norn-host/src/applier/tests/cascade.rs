@@ -1242,3 +1242,123 @@ fn a_key_left_for_several_reasons_is_advised_by_the_first_ranked() {
         assert_eq!(resolution.forecast.links, vec![advisory], "in {holder:?}");
     }
 }
+
+/// **A moved holder's own relative wikilink that would name another document
+/// is never left silently** (ADR 0040): a wikilink written as a `./` or
+/// `../` path is given no relative spelling yet, so where moving its holder
+/// alone would change the document it names — to a twin beside where the
+/// holder lands, or to none — the link is left as written and advised as
+/// unrepresentable, and the change set records what it names after the plan.
+/// Moved together with its target, it still names that document, and nothing
+/// is said.
+#[test]
+fn a_moved_holders_relative_wikilink_it_cannot_respell_is_skipped_saying_what_it_names_after() {
+    for (files, from, to, address, after) in [
+        (
+            vec![
+                ("a/m.md", "[[./x]]\n"),
+                ("a/x.md", "A\n"),
+                ("b/x.md", "B\n"),
+            ],
+            "a/m.md",
+            "b/m.md",
+            "./x",
+            Resolves::one(path("b/x.md")),
+        ),
+        (
+            vec![
+                ("a/b/m.md", "[[../x]]\n"),
+                ("a/x.md", "A\n"),
+                ("c/x.md", "C\n"),
+            ],
+            "a/b/m.md",
+            "c/d/m.md",
+            "../x",
+            Resolves::one(path("c/x.md")),
+        ),
+        (
+            vec![("a/m.md", "[[./x]]\n"), ("a/x.md", "A\n")],
+            "a/m.md",
+            "b/m.md",
+            "./x",
+            Resolves::none(),
+        ),
+    ] {
+        let mut fixture = Fixture::new(&files);
+        let resolution = fixture.resolution(vec![moving(from, to)]);
+        let link = key(to, LinkFamily::Wikilink, address);
+        assert!(resolution.plan.operations[0].cascade.is_empty(), "{to}");
+        assert_eq!(
+            resolution.forecast.links,
+            vec![LinkAdvisory::skipped_unrepresentable(link.clone())],
+            "{to}"
+        );
+        assert!(
+            resolution
+                .plan
+                .conditions
+                .contains(&PlanCondition::link_resolution(
+                    link,
+                    Resolves::one(path("a/x.md")),
+                    after,
+                )),
+            "{to}: {:?}",
+            resolution.plan.conditions
+        );
+        let held = files[0].1;
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(fixture.read(to).as_deref(), Some(held));
+    }
+
+    let fixture = Fixture::new(&[("a/x.md", "X\n"), ("a/m.md", "[[./x]]\n")]);
+    let resolution =
+        fixture.resolution(vec![moving("a/m.md", "c/m.md"), moving("a/x.md", "c/x.md")]);
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty())
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+}
+
+/// **A link the plan leaves naming another document is advised as
+/// retargeted** (ADR 0040): with the exact path first, a document appearing
+/// at a suffix link's exact path — created there, or moved there — takes the
+/// link from the deeper one it named, and one leaving the exact path hands
+/// the link to the deeper one, a delete leaving its links broken among them.
+/// Neither is a broken link, and neither is silent. A link still naming its
+/// own document where a move carries it is followed, not retargeted.
+#[test]
+fn a_link_left_naming_another_document_is_advised_as_retargeted() {
+    let holder = ("h.md", "[[x]] [t](x.md)\n");
+    let retargeted = vec![
+        LinkAdvisory::retargeted(key("h.md", LinkFamily::Markdown, "x.md")),
+        LinkAdvisory::retargeted(key("h.md", LinkFamily::Wikilink, "x")),
+    ];
+    for (files, operation) in [
+        (
+            vec![("x.md", "X\n"), ("a/x.md", "A\n"), holder],
+            super::breaking("x.md"),
+        ),
+        (
+            vec![("a/x.md", "A\n"), ("c/q.md", "Q\n"), holder],
+            moving("c/q.md", "x.md"),
+        ),
+        (
+            vec![("a/x.md", "A\n"), holder],
+            super::creating("x.md", "X\n"),
+        ),
+    ] {
+        let fixture = Fixture::new(&files);
+        let resolution = fixture.resolution(vec![operation.clone()]);
+        assert_eq!(resolution.forecast.links, retargeted, "{operation:?}");
+        assert!(resolution.plan.operations[0].cascade.is_empty());
+    }
+
+    let fixture = Fixture::new(&[("a/x.md", "A\n"), holder]);
+    let resolution = fixture.resolution(vec![moving("a/x.md", "b/x.md")]);
+    assert_eq!(resolution.forecast.links, vec![]);
+    assert!(resolution.plan.operations[0].cascade.is_empty());
+}

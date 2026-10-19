@@ -38,8 +38,9 @@
 //! changes, before and after, as a condition. The forecast advises on what
 //! that record cannot say — a link the plan's cascade matched and left as
 //! written, and why — and on the links whose new resolution a caller should
-//! look at: left broken, made ambiguous, or an ambiguous link the plan
-//! retargets.
+//! look at: left broken, made ambiguous, or retargeted — an ambiguous link
+//! the plan resolves otherwise, or a link that named one document and names
+//! another after the plan without being rewritten.
 //! Each advisory names its link by the key the change set holds it under, or
 //! would hold it under, never by a resolution of its own. A link left broken
 //! or made ambiguous has an entry, from which the advisory follows; a link
@@ -228,8 +229,13 @@ pub enum LinkAdvisory {
         /// The link.
         link: LinkKey,
     },
-    /// The link was ambiguous and the plan changes what it resolves to — a
-    /// delete leaving one of its candidates, say — without rewriting it.
+    /// The plan changes what the link resolves to without rewriting it: it
+    /// was ambiguous — a delete leaving one of its candidates, say — or it
+    /// named one document and names another after the plan, as a document
+    /// appearing at or leaving a suffix link's exact vault path makes it
+    /// (ADR 0040). A link still naming its document where a move carries it,
+    /// or already naming what a rewriting delete or a wikilink rewrite names,
+    /// is not retargeted.
     #[non_exhaustive]
     Retargeted {
         /// The link.
@@ -306,7 +312,7 @@ impl LinkAdvisory {
         LinkAdvisory::MadeAmbiguous { link }
     }
 
-    /// The plan changes what the ambiguous `link` resolves to.
+    /// The plan changes what `link` resolves to without rewriting it.
     pub const fn retargeted(link: LinkKey) -> Self {
         LinkAdvisory::Retargeted { link }
     }

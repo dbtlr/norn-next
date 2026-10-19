@@ -3623,8 +3623,12 @@ records every link whose resolution it changes as a condition naming the link as
 leaves it — by its holder, its syntax and its address as written, protocol prefix
 included — with what it resolves to before and after the plan, a link the plan removes or
 respells away being no entry, since that file's hashes guard it; and the forecast names
-the links the plan leaves as written, leaves broken, makes ambiguous or retargets, and the
-files a folder move leaves behind. A folder move expands at planning into one document
+the links the plan leaves as written, leaves broken, makes ambiguous or retargets — a link
+retargeted being one the plan resolves otherwise without rewriting it, an ambiguous one or
+one leaving a document for another, as a document appearing at or leaving a suffix link's
+exact path makes it — and the files a folder move leaves behind. A moved holder's own
+relative link the cascade cannot respell, a wikilink written as a `./` or `../` path among
+them, is left as written and advised so where the move changes what it names. A folder move expands at planning into one document
 move per document the folder holds, at any depth and in path order, as a `where` target
 does, each keeping what the folder move carries beyond its kind; every other file beneath
 the folder, and every place there the vault's walk does not enter, is left behind and

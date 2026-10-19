@@ -543,7 +543,9 @@ impl OperationKind {
         }
     }
 
-    /// Remove the document at `path`, leaving every link naming it broken.
+    /// Remove the document at `path`, leaving every link naming it as
+    /// written: broken, or naming another document where its address reaches
+    /// one once this one is gone, which the forecast advises as retargeted.
     pub const fn delete_document_breaking_links(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,
