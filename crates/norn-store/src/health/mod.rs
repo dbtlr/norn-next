@@ -816,7 +816,7 @@ fn judge_links(
         return Ok(Vec::new());
     }
     let key = SuffixKey::under(order);
-    resolve_keys(connection, work, key, order, ignore, links, summaries)?;
+    resolve_keys(connection, work, key, links, summaries)?;
 
     let verdicts = links
         .iter()
@@ -945,8 +945,6 @@ fn resolve_keys(
     connection: &Connection,
     work: &ReadWork,
     key: SuffixKey,
-    order: StoredPathOrder,
-    ignore: &AmbiguityIgnore,
     links: &[Held],
     summaries: &mut KeySummaries,
 ) -> Result<(), StoreError> {
@@ -1028,9 +1026,7 @@ fn resolve_keys(
             connection,
             work,
             &statement::totals_sql(key),
-            params_from_iter(statement::totals_parameters(
-                &classes, &paths, ignore, order,
-            )?),
+            params_from_iter(statement::totals_parameters(&classes, &paths)?),
             |row| {
                 Ok(Ok((
                     row.get::<_, i64>(0)?,

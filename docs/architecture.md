@@ -968,20 +968,22 @@ eight documents per row, asks at that and drives from what the part matched, so 
 about its rows whatever the vault — the price of walking before it asks: a page whose part
 keeps more documents than the page reads but no more than about eight per row pays its
 first window, up to about five times the steps it took when such a page asked at the
-ceiling first, a constant that does not grow with the vault. Once the budget reaches the ceiling, a page walking past many rows to the next of a few pays for the many, each
-once over a drain, a declared limit: a part's documents bunched together, or a part whose
-seek reaches many documents it rejects — findings at paths no document stands at, values of
-the wrong declared shape or failing a folded key's typed order, links whose key names
-another document, documents the ambiguity-ignore set leaves out, paths under a glob's
-literal prefix the glob rejects — which its count takes for kept, so the page walks on — or a
-part keeping many documents of which few hold the rows the page selects, among many rows at
-documents it rejects — a validate's findings of one kind, severity or rule, or a field
-sort's section of documents carrying its key — whose count is of documents and not of those rows, so the page walks on past the
-ceiling though the drain stays linear: its rounds to the ceiling, windows counted in its
-own rows and counts, come to a few times the rows the page passes, and each row past them is
-walked once; no index holds such a part's documents in a page's order. Inequality and absence seek the
-documents a page must not hold, so a page they alone narrow seeks its order index as a page
-with no filter does and tests each row against them at its key. Two bars hold this, one on the
+ceiling first, a constant that does not grow with the vault. Once the budget reaches the
+ceiling, a page walking past many rows to the next of a few pays for the many, each once
+over a drain, a declared limit: a part's documents bunched together, or a part whose
+seek reaches many documents it rejects — findings at paths no document stands at, values
+of the wrong declared shape or failing a folded key's typed order, links whose key names
+another document, paths under a glob's literal prefix the glob rejects — which its count
+takes for kept, so the page walks on — or a part keeping many documents of which few
+hold the rows the page selects, among many rows at documents it rejects — a validate's
+findings of one kind, severity or rule, or a field sort's section of documents carrying
+its key — whose count is of documents and not of those rows, so the page walks on past
+the ceiling though the drain stays linear: its rounds to the ceiling, windows counted in
+its own rows and counts, come to a few times the rows the page passes, and each row past
+them is walked once; no index holds such a part's documents in a page's order.
+Inequality and absence seek the documents a page must not hold, so a page they alone
+narrow seeks its order index as a page with no filter does and tests each row against
+them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
@@ -2461,12 +2463,14 @@ folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md`
 that does not tell the two apart. Each document row stores its admitting count, the fewest
 segments a target spells that keeps the document in its class under the pinned declaration,
 written by the changeset that derives the row; a pin that moves the ignore set is followed by
-the heal that derives every row again. Link health's head statement seeks a class by that
-count beside the key the root probes, so a head never reads the members its class keeps
-out; every other class read tests the globs row by row and steps past them (NORN-339). Every glob matches under that one rule: a path part of a
-find, a count or a validate matches with ASCII case folded where the store's order folds and
-bytewise where it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root
-that folds and not on one that tells the two apart. A find's and a count's path range is read
+the heal that derives every row again. Every class read seeks each admitting count from
+one to the target's segment count beside the key the root probes, over each of the
+probe's ranges, so it never reads the members its class keeps out. A head cuts each run
+in ladder order before merging and cutting the union; a total sums the disjoint runs'
+counts. Every glob matches under that one rule: a path part of a find, a count or a
+validate matches with ASCII case folded where the store's order folds and bytewise where
+it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root that folds
+and not on one that tells the two apart. A find's and a count's path range is read
 in the same order; a validate's is its glob's folded range in the answer order, as the
 validate builder's paragraph above states. A glob's work follows its
 literal prefix's range, so a glob with no literal prefix, such as `**/*.MD`, reads every path

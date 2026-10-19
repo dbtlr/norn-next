@@ -1137,18 +1137,18 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
     );
 }
 
-/// **A class read seeks the suffix key its root probes, and no other.** A root
-/// that tells spellings apart ranges over `documents_suffix_key`, and a root
-/// that folds ASCII case over `documents_folded_suffix_key`; either way a
-/// target opens one seek per reduction, bound to the key column, and the
-/// ignore set tests the rows those seeks reached rather than widening what is
-/// read. The bar is judged on the row that searches `documents`: its index and
-/// its range constraint.
+/// **A class read seeks the suffix key its root probes, and no other.** A
+/// root that tells spellings apart ranges over
+/// `documents_admitted_suffix_key`, and a root that folds ASCII case over
+/// `documents_admitted_folded_suffix_key`; either way a target opens one
+/// seek per reduction and admitting count, bound to both the count and the
+/// key range. Excluded members are never read. The bar is judged on the row
+/// that searches `documents`: its index and its range constraint.
 ///
-/// **The candidates direction sorts through one temporary B-tree, and that is
-/// the stated baseline.** Its order is total — the probed key, then `path` —
-/// and each key's index leads with the key alone, so the index answers the
-/// range and not the tie-break.
+/// **The candidates direction sorts through one temporary B-tree, and that
+/// is the stated baseline.** Its order is total — the probed key, then
+/// `path` — and each count's run is ordered by that ladder. The union is
+/// sorted before emission.
 ///
 /// Control: each key's index dropped, and the same bar fails under every
 /// resolution that probes it.
@@ -1172,7 +1172,10 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
         );
         read.assert_no_full_scan_of("documents");
         read.assert_searches_through("documents", Access::Index(index));
-        read.assert_search_constraint("documents", &format!("({column}>? AND {column}<?)"));
+        read.assert_search_constraint(
+            "documents",
+            &format!("(admitting_segments=? AND {column}>? AND {column}<?)"),
+        );
         assert_eq!(
             read.searches_of("documents").len(),
             resolution.probe().range_count(),
@@ -1199,12 +1202,12 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
     for (order, index, column) in [
         (
             StoredPathOrder::Sensitive,
-            "documents_suffix_key",
+            "documents_admitted_suffix_key",
             "suffix_key",
         ),
         (
             StoredPathOrder::AsciiCaseInsensitive,
-            "documents_folded_suffix_key",
+            "documents_admitted_folded_suffix_key",
             "folded_suffix_key",
         ),
     ] {

@@ -166,7 +166,7 @@ impl Snapshot {
         candidates_read: &mut u64,
     ) -> Result<Vec<LinkRow>, StoreError> {
         let ids: Vec<i64> = links.iter().map(|(id, _)| *id).collect();
-        let mut named = self.link_targets(&ids, ignore, record, candidates_read)?;
+        let mut named = self.link_targets(&ids, record, candidates_read)?;
         let heads: Vec<Head> = ids
             .iter()
             .map(|id| named.remove(id).unwrap_or_default())
@@ -205,7 +205,6 @@ impl Snapshot {
     fn link_targets(
         &self,
         links: &[i64],
-        ignore: &AmbiguityIgnore,
         record: &mut Vec<Ran>,
         candidates_read: &mut u64,
     ) -> Result<HashMap<i64, Head>, StoreError> {
@@ -217,7 +216,7 @@ impl Snapshot {
                 record,
                 Ran::new(
                     FindStatement::LinkTargets,
-                    compose_link_targets(links, ignore, self.path_order(), CANDIDATE_HEAD),
+                    compose_link_targets(links, self.path_order(), CANDIDATE_HEAD),
                 ),
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -327,23 +326,22 @@ impl Snapshot {
 /// compiled once, and the ranges [`FindStatement::CandidateSuffixes`] reads
 /// them through: the one way a candidate's minimal disambiguating suffix is
 /// found, whichever connection the statement runs on.
-pub(crate) struct SuffixSpellings<'a> {
+pub(crate) struct SuffixSpellings {
     /// Each candidate's id, one of its spellings, and the class it opens, in
     /// the order the candidate's spellings run.
     spelled: Vec<(i64, String, TargetClass)>,
     /// The index in `spelled` of the spelling each range of the statement
     /// belongs to.
     owners: Vec<usize>,
-    ignore: &'a AmbiguityIgnore,
     order: StoredPathOrder,
 }
 
-impl<'a> SuffixSpellings<'a> {
+impl SuffixSpellings {
     /// The spellings of each candidate `named` holds, by its id and its path,
     /// compiled under `order` less the places `ignore` names.
     pub(crate) fn new(
         named: &BTreeMap<i64, &str>,
-        ignore: &'a AmbiguityIgnore,
+        ignore: &AmbiguityIgnore,
         order: StoredPathOrder,
     ) -> Result<Self, StoreError> {
         let mut spelled: Vec<(i64, String, TargetClass)> = Vec::new();
@@ -362,7 +360,6 @@ impl<'a> SuffixSpellings<'a> {
         Ok(SuffixSpellings {
             spelled,
             owners,
-            ignore,
             order,
         })
     }
@@ -385,7 +382,7 @@ impl<'a> SuffixSpellings<'a> {
                     })
             })
             .collect();
-        compose_candidate_suffixes(&ranges, self.ignore, self.order)
+        compose_candidate_suffixes(&ranges, self.order)
     }
 
     /// The classes each candidate's suffix is read from, by its id: the class

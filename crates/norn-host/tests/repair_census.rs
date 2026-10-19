@@ -361,6 +361,44 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     );
     let mut store = vault.store();
     let plans = plans_of(&store, &statements);
+    let health_head = plans
+        .iter()
+        .find(|plan| {
+            plan.sql()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .starts_with("SELECT 0, j.key, dc.id, dc.path,")
+        })
+        .expect("a link-health head statement");
+    let head_sort = health_head
+        .rows()
+        .iter()
+        .find(|row| row.detail == "USE TEMP B-TREE FOR ORDER BY")
+        .expect("the bounded head merge sorts");
+    assert!(admitted_sort(health_head, head_sort).is_some());
+    let count_only = QueryPlan::new(
+        health_head.sql(),
+        health_head
+            .rows()
+            .iter()
+            .map(|row| {
+                let detail = if row.searches() == Some("dl") {
+                    row.detail.replace(
+                        row.constraint().expect("an admitted run constraint"),
+                        "(admitting_segments=?)",
+                    )
+                } else {
+                    row.detail.clone()
+                };
+                PlanRow::new(row.id, row.parent, detail)
+            })
+            .collect(),
+    );
+    assert!(
+        admitted_sort(&count_only, head_sort).is_none(),
+        "a health head's count-only seek was admitted without its suffix bounds"
+    );
     // The set the census plans is every statement the store began while the
     // repairs ran, and nothing besides: one begun outside a repair's own
     // record, or one the record holds and no plan was taken of, is a
@@ -566,7 +604,10 @@ const REACHED: &[&[&str]] = &[
         "documents_admitted_folded_suffix_key",
     ],
     // A links-to part's target: its class's head and total.
-    &["documents_suffix_key", "documents_folded_suffix_key"],
+    &[
+        "documents_admitted_suffix_key",
+        "documents_admitted_folded_suffix_key",
+    ],
     // The apply's changeset: its written links re-decided, and the rule sets
     // its findings cite.
     &["documents_change_feed"],
@@ -1145,17 +1186,32 @@ fn census(plans: &[QueryPlan]) -> Vec<String> {
 ///   the declared limit at `docs/architecture.md:3041-3046` ("costs the
 ///   findings the selection admits").
 /// - **A class's head** (`FindStatement::ClassHead`, a links-to part's
-///   target). The head reads the class's range off the suffix key the root
-///   probes, which orders it by the key, and sorts by path only each run of
-///   rows equal on the key, the head's `LIMIT` stopping the read: a run is the
-///   documents one key spells, which on the raw key is one path's spellings
-///   of the document extension — its leaf's extension dropped,
-///   `crates/norn-store/src/path.rs:11-12`, and the extension read in any
-///   ASCII case, so at most four documents — and those paths' case spellings
-///   on the folded key a folding root probes, where it
-///   holds one of them (`docs/architecture.md:2389-2391`); the class is read
-///   through that seek at `docs/architecture.md:832-834`.
+///   target). Each admitting-count run is cut in ladder order through the
+///   admitted index, then the bounded heads are merged and cut again. The
+///   merge sorts at most one head per count and range, never the class.
 fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
+    let admitted_runs = || {
+        let runs: Vec<&PlanRow> = plan
+            .rows()
+            .iter()
+            .filter(|row| row.searches() == Some("dl") || row.scans() == Some("dl"))
+            .collect();
+        !runs.is_empty()
+            && runs.iter().all(|row| {
+                matches!(
+                    (row.index(), row.constraint()),
+                    (
+                        Some("documents_admitted_suffix_key"),
+                        Some("(admitting_segments=? AND suffix_key>? AND suffix_key<?)")
+                    ) | (
+                        Some("documents_admitted_folded_suffix_key"),
+                        Some(
+                            "(admitting_segments=? AND folded_suffix_key>? AND folded_suffix_key<?)"
+                        )
+                    )
+                )
+            })
+    };
     let searched_through = |table: &str, indexes: &[&str]| {
         plan.searches_of(table)
             .iter()
@@ -1174,18 +1230,12 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
     let a_summary = opens_with("SELECT f.kind, f.severity, COUNT(*)")
         || opens_with("SELECT fr.kind, fr.severity, COUNT(*)");
     let a_count = opens_with("SELECT count(*) <=");
-    let a_class_head = opens_with("SELECT dr.id, dr.path FROM documents AS dr");
+    let a_class_head = opens_with("SELECT dr.id, dr.path FROM (");
+    let a_health_head = opens_with("SELECT 0, j.key, dc.id, dc.path,");
+    let a_suffix_head = opens_with("SELECT j.key, dc.id FROM json_each(?1) AS j");
     match sort.detail.as_str() {
-        "USE TEMP B-TREE FOR ORDER BY"
-            if searched_through(
-                "documents",
-                &[
-                    "documents_admitted_suffix_key",
-                    "documents_admitted_folded_suffix_key",
-                ],
-            ) =>
-        {
-            Some("LinkHealthHeads")
+        "USE TEMP B-TREE FOR ORDER BY" if (a_health_head || a_suffix_head) && admitted_runs() => {
+            Some("bounded admitted-run heads")
         }
         "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
             if searched_through("documents", &["documents_change_feed"]) =>
@@ -1202,15 +1252,7 @@ fn admitted_sort(plan: &QueryPlan, sort: &PlanRow) -> Option<&'static str> {
         "USE TEMP B-TREE FOR GROUP BY" if matched && a_summary => {
             Some("a summary a document part drives")
         }
-        "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
-            if a_class_head
-                && searched_through(
-                    "documents",
-                    &["documents_suffix_key", "documents_folded_suffix_key"],
-                ) =>
-        {
-            Some("a class's head")
-        }
+        "USE TEMP B-TREE FOR ORDER BY" if a_class_head && admitted_runs() => Some("a class's head"),
         _ => None,
     }
 }

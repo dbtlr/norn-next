@@ -1244,28 +1244,25 @@ fn seek(alias: &'static str, access: Access<'static>, constraint: &str) -> Seek 
 
 /// The seeks each judgment statement is held to under `order`.
 fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek> {
-    let (class_index, admitted_index, key, path_index, link_index, suffix_index, link_key) =
-        match order {
-            Sensitive => (
-                "documents_suffix_key",
-                "documents_admitted_suffix_key",
-                "suffix_key",
-                "documents_path",
-                "link_keys_key",
-                "link_keys_suffix_key",
-                "key",
-            ),
-            Folding => (
-                "documents_folded_suffix_key",
-                "documents_admitted_folded_suffix_key",
-                "folded_suffix_key",
-                "documents_path_nocase",
-                "link_keys_folded_key",
-                "link_keys_folded_suffix_key",
-                "folded_key",
-            ),
-        };
-    let range = format!("({key}>? AND {key}<?)");
+    let (admitted_index, key, path_index, link_index, suffix_index, link_key) = match order {
+        Sensitive => (
+            "documents_admitted_suffix_key",
+            "suffix_key",
+            "documents_path",
+            "link_keys_key",
+            "link_keys_suffix_key",
+            "key",
+        ),
+        Folding => (
+            "documents_admitted_folded_suffix_key",
+            "folded_suffix_key",
+            "documents_path_nocase",
+            "link_keys_folded_key",
+            "link_keys_folded_suffix_key",
+            "folded_key",
+        ),
+    };
+    let range = format!("(admitting_segments=? AND {key}>? AND {key}<?)");
     // A page's driver, then each link it reached, its holder, and every key
     // it is held under.
     let reached = |driver: Vec<Seek>| {
@@ -1346,14 +1343,15 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
                 &format!("(admitting_segments=? AND {key}>? AND {key}<?)"),
             ),
             seek("da", Access::RowId, "(rowid=?)"),
+            seek("dc", Access::RowId, "(rowid=?)"),
             seek("dp", Access::Index(path_index), "(path=?)"),
         ],
         ExplainedStatement::LinkHealthTotals => vec![
-            seek("dl", Access::Index(class_index), &range),
+            seek("dl", Access::Index(admitted_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),
         ],
         ExplainedStatement::LinkHealthSuffixes => {
-            vec![seek("dr", Access::Index(class_index), &range)]
+            vec![seek("dl", Access::Index(admitted_index), &range)]
         }
         ExplainedStatement::LinkHealthAnchors => vec![
             seek("l", Access::RowId, "(rowid=?)"),
@@ -1392,13 +1390,16 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     // key and the path both, so a run sorts nothing and its limit stops the
     // read; the runs' union, at most a head per count the key's segments
     // reach, is sorted whole and cut again: a sort bounded by the key's
-    // segments, never the class. A page of a write's links is read in path
+    // segments, never the class. Candidate suffix probes use the same merge
+    // with a bound of two. A page of a write's links is read in path
     // order off the change-feed index, which does not say a path is one
     // document's, so SQLite sorts the links of one path by ordinal — the one
     // document's own links, which the changeset wrote — and the page's limit
     // stops the read. Every other statement sorts nothing.
     let sorted = match statement {
-        ExplainedStatement::LinkHealthHeads => Some("USE TEMP B-TREE FOR ORDER BY"),
+        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthSuffixes => {
+            Some("USE TEMP B-TREE FOR ORDER BY")
+        }
         ExplainedStatement::LinkHealthWrittenLinks => {
             Some("USE TEMP B-TREE FOR LAST TERM OF ORDER BY")
         }

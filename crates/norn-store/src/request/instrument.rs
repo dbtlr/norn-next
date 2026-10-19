@@ -364,8 +364,6 @@ impl<'a> Request<'a> {
                 params_from_iter(health::totals_parameters(
                     &[(EXPLAINED_CLASS_KEY, 1)],
                     &[EXPLAINED_PAGE_CURSOR_LEAF],
-                    &AmbiguityIgnore::none(),
-                    order,
                 )?),
             ),
             ExplainedStatement::LinkHealthSuffixes => {

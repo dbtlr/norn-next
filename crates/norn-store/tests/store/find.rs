@@ -1571,22 +1571,22 @@ fn filter_bars() -> Vec<FilterBar> {
                             Predicate::resolves(target.clone()),
                             ReadFilter::Resolves(SuffixKey::Raw),
                             Seek::Index {
-                                alias: "dr",
+                                alias: "da",
                                 table: "documents",
-                                access: Access::Index("documents_suffix_key"),
-                                constraint: "(suffix_key>? AND suffix_key<?)",
-                                dropped: "documents_suffix_key",
+                                access: Access::Index("documents_admitted_suffix_key"),
+                                constraint: "(admitting_segments=? AND suffix_key>? AND suffix_key<?)",
+                                dropped: "documents_admitted_suffix_key",
                             },
                         ),
                         (
                             Predicate::resolves(target),
                             ReadFilter::Resolves(SuffixKey::Folded),
                             Seek::Index {
-                                alias: "dr",
+                                alias: "da",
                                 table: "documents",
-                                access: Access::Index("documents_folded_suffix_key"),
-                                constraint: "(folded_suffix_key>? AND folded_suffix_key<?)",
-                                dropped: "documents_folded_suffix_key",
+                                access: Access::Index("documents_admitted_folded_suffix_key"),
+                                constraint: "(admitting_segments=? AND folded_suffix_key>? AND folded_suffix_key<?)",
+                                dropped: "documents_admitted_folded_suffix_key",
                             },
                         ),
                     ]
@@ -2081,9 +2081,9 @@ fn a_part_ceiling_probe_reads_the_parts_own_seek_and_stops_past_the_ceiling() {
 /// part rejects: findings of its kind at paths no document stands at, for a
 /// has-finding part; values of the wrong declared shape, for a shaped
 /// equality; links whose key also names another document, for a links-to
-/// part; and documents the declaration's ambiguity-ignore set leaves out of a
-/// target's class, for a resolution. A count that judged those rows would read
-/// every one of them.
+/// part. A resolution also holds ignored namesakes beside its admitted
+/// members; its admitting-count seeks exclude them before counting. A count
+/// that judged the other parts' rejected rows would read every one of them.
 #[test]
 fn a_part_ceiling_probe_reads_only_its_seek() {
     let probe_steps = |seeded: &Seeded, part: Predicate, declared: &ContentModel| {
@@ -2154,7 +2154,17 @@ fn a_part_ceiling_probe_reads_only_its_seek() {
             documents.push(facts);
         }
         let mut request = seeded.store.begin_request();
-        write_documents(&mut request, &documents);
+        let declared = readings
+            .clone()
+            .declare_ambiguity_ignore(Pattern::parse("ign/**").expect("a glob"));
+        request
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                documents.into_iter().map(norn_store::Change::Upsert),
+                &[],
+                &declared,
+            )
+            .expect("deriving under the resolution declaration");
         for at in 0..rejected {
             request
                 .record_finding(&violation(&format!("ghost/{at:04}.md")))
@@ -4295,4 +4305,40 @@ fn a_first_match_seeks_its_members_and_tests_excluded_paths_at_their_keys() {
             .assert_searches_through("document_fields", Access::Index("document_fields_raw"));
         assert!(explained.sql().contains("fs.container ="));
     }
+}
+
+/// A resolution's cardinality probe stops at its ceiling while streaming
+/// admitted runs, even when the admitted class continues beyond that ceiling.
+#[test]
+fn a_resolutions_ceiling_probe_stops_before_reading_the_whole_admitted_class() {
+    let steps = [20, 2000].map(|members| {
+        let mut seeded = Seeded::new("resolve-ceiling-admitted");
+        let documents: Vec<_> = (0..members)
+            .map(|at| {
+                document(
+                    &format!("names/{at:04}/r.md"),
+                    &format!("hash-{at}"),
+                    "body\n",
+                )
+            })
+            .collect();
+        write_documents(&mut seeded.store.begin_request(), &documents);
+        seeded
+            .plans(
+                &sorted(SortKey::field("status"), Direction::Ascending)
+                    .with_predicates([Predicate::resolves(
+                        ResolutionTarget::new("r").expect("a target"),
+                    )])
+                    .with_limit(1),
+            )
+            .into_iter()
+            .find(|plan| plan.statement == ReadStatement::Find(FindStatement::PartCeiling))
+            .expect("a ceiling probe")
+            .vm_steps
+    });
+    assert!(steps[0] > 0);
+    assert_eq!(
+        steps[0], steps[1],
+        "the ceiling probe read the admitted class beyond its bound"
+    );
 }
