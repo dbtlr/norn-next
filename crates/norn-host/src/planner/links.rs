@@ -1073,9 +1073,10 @@ pub(crate) fn left_behind<'l>(
 /// link between documents without breaking it; a link that still names its
 /// document, followed or left in place, does not.
 ///
-/// A path the plan vacates and refills is the same path on both sides, so a
-/// link resolving there is not read as naming another here: which document
-/// stands there is [`left_behind`]'s question.
+/// What is compared is the document, not the path: a link resolving to a
+/// path the plan vacates and refills — a delete and a create at one path —
+/// names another document though its path is unchanged. Where a move carried
+/// the named document away, [`left_behind`] advises first.
 pub(crate) fn names_another(
     before: &Resolves,
     after: &Resolves,
@@ -1094,8 +1095,7 @@ pub(crate) fn names_another(
             let Some(now) = identity(path) else {
                 return false;
             };
-            let followed = lineage.carried_to(&named).map(|(to, _)| to);
-            now != named && Some(&now) != followed
+            lineage.source(&now).map(|drawn| drawn.from) != Some(named)
         }
         Resolves::None {} | Resolves::Several {} => true,
     }

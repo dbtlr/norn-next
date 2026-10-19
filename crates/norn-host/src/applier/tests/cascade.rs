@@ -1328,8 +1328,9 @@ fn a_moved_holders_relative_wikilink_it_cannot_respell_is_skipped_saying_what_it
 /// at a suffix link's exact path — created there, or moved there — takes the
 /// link from the deeper one it named, and one leaving the exact path hands
 /// the link to the deeper one, a delete leaving its links broken among them.
-/// Neither is a broken link, and neither is silent. A link still naming its
-/// own document where a move carries it is followed, not retargeted.
+/// Neither is a broken link, and neither is silent; nor is a link whose path
+/// the plan vacates and refills with another document. A link still naming
+/// its own document where a move carries it is followed, not retargeted.
 #[test]
 fn a_link_left_naming_another_document_is_advised_as_retargeted() {
     let holder = ("h.md", "[[x]] [t](x.md)\n");
@@ -1356,6 +1357,15 @@ fn a_link_left_naming_another_document_is_advised_as_retargeted() {
         assert_eq!(resolution.forecast.links, retargeted, "{operation:?}");
         assert!(resolution.plan.operations[0].cascade.is_empty());
     }
+
+    // A path the plan vacates and refills names another document though the
+    // path is unchanged.
+    let fixture = Fixture::new(&[("x.md", "X\n"), holder]);
+    let resolution = fixture.resolution(vec![
+        super::breaking("x.md"),
+        super::creating("x.md", "NEW\n"),
+    ]);
+    assert_eq!(resolution.forecast.links, retargeted);
 
     let fixture = Fixture::new(&[("a/x.md", "A\n"), holder]);
     let resolution = fixture.resolution(vec![moving("a/x.md", "b/x.md")]);
