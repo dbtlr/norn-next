@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(16),
-    "7f387af2d6909bd45cd040ecdce9c2c3aa09d1099bad95d1968f718aaabbe063",
+    "a4fb7ea7d5747015709d0c405c9c56c709e29fb564c37dd3623c0173292c6281",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -1072,11 +1072,22 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "the corpus does not hold that {shape}"
         );
     }
-    // A wikilink embed is the one embed the text layer records; the Markdown
-    // image beside it is not a link, and the digest pins that it is not.
+    // Both embeds the text layer records: a wikilink embed, and the Markdown
+    // image beside it, which is a Markdown link with its embed marker set and
+    // whose token opens at the `!`. The digest pins both.
     assert!(
-        glossary.links.iter().any(|link| link.fact.embed),
-        "no embed is exercised"
+        glossary
+            .links
+            .iter()
+            .any(|link| link.fact.embed && link.fact.family == LinkFamily::Wikilink),
+        "no wikilink embed is exercised"
+    );
+    assert!(
+        glossary.links.iter().any(|link| link.fact.embed
+            && link.fact.family == LinkFamily::Markdown
+            && link.fact.target == "assets/pic.png"
+            && link.fact.title.as_deref() == Some("image")),
+        "no Markdown image is exercised"
     );
     // A frontmatter string value written as a wikilink, alias and anchor
     // included: what opts a plain property into the link graph.

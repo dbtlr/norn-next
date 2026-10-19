@@ -79,9 +79,10 @@
 //! # Links, tags and what addresses what
 //!
 //! Two written forms produce a [`Link`], and one fact shape carries both:
-//! `[[…]]` and the inline Markdown link `[title](target)`. Whether a written
-//! protocol decides what the stem addresses, the fact says through
-//! [`Link::resolution`].
+//! `[[…]]` and the inline Markdown link `[title](target)`, whose image form
+//! `![alt](target)` is the same family with [`Link::embed`] set, as `![[…]]`
+//! is the wikilink's. Whether a written protocol decides what the stem
+//! addresses, the fact says through [`Link::resolution`].
 //!
 //! **Dispatch is protocol-first, form-second.** A recognized `protocol://`
 //! prefix shadows the family, because the family says which grammar the author

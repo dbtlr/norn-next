@@ -529,6 +529,64 @@ fn an_embed_carries_the_same_kinds() {
     );
 }
 
+/// **A Markdown image is judged as the Markdown link beside it is.** An image
+/// naming a document raises what the link naming it raises (broken, ambiguous,
+/// missing its anchor, or nothing), and an image naming a file that is no
+/// document raises nothing, because attachments are not indexed.
+#[test]
+fn a_markdown_image_is_judged_as_a_markdown_link_is() {
+    let mut documents = targets();
+    documents.push(derived(
+        "src/i.md",
+        &body_of(&[
+            "[t](missing.md)",
+            "![t](missing.md)",
+            "[t](dup.md)",
+            "![t](dup.md)",
+            "[t](notes/glossary.md#Nope)",
+            "![t](notes/glossary.md#Nope)",
+            "[t](notes/glossary.md)",
+            "![t](notes/glossary.md)",
+            "![t](img/pic.png)",
+        ]),
+    ));
+    let judging = &mut Judging::new("health-images", Sensitive, &documents);
+    let stored = judging
+        .request()
+        .stored_facts(&path("src/i.md"))
+        .expect("reading stored facts")
+        .expect("the holder's row");
+    let embeds: Vec<bool> = stored.links.iter().map(|link| link.fact.embed).collect();
+    assert_eq!(
+        embeds,
+        [false, true]
+            .repeat(4)
+            .into_iter()
+            .chain([true])
+            .collect::<Vec<_>>()
+    );
+
+    let findings = judging.by_ordinal("src/i.md");
+    let kind = |ordinal: u64| findings.get(&ordinal).map(|finding| finding.kind);
+    for ordinal in (0..8).step_by(2) {
+        assert_eq!(
+            kind(ordinal),
+            kind(ordinal + 1),
+            "link {ordinal} and its image"
+        );
+    }
+    assert_eq!(
+        (0..8).step_by(2).map(kind).collect::<Vec<_>>(),
+        [
+            Some(FindingKind::Broken),
+            Some(FindingKind::Ambiguous),
+            Some(FindingKind::MissingAnchor),
+            None
+        ]
+    );
+    assert_eq!(kind(8), None, "an image naming no document is not judged");
+}
+
 /// **A `vault://` link naming one document files a vault-scheme finding, in
 /// either family, and only then.** Obsidian cannot open a `vault://` link, so
 /// one that resolves is warned about; the same document named by a bare, a
