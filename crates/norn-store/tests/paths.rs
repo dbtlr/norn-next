@@ -1,7 +1,7 @@
 //! The segment-aware path encoding, and the probes that read it.
 //!
 //! Resolution is a *prefix* relation between two segment-reversed keys, and
-//! these cases pin the reduction on both sides of it: what a document path
+//! these cases pin the document-name keys on both sides: what a document path
 //! becomes, what a target becomes, and which pairs are therefore in range. The
 //! range itself is exercised against real rows in `store/pillars.rs`; here the
 //! question is whether the keys say what they are supposed to say.
@@ -12,7 +12,7 @@ use norn_store::{
     ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, suffix_probe,
 };
 
-/// The one range a single-reduction probe opens.
+/// The single indexed range a target without a trailing `.md` opens.
 fn only_range(target: &str) -> (String, String) {
     let probe = suffix_probe(target).expect("a suffix target");
     assert_eq!(
@@ -33,11 +33,7 @@ fn prefixes(target: &str) -> Vec<String> {
         .collect()
 }
 
-/// The raw class key a document's own stem opens: its stem with the
-/// terminating separator, unfolded. This is the form `class_key_in` builds
-/// for `SuffixKey::Raw` — crate-private, because a store mints one under its
-/// own path order through `Request::class_key_of` — so a test that wants the
-/// raw form on its own reconstructs it from the stem, which is public.
+/// An explicitly spelled class key used to check probe membership.
 fn raw_class_key(stem: &str) -> ClassKey {
     ClassKey::new(&format!("{stem}/")).expect("a class key")
 }
@@ -52,9 +48,10 @@ fn class_keys(target: &str) -> Vec<String> {
         .collect()
 }
 
-/// The table from the encoding's own documentation, as cases.
+/// Suffix keys normalize complete paths, reverse their segments and
+/// remove only the leaf's Markdown extension. Other extensions remain.
 #[test]
-fn a_path_reverses_its_segments_and_drops_the_leaf_extension() {
+fn a_suffix_key_reverses_path_segments_and_removes_only_md() {
     for (path, suffix_key, stem, depth) in [
         ("glossary.md", "glossary/", "glossary", 1),
         (
@@ -65,9 +62,9 @@ fn a_path_reverses_its_segments_and_drops_the_leaf_extension() {
         ),
         ("docs/norn/index.md", "index/norn/docs/", "index", 3),
         ("a.b.md", "a.b/", "a.b", 1),
-        ("notes/README", "README/notes/", "README", 2),
+        ("notes/README", "readme/notes/", "README", 2),
         ("notes/v1.2.md", "v1.2/notes/", "v1.2", 2),
-        ("notes.tar.gz", "notes.tar/", "notes.tar", 1),
+        ("notes.tar.gz", "notes.tar.gz/", "notes.tar.gz", 1),
     ] {
         let read = DocumentPath::new(path).expect("a document path");
         assert_eq!(read.as_str(), path);
@@ -287,15 +284,10 @@ fn path_bytes_that_are_not_utf8_render_through_the_marker() {
     );
 }
 
-/// The probe a target with no dot in its leaf reduces to, and the pairs that are
-/// therefore in range.
-///
-/// The upper bound is the prefix with its final separator stepped by one, so a
-/// key is in range exactly when it opens with the prefix — which is what makes
-/// the predicate a range over an index rather than a pattern match. The step is
-/// a **byte** step, and the comparison is `BINARY`; both are what make it exact.
+/// A suffix target opens the segment-aligned prefix its candidates share.
+/// The separator successor bounds that prefix under bytewise comparison.
 #[test]
-fn a_suffix_target_reduces_to_the_prefix_its_candidates_share() {
+fn a_suffix_target_opens_the_prefix_shared_by_its_candidates() {
     for (target, lower) in [
         ("glossary", "glossary/"),
         ("norn/glossary", "glossary/norn/"),
@@ -307,32 +299,26 @@ fn a_suffix_target_reduces_to_the_prefix_its_candidates_share() {
     }
 }
 
-/// **A dot in a written target is ambiguous, so the target probes both
-/// reductions.** Nothing in the string says whether the dot opens an extension,
-/// and choosing one reading answers confidently and sometimes wrongly.
+/// Only a trailing `.md` opens two readings. Other dotted leaves keep their extensions.
 #[test]
-fn a_target_whose_leaf_carries_a_dot_opens_both_reductions() {
-    // `v1.2` is a version, and reducing always would resolve it to `v1` — a
-    // single, confident, wrong candidate.
-    assert_eq!(prefixes("v1.2"), vec!["v1/", "v1.2/"]);
-    // `notes.tar` is a name, and reducing never would leave `notes.tar.gz`
-    // unreachable by anything shorter than its whole leaf.
-    assert_eq!(prefixes("notes.tar"), vec!["notes/", "notes.tar/"]);
-    // A target that names its extension reaches the document that dropped it,
-    // which is the case the reduction existed for in the first place.
+fn only_a_markdown_extension_opens_both_target_readings() {
+    // A non-Markdown extension remains part of the target's name.
+    assert_eq!(prefixes("v1.2"), vec!["v1.2/"]);
+    // Non-Markdown extensions remain part of the stem.
+    assert_eq!(prefixes("notes.tar"), vec!["notes.tar/"]);
+    // A target ending in `.md` also names the document carrying that extension.
     assert_eq!(prefixes("glossary.md"), vec!["glossary/", "glossary.md/"]);
     assert_eq!(
         prefixes("norn/glossary.md"),
         vec!["glossary/norn/", "glossary.md/norn/"]
     );
 
-    // A dotfile has one reduction, because the leading dot is part of the name.
+    // A leading dot is part of the name, so this dotfile opens one range.
     assert_eq!(prefixes(".env"), vec![".env/"]);
-    // And a dotfile with an extension has two, the wider of which is the class
-    // the store puts `.env` and `.env.local` in together.
-    assert_eq!(prefixes(".env.local"), vec![".env/", ".env.local/"]);
+    // Other dotfile extensions remain part of the name.
+    assert_eq!(prefixes(".env.local"), vec![".env.local/"]);
 
-    // Every range is bounded the same way, whichever reduction produced it.
+    // Every document-name reading uses the same separator-terminated bounds.
     for (lower, upper) in suffix_probe("v1.2").expect("a suffix target").ranges() {
         assert_eq!(upper, format!("{}0", &lower[..lower.len() - 1]));
     }
@@ -374,7 +360,7 @@ fn a_target_that_is_not_a_suffix_address_is_refused() {
         ("/norn/glossary", "absolute"),
         ("", "empty"),
         ("docs//note", "empty segment"),
-        ("..alpha", "`.` or `..` stem"),
+        ("..md", "`.` or `..` stem"),
         ("note\0.md", "NUL"),
     ] {
         let error = suffix_probe(target).expect_err("a target that is not a suffix address");
@@ -388,9 +374,10 @@ fn a_target_that_is_not_a_suffix_address_is_refused() {
     }
 }
 
-/// An ambiguity class is a probe of length one, and a document names its own.
+/// A document class is its comparison stem followed by `/`. A suffix
+/// probe records every class that either optional `.md` reading can match.
 #[test]
-fn a_class_key_is_the_stem_with_the_separator() {
+fn a_document_class_uses_its_comparison_stem_with_a_terminating_separator() {
     let document = DocumentPath::new("docs/norn/glossary.md").expect("a document path");
     assert_eq!(raw_class_key(document.stem()).as_str(), "glossary/");
 
@@ -414,14 +401,12 @@ fn a_class_key_is_the_stem_with_the_separator() {
         }
     }
 
-    // A probe names one class per reduction, and a two-reduction target names
-    // both: the reductions are disjoint rather than nested, because `.` (0x2e)
-    // sorts before `/` (0x2f), so neither range holds the other's keys and one key
-    // could not stand for both.
+    // Only a target ending in `.md` opens two disjoint classes. The dot
+    // sorts before the separator, so neither class's range contains the other.
     assert_eq!(class_keys("glossary"), vec!["glossary/"]);
     assert_eq!(class_keys("glossary.md"), vec!["glossary.md/", "glossary/"]);
-    assert_eq!(class_keys("v1.2"), vec!["v1.2/", "v1/"]);
-    assert_eq!(class_keys("notes.tar"), vec!["notes.tar/", "notes/"]);
+    assert_eq!(class_keys("v1.2"), vec!["v1.2/"]);
+    assert_eq!(class_keys("notes.tar"), vec!["notes.tar/"]);
     assert!("notes.tar/" < "notes/");
     assert!(!"notes.tar/".starts_with("notes/"));
 
@@ -431,7 +416,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
     for (target, at) in [
         ("glossary.md", "docs/glossary.md"),
         ("v1.2", "notes/v1.2.md"),
-        ("notes.tar", "archive/notes.tar.gz"),
+        ("notes.tar", "archive/notes.tar.md"),
     ] {
         let document = DocumentPath::new(at).expect("a document path");
         assert!(
@@ -476,16 +461,15 @@ fn a_class_key_that_no_probe_opens_is_refused() {
     }
 }
 
-/// **A class key reads back as the suffix address that opens it**, and that
-/// address's probe opens every class the target's reductions name: a dotted
-/// leaf's key reads back as the leaf as written, whose probe opens its stem's
-/// class too.
+/// A class key reads back as a suffix address that opens its class. An
+/// address ending in `.md` opens both its written and extensionless
+/// document-name classes.
 #[test]
 fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
     for (key, address) in [
         ("glossary/", "glossary"),
         ("glossary/norn/", "norn/glossary"),
-        ("v1.2/a/", "a/v1.2"),
+        ("v1.md/a/", "a/v1.md"),
     ] {
         let class = ClassKey::new(key).expect("a class key");
         assert_eq!(class.address(), address);
@@ -494,7 +478,7 @@ fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
             .class_keys();
         assert!(opened.contains(&class), "`{address}` does not open `{key}`");
     }
-    let dotted = suffix_probe("a/v1.2")
+    let dotted = suffix_probe("a/v1.md")
         .expect("a suffix target")
         .class_keys();
     let longest = dotted
@@ -510,27 +494,17 @@ fn a_class_key_reads_back_as_the_address_whose_probe_opens_it() {
     );
 }
 
-/// **The folded suffix key folds ASCII case and nothing else.** `A`-`Z` become
-/// `a`-`z`; every other byte is itself, so a non-ASCII letter keeps its case
-/// and a folded key never claims two spellings the filesystem seam keeps apart.
+/// Suffix keys compare Unicode case and canonical spellings on every root.
 #[test]
-fn the_folded_suffix_key_folds_ascii_case_alone() {
-    for (path, raw, folded) in [
-        (
-            "Docs/Norn/Glossary.MD",
-            "Glossary/Norn/Docs/",
-            "glossary/norn/docs/",
-        ),
-        ("notes/v1.2.md", "v1.2/notes/", "v1.2/notes/"),
-        ("Écoles/Été.md", "Été/Écoles/", "Été/Écoles/"),
-        ("ÄRGER/Straße.md", "Straße/ÄRGER/", "straße/Ärger/"),
+fn the_suffix_key_compares_unicode_case_and_canonical_forms() {
+    for (path, key) in [
+        ("Docs/Norn/Glossary.MD", "glossary/norn/docs/"),
+        ("notes/v1.2.md", "v1.2/notes/"),
+        ("Écoles/Été.md", "été/écoles/"),
+        ("ÄRGER/Straße.md", "straße/ärger/"),
+        ("re\u{301}sume\u{301}.md", "résumé/"),
     ] {
         let read = DocumentPath::new(path).expect("a document path");
-        assert_eq!(read.suffix_key(), raw, "the raw key of `{path}`");
-        assert_eq!(
-            read.folded_suffix_key(),
-            folded,
-            "the folded key of `{path}`"
-        );
+        assert_eq!(read.suffix_key(), key, "{path}");
     }
 }

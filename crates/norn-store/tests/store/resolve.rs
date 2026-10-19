@@ -1,5 +1,5 @@
-//! The one resolver: which documents a target names on a root, under the case
-//! behaviour the root proved and the places its schema ignores, read the same
+//! The one resolver: which documents a target names under the comparison key
+//! and the places its schema ignores, read the same
 //! way by a find's `resolves` part, by a class read, and by the finding a
 //! producer files about the class.
 
@@ -190,11 +190,10 @@ fn strings(paths: &[&str]) -> Vec<String> {
     paths.iter().map(|at| at.to_string()).collect()
 }
 
-/// **On a root that folds ASCII case, every document whose folded key the
-/// target opens is one class, and the spelling that matches exactly takes no
-/// precedence.** The root itself does not tell `Foo` from `foo`.
+/// Case variants share one comparison class. An exact spelling does not
+/// exclude another candidate whose name differs only in case.
 #[test]
-fn a_folding_root_resolves_every_case_spelling_as_one_class() {
+fn case_variants_share_one_class_without_exact_spelling_precedence() {
     let mut vault = Vault::holding(
         "resolve-folded",
         Folding,
@@ -209,47 +208,56 @@ fn a_folding_root_resolves_every_case_spelling_as_one_class() {
     }
 }
 
-/// **On a root that tells spellings apart, the folded key is never consulted.**
-/// `Foo` names the document spelled `Foo` and nothing else.
+/// A case-sensitive filesystem still resolves case variants through the
+/// shared comparison key, without exact-spelling precedence.
 #[test]
-fn a_sensitive_root_resolves_the_raw_spelling_alone() {
-    let mut vault = Vault::holding("resolve-raw", Sensitive, &["a/Foo.md", "b/foo.md"]);
-    assert_eq!(vault.resolves("Foo", &[]), strings(&["a/Foo.md"]));
-    assert_eq!(vault.resolves("foo", &[]), strings(&["b/foo.md"]));
-    assert!(vault.resolves("FOO", &[]).is_empty());
+fn a_case_sensitive_filesystem_still_uses_the_shared_comparison_key() {
+    let mut vault = Vault::holding("resolve-comparison", Sensitive, &["a/Foo.md", "b/foo.md"]);
+    for target in ["Foo", "foo", "FOO"] {
+        assert_eq!(
+            vault.resolves(target, &[]),
+            strings(&["a/Foo.md", "b/foo.md"])
+        );
+    }
 }
 
-/// **A dotted leaf reduces both ways under the fold too.** `Notes.TAR` opens
-/// the folded `notes.tar/` and `notes/`, so a document stored as
-/// `notes.tar.gz` and one stored as `NOTES.md` are both in its class.
+/// A target ending in `.md`, in any ASCII case, names the document and
+/// its `.md.md` twin on either filesystem order.
 #[test]
-fn a_folding_root_reduces_a_dotted_target_both_ways() {
-    let paths = ["archive/notes.tar.gz", "docs/NOTES.md", "docs/v1.md"];
+fn a_target_ending_in_md_names_both_the_document_and_its_md_md_twin() {
+    let paths = ["archive/notes.md.md", "docs/NOTES.md", "docs/v1.md"];
     let mut folding = Vault::holding("resolve-folded-reductions", Folding, &paths);
     assert_eq!(
-        folding.resolves("Notes.TAR", &[]),
-        strings(&["archive/notes.tar.gz", "docs/NOTES.md"])
+        folding.resolves("Notes.MD", &[]),
+        strings(&["archive/notes.md.md", "docs/NOTES.md"])
     );
     assert_eq!(
         folding.resolves("NOTES.MD", &[]),
-        strings(&["docs/NOTES.md"])
+        strings(&["archive/notes.md.md", "docs/NOTES.md"])
     );
     let mut sensitive = Vault::holding("resolve-raw-reductions", Sensitive, &paths);
-    assert!(sensitive.resolves("Notes.TAR", &[]).is_empty());
+    assert_eq!(
+        sensitive.resolves("Notes.MD", &[]),
+        strings(&["archive/notes.md.md", "docs/NOTES.md"])
+    );
 }
 
-/// **The fold is ASCII alone.** A letter outside ASCII keeps its case on a
-/// folding root, so `Été` and `été` stay two classes there.
+/// Unicode lowercase variants share one resolution class on every root.
 #[test]
-fn a_folding_root_does_not_fold_a_letter_outside_ascii() {
-    let mut vault = Vault::holding(
-        "resolve-non-ascii",
-        Folding,
-        &["a/Été.md", "b/été.md", "c/ÉTÉ.md"],
-    );
-    assert_eq!(vault.resolves("Été", &[]), strings(&["a/Été.md"]));
-    assert_eq!(vault.resolves("été", &[]), strings(&["b/été.md"]));
-    assert_eq!(vault.resolves("ÉtÉ", &[]), strings(&["c/ÉTÉ.md"]));
+fn unicode_lowercase_variants_share_one_class_on_every_root() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            "resolve-non-ascii",
+            order,
+            &["a/Été.md", "b/été.md", "c/ÉTÉ.md"],
+        );
+        for target in ["Été", "été", "ÉtÉ"] {
+            assert_eq!(
+                vault.resolves(target, &[]),
+                strings(&["a/Été.md", "b/été.md", "c/ÉTÉ.md"])
+            );
+        }
+    }
 }
 
 /// **An ignored place stays out of a class unless the target names it.** With
@@ -352,14 +360,10 @@ fn a_resolves_part_beside_a_driving_part_judges_each_document_against_its_class(
     }
 }
 
-/// **On a root that folds ASCII case, an ignore glob matches with ASCII case
-/// folded.** The root does not tell `archive` from `Archive`, so `archive/**`
-/// keeps `Archive/norn/glossary.md` out of `glossary`'s class and `Archive/**`
-/// keeps `archive/deep/term.md` out of `term`'s, in a find's `resolves` part
-/// and in the class read alike; a target reaching the ignored place in any
-/// case still resolves to it.
+/// Ambiguity-ignore globs and paths use the comparison key. Case-variant
+/// ignored places stay excluded unless the target names that place.
 #[test]
-fn a_folding_root_matches_an_ignore_glob_with_ascii_case_folded() {
+fn ambiguity_ignore_globs_compare_case_variants_under_the_shared_key() {
     let mut vault = Vault::holding(
         "resolve-ignored-folded",
         Folding,
@@ -406,13 +410,12 @@ fn a_folding_root_matches_an_ignore_glob_with_ascii_case_folded() {
     assert_eq!(vault.class(&class), strings(&["notes/term.md"]));
 }
 
-/// **On a root that tells spellings apart, an ignore glob matches bytes.**
-/// `archive/**` does not name `Archive/norn/glossary.md` there, nor
-/// `Archive/**` `archive/deep/term.md`, so each stays in its class.
+/// Case-sensitive filesystems use the same comparison key for ignore
+/// globs and candidate paths, including differently cased places.
 #[test]
-fn a_sensitive_root_matches_an_ignore_glob_bytewise() {
+fn ambiguity_ignore_globs_use_the_shared_key_on_case_sensitive_filesystems() {
     let mut vault = Vault::holding(
-        "resolve-ignored-raw",
+        "resolve-ignore-sensitive",
         Sensitive,
         &[
             "Archive/norn/glossary.md",
@@ -423,54 +426,34 @@ fn a_sensitive_root_matches_an_ignore_glob_bytewise() {
     );
     assert_eq!(
         vault.resolves("glossary", &["archive/**"]),
-        strings(&["Archive/norn/glossary.md", "docs/norn/glossary.md"])
+        strings(&["docs/norn/glossary.md"])
     );
     assert_eq!(
         vault.resolves("term", &["Archive/**"]),
-        strings(&["archive/deep/term.md", "notes/term.md"])
-    );
-    // The spelling the glob does name is still ignored.
-    assert_eq!(
-        vault.resolves("term", &["archive/**"]),
         strings(&["notes/term.md"])
     );
-
     let class = vault.target_class("glossary", &["archive/**"]);
-    assert!(class.admits("Archive/norn/glossary.md"));
-    assert_eq!(
-        vault.class(&class),
-        strings(&["Archive/norn/glossary.md", "docs/norn/glossary.md"])
-    );
+    assert!(!class.admits("Archive/norn/glossary.md"));
+    assert_eq!(vault.class(&class), strings(&["docs/norn/glossary.md"]));
     let class = vault.target_class("term", &["Archive/**"]);
-    assert!(class.admits("archive/deep/term.md"));
-    assert_eq!(
-        vault.class(&class),
-        strings(&["archive/deep/term.md", "notes/term.md"])
-    );
+    assert!(!class.admits("archive/deep/term.md"));
+    assert_eq!(vault.class(&class), strings(&["notes/term.md"]));
 }
 
-/// **An ignore glob folds no letter outside ASCII.** On a folding root
-/// `Été/**` does not name `été/x/term.md`, while `ÉTé/**` names
-/// `Été/x/term.md`, because only the ASCII `T` differs.
+/// Ignore globs compare Unicode lowercase variants under the shared key.
 #[test]
-fn an_ignore_glob_never_folds_a_letter_outside_ascii() {
-    let mut vault = Vault::holding(
-        "resolve-ignored-non-ascii",
-        Folding,
-        &["Été/x/term.md", "été/x/term.md"],
-    );
-    assert_eq!(
-        vault.resolves("term", &["Été/**"]),
-        strings(&["été/x/term.md"])
-    );
-    assert_eq!(
-        vault.resolves("term", &["ÉTé/**"]),
-        strings(&["été/x/term.md"])
-    );
-    assert_eq!(
-        vault.resolves("term", &["ÉTÉ/**"]),
-        strings(&["Été/x/term.md", "été/x/term.md"])
-    );
+fn ambiguity_ignore_globs_compare_unicode_lowercase_variants() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            "resolve-ignore-unicode",
+            order,
+            &["Été/x/term.md", "été/x/term.md"],
+        );
+        for glob in ["Été/**", "ÉTé/**", "été/**"] {
+            assert!(vault.resolves("term", &[glob]).is_empty());
+            assert_eq!(vault.resolves("été/x/term", &[glob]).len(), 2);
+        }
+    }
 }
 
 /// **A glob naming a leaf keeps a document out of a one-segment target's class
@@ -516,13 +499,9 @@ fn an_ignored_root_level_document_resolves_to_a_target_naming_it() {
     }
 }
 
-/// **A finding's class is the class a find's `resolves` part reads on the same
-/// root.** A producer compiles the target once, reads its class through the
-/// class read, and files the finding under the resolution's class keys; the
-/// candidates it files are the rows the find keeps, and a document joining the
-/// class under any spelling the root folds together reaches the finding.
+/// Findings and resolution record the same comparison class on every root.
 #[test]
-fn a_findings_class_is_the_class_resolves_reads_on_that_root() {
+fn findings_and_resolution_share_one_comparison_class_on_every_root() {
     for (order, joining) in [(Sensitive, "c/Foo.md"), (Folding, "c/FOO.md")] {
         let mut vault = Vault::holding(
             &format!("resolve-finding-{order:?}"),
@@ -592,12 +571,7 @@ fn finding_about_foo(resolution: &TargetClass, class: &[String]) -> FindingFacts
     }
 }
 
-/// **A document leaving a class takes the findings filed under it, and a
-/// change names its class in the key space the store's root probes alone.**
-/// On a root that folds ASCII case, `b/FOO.md` is in the class of `Foo`, and
-/// a finding about `Foo` is filed under the folded key: the death of
-/// `b/FOO.md` reaches it there. The raw key `FOO/` is one no finding in this
-/// store is filed under, so the change does not name it.
+/// A changed document reaches findings filed under its comparison class.
 #[test]
 fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
     for (order, leaving) in [(Sensitive, "b/Foo.md"), (Folding, "b/FOO.md")] {
@@ -633,11 +607,7 @@ fn a_document_leaving_a_class_takes_the_findings_filed_under_it() {
     }
 }
 
-/// **A class read hands its candidates back in the probed key's order, then
-/// by path.** On a root that folds ASCII case the probed key is the folded
-/// one, and its order is neither the raw key's nor the paths' own, so a read
-/// ordered by either hands the class back in another order. Two spellings of
-/// one folded key fall back on their paths.
+/// Candidate ladders order by the normalized suffix key, then original path spelling.
 #[test]
 fn a_class_read_orders_its_candidates_by_the_probed_key_then_path() {
     let paths = [
@@ -663,8 +633,16 @@ fn a_class_read_orders_its_candidates_by_the_probed_key_then_path() {
         ordered.sort_by_key(|at| (key(&path(at)), at.clone()));
         ordered
     };
-    let expected = ordered_by(|at| at.folded_suffix_key().to_string());
-    let by_raw_key = ordered_by(|at| at.suffix_key().to_string());
+    let expected = ordered_by(|at| at.suffix_key().to_string());
+    let by_raw_key = ordered_by(|at| {
+        let mut segments: Vec<_> = at.as_str().split('/').collect();
+        let leaf = segments.pop().expect("a leaf");
+        format!(
+            "{}/{}/",
+            leaf.trim_end_matches(".md"),
+            segments.into_iter().rev().collect::<Vec<_>>().join("/")
+        )
+    });
     let mut by_path = strings(&paths);
     by_path.sort();
     assert_ne!(
@@ -702,58 +680,34 @@ fn finding_filed_under(class_keys: &[&str]) -> FindingFacts {
     }
 }
 
-/// **A class is read only under the order it was compiled under, which is
-/// its store's.** A class compiled on a store whose root folds ASCII case
-/// reads the folded key; handed to a store whose root tells spellings apart,
-/// it would serve `a/Foo.md` and `b/foo.md` as one class that root keeps
-/// apart, so the read and its plan are refused. The class that store compiles
-/// itself holds `a/Foo.md` alone.
+/// A compiled class reads identically across filesystem orders.
 #[test]
-fn a_class_compiled_under_another_order_is_refused() {
+fn a_class_compiled_under_another_order_reads_the_same_candidates() {
     let held = ["a/Foo.md", "b/foo.md"];
     let mut sensitive = Vault::holding("resolve-foreign-class", Sensitive, &held);
     let mut folding = Vault::holding("resolve-foreign-class-folded", Folding, &held);
     let foreign = folding.target_class("Foo", &[]);
     assert_eq!(folding.class(&foreign), strings(&held));
-
-    {
-        let request = sensitive.store.begin_request();
-        for refused in [
-            request.suffix_candidates(&foreign).map(|_| ()),
-            request
-                .emitted_plan(ExplainedStatement::SuffixCandidates(&foreign))
-                .map(|_| ()),
-        ] {
-            assert!(
-                matches!(
-                    refused,
-                    Err(StoreError::KeySpace {
-                        order: Sensitive,
-                        ..
-                    })
-                ),
-                "a sensitive store read a folded class: {refused:?}"
-            );
-        }
-    }
+    assert_eq!(sensitive.class(&foreign), strings(&held));
+    sensitive
+        .store
+        .begin_request()
+        .emitted_plan(ExplainedStatement::SuffixCandidates(&foreign))
+        .expect("a portable class plan");
     let own = sensitive.target_class("Foo", &[]);
-    assert_eq!(sensitive.class(&own), strings(&["a/Foo.md"]));
+    assert_eq!(sensitive.class(&own), strings(&held));
 }
 
-/// **A class probe for findings ranges over the store's own key space.** On a
-/// folding root a finding about `Foo` is filed under the folded key `foo/`, so
-/// the class probe the store builds for the stem `Foo` reaches it, and a probe
-/// over the raw key — which ranges over `Foo/` and would miss it — is refused
-/// by the read and its plan alike.
+/// Class probes reach the same normalized findings across filesystem orders.
 #[test]
-fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
+fn class_probes_reach_normalized_findings_across_filesystem_orders() {
     let mut vault = Vault::holding("resolve-class-probe", Folding, &["a/Foo.md", "b/foo.md"]);
     let mut request = vault.store.begin_request();
     request
         .record_finding(&finding_filed_under(&["foo/"]))
         .expect("recording the finding");
     let probe = request.class_probe("Foo").expect("a class stem");
-    assert_eq!(probe.key(), SuffixKey::Folded);
+    assert_eq!(probe.key(), SuffixKey::Comparison);
     let found = request
         .findings_in_class(&probe)
         .expect("reading the class");
@@ -764,7 +718,7 @@ fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
     );
 
     let raw = norn_store::suffix_probe("Foo").expect("a suffix target");
-    assert_eq!(raw.key(), SuffixKey::Raw);
+    assert_eq!(raw.key(), SuffixKey::Comparison);
     for refused in [
         request.findings_in_class(&raw).map(|_| ()),
         request
@@ -772,8 +726,8 @@ fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
             .map(|_| ()),
     ] {
         assert!(
-            matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
-            "a folding store ranged over the raw key: {refused:?}"
+            refused.is_ok(),
+            "the normalized probe reads across stores: {refused:?}"
         );
     }
     assert_eq!(
@@ -786,19 +740,16 @@ fn a_class_probe_reaches_the_findings_filed_in_the_store_s_key_space() {
     );
 }
 
-/// **A finding filed under a class key outside the store's key space is
-/// refused**, through the door for a lone finding and inside a changeset
-/// alike. On a folding root `Foo/` is a raw key no change there names, so a
-/// finding filed under it would stand through `b/FOO.md` joining the class of
-/// `Foo`. A sensitive root's key space holds every class key.
+/// Every root refuses unnormalized finding class keys, which changed
+/// documents could never reach through comparison-key maintenance.
 #[test]
-fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
+fn findings_with_unnormalized_class_keys_are_refused_on_every_root() {
     let mut vault = Vault::holding("resolve-foreign-key", Folding, &["a/Foo.md"]);
     let mut request = vault.store.begin_request();
     let filed = finding_filed_under(&["Foo/"]);
     let refused = request.record_finding(&filed);
     assert!(
-        matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
+        matches!(refused, Err(StoreError::KeySpace { .. })),
         "a folding store filed a finding under `Foo/`: {refused:?}"
     );
     let refused = request.apply_increment(
@@ -812,7 +763,7 @@ fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
         &norn_store::ContentModel::none(),
     );
     assert!(
-        matches!(refused, Err(StoreError::KeySpace { order: Folding, .. })),
+        matches!(refused, Err(StoreError::KeySpace { .. })),
         "a folding store's changeset filed a finding under `Foo/`: {refused:?}"
     );
     assert!(
@@ -828,5 +779,83 @@ fn a_finding_filed_outside_the_store_s_key_space_is_refused() {
         .store
         .begin_request()
         .record_finding(&finding_filed_under(&["Foo/", "foo/"]))
-        .expect("a sensitive store files under any class key");
+        .expect_err("a sensitive store also refuses an unnormalized class key");
+}
+
+/// Unicode case and canonical spellings name the same documents on every root.
+#[test]
+fn unicode_spellings_share_one_comparison_key_on_every_root() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            "resolve-unicode-comparison",
+            order,
+            &["n422-Éclair.md", "résumé.md", "decomposed/cafe\u{301}.md"],
+        );
+        for (target, expected) in [
+            ("n422-éclair", "n422-Éclair.md"),
+            ("re\u{301}sume\u{301}", "résumé.md"),
+            ("CAFÉ", "decomposed/cafe\u{301}.md"),
+        ] {
+            assert_eq!(
+                vault.resolves(target, &[]),
+                strings(&[expected]),
+                "{order:?}: {target}"
+            );
+        }
+    }
+}
+
+/// Only the Markdown extension is optional, including on dotted document stems.
+#[test]
+fn only_md_is_optional_in_a_target() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            "resolve-md-only",
+            order,
+            &["photo.md", "v1.md", "v1.2.md", "note.md", "note.md.md"],
+        );
+        assert!(vault.resolves("photo.png", &[]).is_empty());
+        assert_eq!(vault.resolves("v1.2", &[]), strings(&["v1.2.md"]));
+        assert_eq!(
+            vault.resolves("NOTE.MD", &[]),
+            strings(&["note.md", "note.md.md"])
+        );
+        let mut with_photo =
+            Vault::holding("resolve-photo-stem", order, &["photo.md", "photo.png.md"]);
+        assert_eq!(
+            with_photo.resolves("photo.png", &[]),
+            strings(&["photo.png.md"])
+        );
+    }
+}
+
+/// Ignore globs and candidate paths use the same comparison key.
+#[test]
+fn ambiguity_ignore_matches_case_and_canonical_variants_on_every_root() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            "resolve-unicode-ignore",
+            order,
+            &["ARCHIVE/re\u{301}sume\u{301}/note.md", "notes/note.md"],
+        );
+        assert_eq!(
+            vault.resolves("note", &["archive/RÉSUMÉ/**"]),
+            strings(&["notes/note.md"])
+        );
+        assert_eq!(
+            vault.resolves("archive/résumé/note", &["archive/RÉSUMÉ/**"]),
+            strings(&["ARCHIVE/re\u{301}sume\u{301}/note.md"])
+        );
+    }
+}
+
+/// Contextual lowercase cannot split documents sharing a complete path key.
+#[test]
+fn contextual_lowercase_twins_share_the_suffix_class() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding("resolve-contextual-lowercase", order, &["ΟΣ.md", "Οσ.md"]);
+        for target in ["ΟΣ", "Οσ", "ΟΣ.md", "Οσ.md"] {
+            assert_eq!(vault.resolves(target, &[]), strings(&["ΟΣ.md", "Οσ.md"]));
+        }
+    }
 }

@@ -21,11 +21,12 @@
 //! is the one the finding was recorded with; no class is resolved again at
 //! read time. Only an ambiguous link's finding (`link/ambiguous`) carries a
 //! hint, because only its candidates run past a head a request can enumerate.
-//! The hint names the address the finding's longest class key reads back as
-//! ([`crate::ClassKey::address`]): a target's reductions differ only in the
-//! leaf, the leaf as written is the longer key, and its address's probe opens
-//! every class the target's probe did. An ambiguous finding in no class — a
-//! rooted name's, keyed by paths alone — has no hint, and neither does one
+//! The hint names the address the link's longest own class key reads back as
+//! ([`crate::ClassKey::address`]): a target ending in `.md` opens two
+//! classes, and the longer own key reads back as an address whose probe
+//! opens both. Candidate naming classes do not select the hint. An ambiguous
+//! finding in no class, such as a rooted name keyed only by paths, has no
+//! hint, and neither does one
 //! whose address a request could not spell: an address holding `#` reads as a
 //! target with an anchor, which names another address.
 
@@ -365,23 +366,10 @@ impl Snapshot {
     }
 }
 
-/// The request that enumerates the class a finding of `kind` about the link
-/// written `target` is about: a `find` resolving the address of the class in
-/// `classes` that the link's own address spells — as written, or folded by
-/// ASCII case where the root folds it. Only an ambiguous link's finding has
-/// candidates past its head to enumerate, so every other kind has none; and
-/// neither has a finding in no class its link spells, nor one whose address a
-/// target cannot spell.
-///
-/// A finding is in the classes its link's keys open and in the classes its
-/// candidates are named in, and only the first name the link: the class the
-/// link spells is the longest of its keys', and a candidate's naming class
-/// can be longer, so the hint is found by the link's own address rather than
-/// by length. An ambiguous finding in a class — a suffix-addressed link's —
-/// carries the hint whether or not its head holds the whole total: the hint
-/// names the class, not the candidates the head left out. An ambiguous rooted
-/// name is written with its protocol and spells no class, and so carries
-/// none.
+/// The request enumerating an ambiguous suffix link's own comparison class.
+/// The longest key of the link's probe reads both `.md` readings back;
+/// candidate naming classes do not choose the hint. Rooted names and other
+/// finding kinds have no suffix enumeration hint.
 fn hint_of(kind: FindingKind, target: Option<&str>, classes: &BTreeSet<ClassKey>) -> Option<Hint> {
     if kind != FindingKind::Ambiguous {
         return None;
@@ -391,10 +379,10 @@ fn hint_of(kind: FindingKind, target: Option<&str>, classes: &BTreeSet<ClassKey>
         return None;
     }
     let spelled = written.split('#').next()?;
-    let class = classes.iter().find(|class| {
-        let address = class.address();
-        address == spelled || address == spelled.to_ascii_lowercase()
-    })?;
+    let own = crate::suffix_probe(spelled).ok()?.class_keys();
+    let class = own
+        .intersection(classes)
+        .max_by_key(|class| class.as_str().len())?;
     ResolutionTarget::new(class.address())
         .ok()
         .map(Hint::resolves)
@@ -462,13 +450,10 @@ mod tests {
             .collect()
     }
 
-    /// **A hint names the class the link's own address spells**, which is
-    /// the class every other class the link opens is a reduction of, and
-    /// never a class a candidate is named in, however long: `[[crowd]]`
-    /// whose candidates are named in `crowd.md/` names `crowd`, and on a
-    /// folding root the folded class. An anchor is no part of the address. A
-    /// finding in no class its link spells, a rooted name, and a finding of
-    /// any other kind have none.
+    /// A hint selects the link's own comparison class, excluding classes
+    /// used only to name candidates. `[[crowd]]` enumerates `crowd` even
+    /// when a candidate is named through `crowd.md/`. Anchors do not
+    /// affect this choice, and rooted names have no suffix-class hint.
     #[test]
     fn a_hint_names_the_class_the_links_own_address_spells() {
         let target = |hint: Option<Hint>| match hint {

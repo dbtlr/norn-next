@@ -579,25 +579,22 @@ fn a_rename_breaks_path_links_to_the_old_path() {
     }
 }
 
-/// **A link reached two ways in one changeset files one finding.** `[[v1.2]]`
-/// is held under the classes `v1.2/` and `v1/`, and `[[vault://v1.2]]` under
-/// the paths `v1.2.md` and `v1.md`; each names an attachment, and naming no
-/// document raises nothing. One changeset writing both documents reaches each
-/// link twice, and each is judged once — ambiguous between the two, one
-/// finding apiece, two links re-decided.
+/// Suffix and rooted `.md` links each have two document-name keys.
+/// Creating both candidates rejudges each link once and files one
+/// ambiguity finding per link, replacing its earlier broken finding.
 #[test]
 fn a_link_reached_by_two_affected_classes_files_one_finding() {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("redecide-two-classes-{order:?}"), order);
-        vault.write(&[("h.md", "[[v1.2]]\n\n[[vault://v1.2]]\n")]);
-        assert_eq!(vault.findings("h.md"), [], "{order:?}");
+        vault.write(&[("h.md", "[[v1.md]]\n\n[[vault://v1.md]]\n")]);
+        assert_eq!(vault.findings("h.md"), [broken(0), broken(1)], "{order:?}");
 
-        let counters = vault.write(&[("v1.md", "one\n"), ("v1.2.md", "one point two\n")]);
+        let counters = vault.write(&[("v1.md", "one\n"), ("v1.md.md", "one point two\n")]);
         assert_eq!(
             vault.findings("h.md"),
             [
-                ambiguous(0, &["v1.2.md", "v1.md"], 2),
-                ambiguous(1, &["v1.2.md", "v1.md"], 2),
+                ambiguous(0, &["v1.md.md", "v1.md"], 2),
+                ambiguous(1, &["v1.md", "v1.md.md"], 2),
             ],
             "{order:?}"
         );
@@ -606,32 +603,27 @@ fn a_link_reached_by_two_affected_classes_files_one_finding() {
     }
 }
 
-/// **A dotted leaf's finding is re-filed whichever of its classes changes.**
-/// `[[v1.2#Intro]]` naming `v1.md` alone misses its anchor, and the finding is
-/// filed under both `v1.2/` and `v1/`. A changeset changing only `v1.2/`
-/// discards it through that key and re-decides the link ambiguous; a death in
-/// `v1.2/` makes it miss its anchor again; a changeset changing only `v1/`
-/// reaches it through the other key and heals it. Each time the old finding
-/// is gone before the new one is filed, or the changeset would refuse a
-/// second finding about one link.
+/// A link ending in `.md` is rejudged when either document-name class
+/// changes. Adding its `.md.md` twin makes it ambiguous; removing the
+/// twin restores the missing-anchor finding, and adding the heading heals it.
 #[test]
-fn a_dotted_leaf_link_is_refiled_when_either_of_its_classes_changes() {
+fn a_link_ending_in_md_is_rejudged_when_either_document_name_class_changes() {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("redecide-dotted-{order:?}"), order);
-        vault.write(&[("h.md", "[[v1.2#Intro]]\n"), ("v1.md", "one\n")]);
+        vault.write(&[("h.md", "[[v1.md#Intro]]\n"), ("v1.md", "one\n")]);
         assert_eq!(
             vault.findings("h.md"),
             [missing_anchor(0, "v1.md")],
             "{order:?}"
         );
 
-        vault.write(&[("x/v1.2.md", "one point two\n")]);
+        vault.write(&[("x/v1.md.md", "one point two\n")]);
         assert_eq!(
             vault.findings("h.md"),
-            [ambiguous(0, &["x/v1.2.md", "v1.md"], 2)],
+            [ambiguous(0, &["x/v1.md.md", "v1.md"], 2)],
             "{order:?}"
         );
-        vault.kill("x/v1.2.md");
+        vault.kill("x/v1.md.md");
         assert_eq!(
             vault.findings("h.md"),
             [missing_anchor(0, "v1.md")],
@@ -648,23 +640,19 @@ fn a_dotted_leaf_link_is_refiled_when_either_of_its_classes_changes() {
     }
 }
 
-/// **A rooted name is re-decided through a path key its other key sorts
-/// below.** `[[vault://v1.2]]` is held under the paths `v1.2.md` and `v1.md`,
-/// and names `v1.2.md` alone. Writing `v1.md` alone changes one of its paths:
-/// its other key sorts below the one changed but is no changed path, so the
-/// link belongs to the changed one's pass, and is filed ambiguous; killing
-/// `v1.md` heals it the same way.
+/// A rooted `.md` link is rejudged when either complete path changes.
+/// Adding `v1.md` beside `v1.md.md` makes it ambiguous; deleting it heals it.
 #[test]
 fn a_rooted_name_is_redecided_through_its_one_changed_path() {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("redecide-rooted-{order:?}"), order);
-        vault.write(&[("h.md", "[[vault://v1.2]]\n"), ("v1.2.md", "x\n")]);
+        vault.write(&[("h.md", "[[vault://v1.md]]\n"), ("v1.md.md", "x\n")]);
         assert_eq!(vault.findings("h.md"), [], "{order:?}");
 
         vault.write(&[("v1.md", "one\n")]);
         assert_eq!(
             vault.findings("h.md"),
-            [ambiguous(0, &["v1.2.md", "v1.md"], 2)],
+            [ambiguous(0, &["v1.md", "v1.md.md"], 2)],
             "{order:?}"
         );
         vault.kill("v1.md");
@@ -903,27 +891,25 @@ fn a_same_document_anchors_candidate_is_renamed_when_its_class_moves() {
     );
 }
 
-/// **An ambiguous link names a dotted candidate by the suffix its reduction
-/// leaves it.** `[[v1.2.3]]` names `v1.2.3.md` and `v1.2.md`, and the second
-/// is named `v1.2` while no `v1.md` stands — the first by its written leaf, since `v1.2.3` reduces to the second. Writing `v1.md` moves the class
-/// `v1/` — which no key of the link falls in — and `v1.2` then names two
-/// documents, so the candidate is `v1.2.md`; killing it gives `v1.2` back.
+/// An ambiguous candidate's minimal suffix is recomputed when one of
+/// its optional `.md` spellings gains a competing document. Creating
+/// `v1.md` changes the candidate's suffix; removing it restores the suffix.
 #[test]
-fn an_ambiguous_links_dotted_candidate_is_renamed_when_its_reduction_moves() {
+fn an_ambiguous_candidates_minimal_suffix_changes_when_an_md_name_becomes_ambiguous() {
     candidates_named_after(
         "redecide-named-dotted",
         "h.md",
         &[
             (
                 &[
-                    ("h.md", Some("[[v1.2.3]]\n")),
-                    ("v1.2.3.md", Some("")),
-                    ("v1.2.md", Some("")),
+                    ("h.md", Some("[[v1.md.md]]\n")),
+                    ("v1.md.md.md", Some("")),
+                    ("v1.md.md", Some("")),
                 ],
-                &[&["v1.2.3.md", "v1.2"]],
+                &[&["v1.md.md.md", "v1.md"]],
             ),
-            (&[("v1.md", Some(""))], &[&["v1.2.3.md", "v1.2.md"]]),
-            (&[("v1.md", None)], &[&["v1.2.3.md", "v1.2"]]),
+            (&[("v1.md", Some(""))], &[&["v1.md.md.md", "v1.md.md"]]),
+            (&[("v1.md", None)], &[&["v1.md.md.md", "v1.md"]]),
         ],
     );
 }
@@ -980,7 +966,7 @@ fn pin_schema(store: &mut Store, schema: usize) {
 }
 
 /// The places the edit script writes, kills and renames between: stems shared
-/// across directories and across case, a dotted stem and its reductions, a
+/// across directories and across case, a dotted stem and its optional `.md` spellings, a
 /// leaf that is a directory's name, places under the ignore globs, and places
 /// only a path link names.
 const PLACES: [&str; 30] = [
@@ -1308,7 +1294,7 @@ fn incremental_equals_rebuild_including_finding_order() {
 /// **A neighborhood of many pages equals a rebuild.** Seven hundred documents
 /// each hold one to three links into one stem, its dotted neighbor and one
 /// path, so every arm reads more than one page; each changeset after them
-/// moves the stem's class, a path, a dotted reduction, or a holder, and the
+/// moves the stem's class, a path, an optional `.md` class, or a holder, and the
 /// store equals one built from zero on both roots.
 #[test]
 fn a_neighborhood_of_many_pages_equals_a_rebuild() {
@@ -1544,19 +1530,16 @@ fn a_writes_work_does_not_follow_the_ignored_members_of_its_class() {
     }
 }
 
-/// **A key the chunks hold in turn is resolved once.** Six hundred documents
-/// each link `[[hub.v1]]`, which is held under `hub/` and under `hub.v1/`, so
-/// writing one more document the stem `hub` names walks the class `hub/` in
-/// three chunks, each holding both keys. The re-decision keeps only the keys
-/// the chunk it last filed held, and each chunk holds the one the next reads,
-/// so each key is resolved once and its candidates are read once.
+/// Six hundred links to `hub.md` share the keys `hub/` and `hub.md/`.
+/// Changing `hub/` rejudges them in chunks while resolving each shared
+/// key and reading its candidates once.
 #[test]
 fn a_key_every_chunk_holds_is_resolved_once() {
     let mut vault = Vault::new("redecide-cross-class-chunks", Sensitive);
     let mut documents: Vec<(String, &str)> = (0..2)
         .map(|at| (format!("m/{at:03}/hub.md"), "hub\n"))
         .collect();
-    documents.extend((0..600).map(|at| (format!("h/{at:03}.md"), "[[hub.v1]]\n")));
+    documents.extend((0..600).map(|at| (format!("h/{at:03}.md"), "[[hub.md]]\n")));
     vault.apply(
         documents
             .iter()
@@ -1576,7 +1559,7 @@ fn a_key_every_chunk_holds_is_resolved_once() {
     let counters = request.finish();
     assert_eq!(counted(&counters, "links_redecided"), 600);
     assert_eq!(counted(&counters, "link_health_keys_resolved"), 2);
-    // `hub/` names the three hubs, and `hub.v1/` names nothing.
+    // `hub/` names the three hubs, and `hub.md/` names nothing.
     assert_eq!(counted(&counters, "link_health_candidates_read"), 3);
     assert_eq!(counted(&counters, "findings_written"), 600);
 }
@@ -1928,5 +1911,35 @@ fn a_changeset_past_one_chunk_of_keys_reaches_every_key_in_the_next() {
             "{order:?}"
         );
         assert_rebuilds(&mut vault.store, order, &held, &label);
+    }
+}
+
+/// Comparison twins joining and leaving a class rejudge its untouched links.
+#[test]
+fn comparison_twins_rejudge_link_health_when_created_and_removed() {
+    for order in [Sensitive, Folding] {
+        for (first, twin, link) in [
+            ("ΟΣ.md", "Οσ.md", "[[ΟΣ]]\n\n[x](ΟΣ.md)\n"),
+            ("Note.md", "note.md", "[[note]]\n\n[x](NOTE.md)\n"),
+            (
+                "résumé.md",
+                "re\u{301}sume\u{301}.md",
+                "[[résumé]]\n\n[x](re\u{301}sume\u{301}.MD)\n",
+            ),
+        ] {
+            let mut vault = Vault::new("redecide-comparison-twins", order);
+            vault.write(&[(first, "target\n"), ("holder.md", link)]);
+            assert_eq!(vault.findings("holder.md"), []);
+            vault.write(&[(twin, "twin\n")]);
+            let mut candidates = [first, twin];
+            candidates.sort();
+            assert_eq!(
+                vault.findings("holder.md"),
+                [ambiguous(0, &candidates, 2), ambiguous(1, &candidates, 2)],
+                "{order:?}"
+            );
+            vault.kill(twin);
+            assert_eq!(vault.findings("holder.md"), []);
+        }
     }
 }

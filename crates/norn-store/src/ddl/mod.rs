@@ -76,14 +76,8 @@ pub(crate) mod migrations;
 pub(crate) mod stems;
 pub(crate) mod tombstones;
 
-/// The store schema version, pinned at 1 through the pre-release build.
-///
-/// It does not move: a DDL change during development is detected as a
-/// [`fingerprint`] mismatch and resolved by rebuilding from zero, which
-/// consumes no version numbers. At the first release version 1 freezes as the
-/// first migratable baseline, and from then on the migrations pillar is the
-/// evolution path.
-pub const STORE_SCHEMA_VERSION: i64 = 1;
+/// The store schema version of the normalized resolution key columns.
+pub const STORE_SCHEMA_VERSION: i64 = 2;
 
 /// The areas, in execution order. `meta` is first, and it is the substrate's
 /// table rather than this tree's, because it is what an open reads to decide

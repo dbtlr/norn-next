@@ -13,7 +13,7 @@
 //! through the heal every attach runs — the main vault, and a second one for
 //! the tag stance the main vault does not take, since a stance is a vault's own
 //! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints, their stem trigrams, their raw and
-//! folded suffix keys and their admitting counts, the links and the keys the link index holds them
+//! normalized suffix and path keys and their admitting counts, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
 //! with their typed halves, the offset spelling beside a typed date and a tag key's folds, every finding with its candidates, classes and path keys, the
 //! rules it cites and the head of the value it names, the
@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(16),
-    "c226e07c8f8e2fb2a23e086ff98cbcfbfe2f68f5615928d2335ac3d1e7a85815",
+    "d012f726ad2aafab855dac9fa3307ea1e3a45ed4602e5e5b4edfb389c89e021b",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -443,10 +443,7 @@ A paragraph closing on a block id. ^glossary-block
 /// A link the store judges broken, one it judges ambiguous, and two whose
 /// anchors name a heading and a block `health/anchored.md` does not hold.
 ///
-/// A link-health finding is keyed by the link's address as the root compares
-/// it, so an address with an upper-case letter keys it one way on a root that
-/// folds case and another on one that does not. Every address here, and every
-/// document it names, is written in lower case so the rows are the same on both.
+/// Link-health findings use normalized comparison keys on every root.
 const LINK_HEALTH: &str = "# Link health
 
 A broken [[nowhere at all]], an ambiguous [[twin]], a missing heading [[anchored#No Such Heading]] \
@@ -951,36 +948,36 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "notes/Deep%20Note.md",
-            &["notes/Deep Note.md"][..],
+            &["notes/deep note.md"][..],
             "a percent-encoded Markdown link is keyed by the path it decodes to",
         ),
         (
             deep,
             None,
             "../Notes.md",
-            &["Notes.md"],
+            &["notes.md"],
             "a Markdown link climbing a directory is keyed by the path it joins to",
         ),
         (
             glossary,
             None,
             "notes/Deep Note",
-            &["Deep Note/notes/"],
+            &["deep note/notes/"],
             "a wikilink is keyed by its suffix address",
         ),
         (
             glossary,
             None,
             "v1.2",
-            &["v1.2/", "v1/"],
-            "a dotted wikilink is keyed by both reductions",
+            &["v1.2/"],
+            "a dotted non-Markdown leaf keeps its extension in the key",
         ),
         (
             glossary,
             None,
             "picture.png",
-            &["picture.png/", "picture/"],
-            "a wikilink naming an attachment is keyed by both reductions",
+            &["picture.png/"],
+            "an attachment-shaped target keeps its whole leaf",
         ),
         (
             glossary,
@@ -993,14 +990,14 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             None,
             "",
-            &["Glossary.md"],
+            &["glossary.md"],
             "a same-document anchor is keyed by its own document's path",
         ),
         (
             glossary,
             None,
             "/Notes.md",
-            &["Notes.md"],
+            &["notes.md"],
             "a rooted Markdown link is keyed by the path from the vault root",
         ),
         (
@@ -1015,22 +1012,21 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             Some("vault"),
             "notes/Deep Note.md",
-            &["notes/Deep Note.md", "notes/Deep Note.md.md"],
+            &["notes/deep note.md", "notes/deep note.md.md"],
             "a vault wikilink is keyed by the root path each of its reductions spells",
         ),
         (
             glossary,
             Some("vault"),
             "v1.2",
-            &["v1.2.md", "v1.md"],
-            "a vault wikilink whose leaf carries a non-Markdown extension is keyed by the stem \
-             as written and the stem without its extension, each a Markdown path",
+            &["v1.2.md"],
+            "a rooted non-Markdown leaf names only its complete Markdown stem",
         ),
         (
             glossary,
             None,
             "Notes.md?view=raw",
-            &["Notes.md"],
+            &["notes.md"],
             "a Markdown link's query is not part of its key",
         ),
         (
@@ -1244,15 +1240,12 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         document("notes/Deep Note.md").body.contains("\r\n"),
         "no CRLF document is exercised"
     );
-    assert!(
+    assert_eq!(
         rows.fields()
-            .iter()
-            .any(|(field, value)| field.ends_with(".folded_suffix_key")
-                && rows
-                    .fields()
-                    .get(&field.replace(".folded_suffix_key", ".suffix_key"))
-                    .is_some_and(|raw| raw != value)),
-        "no suffix key that folds to another spelling is exercised"
+            .get("document[notes/Deep Note.md].path_key")
+            .map(String::as_str),
+        Some("\"notes/deep note.md\""),
+        "the corpus exercises a normalized complete-path key"
     );
     assert_eq!(
         rows.fields()

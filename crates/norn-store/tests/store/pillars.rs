@@ -472,10 +472,10 @@ fn a_tombstone_at_a_live_path_is_damage() {
         &mut store,
         "INSERT INTO tombstones (
              path, last_content_hash, provenance, generation, recorded_at,
-             suffix_key, folded_suffix_key
+             suffix_key, path_key
          ) VALUES (
              'docs/norn/glossary.md', 'hash-0', 'heal-prune', 1, 0,
-             'glossary/norn/docs/', 'glossary/norn/docs/'
+             'glossary/norn/docs/', 'docs/norn/glossary.md'
          )",
     )
     .expect("writing a pair nothing writes");
@@ -902,8 +902,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
         vec!["archive/docs/norn/glossary.md", "docs/norn/glossary.md"]
     );
 
-    // A target that names its extension reaches the same documents, because the
-    // probe opens both readings of the dot.
+    // The optional `.md` spelling reaches the same documents here.
     assert_eq!(paths("norn/glossary.md").len(), 2);
 
     // A suffix that identifies one document is not an ambiguity class at all.
@@ -911,20 +910,18 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
     assert_eq!(paths("nothing").len(), 0);
 }
 
-/// **A written dot is ambiguous, and the probe answers with both readings rather
-/// than picking one.** Reducing always makes `v1.2` resolve to `v1` — a single,
-/// confident, wrong candidate. Reducing never leaves a document whose leaf carries
-/// two dots unreachable by anything shorter than the whole leaf.
+/// A target ending in `.md` names the document and its `.md.md` twin.
+/// Other extensions, including dotfile suffixes, remain part of the name.
 #[test]
-fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
+fn a_target_ending_in_md_names_both_the_document_and_its_md_md_twin() {
     let scratch = Scratch::new("two-reductions");
     let mut store = scratch.open();
     let mut request = store.begin_request();
 
     for (index, at) in [
         "notes/v1.md",
-        "notes/v1.2.md",
-        "archive/notes.tar.gz",
+        "notes/v1.md.md",
+        "archive/notes.md.md",
         ".env",
         ".env.local",
     ]
@@ -949,15 +946,15 @@ fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
     };
 
     // Both readings, so the ambiguity is reported rather than resolved wrongly.
-    assert_eq!(paths("v1.2"), vec!["notes/v1.2.md", "notes/v1.md"]);
+    assert_eq!(paths("v1.md"), vec!["notes/v1.md", "notes/v1.md.md"]);
     // And the document that stored its own dotted stem is reachable by a target
     // that names less than the whole leaf.
-    assert_eq!(paths("notes.tar"), vec!["archive/notes.tar.gz"]);
-    assert_eq!(paths("notes.tar.gz"), vec!["archive/notes.tar.gz"]);
-    // A dotfile is a name: `.env` opens one range, and the class it opens is the
-    // one the store puts both dotfiles in.
-    assert_eq!(paths(".env"), vec![".env", ".env.local"]);
-    assert_eq!(paths(".env.local"), vec![".env", ".env.local"]);
+    assert_eq!(paths("notes.md"), vec!["archive/notes.md.md"]);
+    assert_eq!(paths("notes.md.md"), vec!["archive/notes.md.md"]);
+    // Dotfile suffixes other than `.md` remain part of the name, so these
+    // two dotfiles have distinct comparison classes.
+    assert_eq!(paths(".env"), vec![".env"]);
+    assert_eq!(paths(".env.local"), vec![".env.local"]);
 }
 
 /// **The ladder's order is total.** Equal suffix keys are exactly what an
@@ -1011,7 +1008,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
 fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
     match statement {
         ExplainedStatement::SuffixCandidates(_) => {
-            "a_class_read_seeks_the_suffix_key_its_root_probes"
+            "class_reads_seek_the_same_suffix_comparison_index_on_every_root"
         }
         ExplainedStatement::FindingsInClass(_)
         | ExplainedStatement::SubjectDiscard(..)
@@ -1137,10 +1134,9 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
     );
 }
 
-/// **A class read seeks the suffix key its root probes, and no other.** A
-/// root that tells spellings apart ranges over
-/// `documents_admitted_suffix_key`, and a root that folds ASCII case over
-/// `documents_admitted_folded_suffix_key`; either way a target opens one
+/// **A class read seeks the one suffix comparison key on every root, and no
+/// other.** Every root ranges over `documents_admitted_suffix_key`; a target
+/// opens one
 /// seek per reduction and admitting count, bound to both the count and the
 /// key range. Excluded members are never read. The bar is judged on the row
 /// that searches `documents`: its index and its range constraint.
@@ -1153,7 +1149,7 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
 /// Control: each key's index dropped, and the same bar fails under every
 /// resolution that probes it.
 #[test]
-fn a_class_read_seeks_the_suffix_key_its_root_probes() {
+fn class_reads_seek_the_same_suffix_comparison_index_on_every_root() {
     use norn_store::{AmbiguityIgnore, StoredPathOrder, TargetClass};
 
     let judge = |store: &mut norn_store::Store,
@@ -1207,8 +1203,8 @@ fn a_class_read_seeks_the_suffix_key_its_root_probes() {
         ),
         (
             StoredPathOrder::AsciiCaseInsensitive,
-            "documents_admitted_folded_suffix_key",
-            "folded_suffix_key",
+            "documents_admitted_suffix_key",
+            "suffix_key",
         ),
     ] {
         let scratch = Scratch::new(&format!("class-read-plans-{}", order.as_str()));
@@ -1442,7 +1438,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     assert_eq!(
         bars,
         [
-            "a_class_read_seeks_the_suffix_key_its_root_probes",
+            "class_reads_seek_the_same_suffix_comparison_index_on_every_root",
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
             "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id",
@@ -2167,11 +2163,15 @@ fn an_enumeration_drained_a_page_at_a_time_reaches_every_row() {
         .into_iter()
         .next()
     {
-        keyed.push((stored.path.as_str().to_string(), stored.raw, stored.folded));
+        keyed.push((
+            stored.path.as_str().to_string(),
+            stored.suffix_key,
+            stored.path_key,
+        ));
         keyed_after = Some(stored.path);
         assert!(keyed.len() < 32, "the suffix-key cursor did not advance");
     }
-    let key = |path: &str, key: &str| (path.to_string(), key.to_string(), key.to_string());
+    let key = |path: &str, key: &str| (path.to_string(), key.to_string(), path.to_string());
     assert_eq!(
         keyed,
         vec![
@@ -3286,28 +3286,25 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     assert_eq!(request.counters().get("findings_written"), Some(5));
 }
 
-/// **A finding belongs to every class its target's reductions read, and any one of
-/// them reaches it.** The two reductions are disjoint rather than nested — `.` is
-/// `0x2e` and `/` is `0x2f`, so `notes.tar/` sorts before `notes/` — so a finding
-/// filed under one class alone would be invisible to maintenance that named the
-/// other: a finding nothing ever revisits, which is the hazard class scoping
-/// exists to close.
+/// A finding about a target ending in `.md` is reachable through both
+/// document-name classes. `notes.md/` sorts before `notes/`, and neither
+/// range contains the other, so each membership must maintain the finding.
 #[test]
 fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
     // The byte order the hazard is made of, stated where it is relied on.
-    assert!("notes.tar/" < "notes/", "`.` does not sort before `/`");
+    assert!("notes.md/" < "notes/", "`.` does not sort before `/`");
     assert!(
-        !"notes.tar/".starts_with("notes/"),
+        !"notes.md/".starts_with("notes/"),
         "the reductions nest after all"
     );
 
     for (target, at) in [
-        // The flagship pair: the written target reduces one way, the document it
-        // resolves to is in the class the *other* reduction names.
-        ("v1.2", "notes/v1.2.md"),
-        ("notes.tar", "archive/notes.tar.gz"),
-        ("notes.tar.gz", "archive/notes.tar.gz"),
-        // And a target with one reduction, which is one class and unchanged.
+        // The target's written stem names a document ending in `.md.md`,
+        // while its optional `.md` reading names the extensionless class.
+        ("v1.md", "notes/v1.md.md"),
+        ("notes.md", "archive/notes.md.md"),
+        ("notes.md.md", "archive/notes.md.md"),
+        // A target without `.md` opens only one document-name class.
         ("glossary", "docs/glossary.md"),
     ] {
         let scratch = Scratch::new("two-reduction");
@@ -3423,13 +3420,13 @@ fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
     let scratch = Scratch::new("both-classes");
     let mut store = scratch.open();
     let mut request = store.begin_request();
-    let probe = suffix_probe("v1.2").expect("a suffix target");
+    let probe = suffix_probe("v1.md").expect("a suffix target");
     assert_eq!(probe.range_count(), 2);
 
     request
         .record_finding(&path_names_no_document_for_target(
             "docs/index.md",
-            "v1.2",
+            "v1.md",
             &[],
             2,
         ))
@@ -3445,7 +3442,7 @@ fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
     let outcome = write_documents(
         &mut request,
         &[
-            document("v1.2.md", "hash-1", "a body\n"),
+            document("v1.md.md", "hash-1", "a body\n"),
             document("v1.md", "hash-1", "a body\n"),
         ],
     );
@@ -4198,9 +4195,7 @@ fn pinning_the_schema_that_is_already_pinned_is_a_no_op() {
     assert!(moved.repinned);
 }
 
-/// The migration ledger is carved and empty. Store schema version is pinned, so
-/// nothing is migrating, and recording version 1 here would put the same fact in
-/// two places.
+/// Pre-release schema changes rebuild the derived store, leaving the migration ledger empty.
 #[test]
 fn the_migration_ledger_is_empty_through_the_pre_release_build() {
     let scratch = Scratch::new("migrations");

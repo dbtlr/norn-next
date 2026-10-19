@@ -143,13 +143,9 @@
 //! named by ([`ReadFilter::LinksTo`]): a link naming two or more documents is a
 //! backlink of none of them.
 //!
-//! A `resolves` part enumerates the target's ambiguity class through the one
-//! resolver, [`crate::resolve::TargetClass`]: both reductions of a dotted leaf, over the raw
-//! suffix key where the snapshot's root tells spellings apart and over the
-//! folded key where it folds ASCII case, less the places the declaration's
-//! ambiguity-ignore set keeps out of the class. The case behaviour is the
-//! snapshot's ([`Snapshot::path_order`]): the order the rows it reads were
-//! derived under, so no find detects it.
+//! A `resolves` part enumerates the target's ambiguity class through
+//! [`crate::resolve::TargetClass`], using the normalized comparison key and
+//! the declaration's ambiguity-ignore set on every root. Only `.md` is optional.
 //!
 //! # A comparison that assumed an offset is advised
 //!

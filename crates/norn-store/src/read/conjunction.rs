@@ -405,7 +405,7 @@ impl Snapshot {
                         Unsatisfied::links_to_ambiguous(target.clone(), head),
                     )),
                     Naming::One { document, path } => {
-                        let key = SuffixKey::under(self.path_order());
+                        let key = SuffixKey::Comparison;
                         let mut values: Vec<Value> = keys_naming(&DocumentPath::new(&path)?, key)
                             .into_iter()
                             .map(Value::Text)
@@ -415,19 +415,17 @@ impl Snapshot {
                     }
                 }
             }
-            Predicate::Resolves { target, .. } => match TargetClass::compile(
-                target.address(),
-                self.path_order(),
-                declared.ambiguity_ignore(),
-            ) {
-                Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(
-                    target.address(),
-                ))),
-                Ok(class) => filter(
-                    ReadFilter::Resolves(class.probe().key()),
-                    class.parameters(),
-                ),
-            },
+            Predicate::Resolves { target, .. } => {
+                match TargetClass::compile(target.address(), declared.ambiguity_ignore()) {
+                    Err(_) => Ok(Part::MatchesNothing(Unsatisfied::impossible_path(
+                        target.address(),
+                    ))),
+                    Ok(class) => filter(
+                        ReadFilter::Resolves(class.probe().key()),
+                        class.parameters(),
+                    ),
+                }
+            }
             Predicate::Tag { name, .. } => filter(ReadFilter::Tag, vec![text(&fold_tag(name))]),
             Predicate::HasFinding { kind, .. } => filter(
                 ReadFilter::Finding,

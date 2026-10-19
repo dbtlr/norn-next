@@ -154,14 +154,14 @@ impl WriteStatement {
         match self {
             Self::UpsertDocument => {
                 "INSERT INTO documents (
-                     path, suffix_key, folded_suffix_key, admitting_segments, content_hash,
+                     path, suffix_key, path_key, admitting_segments, content_hash,
                      byte_length, body, body_hash, body_offset, frontmatter,
                      frontmatter_projection_hash, frontmatter_diagnostic_count, generation,
                      derived_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(path) DO UPDATE SET
                      suffix_key                   = excluded.suffix_key,
-                     folded_suffix_key            = excluded.folded_suffix_key,
+                     path_key            = excluded.path_key,
                      admitting_segments           = excluded.admitting_segments,
                      content_hash                 = excluded.content_hash,
                      byte_length                  = excluded.byte_length,
@@ -189,8 +189,8 @@ impl WriteStatement {
                  RETURNING id"
             }
             Self::InsertLinkKey => {
-                "INSERT INTO link_keys (link, document, key, folded_key, segments)
-                 VALUES (?1, ?2, ?3, ?4, ?5)"
+                "INSERT INTO link_keys (link, document, key, segments)
+                 VALUES (?1, ?2, ?3, ?4)"
             }
             Self::InsertHeading => {
                 "INSERT INTO headings (
@@ -221,7 +221,7 @@ impl WriteStatement {
             Self::RecordTombstone => {
                 "INSERT INTO tombstones (
                      path, last_content_hash, provenance, generation, recorded_at,
-                     suffix_key, folded_suffix_key
+                     suffix_key, path_key
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(path) DO UPDATE SET
                      last_content_hash = COALESCE(

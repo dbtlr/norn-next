@@ -1,6 +1,4 @@
-//! The one resolver: a written target, the case behaviour its vault root
-//! proved, and the places the vault's schema keeps out of ambiguity classes,
-//! compiled into the class of documents the target names.
+//! The one resolver compiles written targets into indexed candidate classes.
 //!
 //! Every surface that asks which documents a target names asks here: a find's
 //! `resolves` part, a read of a class's candidates — a get's target, a
@@ -15,43 +13,20 @@
 //! link key's class or path, so no two surfaces can disagree
 //! about a class.
 //!
-//! [`TargetClass::class_keys`] spells the class keys a target is read
-//! through. The link-health judgment ([`crate::health`]) keys a link's
-//! findings by the link's stored `link_keys` rows, not by this set, and
-//! nothing outside this module's tests calls [`TargetClass::class_keys`].
+//! Every resolution surface reads the same normalized suffix or path keys.
+//! [`crate::comparison_key`] applies NFC and Unicode default lowercasing on
+//! every root; exact spelling takes no precedence among comparison twins.
 //!
-//! # Case is the root's
+//! [`AmbiguityIgnore`] excludes a candidate unless the target's segments
+//! reach the shallowest ignored place's last segment. A document at the
+//! root is its whole place and is reached by its own name. Patterns and
+//! candidate paths compare under the same key as resolution. Query path
+//! globs retain their filesystem order independently.
 //!
-//! A root that tells spellings apart reads the raw suffix key and never
-//! consults the folded one. A root that folds ASCII case reads the folded key,
-//! and there every document whose folded key the target's folded reduction
-//! prefixes is one class: an exact-case match takes no precedence, because the
-//! root itself does not tell the two spellings apart. The fold is ASCII alone,
-//! so a non-ASCII letter keeps its case under either — see
-//! [`crate::path::SuffixKey`].
-//!
-//! # Ignored places
-//!
-//! A vault's schema may name globs whose places stay out of ambiguity classes
-//! ([`AmbiguityIgnore`]). A place is **under** an ignore glob when the glob
-//! matches the place or one of its segment-aligned ancestors; the shallowest
-//! such spelling is the **ignored place**. A candidate under one is excluded
-//! from a target's class unless the target names the ignored place: the
-//! segments it spells reach the ignored place's last segment. A one-segment
-//! target spells a stem alone and names no place below the root, while a
-//! document at the root is its whole place and its own name names it. So with
-//! `archive/**` ignored, `glossary` and `norn/glossary` both pass over
-//! `archive/norn/glossary.md`, and `archive/norn/glossary` resolves to it; with
-//! `glossary.md` ignored, `glossary` still resolves to `glossary.md`.
-//!
-//! The globs match under the order the class is read under, the store's
-//! recorded path order: where it folds ASCII case a glob matches with ASCII
-//! case folded, so `archive/**` ignores `Archive/notes.md` there as the root
-//! itself does not tell the two apart; where it tells spellings apart a glob
-//! matches bytes. The fold is [`CaseFold::Ascii`], so a letter outside ASCII
-//! keeps its case in a glob as it does in a key. It is the one fold every glob
-//! takes from the order ([`StoredPathOrder::glob_case`]), so an ignore glob and
-//! a find's path part written alike name the same places on any root.
+//! The predicates here seek the stored key columns. Each document row stores
+//! its admitting count under the pinned declaration, so every class read
+//! seeks one run of the admitted-key index per count from one to the
+//! target's segments, and never reads a member its class keeps out.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -62,8 +37,9 @@ use norn_db::rusqlite::{self, Connection};
 use norn_wire::{CaseFold, Pattern};
 
 use crate::error::{self, StoreError};
-use crate::facts::StoredPathOrder;
-use crate::path::{ClassKey, SuffixKey, SuffixProbe, prefix_successor, suffix_probe};
+use crate::path::{
+    ClassKey, SuffixKey, SuffixProbe, comparison_key, prefix_successor, suffix_probe,
+};
 use crate::request::range_predicate_from;
 
 /// The name a statement calls the prefix step by: `norn_key_successor(key)`,
@@ -88,6 +64,7 @@ const SEPARATOR: char = '/';
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AmbiguityIgnore {
     patterns: Vec<Pattern>,
+    matching: Vec<Pattern>,
 }
 
 impl AmbiguityIgnore {
@@ -110,7 +87,10 @@ impl AmbiguityIgnore {
             .patterns
             .binary_search_by(|held| held.as_str().cmp(pattern.as_str()))
         {
+            let normalized = Pattern::parse(&comparison_key(pattern.as_str()))
+                .expect("normalizing a valid glob preserves its grammar");
             self.patterns.insert(at, pattern);
+            self.matching.insert(at, normalized);
         }
         self
     }
@@ -131,7 +111,7 @@ impl AmbiguityIgnore {
     }
 
     /// Whether `path` stays in the class of a target of `target_segments`
-    /// segments, on a root whose path order is `order`.
+    /// segments, under the comparison key.
     ///
     /// A path under no glob always stays. A path under one stays only where the
     /// target names its ignored place: the segments the target spells — the
@@ -141,14 +121,13 @@ impl AmbiguityIgnore {
     /// spells the stem alone, which names no place below the root; a document
     /// at the root is its whole place, so its own name names it.
     ///
-    /// The globs match with ASCII case folded where `order` folds it, and
-    /// bytewise where it does not.
-    pub fn admits(&self, path: &str, target_segments: usize, order: StoredPathOrder) -> bool {
-        target_segments >= self.admitting_segments(path, order)
+    /// The globs and paths are normalized by [`crate::comparison_key`].
+    pub fn admits(&self, path: &str, target_segments: usize) -> bool {
+        target_segments >= self.admitting_segments(path)
     }
 
-    /// The fewest segments a target spells that keep `path` in its class, on
-    /// a root whose path order is `order`: [`AmbiguityIgnore::admits`] holds
+    /// The fewest segments a target spells that keep `path` in its class:
+    /// [`AmbiguityIgnore::admits`] holds
     /// exactly for a target of at least this many segments.
     ///
     /// One for a path under no glob, and for a document at the root, whose
@@ -161,8 +140,8 @@ impl AmbiguityIgnore {
     /// (`documents.admitting_segments`), so every class read seeks the
     /// members its class admits rather than stepping past the ones it keeps
     /// out.
-    pub fn admitting_segments(&self, path: &str, order: StoredPathOrder) -> usize {
-        let Some(ignored) = self.ignored_place(path, order.glob_case()) else {
+    pub fn admitting_segments(&self, path: &str) -> usize {
+        let Some(ignored) = self.ignored_place(path) else {
             return 1;
         };
         let depth = path.split(SEPARATOR).count();
@@ -175,11 +154,12 @@ impl AmbiguityIgnore {
 
     /// How many segments the shallowest spelling of `path` or one of its
     /// ancestors an ignore glob matches has, or `None` where no glob matches
-    /// any of them, the globs matching under `case`.
-    fn ignored_place(&self, path: &str, case: CaseFold) -> Option<usize> {
+    /// any of them, compared under the resolution key.
+    fn ignored_place(&self, path: &str) -> Option<usize> {
         if self.patterns.is_empty() {
             return None;
         }
+        let path = comparison_key(path);
         let ends = path
             .match_indices(SEPARATOR)
             .map(|(at, _)| at)
@@ -187,54 +167,32 @@ impl AmbiguityIgnore {
         ends.enumerate()
             .find(|(_, end)| {
                 let place = &path[..*end];
-                self.patterns
+                self.matching
                     .iter()
-                    .any(|pattern| pattern.matches(place, case))
+                    .any(|pattern| pattern.matches(place, CaseFold::Exact))
             })
             .map(|(index, _)| index + 1)
     }
 }
 
-/// A target compiled for one root: the probe over the key the root probes, how
-/// many segments the target spells, the places the root's schema ignores, and
-/// the path order those places are matched under.
+/// A target's comparison-key probe, segment count and ignored places.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetClass {
     probe: SuffixProbe,
     target_segments: usize,
     ignore: AmbiguityIgnore,
-    order: StoredPathOrder,
 }
 
 impl TargetClass {
-    /// Compile `target` — a suffix address, with any `#` anchor already split
-    /// off — for a root whose proven case behaviour is `order`, excluding the
-    /// places `ignore` names.
-    ///
-    /// Crate-private, because the order is the store's: a class is compiled
-    /// by [`crate::Request::target_class`] under the order the store records,
-    /// or by a find under the order its snapshot reads, and never under an
-    /// order a caller names.
-    ///
-    /// The refusals are [`suffix_probe`]'s: a spelling that is not a suffix
-    /// address names no class under any root.
-    pub(crate) fn compile(
-        target: &str,
-        order: StoredPathOrder,
-        ignore: &AmbiguityIgnore,
-    ) -> Result<Self, StoreError> {
+    /// Compile a suffix target, with its anchor already split off, excluding
+    /// places named by `ignore`. The key is the same on every root.
+    /// A spelling [`suffix_probe`] refuses names no class.
+    pub(crate) fn compile(target: &str, ignore: &AmbiguityIgnore) -> Result<Self, StoreError> {
         Ok(TargetClass {
-            probe: suffix_probe(target)?.in_space(SuffixKey::under(order)),
+            probe: suffix_probe(target)?,
             target_segments: target.split(SEPARATOR).count(),
             ignore: ignore.clone(),
-            order,
         })
-    }
-
-    /// The path order the class was compiled under, which is the order of the
-    /// store it was compiled for.
-    pub(crate) fn order(&self) -> StoredPathOrder {
-        self.order
     }
 
     /// The probe the class is read through.
@@ -243,7 +201,7 @@ impl TargetClass {
     }
 
     /// The ambiguity classes a finding about this target belongs to, in the
-    /// key space the root probes.
+    /// comparison key space.
     pub fn class_keys(&self) -> BTreeSet<ClassKey> {
         self.probe.class_keys()
     }
@@ -251,7 +209,7 @@ impl TargetClass {
     /// Whether a document at `path` whose key this probe's ranges hold is in
     /// the class: the ignore set is the one test the ranges do not make.
     pub fn admits(&self, path: &str) -> bool {
-        self.ignore.admits(path, self.target_segments, self.order)
+        self.ignore.admits(path, self.target_segments)
     }
 
     /// Each range's bounds, then the target's segment count.
@@ -411,24 +369,15 @@ pub(crate) fn named_admitted(document: &str, segments: &str) -> String {
     )
 }
 
-/// The `link_keys` column a read under `key` seeks: the raw key where the root
-/// tells spellings apart, and the folded key where it folds ASCII case.
-pub(crate) fn link_key_column(key: SuffixKey) -> &'static str {
-    match key {
-        SuffixKey::Raw => "key",
-        SuffixKey::Folded => "folded_key",
-    }
+/// The indexed link column holding its normalized suffix or path key.
+pub(crate) fn link_key_column(_key: SuffixKey) -> &'static str {
+    "key"
 }
 
-/// The rows of `documents` a statement calls `alias` standing at a link's path
-/// key `link_key` — an expression holding the key in the space `key` selects —
-/// under the root's order: bytewise where it tells spellings apart, and with
-/// ASCII case folded where it folds, which `documents_path_nocase` seeks.
-pub(crate) fn link_key_path(alias: &str, key: SuffixKey, link_key: &str) -> String {
-    match key {
-        SuffixKey::Raw => format!("{alias}.path = {link_key}"),
-        SuffixKey::Folded => format!("{alias}.path = {link_key} COLLATE NOCASE"),
-    }
+/// The documents standing at a link's normalized complete path key.
+/// `documents_path_key` seeks every comparison twin without a collation.
+pub(crate) fn link_key_path(alias: &str, _key: SuffixKey, link_key: &str) -> String {
+    format!("{alias}.path_key = {link_key}")
 }
 
 /// The rows of `documents` a statement calls `dr` that are in `class`: the
@@ -498,8 +447,7 @@ pub(crate) fn ladder(key: &str, path: &str) -> String {
 ///
 /// It is the order [`ladder`] spells in SQL. The two agree because every
 /// column a rung or a path is read from — `documents.suffix_key`,
-/// `documents.folded_suffix_key`, `documents.path` and `link_keys.key` or
-/// `link_keys.folded_key` — takes the `BINARY` collation, which compares
+/// `documents.path_key`, `documents.path` and `link_keys.key` — takes the `BINARY` collation, which compares
 /// bytes as Rust compares `str`. A column given another collation, or a
 /// ladder over another expression, changes both or neither.
 pub(crate) fn ladder_cmp(left: (&str, &str), right: (&str, &str)) -> Ordering {
@@ -528,7 +476,6 @@ pub(crate) fn register_functions(connection: &Connection) -> Result<(), StoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use StoredPathOrder::Sensitive;
 
     fn ignoring(globs: &[&str]) -> AmbiguityIgnore {
         AmbiguityIgnore::new(
@@ -545,14 +492,14 @@ mod tests {
     #[test]
     fn a_target_reaches_an_ignored_place_from_its_last_segment_down() {
         let nested = ignoring(&["**/drafts/**"]);
-        assert!(nested.admits("notes/drafts/x.md", 2, Sensitive));
-        assert!(!nested.admits("notes/drafts/x.md", 1, Sensitive));
+        assert!(nested.admits("notes/drafts/x.md", 2));
+        assert!(!nested.admits("notes/drafts/x.md", 1));
         let deeper = ignoring(&["archive/**"]);
-        assert!(deeper.admits("archive/norn/glossary.md", 3, Sensitive));
-        assert!(!deeper.admits("archive/norn/glossary.md", 2, Sensitive));
+        assert!(deeper.admits("archive/norn/glossary.md", 3));
+        assert!(!deeper.admits("archive/norn/glossary.md", 2));
         let leaf = ignoring(&["attachments/*"]);
-        assert!(leaf.admits("attachments/image.md", 2, Sensitive));
-        assert!(!leaf.admits("attachments/image.md", 1, Sensitive));
+        assert!(leaf.admits("attachments/image.md", 2));
+        assert!(!leaf.admits("attachments/image.md", 1));
     }
 
     /// **A document at the root that a glob ignores is reached by its own
@@ -561,11 +508,8 @@ mod tests {
     #[test]
     fn a_root_level_ignored_document_is_reached_by_its_own_name() {
         let root = ignoring(&["glossary.md"]);
-        assert!(root.admits("glossary.md", 1, Sensitive));
-        assert!(
-            root.admits("docs/glossary.md", 1, Sensitive),
-            "a path no glob matches"
-        );
+        assert!(root.admits("glossary.md", 1));
+        assert!(root.admits("docs/glossary.md", 1), "a path no glob matches");
     }
 
     /// **The admitting count is the shortest target that keeps a place in
@@ -582,32 +526,20 @@ mod tests {
             ("archive/glossary.md", 2),
             ("attachments/image.md", 2),
         ] {
-            assert_eq!(set.admitting_segments(path, Sensitive), segments, "{path}");
-            assert!(set.admits(path, segments, Sensitive), "{path}");
-            assert!(!set.admits(path, segments - 1, Sensitive), "{path}");
+            assert_eq!(set.admitting_segments(path), segments, "{path}");
+            assert!(set.admits(path, segments), "{path}");
+            assert!(!set.admits(path, segments - 1), "{path}");
         }
     }
 
     #[test]
     fn a_place_is_under_the_shallowest_spelling_a_glob_matches() {
         let set = ignoring(&["archive/**", "attachments/*", "**/drafts/**"]);
-        for case in [CaseFold::Exact, CaseFold::Ascii] {
-            assert_eq!(set.ignored_place("archive/deep/glossary.md", case), Some(1));
-            assert_eq!(set.ignored_place("attachments/image.md", case), Some(2));
-            assert_eq!(set.ignored_place("notes/drafts/x.md", case), Some(2));
-            assert_eq!(set.ignored_place("notes/glossary.md", case), None);
-        }
-        assert_eq!(
-            set.ignored_place("Archive/glossary.md", CaseFold::Exact),
-            None
-        );
-        assert_eq!(
-            set.ignored_place("Archive/glossary.md", CaseFold::Ascii),
-            Some(1)
-        );
-        assert_eq!(
-            set.ignored_place("notes/Drafts/x.md", CaseFold::Ascii),
-            Some(2)
-        );
+        assert_eq!(set.ignored_place("archive/deep/glossary.md"), Some(1));
+        assert_eq!(set.ignored_place("attachments/image.md"), Some(2));
+        assert_eq!(set.ignored_place("notes/drafts/x.md"), Some(2));
+        assert_eq!(set.ignored_place("notes/glossary.md"), None);
+        assert_eq!(set.ignored_place("Archive/glossary.md"), Some(1));
+        assert_eq!(set.ignored_place("notes/Drafts/x.md"), Some(2));
     }
 }

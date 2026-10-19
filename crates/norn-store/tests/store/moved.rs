@@ -82,18 +82,20 @@ fn the_moved_bars_cover_every_statement() {
         assert_eq!(statement.slot(), slot);
         let bar = match statement {
             MovedStatement::TombstonesBySuffix => {
-                "tombstone_suffix_plans_seek_only_the_roots_partial_index"
+                "tombstone_suffix_reads_seek_the_same_partial_comparison_index_on_every_root"
             }
-            MovedStatement::TombstoneAtPath => "exact_tombstone_plans_seek_the_roots_path_index",
+            MovedStatement::TombstoneAtPath => {
+                "tombstone_path_reads_seek_the_same_partial_comparison_index_on_every_root"
+            }
             MovedStatement::LiveHolders => "live_holder_plans_seek_the_hash_index_without_sorting",
         };
         assert!(!bar.is_empty());
     }
 }
 
-/// The snapshot's proven root order chooses the suffix key space.
+/// Recorded deaths resolve through the same suffix comparison key on both roots.
 #[test]
-fn tombstone_suffix_reads_use_the_roots_raw_or_folded_key() {
+fn tombstone_suffix_reads_use_one_comparison_key_on_every_root() {
     for order in [
         StoredPathOrder::Sensitive,
         StoredPathOrder::AsciiCaseInsensitive,
@@ -112,14 +114,13 @@ fn tombstone_suffix_reads_use_the_roots_raw_or_folded_key() {
             read.tombstones_by_suffix("target")
                 .expect("other case")
                 .len(),
-            usize::from(order == StoredPathOrder::AsciiCaseInsensitive)
+            1
         );
     }
 }
 
-/// Deaths sharing a key come in path order. Across two reductions they come
-/// range by range, each in key-then-path order, so the named pair never depends
-/// on row ids or the order one increment recorded the deaths in.
+/// Deaths sharing a comparison key are named in original path order.
+/// A target ending in `.md` opens both indexed document-name ranges.
 #[test]
 fn deaths_sharing_a_key_are_named_in_path_order() {
     for (order, spellings, named) in [
@@ -166,10 +167,10 @@ fn deaths_sharing_a_key_are_named_in_path_order() {
             let scratch = Scratch::new("moved-two-reduction-ties");
             let mut store = scratch.open_under(order);
             let mut entries = [
-                ("z/a.b.md", Provenance::PlanDelete),
-                ("y/a.b.md", Provenance::PlanDelete),
+                ("z/a.md.md", Provenance::PlanDelete),
+                ("y/a.md.md", Provenance::PlanDelete),
                 ("x/a.md", Provenance::PlanDelete),
-                ("w/a.b.md", Provenance::PlanDelete),
+                ("w/a.md.md", Provenance::PlanDelete),
                 ("v/a.md", Provenance::PlanDelete),
             ];
             if reversed {
@@ -177,7 +178,7 @@ fn deaths_sharing_a_key_are_named_in_path_order() {
             }
             deaths(&mut store, &entries);
             let found: Vec<_> = snapshot(&store)
-                .tombstones_by_suffix("a.b")
+                .tombstones_by_suffix("a.md")
                 .expect("two-reduction deaths")
                 .into_iter()
                 .map(|death| death.path)
@@ -191,9 +192,7 @@ fn deaths_sharing_a_key_are_named_in_path_order() {
     }
 }
 
-/// On either root, the suffix read's cost does not grow with quarantine deaths
-/// sharing its key: the root's partial suffix index, raw or folded, holds none
-/// of them for the read to step over.
+/// The partial suffix index excludes quarantine deaths on every root.
 #[test]
 fn quarantine_deaths_sharing_the_key_do_not_grow_the_suffix_read() {
     let steps = |order: StoredPathOrder, quarantined: usize| {
@@ -225,7 +224,8 @@ fn quarantine_deaths_sharing_the_key_do_not_grow_the_suffix_read() {
     }
 }
 
-/// The exact path names one recorded death or none, by stored spelling.
+/// A complete path key names a recorded death or none. A differently cased
+/// target reaches the same death while preserving its original spelling.
 #[test]
 fn tombstone_at_path_returns_one_or_none() {
     let scratch = Scratch::new("moved-exact");
@@ -246,16 +246,18 @@ fn tombstone_at_path_returns_one_or_none() {
     );
     assert_eq!(
         read.tombstone_at_path(&path("old/target.md"))
-            .expect("other spelling"),
-        Vec::new()
+            .expect("other spelling")
+            .into_iter()
+            .map(|death| death.path)
+            .collect::<Vec<_>>(),
+        vec![path("Old/Target.md")]
     );
 }
 
-/// A folding root reads deaths at the folded place and names them in path order.
-/// A death sharing the folded suffix key under another extension is not at
-/// the place, and three deaths at one place still name only the first two.
+/// Comparison-equivalent complete paths reach the same recorded deaths
+/// in original path order. Other extensions do not share that path key.
 #[test]
-fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
+fn comparison_equivalent_tombstone_paths_are_read_in_path_order() {
     let scratch = Scratch::new("moved-folded-exact");
     let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
     deaths(
@@ -306,11 +308,10 @@ fn exact_tombstone_reads_fold_case_and_name_two_deaths_in_path_order() {
     }
 }
 
-/// On a folding root, deaths sharing the place's directories and stem under
-/// other extensions leave the exact-path read's cost unchanged: the seek walks
-/// only deaths at the folded place.
+/// A complete-path comparison seek reads no sibling with another
+/// extension, so those siblings do not increase the read's work.
 #[test]
-fn deaths_sharing_the_stem_do_not_grow_the_folded_exact_read() {
+fn a_tombstone_path_seek_does_not_read_siblings_with_other_extensions() {
     let steps = |siblings: usize| {
         let scratch = Scratch::new("moved-folded-exact-cost");
         let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
@@ -337,11 +338,10 @@ fn deaths_sharing_the_stem_do_not_grow_the_folded_exact_read() {
     assert_eq!(steps(3), steps(600));
 }
 
-/// On a folding root, quarantine deaths at the folded place leave the
-/// exact-path read's cost unchanged: the partial NOCASE index holds none of
-/// them, so the two-row limit counts only deaths whose file is gone.
+/// The partial comparison-path index excludes quarantine deaths before
+/// the bounded seek, so their number does not increase its work.
 #[test]
-fn quarantine_deaths_at_the_folded_place_do_not_grow_the_exact_read() {
+fn quarantine_deaths_do_not_grow_a_tombstone_comparison_path_seek() {
     let steps = |quarantined: usize| {
         let scratch = Scratch::new("moved-folded-exact-quarantine-cost");
         let mut store = scratch.open_under(StoredPathOrder::AsciiCaseInsensitive);
@@ -387,9 +387,10 @@ fn quarantine_deaths_at_the_folded_place_do_not_grow_the_exact_read() {
     assert_eq!(steps(3), steps(255));
 }
 
-/// A case-variant Markdown link can follow the same moved bytes as a wikilink.
+/// A case-variant Markdown link finds its recorded death through the
+/// same complete-path comparison key as the indexed document.
 #[test]
-fn a_case_variant_markdown_link_finds_its_death_on_a_folding_root() {
+fn a_case_variant_markdown_link_finds_its_tombstone_by_comparison_key() {
     use crate::health::{body_of, derived};
     use norn_wire::FindingKind;
 
@@ -451,7 +452,7 @@ fn a_case_variant_markdown_link_finds_its_death_on_a_folding_root() {
     );
 }
 
-/// A death with no new hash keeps the first death's hash and both suffix keys.
+/// A repeated death retains its last known hash and normalized suffix and path keys.
 #[test]
 fn a_redeath_keeps_the_recorded_hash_and_suffix_keys() {
     for order in [
@@ -550,21 +551,21 @@ fn judge_seek(plan: &norn_testkit::explain::QueryPlan, table: &str, index: &str)
         .assert_searches_through(table, norn_testkit::explain::Access::Index(index));
 }
 
-/// Both probe reductions search only the root's partial suffix index.
+/// Suffix reads seek the partial suffix index, independent of filesystem order.
 #[test]
-fn tombstone_suffix_plans_seek_only_the_roots_partial_index() {
+fn tombstone_suffix_reads_seek_the_same_partial_comparison_index_on_every_root() {
     for (order, index, other_column, other_index) in [
         (
             StoredPathOrder::Sensitive,
             "tombstones_suffix_key",
-            "folded_suffix_key",
-            "tombstones_folded_suffix_key",
+            "path_key",
+            "tombstones_path_key",
         ),
         (
             StoredPathOrder::AsciiCaseInsensitive,
-            "tombstones_folded_suffix_key",
-            "suffix_key",
             "tombstones_suffix_key",
+            "path_key",
+            "tombstones_path_key",
         ),
     ] {
         let scratch = Scratch::new("moved-suffix-plans");
@@ -599,16 +600,12 @@ fn tombstone_suffix_plans_seek_only_the_roots_partial_index() {
     }
 }
 
-/// The exact-path statement seeks the root's path index with no scan or sort,
-/// and reads no suffix key.
+/// Exact-path reads seek the partial normalized path index on both roots.
 #[test]
-fn exact_tombstone_plans_seek_the_roots_path_index() {
+fn tombstone_path_reads_seek_the_same_partial_comparison_index_on_every_root() {
     for (order, index) in [
-        (StoredPathOrder::Sensitive, "tombstones_path"),
-        (
-            StoredPathOrder::AsciiCaseInsensitive,
-            "tombstones_path_nocase",
-        ),
+        (StoredPathOrder::Sensitive, "tombstones_path_key"),
+        (StoredPathOrder::AsciiCaseInsensitive, "tombstones_path_key"),
     ] {
         let scratch = Scratch::new("moved-exact-plans");
         let mut store = scratch.open_under(order);

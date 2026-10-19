@@ -26,8 +26,6 @@ use std::path::PathBuf;
 
 use norn_db::{DbError, rusqlite};
 
-use crate::facts::StoredPathOrder;
-
 /// A store operation that did not happen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -85,17 +83,9 @@ pub enum StoreError {
         /// The fingerprint the store pins, or `None` where it pins none.
         pinned: Option<String>,
     },
-    /// A class, a class probe or a class key spelled in another key space than
-    /// the one the store's path order selects. Refused rather than read or
-    /// written: a read would range over the other suffix key and answer with
-    /// spellings the root merges or splits another way, and a finding filed
-    /// under a key no change in this store names is one no maintenance ever
-    /// reaches.
-    KeySpace {
-        what: &'static str,
-        /// The path order the store's rows were derived under.
-        order: StoredPathOrder,
-    },
+    /// A finding's class or path key is outside the normalized resolution space.
+    /// Such a key would never be reached by changeset maintenance.
+    KeySpace { what: &'static str },
     /// A caller handed over a finding only the store files, or a discard that
     /// reaches one: a finding of a kind the store judges itself — link health
     /// — or one about a link, which only such a finding is. Refused rather
@@ -161,11 +151,9 @@ impl fmt::Display for StoreError {
                 schema_named(derived_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
-            StoreError::KeySpace { what, order } => write!(
-                f,
-                "{what} is spelled in another key space than the store's `{}` path order selects",
-                order.as_str()
-            ),
+            StoreError::KeySpace { what } => {
+                write!(f, "{what} is outside the normalized resolution key space")
+            }
             StoreError::StoreJudged { what } => write!(
                 f,
                 "{what} is a finding the store judges and files itself, and no caller records or \

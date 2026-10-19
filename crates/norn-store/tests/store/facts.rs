@@ -320,18 +320,8 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     store.verify_integrity().expect("a store just written to");
 }
 
-/// **A link is held under the keys a links-to seek reads**, derived from the
-/// link and the path of the document holding it. A wikilink's are its suffix
-/// address's segment-reversed prefixes, one per reduction of a dotted leaf,
-/// beside the segments the target spells, an attachment's name among them; a
-/// path's — a Markdown target's, `vault://` or not — is the vault path it
-/// names, split before each segment is percent-decoded, its query cut off and
-/// nothing reduced; a `vault://` wikilink's are the root paths its reductions
-/// spell, nothing decoded; a same-document anchor's is the holding document's
-/// own path. A link addressed elsewhere — a protocol other than `vault`, a
-/// Markdown target opening with a URI scheme — and a target that names no
-/// vault path or no suffix address are held under no key. Each key is held
-/// raw and folded.
+/// Links are held under normalized suffix or complete-path keys.
+/// Only `.md` opens two readings; other extensions remain in the leaf.
 #[test]
 fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
     let scratch = Scratch::new("link-keys");
@@ -360,28 +350,25 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
         .stored_facts(&facts.path)
         .expect("reading a document")
         .expect("a document");
-    let key = |link: u64, key: &str, folded: &str, segments: Option<u64>| StoredLinkKey {
+    let key = |link: u64, _folded: &str, segments: Option<u64>| StoredLinkKey {
         link,
-        key: key.to_string(),
-        folded_key: folded.to_string(),
+        key: _folded.to_string(),
         segments,
     };
     assert_eq!(
         stored.link_keys,
         vec![
-            key(0, "Glossary.md/norn/", "glossary.md/norn/", Some(2)),
-            key(0, "Glossary/norn/", "glossary/norn/", Some(2)),
-            key(1, "Notes/", "notes/", Some(1)),
-            key(2, "a/x/My Note.md", "a/x/my note.md", None),
-            key(3, "a/b/foo", "a/b/foo", None),
-            key(4, "top.md", "top.md", None),
-            key(6, "a/b/doc.md", "a/b/doc.md", None),
-            key(8, "picture.png/", "picture.png/", Some(1)),
-            key(8, "picture/", "picture/", Some(1)),
-            key(10, "notes/X.md", "notes/x.md", None),
-            key(13, "a/b/q.md", "a/b/q.md", None),
-            key(14, "Notes/v1.2.md", "notes/v1.2.md", None),
-            key(14, "Notes/v1.md", "notes/v1.md", None),
+            key(0, "glossary.md/norn/", Some(2)),
+            key(0, "glossary/norn/", Some(2)),
+            key(1, "notes/", Some(1)),
+            key(2, "a/x/my note.md", None),
+            key(3, "a/b/foo", None),
+            key(4, "top.md", None),
+            key(6, "a/b/doc.md", None),
+            key(8, "picture.png/", Some(1)),
+            key(10, "notes/x.md", None),
+            key(13, "a/b/q.md", None),
+            key(14, "notes/v1.2.md", None),
         ]
     );
 
@@ -438,8 +425,8 @@ fn a_link_key_is_held_beside_its_links_own_document() {
     induced_failure::execute_out_of_band(
         &mut store,
         &format!(
-            "INSERT INTO link_keys (link, document, key, folded_key, segments)
-             SELECT link, {other_document}, 'c/', 'c/', 1 FROM link_keys"
+            "INSERT INTO link_keys (link, document, key, segments)
+             SELECT link, {other_document}, 'c/', 1 FROM link_keys"
         ),
     )
     .expect_err("a key written for another document's link is kept");
@@ -526,11 +513,7 @@ fn the_candidate_rank_check_is_built_from_the_bound_the_api_states() {
     );
 }
 
-/// **A finding's ambiguity classes are rows, not a column.** A target whose leaf
-/// carries a dot reduces two ways, and the two prefixes are disjoint under
-/// `BINARY` — `notes.tar/` sorts before `notes/` — so a single-valued column could
-/// hold only one of them and the finding would be invisible to the class the other
-/// opens.
+/// Class memberships are a set, so every reading reaches the finding once.
 #[test]
 fn a_findings_class_membership_is_a_set_of_rows() {
     let declared = ddl::statements();
@@ -762,19 +745,19 @@ fn a_derived_path_form_has_one_home() {
         );
     }
     // The fifteen that stay, because a statement in this build reads each: the
-    // resolution ladder's range under either key, the order a heal's page seeks on a vault that
+    // resolution ladder's suffix and path comparison seeks, the order a heal's page seeks on a vault that
     // folds ASCII case, the class and path directions of findings maintenance, the
     // schema-key discard's two ranges, the two change feeds, each of which is
     // answered out of its own index without the row being read at all, the
     // documents a find's tag part names, the links a links-to part seeks under
-    // either key, a link's own keys, which a links-to part reads beside
+    // its comparison key, a link's own keys, which a links-to part reads beside
     // the one it sought and a link row's discard cascades through, and the
     // heading readings, slugs and block identifiers the anchor predicate
     // seeks in one document.
     for present in [
         "document_tags_folded_name",
         "documents_suffix_key",
-        "documents_folded_suffix_key",
+        "documents_path_key",
         "documents_path_nocase",
         "documents_change_feed",
         "tombstones_change_feed",
@@ -783,7 +766,7 @@ fn a_derived_path_form_has_one_home() {
         "findings_fingerprint_kind_nocase",
         "link_keys_link",
         "link_keys_key",
-        "link_keys_folded_key",
+        "tombstones_path_key",
         "headings_document_reading",
         "headings_document_slug",
         "blocks_document_block_id",

@@ -243,7 +243,7 @@ fn targets() -> Vec<DocumentFacts> {
         derived("r/report.md", "report\n"),
         derived("r/report.md.md", "report twice\n"),
         derived("pic/photo.md", "photo\n"),
-        derived("v1.2.md", "dotted\n"),
+        derived("v1.md.md", "dotted\n"),
         derived("v1.md", "undotted\n"),
     ];
     all.extend((1..=7).map(|at| derived(&format!("crowd/{at}/crowd.md"), "crowd\n")));
@@ -290,12 +290,12 @@ const SOURCE: &[(&str, Option<FindingKind>, Option<FindingKind>)] = {
         ("[[photo.png]]", None, None),
         ("[[crowd]]", Some(Ambiguous), Some(Ambiguous)),
         ("[[archive/glossary]]", None, None),
-        ("[[vault://v1.2]]", Some(Ambiguous), Some(Ambiguous)),
+        ("[[vault://v1.md]]", Some(Ambiguous), Some(Ambiguous)),
         ("[gone](missing.md)", Some(Broken), Some(Broken)),
-        ("[[GLOSSARY]]", Some(Broken), None),
+        ("[[GLOSSARY]]", None, None),
         ("![[dup]]", Some(Ambiguous), Some(Ambiguous)),
         ("![[missing]]", Some(Broken), Some(Broken)),
-        ("[[Glossary#heading]]", Some(Broken), None),
+        ("[[Glossary#heading]]", None, None),
         ("[frag](../notes/glossary.md#Heading)", None, None),
     ]
 };
@@ -516,7 +516,7 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
         &body_of(&[
             "[[crowd]]",
             "[[missing]]",
-            "[[vault://v1.2]]",
+            "[[vault://v1.md]]",
             "[[glossary#Nope]]",
         ]),
     ));
@@ -569,10 +569,10 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
     );
     assert_eq!(read("missing"), (FindingKind::Broken, Vec::new(), 0, None));
     assert_eq!(
-        read("vault://v1.2"),
+        read("vault://v1.md"),
         (
             FindingKind::Ambiguous,
-            vec!["v1.2.md".to_string(), "v1.md".to_string()],
+            vec!["v1.md".to_string(), "v1.md.md".to_string()],
             2,
             None
         )
@@ -625,23 +625,19 @@ fn an_unplaced_link_is_stored_and_judged_without_a_span() {
     assert_eq!(row.span, None);
 }
 
-/// **A dotted leaf totals both of its reductions.** `[[v1.2]]` names every
-/// `**/v1.2.md` and every `**/v1.md`, so over two of the first and one of the
-/// second it is ambiguous among three, its head merged across the two classes
-/// in the resolution ladder's order, as the links column reads it, and it is
-/// keyed by both classes, and by `v1.2.md/` and `v1.md/`, the classes its
-/// candidates' written leaves are named in.
+/// A target ending in `.md` totals both document-name classes. The
+/// ambiguous finding and links column agree on its three candidates.
 #[test]
-fn a_dotted_leaf_totals_both_reductions() {
+fn a_target_ending_in_md_totals_both_document_name_classes() {
     for order in [Sensitive, Folding] {
         let mut judging = Judging::new(
             &format!("health-dotted-{order:?}"),
             order,
             &[
-                derived("a/v1.2.md", "a\n"),
-                derived("b/v1.2.md", "b\n"),
+                derived("a/v1.md.md", "a\n"),
+                derived("b/v1.md.md", "b\n"),
                 derived("c/v1.md", "c\n"),
-                derived("h.md", &body_of(&["[[v1.2]]"])),
+                derived("h.md", &body_of(&["[[v1.md]]"])),
             ],
         );
         let findings = judging.by_ordinal("h.md");
@@ -656,7 +652,7 @@ fn a_dotted_leaf_totals_both_reductions() {
                 .iter()
                 .map(|key| key.as_str())
                 .collect::<Vec<_>>(),
-            ["v1.2.md/", "v1.2/", "v1.md/", "v1/"],
+            ["v1.md.md/", "v1.md/", "v1/"],
             "{order:?}"
         );
     }
@@ -682,18 +678,18 @@ fn judged_beside_the_links_column(
     (finding, row.clone())
 }
 
-/// **A head merged across two keys is cut to the bound.** `[[v1.2]]` over five
-/// `*/v1.2.md` and three `*/v1.md` reads a full head from each class; the
+/// **A head merged across two keys is cut to the bound.** `[[v1.md]]` over five
+/// `*/v1.md.md` and three `*/v1.md` reads a full head from each class; the
 /// finding carries the first [`CANDIDATE_HEAD`] of the eight in the ladder's
 /// order, as the links column does, beside the total eight.
 #[test]
 fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
-    let mut documents: Vec<String> = (1..=5).map(|at| format!("d{at}/v1.2.md")).collect();
+    let mut documents: Vec<String> = (1..=5).map(|at| format!("d{at}/v1.md.md")).collect();
     documents.extend((1..=3).map(|at| format!("e{at}/v1.md")));
     let documents: Vec<&str> = documents.iter().map(String::as_str).collect();
     for order in [Sensitive, Folding] {
         let (finding, row) =
-            judged_beside_the_links_column("health-merged-cut", order, &documents, "[[v1.2]]");
+            judged_beside_the_links_column("health-merged-cut", order, &documents, "[[v1.md]]");
         assert_eq!(finding.kind, FindingKind::Ambiguous, "{order:?}");
         assert_eq!(finding.candidates.len(), CANDIDATE_HEAD, "{order:?}");
         assert_eq!(finding_head(&finding), row_head(&row), "{order:?}");
@@ -705,11 +701,8 @@ fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
     }
 }
 
-/// **A class larger than the head is cut in the ladder's order, not the
-/// path's.** On a root that folds ASCII case, six `*/A.md` whose directories
-/// differ in case rank one way by the folded suffix key the ladder reads and
-/// another by the path: `F/A.md` is the least path and the last rung. The
-/// head is the ladder's first five, as the links column reads it.
+/// A class head follows the comparison-key ladder rather than original
+/// path order. `F/A.md` sorts first as a path but last as a suffix key.
 #[test]
 fn a_class_larger_than_the_head_is_cut_in_the_ladders_order() {
     let documents = ["F/A.md", "a/A.md", "b/A.md", "c/A.md", "d/A.md", "e/A.md"];
@@ -727,17 +720,15 @@ fn a_class_larger_than_the_head_is_cut_in_the_ladders_order() {
     );
 }
 
-/// **A rooted name's documents rank by the key that reached them.** On a root
-/// that folds ASCII case, `[[vault://v1.Z]]` is keyed `v1.z.md` and `v1.md`;
-/// the key ranks `v1.md` first, though the path `v1.Z.md` is the lesser. The
-/// head is in that order, as the links column reads it.
+/// A rooted `.md` target ranks candidates by normalized complete-path
+/// keys. `v1.md` precedes `v1.MD.md`, despite their original byte order.
 #[test]
 fn a_rooted_names_documents_rank_by_the_key_that_reached_them() {
     let (finding, row) = judged_beside_the_links_column(
         "health-rooted-rung",
         Folding,
-        &["v1.Z.md", "v1.md"],
-        "[[vault://v1.Z]]",
+        &["v1.MD.md", "v1.md"],
+        "[[vault://v1.MD]]",
     );
     assert_eq!(finding.kind, FindingKind::Ambiguous);
     assert_eq!(finding_head(&finding), row_head(&row));
@@ -747,7 +738,7 @@ fn a_rooted_names_documents_rank_by_the_key_that_reached_them() {
             .iter()
             .map(|candidate| candidate.path.as_str())
             .collect::<Vec<_>>(),
-        ["v1.md", "v1.Z.md"]
+        ["v1.md", "v1.MD.md"]
     );
 }
 
@@ -807,34 +798,26 @@ fn a_missing_anchor_is_judged_by_the_stored_readings() {
     }
 }
 
-/// **A finding's keys are its link's keys and its candidates' naming
-/// classes.** On either root, each finding is keyed by the keys the link
-/// index holds its link under, in the key space the root probes — a suffix
-/// address's classes, one per reduction; a path's exact path, or each path a
-/// rooted name's reductions spell; and none for a link that names no vault
-/// path — and by the classes each candidate it carries is named in: its
-/// stem's class and its leaf's, each with its reduction's. `V1.2.md` is named
-/// in `V1.2/`, `V1/` and `V1.2.md/`, and `V1.md` in `V1/` and `V1.md/`. The
-/// store files each of them.
+/// Link-health findings record normalized link keys and candidate naming classes.
 #[test]
 fn a_findings_keys_are_its_links_keys() {
     for order in [Sensitive, Folding] {
-        let space = SuffixKey::under(order);
+        let space = SuffixKey::Comparison;
         let mut judging = Judging::new(
             &format!("health-keys-{order:?}"),
             order,
             &[
-                derived("a/V1.2.md", "a\n"),
+                derived("a/V1.md.md", "a\n"),
                 derived("b/V1.md", "b\n"),
-                derived("V1.2.md", "rooted\n"),
+                derived("V1.md.md", "rooted\n"),
                 derived("V1.md", "rooted\n"),
                 derived(
                     "Src/h.md",
                     &body_of(&[
                         "[[Missing/Thing]]",
-                        "[[V1.2]]",
+                        "[[V1.md]]",
                         "[g](Gone/Dir.md)",
-                        "[[vault://V1.2]]",
+                        "[[vault://V1.md]]",
                         "[e](../../escape.md)",
                     ]),
                 ),
@@ -855,15 +838,14 @@ fn a_findings_keys_are_its_links_keys() {
                 .filter(|key| key.link == *ordinal)
                 .map(|key| {
                     let spelled = match space {
-                        SuffixKey::Raw => key.key.clone(),
-                        SuffixKey::Folded => key.folded_key.clone(),
+                        SuffixKey::Comparison => key.key.clone(),
                     };
                     (spelled, key.segments.is_some())
                 })
                 .collect();
             let naming = |candidate: &str| -> &[&str] {
                 match candidate.rsplit('/').next() {
-                    Some("V1.2.md") => &["V1.2/", "V1/", "V1.2.md/"],
+                    Some("V1.md.md") => &["V1.md/", "V1/", "V1.md.md/"],
                     Some("V1.md") => &["V1/", "V1.md/"],
                     other => {
                         panic!("{order:?}: a candidate the fixture holds no name of: {other:?}")
@@ -871,8 +853,7 @@ fn a_findings_keys_are_its_links_keys() {
                 }
             };
             let in_space = |class: &str| match space {
-                SuffixKey::Raw => class.to_string(),
-                SuffixKey::Folded => class.to_ascii_lowercase(),
+                SuffixKey::Comparison => class.to_ascii_lowercase(),
             };
             let expected_classes: BTreeSet<String> = keys
                 .iter()
@@ -904,7 +885,7 @@ fn a_findings_keys_are_its_links_keys() {
             classes = classes.max(filed_classes.len());
             paths = paths.max(filed_paths.len());
         }
-        assert_eq!((classes, paths), (4, 2), "{order:?}: the fixture's reach");
+        assert_eq!((classes, paths), (3, 2), "{order:?}: the fixture's reach");
         assert!(
             findings[&4].class_keys.is_empty() && findings[&4].path_keys.is_empty(),
             "{order:?}: a link naming no vault path is keyed by nothing"
@@ -1248,18 +1229,18 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
         Sensitive => (
             "documents_admitted_suffix_key",
             "suffix_key",
-            "documents_path",
+            "documents_path_key",
             "link_keys_key",
             "link_keys_suffix_key",
             "key",
         ),
         Folding => (
-            "documents_admitted_folded_suffix_key",
-            "folded_suffix_key",
-            "documents_path_nocase",
-            "link_keys_folded_key",
-            "link_keys_folded_suffix_key",
-            "folded_key",
+            "documents_admitted_suffix_key",
+            "suffix_key",
+            "documents_path_key",
+            "link_keys_key",
+            "link_keys_suffix_key",
+            "key",
         ),
     };
     let range = format!("(admitting_segments=? AND {key}>? AND {key}<?)");
@@ -1344,11 +1325,11 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             ),
             seek("da", Access::RowId, "(rowid=?)"),
             seek("dc", Access::RowId, "(rowid=?)"),
-            seek("dp", Access::Index(path_index), "(path=?)"),
+            seek("dp", Access::Index(path_index), "(path_key=?)"),
         ],
         ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(admitted_index), &range),
-            seek("dp", Access::Index(path_index), "(path=?)"),
+            seek("dp", Access::Index(path_index), "(path_key=?)"),
         ],
         ExplainedStatement::LinkHealthSuffixes => {
             vec![seek("dl", Access::Index(admitted_index), &range)]
@@ -1463,22 +1444,8 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     }
 }
 
-/// **Every statement the judgment runs seeks what it reads, and sorts
-/// nothing past a head.** The links a set of documents holds are an equality
-/// seek of `documents_path` per document, of `links_document_ordinal` per
-/// document row, and of `link_keys_link` per link; the links held under a
-/// class a range seek of the link index over the key the root probes, and
-/// those held under a path key an equality seek of it, each link then reached
-/// by its row id and its holder by its own; each distinct key's head a range
-/// seek of the suffix key the root probes within each admitting count, and
-/// its total a range seek of that suffix key, or either a seek of the path at
-/// a path key; each candidate's suffixes a range seek of the same suffix key;
-/// and each anchor a link reached by its row id and a handful of equality
-/// seeks into the one document it names. Nothing is read end to end, and only
-/// a head sorts, and only the head of each admitting count it reads.
-///
-/// Controls: each index a statement seeks dropped on a store of its own, and
-/// the bar fails for that statement.
+/// Link-health judgment uses indexed comparison-key seeks on every root.
+/// Exact holding-document reads retain original path identity.
 #[test]
 fn the_link_health_judgment_seeks_every_row_it_reads() {
     for order in [Sensitive, Folding] {
@@ -1502,6 +1469,63 @@ fn the_link_health_judgment_seeks_every_row_it_reads() {
                     || judge(&mut store, statement, order),
                 );
             }
+        }
+    }
+}
+
+/// An attachment-shaped target is unjudged until its complete stem names a document.
+#[test]
+fn an_attachment_target_never_drops_its_extension() {
+    for order in [Sensitive, Folding] {
+        let documents = [
+            derived("photo.md", "photo\n"),
+            derived("holder.md", "[[photo.png]]\n"),
+        ];
+        let without = Judging::new("health-photo-without", order, &documents);
+        let links = without.links("holder.md");
+        assert_eq!(links[0].health(), LinkHealth::NotJudged);
+        assert!(row_head(&links[0]).is_empty());
+        let mut documents = documents.to_vec();
+        documents.push(derived("photo.png.md", "named stem\n"));
+        let with = Judging::new("health-photo-with", order, &documents);
+        let links = with.links("holder.md");
+        assert_eq!(links[0].health(), LinkHealth::Healthy);
+        assert_eq!(
+            row_head(&links[0]),
+            vec![("photo.png.md".to_string(), "photo.png".to_string())]
+        );
+    }
+}
+
+/// Ambiguous Unicode spellings retain the hint that enumerates their class.
+#[test]
+fn ambiguous_unicode_targets_keep_their_enumeration_hint() {
+    for order in [Sensitive, Folding] {
+        let judging = Judging::new(
+            "health-unicode-hints",
+            order,
+            &[
+                derived("Été.md", "one\n"),
+                derived("été.md", "two\n"),
+                derived("ΟΣ.md", "one\n"),
+                derived("Οσ.md", "two\n"),
+                derived("holder.md", "[[ÉTÉ]]\n\n[[e\u{301}te\u{301}]]\n\n[[ΟΣ]]\n"),
+            ],
+        );
+        let rows = judging.validated();
+        for (written, address) in [("ÉTÉ", "été"), ("e\u{301}te\u{301}", "été"), ("ΟΣ", "οσ")]
+        {
+            let row = rows
+                .iter()
+                .find(|row| row.target.as_deref() == Some(written))
+                .expect("an ambiguous finding");
+            assert_eq!(
+                row.hint,
+                Some(Hint::resolves(
+                    ResolutionTarget::new(address).expect("a target")
+                )),
+                "{order:?}: {written}"
+            );
         }
     }
 }

@@ -45,18 +45,11 @@
 //! prove. So this module folds nothing beyond ASCII on any root, and on such a
 //! root a document's identity is **the spelling the tree lists**: `café.md`
 //! and `CAFÉ.md` are one entry to the volume, and the one the directory renders
-//! is the document. A spelling only the volume resolves names no document — a
-//! link or a request spelled that way is broken or not found, and a walk
-//! never reads such a spelling as standing: a stat on a folding volume
-//! answers for every spelling of an entry, where the directory's listing
-//! answers only for the one it renders — so a descent handed a caller's
-//! spelling on a folding root passes a component only where its parent lists
-//! it (see `walk`). Widening the fold is a change to this module, to the
-//! store's collation, its folded suffix key and every path glob's fold, which
-//! the store's `StoredPathOrder::glob_case` gives the ambiguity-ignore globs
-//! and the path parts of a find, a count and a validate, and to the contract
-//! sample each of them is pinned to — this module's copy and the store's, one
-//! sample written twice — never a local choice made at a comparison site.
+//! is the document. A walk reads only the spelling the parent directory lists,
+//! even where the volume answers a stat for another spelling. Filesystem
+//! identity, collation and query path globs share this ASCII fold. Link
+//! resolution independently compares NFC under Unicode default lowercasing
+//! on every root, including ambiguity-ignore globs.
 //!
 //! **Whether the fold is applied at all is proven, not assumed.** The key
 //! folds only where an existing directory entry demonstrates that the root

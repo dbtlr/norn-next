@@ -820,7 +820,7 @@ impl ProjectedFinding {
 /// Read it with [`DerivedRows::read`]. It carries what [`StoreProjection`]
 /// carries and drops what it drops — row identifiers, write generations and
 /// timestamps, none of which is a function of the vault — plus each document
-/// row's stored suffix keys, raw and folded, and its admitting count. Tombstones stay out for the
+/// row's normalized suffix and path keys, and its admitting count. Tombstones stay out for the
 /// projection's reason: a death is one store's history, and a store derived
 /// from zero records none.
 ///
@@ -848,8 +848,8 @@ impl DerivedRows {
         let mut suffix_keys = Vec::new();
         for_each_stored_suffix_key(store, |stored| {
             let at = format!("document[{}]", stored.path.as_str());
-            suffix_keys.push((format!("{at}.suffix_key"), quoted(&stored.raw)));
-            suffix_keys.push((format!("{at}.folded_suffix_key"), quoted(&stored.folded)));
+            suffix_keys.push((format!("{at}.suffix_key"), quoted(&stored.suffix_key)));
+            suffix_keys.push((format!("{at}.path_key"), quoted(&stored.path_key)));
             suffix_keys.push((
                 format!("{at}.admitting_segments"),
                 stored.admitting_segments.to_string(),
@@ -1012,15 +1012,15 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
 
     for_each_stored_suffix_key(store, |stored| {
         assert_eq!(
-            stored.raw,
+            stored.suffix_key,
             stored.path.suffix_key(),
             "{subject}: the row at `{}` holds a suffix key its own path does not produce",
             stored.path.as_str()
         );
         assert_eq!(
-            stored.folded,
-            stored.path.folded_suffix_key(),
-            "{subject}: the row at `{}` holds a folded suffix key its own path does not produce",
+            stored.path_key,
+            stored.path.path_key(),
+            "{subject}: the row at `{}` holds a path key its own path does not produce",
             stored.path.as_str()
         );
     })
@@ -1293,7 +1293,6 @@ impl StoredColumns for StoredLinkKey {
         vec![
             ("link", self.link.to_string()),
             ("key", quoted(&self.key)),
-            ("folded_key", quoted(&self.folded_key)),
             (
                 "segments",
                 self.segments

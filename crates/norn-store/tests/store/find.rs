@@ -513,12 +513,8 @@ fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
         ReadFilter::Member(_) => FieldMatch::ALL.map(ReadFilter::Member).to_vec(),
         ReadFilter::Before(_) => orders.map(ReadFilter::Before).to_vec(),
         ReadFilter::After(_) => orders.map(ReadFilter::After).to_vec(),
-        ReadFilter::Resolves(_) => [SuffixKey::Raw, SuffixKey::Folded]
-            .map(ReadFilter::Resolves)
-            .to_vec(),
-        ReadFilter::LinksTo(_) => [SuffixKey::Raw, SuffixKey::Folded]
-            .map(ReadFilter::LinksTo)
-            .to_vec(),
+        ReadFilter::Resolves(_) => [SuffixKey::Comparison].map(ReadFilter::Resolves).to_vec(),
+        ReadFilter::LinksTo(_) => [SuffixKey::Comparison].map(ReadFilter::LinksTo).to_vec(),
         ReadFilter::PathGlob(_) | ReadFilter::ExcludePathGlob(_) => [
             StoredPathOrder::Sensitive,
             StoredPathOrder::AsciiCaseInsensitive,
@@ -1562,14 +1558,14 @@ fn filter_bars() -> Vec<FilterBar> {
             ],
         },
         FilterBar {
-            shape: ReadFilter::Resolves(SuffixKey::Raw),
+            shape: ReadFilter::Resolves(SuffixKey::Comparison),
             probes: [target("glossary"), target("v1.2#Heading")]
                 .into_iter()
                 .flat_map(|target| {
                     [
                         (
                             Predicate::resolves(target.clone()),
-                            ReadFilter::Resolves(SuffixKey::Raw),
+                            ReadFilter::Resolves(SuffixKey::Comparison),
                             Seek::Index {
                                 alias: "da",
                                 table: "documents",
@@ -1580,13 +1576,13 @@ fn filter_bars() -> Vec<FilterBar> {
                         ),
                         (
                             Predicate::resolves(target),
-                            ReadFilter::Resolves(SuffixKey::Folded),
+                            ReadFilter::Resolves(SuffixKey::Comparison),
                             Seek::Index {
                                 alias: "da",
                                 table: "documents",
-                                access: Access::Index("documents_admitted_folded_suffix_key"),
-                                constraint: "(admitting_segments=? AND folded_suffix_key>? AND folded_suffix_key<?)",
-                                dropped: "documents_admitted_folded_suffix_key",
+                                access: Access::Index("documents_admitted_suffix_key"),
+                                constraint: "(admitting_segments=? AND suffix_key>? AND suffix_key<?)",
+                                dropped: "documents_admitted_suffix_key",
                             },
                         ),
                     ]
@@ -1614,11 +1610,11 @@ fn filter_bars() -> Vec<FilterBar> {
                 .collect(),
         },
         FilterBar {
-            shape: ReadFilter::LinksTo(SuffixKey::Raw),
+            shape: ReadFilter::LinksTo(SuffixKey::Comparison),
             probes: vec![
                 (
                     Predicate::links_to(target("glossary")),
-                    ReadFilter::LinksTo(SuffixKey::Raw),
+                    ReadFilter::LinksTo(SuffixKey::Comparison),
                     Seek::Index {
                         alias: "lk",
                         table: "link_keys",
@@ -1629,13 +1625,13 @@ fn filter_bars() -> Vec<FilterBar> {
                 ),
                 (
                     Predicate::links_to(target("glossary")),
-                    ReadFilter::LinksTo(SuffixKey::Folded),
+                    ReadFilter::LinksTo(SuffixKey::Comparison),
                     Seek::Index {
                         alias: "lk",
                         table: "link_keys",
-                        access: Access::Index("link_keys_folded_key"),
-                        constraint: "(folded_key=?)",
-                        dropped: "link_keys_folded_key",
+                        access: Access::Index("link_keys_key"),
+                        constraint: "(key=?)",
+                        dropped: "link_keys_key",
                     },
                 ),
             ],
@@ -1663,9 +1659,8 @@ fn filter_bars() -> Vec<FilterBar> {
 /// same on either root.
 fn root_of(shape: ReadFilter) -> StoredPathOrder {
     match shape {
-        ReadFilter::Resolves(SuffixKey::Folded) | ReadFilter::LinksTo(SuffixKey::Folded) => {
-            StoredPathOrder::AsciiCaseInsensitive
-        }
+        ReadFilter::Resolves(SuffixKey::Comparison)
+        | ReadFilter::LinksTo(SuffixKey::Comparison) => StoredPathOrder::AsciiCaseInsensitive,
         ReadFilter::PathGlob(order) => order,
         _ => StoredPathOrder::Sensitive,
     }
@@ -1774,8 +1769,8 @@ fn judge_filter(page: &QueryPlan, seek: &Seek) {
 /// resolution part each suffix range the target opens;
 /// the tag part `(name)`; the finding part `(kind, fingerprint)`; and the
 /// links-to part the link index at each key the named document is named by,
-/// raw or folded as the root probes. No step
-/// of any of these pages reads a relation end to end.
+/// under the shared comparison key on every root. No step of any of these
+/// pages reads a relation end to end.
 ///
 /// Each filter is judged on the path page, and on the valued section of a field
 /// sort, which reach the page's document through a row id and through the
@@ -3687,8 +3682,7 @@ fn each_filter_answers_the_documents_its_part_names() {
         with(Predicate::resolves(target("glossary#Design"))),
         ["other/glossary.md"]
     );
-    // Both reductions: `v1.2` is the stem `v1.2` and the stem `v1` with `.2`
-    // taken as an extension.
+    // A non-Markdown extension stays in the stem.
     assert_eq!(
         with(Predicate::resolves(target("other/v1.2"))),
         ["other/v1.2.md"]

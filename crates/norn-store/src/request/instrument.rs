@@ -112,18 +112,11 @@ impl<'a> Request<'a> {
                 given: ids.get(),
             });
         }
-        // A class statement is explained over the key space its reader ranges
-        // over, so a class or probe that reader refuses is refused here too.
-        match statement {
-            ExplainedStatement::SuffixCandidates(resolution) => self.check_class(resolution)?,
-            ExplainedStatement::FindingsInClass(probe) => self.check_probe(probe)?,
-            ExplainedStatement::PathDiscard(path) => self.check_path_key(path)?,
-            _ => {}
+        if let ExplainedStatement::PathDiscard(path) = statement {
+            self.check_path_key(path)?;
         }
-        // The judgment's statements are spelled in the key space the store's
-        // order selects, as the judgment spells them.
-        let order = self.store.path_order();
-        let key = SuffixKey::under(order);
+        // Explain the same comparison-key statements that judgment runs.
+        let key = SuffixKey::Comparison;
         let sql = match statement {
             ExplainedStatement::SuffixCandidates(resolution) => suffix_candidates_sql(resolution),
             ExplainedStatement::FindingsInClass(probe) => {
@@ -171,7 +164,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthPathLinks => health::links_sql(key, Selected::Path),
             ExplainedStatement::LinkHealthHeads => health::heads_sql(key),
             ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
-            ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
+            ExplainedStatement::LinkHealthSuffixes => explained_suffixes()?.0,
             ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
             ExplainedStatement::LinkHealthWrittenLinks => health::links_sql(key, Selected::Written),
             ExplainedStatement::LinkHealthClassFindings => health::class_findings_sql(),
@@ -367,7 +360,7 @@ impl<'a> Request<'a> {
                 )?),
             ),
             ExplainedStatement::LinkHealthSuffixes => {
-                database.emitted_plan(&sql, params_from_iter(explained_suffixes(order)?.1))
+                database.emitted_plan(&sql, params_from_iter(explained_suffixes()?.1))
             }
             // The link and its target are keyed by row ids no caller above
             // this crate holds, so both are bound as a fact read's id is.
@@ -479,8 +472,7 @@ impl<'a> Request<'a> {
 /// ids its chunk holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainedStatement<'a> {
-    /// [`Request::suffix_candidates`], over the key the resolution's root
-    /// probes.
+    /// [`Request::suffix_candidates`], over the normalized comparison key.
     SuffixCandidates(&'a TargetClass),
     /// [`Request::findings_in_class`].
     FindingsInClass(&'a SuffixProbe),
@@ -924,11 +916,9 @@ fn explained_after(text: &str) -> health::After {
 /// The candidate-suffix statement a judgment runs, as its text and values,
 /// over one candidate: the statement a read names candidates by, spelled
 /// through the same [`SuffixSpellings`].
-fn explained_suffixes(
-    order: StoredPathOrder,
-) -> Result<(String, Vec<norn_db::rusqlite::types::Value>), StoreError> {
+fn explained_suffixes() -> Result<(String, Vec<norn_db::rusqlite::types::Value>), StoreError> {
     let named = BTreeMap::from([(EXPLAINED_DOCUMENT_ROW, EXPLAINED_PAGE_CURSOR_LEAF)]);
-    SuffixSpellings::new(&named, &AmbiguityIgnore::none(), order)?.statement()
+    SuffixSpellings::new(&named, &AmbiguityIgnore::none())?.statement()
 }
 
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.

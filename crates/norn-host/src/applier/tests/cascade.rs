@@ -565,6 +565,63 @@ fn own_relative_links_whose_spellings_cross_each_reach_the_file_they_named() {
     );
 }
 
+/// **A moved document's own relative link follows the document it names
+/// under the comparison key** (ADR 0040): `../Note.md` names `a/note.md`, and
+/// an NFD spelling names the NFC document, so when one plan moves the holder
+/// and the target, or moves the holder and deletes the target, the link is
+/// decided by the stored document it names. A move rewrites it to the
+/// target's new place, as the exact spelling is, and a delete rewriting the
+/// links naming its document rewrites it to name the delete's target.
+#[test]
+fn an_own_relative_link_follows_its_target_under_the_comparison_key() {
+    let nfd = "re\u{301}sume\u{301}";
+    for (stored, written, landed, respelled) in [
+        ("a/note.md", "../Note.md", "y/note.md", "../y/note.md"),
+        ("a/note.md", "../note.md", "y/note.md", "../y/note.md"),
+        (
+            "a/r\u{e9}sum\u{e9}.md",
+            &*format!("../{nfd}.md"),
+            "y/r\u{e9}sum\u{e9}.md",
+            "../y/r\u{e9}sum\u{e9}.md",
+        ),
+    ] {
+        let mut fixture = Fixture::new(&[
+            (stored, "target\n"),
+            ("a/b/m.md", &format!("[p]({written})\n")),
+        ]);
+        let cascades = fixture.moved(vec![moving("a/b/m.md", "z/m.md"), moving(stored, landed)]);
+        assert_eq!(
+            cascades,
+            [vec![markdown("z/m.md", written, respelled)], vec![]],
+            "`{written}` naming `{stored}`"
+        );
+        assert_eq!(
+            fixture.read("z/m.md"),
+            Some(format!("[p]({respelled})\n")),
+            "`{written}` naming `{stored}`"
+        );
+
+        let mut fixture = Fixture::new(&[
+            (stored, "target\n"),
+            ("other/keep.md", "kept\n"),
+            ("a/b/m.md", &format!("[p]({written})\n")),
+        ]);
+        let deleting = Operation::new(norn_wire::OperationKind::delete_document_rewriting(
+            path(stored),
+            norn_wire::ResolutionTarget::new("keep").expect("a target"),
+        ));
+        let cascades = fixture.moved(vec![moving("a/b/m.md", "z/m.md"), deleting]);
+        assert_eq!(
+            cascades,
+            [
+                vec![markdown("z/m.md", written, "../other/keep.md")],
+                vec![]
+            ],
+            "`{written}` naming `{stored}`, deleted"
+        );
+    }
+}
+
 /// **A refreshed move's crossing rewrites land as one batch too**: another
 /// writer edits the moved document after the preview, the refusal's fresh
 /// plan generates the cascade again from what it holds now, and each of its
@@ -735,8 +792,8 @@ fn a_backlink_added_to_a_refilled_path_after_preview_refuses_the_plan() {
 
 /// **A link is respelled only in the extension style it was written in**: a
 /// wikilink written without the document extension whose every spelling of
-/// the destination without one reads as something else — `Ü/v1.2` names an
-/// attachment — is left as written and said to be unrepresentable, never
+/// the destination without one reads as something else — `Ü/v1.md` names two
+/// documents — is left as written and said to be unrepresentable, never
 /// given an extension its author did not write.
 #[test]
 fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
@@ -745,7 +802,7 @@ fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
         ("Ü/v1.md", "V\n"),
         ("h.md", "[[b/note one]]\n"),
     ]);
-    let resolution = fixture.resolution(vec![moving("b/note one.md", "Ü/v1.2.md")]);
+    let resolution = fixture.resolution(vec![moving("b/note one.md", "Ü/v1.md.md")]);
     assert_eq!(resolution.plan.operations[0].cascade, []);
     assert_eq!(
         resolution.forecast.links,
@@ -913,7 +970,7 @@ fn a_left_behind_link_sharing_its_key_with_a_respelled_one_is_still_unrepresenta
         ("c.md", "[[x]]\n"),
     ]);
     let resolution =
-        fixture.previewed_and_applied(vec![moving("x.md", "Ü/v1.2.md"), moving("t.md", "x.md")]);
+        fixture.previewed_and_applied(vec![moving("x.md", "Ü/v1.md.md"), moving("t.md", "x.md")]);
     assert_eq!(
         resolution.plan.operations[1].cascade,
         [wikilink("h.md", "t", "x")]

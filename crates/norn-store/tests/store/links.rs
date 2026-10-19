@@ -118,7 +118,7 @@ fn source_links() -> Vec<LinkFact> {
         wikilink("picture.png"),
         // 11: its own document.
         markdown("./a.md"),
-        // 12: both reductions of a dotted leaf.
+        // 12: both document-name readings of a target ending in `.md`.
         wikilink("report.md"),
         // 13: a same-document anchor, which names its own document.
         link(LinkFamily::Wikilink, None, "", Some("Heading")),
@@ -315,12 +315,7 @@ fn names(health: LinkHealth, paths: &[&str]) -> (LinkHealth, Vec<String>, u64) {
 
 // ---- what a link names ----
 
-/// **A wikilink is healthy, broken or ambiguous by what its target names**,
-/// read through the one resolver on either root: one document is healthy,
-/// none is broken, two are ambiguous and the head names both, a dotted leaf
-/// reduces both ways, and an anchor is split off before resolution and carried
-/// as written, never checked. The head names each document by its minimal
-/// disambiguating suffix.
+/// Wikilink health follows its candidates. Only `.md` is optional in a dotted leaf.
 #[test]
 fn a_wikilink_is_healthy_broken_or_ambiguous_by_what_its_target_names() {
     for order in [Sensitive, Folding] {
@@ -415,7 +410,7 @@ fn addressed() -> Vec<DocumentFacts> {
         holding(
             "x/src.md",
             vec![
-                // 0: a dotted leaf reduced to the document it names.
+                // 0: a non-Markdown extension remains in the document stem.
                 wikilink("v1.2"),
                 // 1: an attachment no document is.
                 wikilink("photo.png"),
@@ -528,33 +523,17 @@ fn rooted() -> Vec<DocumentFacts> {
     all
 }
 
-/// **A `vault://` link is rooted at the vault root, and its family keeps its
-/// own rules**, on either root. A wikilink names the root path each of its
-/// reductions spells: `[[vault://Notes]]` and `[[vault://Notes.md]]` name
-/// `Notes.md`, and `[[vault://v1.2]]` names `v1.md` — its dotted leaf's
-/// stem, stripped of its extension, exactly as a suffix wikilink's own
-/// second reduction reaches it; it is never a suffix address, so
-/// `[[vault://Deep]]` does not reach `sub/Deep.md`; and nothing in
-/// it is decoded or cut off, so `[[vault://my%20note]]` and
-/// `[[vault://Notes?x]]` name nothing. A Markdown link names the one path it
-/// spells, percent-decoded and its query cut off and never reduced:
-/// `[t](vault://Notes)` names the path `Notes`, where no document stands. A
-/// path is matched under the root's order, so a lowercase spelling names
-/// `Notes.md` only where the root folds case. A links-to part reaches each
-/// link that names its document.
+/// Vault links retain their family reading, compared under one normalized key.
+/// A rooted `v1.2` names only `v1.2.md`, and names no document here.
 #[test]
 fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
     for order in [Sensitive, Folding] {
         let linked = Linked::holding(&format!("links-rooted-{order:?}"), order, &rooted());
-        let folded = if order == Folding {
-            names(LinkHealth::Healthy, &["Notes.md"])
-        } else {
-            names(LinkHealth::Broken, &[])
-        };
+        let folded = names(LinkHealth::Healthy, &["Notes.md"]);
         for (at, expected) in [
             ("h/w-notes.md", names(LinkHealth::Healthy, &["Notes.md"])),
             ("h/w-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
-            ("h/w-v12.md", names(LinkHealth::Healthy, &["v1.md"])),
+            ("h/w-v12.md", names(LinkHealth::NotJudged, &[])),
             ("h/w-deep.md", names(LinkHealth::Broken, &[])),
             ("h/w-encoded.md", names(LinkHealth::Broken, &[])),
             ("h/w-query.md", names(LinkHealth::Broken, &[])),
@@ -576,12 +555,10 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
             "h/w-notes-md.md",
             "h/w-notes.md",
         ];
-        if order == Folding {
-            notes.extend(["h/m-lower.md", "h/w-lower.md"]);
-            notes.sort_unstable();
-        }
+        notes.extend(["h/m-lower.md", "h/w-lower.md"]);
+        notes.sort_unstable();
         assert_eq!(linked.backlinks("Notes"), notes, "{order:?}");
-        assert_eq!(linked.backlinks("v1"), ["h/w-v12.md"], "{order:?}");
+        assert!(linked.backlinks("v1").is_empty(), "{order:?}");
         assert_eq!(linked.backlinks("my note"), ["h/m-encoded.md"], "{order:?}");
         assert_eq!(
             linked.backlinks("sub/Deep"),
@@ -591,20 +568,18 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
     }
 }
 
-/// **A `vault://` wikilink's dotted-leaf reduction reaches the same document
-/// a suffix wikilink's does.** With only `v1.md` standing, `[[v1.2]]` and
-/// `[[vault://v1.2]]` both strip `v1.2`'s leaf to its stem `v1` for their
-/// second reduction, so both name `v1.md` and are healthy, on either root.
+/// Rooted and suffix wikilinks both allow the document's `.md` extension.
+/// With only `v1.md` present, both authored forms name that document.
 #[test]
-fn a_vault_wikilinks_dotted_leaf_reduction_matches_a_suffix_wikilinks() {
+fn vault_and_suffix_wikilinks_both_allow_the_md_extension() {
     for order in [Sensitive, Folding] {
         let linked = Linked::holding(
             &format!("links-vault-dotted-leaf-{order:?}"),
             order,
             &[
                 holding("v1.md", Vec::new()),
-                holding("h/s.md", vec![wikilink("v1.2")]),
-                holding("h/r.md", vec![vault(LinkFamily::Wikilink, "v1.2")]),
+                holding("h/s.md", vec![wikilink("v1.md")]),
+                holding("h/r.md", vec![vault(LinkFamily::Wikilink, "v1.md")]),
             ],
         );
         for at in ["h/s.md", "h/r.md"] {
@@ -617,11 +592,8 @@ fn a_vault_wikilinks_dotted_leaf_reduction_matches_a_suffix_wikilinks() {
     }
 }
 
-/// **A rooted wikilink naming two documents is a backlink of neither**: with
-/// `Notes.md` and `Notes.md.md` both standing, `[[vault://Notes.md]]` names
-/// each by one of its reductions, so it is ambiguous, and a links-to part
-/// naming either document alone confirms the link's other path and drops it.
-/// The Markdown link beside it names `Notes.md` alone and is its backlink.
+/// A rooted target ending in `.md` names both its document and its
+/// `.md.md` twin. An ambiguous link is a backlink of neither document.
 #[test]
 fn a_rooted_wikilink_naming_two_documents_is_a_backlink_of_neither() {
     for order in [Sensitive, Folding] {
@@ -688,14 +660,15 @@ fn a_link_addressed_elsewhere_or_to_an_absent_attachment_is_not_judged() {
     }
 }
 
-/// **The root's case behaviour is the resolution's**: where the root tells
-/// spellings apart, `[[GLOSSARY]]` and `../NOTES/Glossary.md` name nothing;
-/// where it folds ASCII case, each names `notes/glossary.md`, and a lowercase
-/// path names the document standing at its uppercase spelling.
+/// Both link families compare case variants through the same key on
+/// every root. Filesystem case sensitivity does not select candidates.
 #[test]
-fn a_folding_root_resolves_every_case_spelling_of_either_family() {
+fn both_link_families_compare_case_variants_under_one_comparison_key() {
     for (order, expected) in [
-        (Sensitive, names(LinkHealth::Broken, &[])),
+        (
+            Sensitive,
+            names(LinkHealth::Healthy, &["Notes/Glossary.md"]),
+        ),
         (Folding, names(LinkHealth::Healthy, &["Notes/Glossary.md"])),
     ] {
         let upper = Linked::holding(
@@ -710,7 +683,11 @@ fn a_folding_root_resolves_every_case_spelling_of_either_family() {
     }
     let sensitive = Linked::new("links-case-sensitive", Sensitive, 0);
     for row in sensitive.links("src/d.md") {
-        assert_eq!(reading(&row), names(LinkHealth::Broken, &[]), "{row:?}");
+        assert_eq!(
+            reading(&row),
+            names(LinkHealth::Healthy, &["notes/glossary.md"]),
+            "{row:?}"
+        );
     }
     let folding = Linked::new("links-case-folding", Folding, 0);
     for row in folding.links("src/d.md") {
@@ -820,9 +797,7 @@ fn links_to_matches_a_link_that_resolves_to_exactly_its_document() {
     for order in [Sensitive, Folding] {
         let linked = Linked::new(&format!("links-to-{order:?}"), order, 0);
         let mut glossary = vec!["src/a.md", "src/b.md", "src/c.md"];
-        if order == Folding {
-            glossary.push("src/d.md");
-        }
+        glossary.push("src/d.md");
         assert_eq!(linked.backlinks("glossary"), glossary, "{order:?}");
         assert_eq!(linked.backlinks("notes/glossary#Heading"), glossary);
         assert_eq!(linked.backlinks("notes/dup"), ["src/a.md", "src/b.md"]);
@@ -903,7 +878,7 @@ fn links_to_applies_the_ignored_places_a_resolution_applies() {
         &request().with_predicates([Predicate::links_to(resolution("notes/glossary"))]),
         &bare(),
     );
-    assert_eq!(paths(&found), ["src/c.md"]);
+    assert_eq!(paths(&found), ["src/c.md", "src/d.md"]);
     let found = linked.find_under(
         &request().with_predicates([Predicate::links_to(resolution("archive/glossary"))]),
         &bare(),
@@ -993,7 +968,7 @@ fn a_count_and_a_validate_narrow_by_links_to() {
         )
         .expect("a count");
     assert_eq!(counted.tallies.len(), 1);
-    assert_eq!(counted.tallies[0].count, 3);
+    assert_eq!(counted.tallies[0].count, 4);
     let reported = linked
         .snapshot()
         .count(
@@ -1107,7 +1082,7 @@ fn judge_link_targets(plan: &QueryPlan, class_index: &str, key: &str, path_index
     );
     let at = rows_of(plan, "dp");
     at.assert_searches_through("documents", Access::Index(path_index));
-    at.assert_search_constraint("documents", "(path=?)");
+    at.assert_search_constraint("documents", "(path_key=?)");
 }
 
 /// A vault whose `src/many.md` links to a target naming seven documents and
@@ -1133,11 +1108,10 @@ fn crowded(label: &str, order: StoredPathOrder) -> Linked {
 
 /// **A read of what targets name seeks the class or the path each names**: a
 /// page's links are read as one set, each link's keys a seek of
-/// `link_keys_link`, each suffix key's class a seek of `documents_admitted_suffix_key`
-/// where the root tells spellings apart and of `documents_admitted_folded_suffix_key`
-/// where it folds ASCII case, bounded on both sides by the key's range, and
-/// each path key's documents a seek of `documents_path` at the path where the
-/// root tells spellings apart and of `documents_path_nocase` where it folds;
+/// `link_keys_link`, each suffix key's class a seek of
+/// `documents_admitted_suffix_key` on every root, bounded on both sides by the
+/// key's normalized range, and each path key's documents a seek of
+/// `documents_path_key` at the normalized path;
 /// the candidates' suffixes are each a range seek of the same suffix key. A
 /// links-to part's target is read by the class statements, a head and a total
 /// over the same ranges.
@@ -1151,13 +1125,13 @@ fn a_read_of_targets_seeks_the_class_or_the_path_each_names() {
             Sensitive,
             "documents_admitted_suffix_key",
             "suffix_key",
-            "documents_path",
+            "documents_path_key",
         ),
         (
             Folding,
-            "documents_admitted_folded_suffix_key",
-            "folded_suffix_key",
-            "documents_path_nocase",
+            "documents_admitted_suffix_key",
+            "suffix_key",
+            "documents_path_key",
         ),
     ] {
         let linked = crowded(&format!("links-resolution-plan-{order:?}"), order);
@@ -1299,8 +1273,8 @@ fn a_links_head_is_cut_in_the_statement_that_names_it() {
 /// Judge a links-to part's rows in a page's plan: the links that could name
 /// the document are equality seeks of the link index at its keys, each link
 /// reached has its own keys read off `link_keys_link`, and the documents each
-/// of those reaches are a range seek of the suffix key the root probes or a
-/// seek of the path; nothing in the plan is read end to end.
+/// reaches are indexed seeks of the suffix or complete-path comparison
+/// key; nothing in the plan is read end to end.
 fn judge_links_to(
     page: &QueryPlan,
     key_index: &str,
@@ -1317,11 +1291,7 @@ fn judge_links_to(
         own.assert_searches_through("link_keys", Access::Index("link_keys_link"));
         own.assert_search_constraint("link_keys", "(link=?)");
     }
-    let suffix_column = if key == "key" {
-        "suffix_key"
-    } else {
-        "folded_suffix_key"
-    };
+    let suffix_column = "suffix_key";
     let reached = rows_of(page, "dl");
     reached.assert_searches_through("documents", Access::Index(suffix_index));
     reached.assert_search_constraint(
@@ -1330,18 +1300,10 @@ fn judge_links_to(
     );
     let at = rows_of(page, "dp");
     at.assert_searches_through("documents", Access::Index(path_index));
-    at.assert_search_constraint("documents", "(path=?)");
+    at.assert_search_constraint("documents", "(path_key=?)");
 }
 
-/// **A links-to part seeks the link index and confirms each link it reaches
-/// by seeks**: the page is driven from equality seeks of `link_keys_key` —
-/// `link_keys_folded_key` where the root folds ASCII case — at each key the
-/// named document is named by, and each link reached is confirmed to name
-/// that document alone by a seek of its own keys and of the documents they
-/// reach. It never reads `links` or scans the link index.
-///
-/// Controls: each index the part seeks dropped, the part reads something else
-/// and fails.
+/// Backlinks seek normalized link keys, then confirm each candidate by indexed suffix or path-key seeks.
 #[test]
 fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
     for (order, key_index, key, suffix_index, path_index) in [
@@ -1350,14 +1312,14 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
             "link_keys_key",
             "key",
             "documents_admitted_suffix_key",
-            "documents_path",
+            "documents_path_key",
         ),
         (
             Folding,
-            "link_keys_folded_key",
-            "folded_key",
-            "documents_admitted_folded_suffix_key",
-            "documents_path_nocase",
+            "link_keys_key",
+            "key",
+            "documents_admitted_suffix_key",
+            "documents_path_key",
         ),
     ] {
         let mut linked = Linked::new(&format!("links-to-plan-{order:?}"), order, 0);
@@ -1367,7 +1329,7 @@ fn a_links_to_part_seeks_the_link_index_and_confirms_each_link_by_seeks() {
             let page = plans
                 .iter()
                 .find(|plan| {
-                    plan.filters == [ReadFilter::LinksTo(SuffixKey::under(order))]
+                    plan.filters == [ReadFilter::LinksTo(SuffixKey::Comparison)]
                         && is_page(plan.statement)
                 })
                 .expect("the page statement");

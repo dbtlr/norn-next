@@ -408,17 +408,15 @@ pub struct StoredDocument {
     pub derived_at: i64,
 }
 
-/// The suffix keys one document row holds, and the admitting count that keeps
-/// it in their classes, beside the path that has to produce them: what
+/// The suffix and path keys one document row holds, and its admitting count, beside the path that has to produce them: what
 /// [`crate::Request::suffix_keys_after`] pages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSuffixKeys {
     pub path: DocumentPath,
     /// `documents.suffix_key`, which [`DocumentPath::suffix_key`] recomputes.
-    pub raw: String,
-    /// `documents.folded_suffix_key`, which
-    /// [`DocumentPath::folded_suffix_key`] recomputes.
-    pub folded: String,
+    pub suffix_key: String,
+    /// `documents.path_key`, which [`DocumentPath::path_key`] recomputes.
+    pub path_key: String,
     /// `documents.admitting_segments`, which
     /// [`crate::AmbiguityIgnore::admitting_segments`] recomputes under the
     /// declaration the row was derived under.
@@ -428,40 +426,14 @@ pub struct StoredSuffixKeys {
 /// The case behaviour a vault root was **proven** to have at the filesystem
 /// seam, as the store carries it.
 ///
-/// It selects five things, and rewrites no path in any of them — a stored path
-/// keeps the spelling the tree carries:
+/// It records a rebuild input and selects the filesystem order a heal
+/// merges against, the query path-glob fold and its indexed ranges. Paths
+/// keep their vault spelling, and resolution never takes this fact as input.
 ///
-/// - **The store's recorded rebuild input.** A store records the order its rows
-///   were derived under, and an open under another one rebuilds from zero
-///   ([`crate::Store::path_order`]).
-/// - **The suffix key a class probes**: the raw key where the root tells
-///   spellings apart and the ASCII-folded key where it folds them
-///   ([`crate::SuffixKey::under`]), which is also the key space a finding's
-///   classes are filed in.
-/// - **Every glob's fold** ([`StoredPathOrder::glob_case`]): bytewise where the
-///   root tells spellings apart and with ASCII case folded where it folds them.
-///   The ambiguity-ignore globs ([`crate::AmbiguityIgnore::admits`]) and the
-///   path part of a find, a count and a validate match under it.
-/// - **The collation a find's or a count's path part seeks its range under**:
-///   `documents_path` where the root tells spellings apart, and
-///   `documents_path_nocase` over the folded prefix where it folds them.
-/// - **The collation a heal pages stored documents under**: bytewise, or
-///   `NOCASE` with a bytewise tie-break, as the walk it merges against orders
-///   paths. The heal hands the page its walk's proven order.
-///
-/// **It does not select the order a read answers paths in.** A find's pages
-/// and a validate's findings answer in one path order on every root — ASCII
-/// case folded, then bytewise — which is the read machinery's, not the root's;
-/// on a root that tells spellings apart it differs from the order a heal pages
-/// in.
-///
-/// This crate depends on nothing in the filesystem seam, so each fold here —
-/// the `NOCASE` collation, the folded suffix key, and the globs'
-/// [`norn_wire::CaseFold::Ascii`] — is **another implementation of the seam's
-/// rule, not a derivation of it**. The contract all of them are held to is
-/// written once — ASCII lowercase, then bytes, with the byte comparison
-/// breaking a fold's ties — and each carries a test against it over the same
-/// sample, so widening one implementation and not the others fails.
+/// Answer ordering is ASCII case folded with bytewise ties on every root,
+/// independently of this filesystem fact. The store's `NOCASE` collation
+/// and query glob's [`norn_wire::CaseFold::Ascii`] implement the filesystem
+/// seam's ASCII fold for these mechanics alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredPathOrder {
     /// Preserve bytewise UTF-8 path order.
@@ -484,9 +456,8 @@ impl StoredPathOrder {
 
     /// How a glob's literal letters compare with a path's under this order:
     /// as themselves where the root tells spellings apart, and with ASCII case
-    /// folded where it folds them. Every glob a store's paths are matched
-    /// against takes its case here, so no glob consumer decides the fold for
-    /// itself.
+    /// folded where it folds them. Query path globs take their case here. Ambiguity-ignore globs use
+    /// the resolution comparison key instead.
     pub const fn glob_case(self) -> CaseFold {
         match self {
             StoredPathOrder::Sensitive => CaseFold::Exact,
@@ -561,11 +532,9 @@ impl std::fmt::Display for DerivationVersion {
 pub struct StoredLinkKey {
     /// The position of the link this is a key of among the document's links.
     pub link: u64,
-    /// The key as the target spells it: a suffix address's segment-reversed
-    /// prefix, or a vault path.
+    /// The normalized comparison key: a suffix address's segment-reversed
+    /// prefix, or a complete vault path.
     pub key: String,
-    /// The key with ASCII case folded.
-    pub folded_key: String,
     /// How many segments a suffix address spells, and `None` beside a path.
     pub segments: Option<u64>,
 }
@@ -741,23 +710,21 @@ pub struct FindingFacts {
     pub severity: Severity,
     /// The path the finding is about, whether or not a document is stored there.
     pub path: DocumentPath,
-    /// Every ambiguity class this finding is maintained by, which is
-    /// [`crate::SuffixProbe::class_keys`] for the probe it was read from — one
-    /// class per reduction of the target, and empty for a finding that is not
-    /// about resolution at all.
+    /// Every ambiguity class that maintains this finding. A suffix link
+    /// records its own document-name classes and its candidates' naming
+    /// classes. Findings unrelated to resolution carry no class key.
     ///
-    /// A set rather than one key, because a target's two reductions are two
-    /// disjoint classes and a finding filed under only one of them is invisible to
-    /// maintenance that names the other. Validated keys, because a key no probe's
-    /// range opens is the same invisibility by another route.
+    /// A target ending in `.md` opens two disjoint classes, and either
+    /// must reach its finding. Keys use the normalized comparison form so
+    /// changeset maintenance can reach every recorded membership.
     pub class_keys: BTreeSet<ClassKey>,
     /// Every exact vault path this finding is maintained by: the paths a
-    /// path-addressed link spells — one for a path, one per reduction for a
-    /// rooted name — and empty for a finding about no such link.
+    /// path-addressed link spells, including both optional `.md` paths of
+    /// a rooted name, and empty for a finding about no such link.
     ///
     /// The other key space from [`FindingFacts::class_keys`]: a change reaches
-    /// a finding here only by writing or killing one of these paths exactly,
-    /// never by sharing a class with one.
+    /// a finding here by writing or killing a path with the same complete
+    /// comparison key, never merely by sharing a suffix class.
     pub path_keys: BTreeSet<PathKey>,
     /// What the finding is about **inside** its subject, as written, and
     /// `None` where the subject is the whole of what it is about.

@@ -167,11 +167,10 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
 ///   fills the key's head so its total is counted;
 /// - every link is `[[dNNNNN/hub]]`, a key of its own in the class, and each
 ///   is filed broken;
-/// - every link is `[[hub.vNNNNN]]`, which the class holds under `hub/` and
-///   a class of its own holds under `hub.vNNNNN/`, and each is filed
-///   ambiguous;
-/// - every link is `[[vault://new/hub.vNNNNN]]`, held under the path
-///   `new/hub.md` and a path of its own, and each names the one document.
+/// - every link is `[[dNNNNN/hub.md]]`, held under one key in `hub/`
+///   and another in `hub.md/`, and each is filed broken;
+/// - every link is `[[vault://new/hub.md]]`, held under the paths
+///   `new/hub.md` and `new/hub.md.md`, and each names the one document.
 ///
 /// The re-decision reads, judges and files one chunk at a time, and keeps
 /// what a key names only while the chunk just filed holds it, so the heap the
@@ -206,14 +205,14 @@ fn a_hub_write_holds_heap_within_a_chunk() {
         Shape {
             label: "cross-class-keys",
             protocol: None,
-            target: |n| format!("hub.v{n:05}"),
+            target: |n| format!("d{n:05}/hub.md"),
             filed: true,
             hubs: 1,
         },
         Shape {
             label: "cross-path-keys",
             protocol: Some("vault"),
-            target: |n| format!("new/hub.v{n:05}"),
+            target: |_| "new/hub.md".to_string(),
             filed: false,
             hubs: 1,
         },

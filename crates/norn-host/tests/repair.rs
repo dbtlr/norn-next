@@ -6007,12 +6007,7 @@ fn a_follow_no_spelling_or_edit_can_write_skips_as_link_not_rewritable() {
             "new.md",
             "skipped_unplaced",
         ),
-        (
-            "no-spelling",
-            "See [[old]].\n",
-            "new.part.md",
-            "no spelling",
-        ),
+        ("no-spelling", "See [[old]].\n", "new.md.md", "no spelling"),
     ] {
         let (_sandbox, vault, host) = a_vault_under(
             &format!("host-repair-follow-{label}"),
@@ -6326,10 +6321,10 @@ fn recreating_the_old_target_refuses_a_follow_from_a_routed_holder() {
     assert!(!stands(&vault, "tasks/zz-holder.md"));
 }
 
-/// **Both root reductions of a vault link contribute their tombstones.**
+/// Both complete paths named by a rooted `.md` link contribute their tombstones.
 /// A live copy of the first death cannot turn the two deaths into one follow.
 #[test]
-fn a_vault_link_matching_both_root_reductions_skips_as_several_tombstones() {
+fn a_rooted_md_link_matching_both_tombstones_skips_as_several_tombstones() {
     let (_sandbox, vault, host) = a_vault_under(
         "host-repair-vault-two-reductions",
         "version: 1\n",

@@ -110,10 +110,9 @@ pub enum FindStatement {
     /// answers finding rows.
     FindingClasses,
     /// The head of the class a target opens: each admitting-count run of
-    /// each suffix range on `documents_admitted_suffix_key` where the root
-    /// tells spellings apart and on `documents_admitted_folded_suffix_key`
-    /// where it folds ASCII case, cut at [`crate::CANDIDATE_HEAD`] in ladder
-    /// order, then merged and cut again. Run by every read that resolves one
+    /// each normalized suffix range on `documents_admitted_suffix_key`, cut
+    /// at [`crate::CANDIDATE_HEAD`] in ladder order, then merged and cut
+    /// again. Run by every read that resolves one
     /// target: a get's and a links-to part's.
     ClassHead,
     /// How many documents the class holds, run only where the head filled
@@ -122,13 +121,13 @@ pub enum FindStatement {
     /// Whether each suffix spelling of each candidate a read names names that
     /// candidate alone, for every candidate at once: for each range of each
     /// spelling's class, at most two of the documents in it — a range of the
-    /// suffix key the root probes, less the places the schema ignores — each
+    /// suffix comparison key, less the places the schema ignores — each
     /// then reached by its row id. Run once by every read that names
     /// candidates, however many there are.
     CandidateSuffixes,
     /// What each of a page's links names, for every link at once: the keys of
     /// the links on `link_keys_link`, each distinct key read once — a suffix
-    /// key's class a range of the suffix key the root probes, less the places
+    /// key's class a range of the suffix comparison key, less the places
     /// the schema ignores, and a path key the documents at the path on
     /// `documents_path` or `documents_path_nocase` — and for each link, at
     /// most [`crate::CANDIDATE_HEAD`] of the documents its keys reached, in
@@ -1002,7 +1001,7 @@ pub(crate) fn compose_class_total(class: &TargetClass) -> (String, Vec<Value>) {
 
 /// One range of one suffix spelling's class, as
 /// [`FindStatement::CandidateSuffixes`] reads it: the range's bounds in the key
-/// space the root probes, and how many segments the spelling spells.
+/// comparison key space, and how many segments the spelling spells.
 pub(crate) struct SpellingRange<'a> {
     pub(crate) lower: &'a str,
     pub(crate) upper: &'a str,
@@ -1010,18 +1009,17 @@ pub(crate) struct SpellingRange<'a> {
 }
 
 /// [`FindStatement::CandidateSuffixes`]: for each of `ranges`, at most two
-/// of the admitted documents in it under `order`, each as the range's index
-/// in `ranges` and the document's id, in no order.
+/// of the admitted documents in it, each as the range's index in `ranges`
+/// and the document's id, in no order.
 ///
 /// The ranges drive the statement — `CROSS JOIN` keeps them the outer loop.
-/// Each admitting count opens one seek of the suffix key the root probes,
+/// Each admitting count opens one seek of the suffix comparison key,
 /// cut at two documents in ladder order. The bounded heads are merged and
 /// cut at two before their documents are emitted, each reached by row id.
 /// A range costs at most two members per admitting count, however large the
 /// class. Every class range uses [`resolve::range_rows`].
 pub(crate) fn compose_candidate_suffixes(
     ranges: &[SpellingRange<'_>],
-    order: StoredPathOrder,
 ) -> Result<(String, Vec<Value>), StoreError> {
     let listed = canonical_json(&FrontmatterValue::Sequence(
         ranges
@@ -1038,7 +1036,7 @@ pub(crate) fn compose_candidate_suffixes(
             .collect(),
     ))?;
     let class = resolve::range_rows(
-        SuffixKey::under(order),
+        SuffixKey::Comparison,
         (
             "json_extract(j.value, '$[0]')",
             "json_extract(j.value, '$[1]')",
@@ -1057,9 +1055,9 @@ pub(crate) fn compose_candidate_suffixes(
 }
 
 /// [`FindStatement::LinkTargets`]: for each link `links` names that names a
-/// document, at most `head` of the documents it names under `order`, in the
-/// resolution ladder's order, each as the link's id, the document's id and
-/// path, and how many documents the link names.
+/// document, at most `head` of the documents it names, in the resolution
+/// ladder's order, each as the link's id, the document's id and path, and how
+/// many documents the link names.
 ///
 /// **Each distinct key is read once**, however many of the links carry it:
 /// `keyed` is the page's keys, each once, and `reached` the documents each
@@ -1068,15 +1066,11 @@ pub(crate) fn compose_candidate_suffixes(
 /// sharing a key share its read. Each key's total sums its admitted runs
 /// separately from its bounded head. Each link's head merges its keys' heads
 /// in the ladder's order: the probed key, then the path. Its total sums
-/// their disjoint counts. A path key's rows share one key, so they rank by
-/// the path alone, which is its path order among documents a folding root
-/// reads as one.
-pub(crate) fn compose_link_targets(
-    links: &[i64],
-    order: StoredPathOrder,
-    head: usize,
-) -> (String, Vec<Value>) {
-    let key = SuffixKey::under(order);
+/// their disjoint counts. A path key's rows share one comparison key, so
+/// their original path spellings break ties, independently of filesystem
+/// case behavior.
+pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<Value>) {
+    let key = SuffixKey::Comparison;
     let link_key = resolve::link_key_column(key);
     let class = resolve::link_key_rows(key, "keyed.key", "keyed.segments", Some("?2"));
     let total = resolve::link_key_total(key, "keyed.key", "keyed.segments");

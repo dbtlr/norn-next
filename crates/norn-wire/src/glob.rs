@@ -53,14 +53,16 @@
 //!
 //! # Its callers' fold
 //!
-//! Every glob over a path names the same fold, taken from one rule:
+//! The resolver's ambiguity-ignore set normalizes patterns and paths to NFC
+//! under Unicode default lowercasing, then matches with [`CaseFold::Exact`].
+//!
+//! Query and schema path globs take their filesystem fold from one rule:
 //! [`CaseFold::Ascii`] where the vault store's recorded path order folds ASCII
 //! case, which is where the vault root was proven to treat two spellings as
 //! one name, and [`CaseFold::Exact`] where it does not. The store states the
 //! rule once (`norn_store::StoredPathOrder::glob_case`), and each path caller
 //! reads it there:
 //!
-//! - the ambiguity-ignore set, where the store's resolver reads a class;
 //! - the path part of a find, a count and a validate, where the store's read
 //!   builders run the glob inside a statement, under the order the snapshot
 //!   reads;

@@ -9,7 +9,7 @@
 //! the page names from the keys the link index holds it under
 //! ([`crate::link`]) — each distinct key once, a suffix key's class through the
 //! one resolver's class predicate and a path key's documents at the path under
-//! the snapshot's path order — each link's head at most [`CANDIDATE_HEAD`] of
+//! the comparison key — each link's head at most [`CANDIDATE_HEAD`] of
 //! them in the ladder's order, beside its total. The head is cut in the
 //! statement, so the candidate rows it hands back, which the caller's work
 //! counts, are at most [`CANDIDATE_HEAD`] per link. A link held under no key
@@ -30,7 +30,7 @@ use norn_wire::{Anchor, Candidate, CandidateHead, LinkRow};
 
 use super::Ran;
 use crate::error::{self, StoreError};
-use crate::facts::{CANDIDATE_HEAD, LinkAnchor, LinkFact, StoredPathOrder};
+use crate::facts::{CANDIDATE_HEAD, LinkAnchor, LinkFact};
 use crate::find::{
     FindStatement, SpellingRange, compose_candidate_suffixes, compose_class_head,
     compose_class_total, compose_link_targets, wire_span,
@@ -122,7 +122,7 @@ impl Snapshot {
     }
 
     /// What the suffix address `address` names on this snapshot, its class
-    /// compiled under the snapshot's path order and less the places `ignore`
+    /// compiled under the comparison key and less the places `ignore`
     /// names. An address that is no suffix address names nothing.
     pub(crate) fn name_target(
         &self,
@@ -130,7 +130,7 @@ impl Snapshot {
         ignore: &AmbiguityIgnore,
         record: &mut Vec<Ran>,
     ) -> Result<Naming, StoreError> {
-        let Ok(class) = TargetClass::compile(address, self.path_order(), ignore) else {
+        let Ok(class) = TargetClass::compile(address, ignore) else {
             return Ok(Naming::Nothing);
         };
         let head = self.class_head(&class, record)?;
@@ -216,7 +216,7 @@ impl Snapshot {
                 record,
                 Ran::new(
                     FindStatement::LinkTargets,
-                    compose_link_targets(links, self.path_order(), CANDIDATE_HEAD),
+                    compose_link_targets(links, CANDIDATE_HEAD),
                 ),
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -310,7 +310,7 @@ impl Snapshot {
         if named.is_empty() {
             return Ok(HashMap::new());
         }
-        let spellings = SuffixSpellings::new(named, ignore, self.path_order())?;
+        let spellings = SuffixSpellings::new(named, ignore)?;
         let rows: Vec<(usize, i64)> = self
             .run_statement(
                 record,
@@ -333,21 +333,19 @@ pub(crate) struct SuffixSpellings {
     /// The index in `spelled` of the spelling each range of the statement
     /// belongs to.
     owners: Vec<usize>,
-    order: StoredPathOrder,
 }
 
 impl SuffixSpellings {
     /// The spellings of each candidate `named` holds, by its id and its path,
-    /// compiled under `order` less the places `ignore` names.
+    /// compiled under the comparison key less the places `ignore` names.
     pub(crate) fn new(
         named: &BTreeMap<i64, &str>,
         ignore: &AmbiguityIgnore,
-        order: StoredPathOrder,
     ) -> Result<Self, StoreError> {
         let mut spelled: Vec<(i64, String, TargetClass)> = Vec::new();
         for (document, path) in named {
             for spelling in DocumentPath::new(path)?.suffix_spellings() {
-                if let Ok(class) = TargetClass::compile(&spelling, order, ignore) {
+                if let Ok(class) = TargetClass::compile(&spelling, ignore) {
                     spelled.push((*document, spelling, class));
                 }
             }
@@ -357,11 +355,7 @@ impl SuffixSpellings {
             .enumerate()
             .flat_map(|(at, (_, _, class))| class.probe().ranges().map(move |_| at))
             .collect();
-        Ok(SuffixSpellings {
-            spelled,
-            owners,
-            order,
-        })
+        Ok(SuffixSpellings { spelled, owners })
     }
 
     /// The statement that reads at most two documents of each range of each
@@ -382,12 +376,12 @@ impl SuffixSpellings {
                     })
             })
             .collect();
-        compose_candidate_suffixes(&ranges, self.order)
+        compose_candidate_suffixes(&ranges)
     }
 
     /// The classes each candidate's suffix is read from, by its id: the class
     /// ([`ClassKey::leading`]) of every key each of its spellings' classes
-    /// opens — the stem's class and its reductions'. The statement reads
+    /// opens, including both classes where a spelling ends in `.md`. The statement reads
     /// documents inside those classes and nowhere else, so a change moves a
     /// candidate's suffix only where it changes one of them.
     pub(crate) fn naming_classes(&self) -> HashMap<i64, BTreeSet<ClassKey>> {
