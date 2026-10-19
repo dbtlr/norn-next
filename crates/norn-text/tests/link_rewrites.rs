@@ -568,13 +568,15 @@ fn a_form_that_produces_no_link_fact_is_never_rewritten() {
 /// image nested in a link is respelled beside the link around it.
 #[test]
 fn an_inline_image_is_respelled_keeping_its_bang_and_alt_text() {
-    let source = "![a *b*](old.md#Part) and ![](<old.md>) and [![x](old.md)](old.md)\n";
+    let source = "![a *b*](old.md#Part) and ![](<old.md>) and [![x](old.md)](old.md) \
+                  and ![a [b] c](old.md \"Tip\")\n";
     let out = rewrite(source, LinkFamily::Markdown, "old.md", "../new.md");
     assert_eq!(
         out.text,
-        "![a *b*](../new.md#Part) and ![](<../new.md>) and [![x](../new.md)](../new.md)\n"
+        "![a *b*](../new.md#Part) and ![](<../new.md>) and [![x](../new.md)](../new.md) \
+         and ![a [b] c](../new.md \"Tip\")\n"
     );
-    assert_eq!(out.rewritten, 4);
+    assert_eq!(out.rewritten, 5);
     assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
 }
 

@@ -139,7 +139,8 @@ pub struct LinkFact {
     /// The top-level frontmatter field holding the link, and `None` for a body link.
     pub field: Option<String>,
     pub family: LinkFamily,
-    /// A wikilink embed (`![[…]]`). Never true for an inline Markdown link.
+    /// A wikilink embed (`![[…]]`) or a Markdown image (`![alt](x)`). False for
+    /// a plain Markdown link.
     pub embed: bool,
     /// The `protocol://` prefix, sentinel excluded. `None` is
     /// written-without-a-protocol, which is a distinct fact from any protocol.
