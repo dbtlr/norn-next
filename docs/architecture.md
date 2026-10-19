@@ -2540,9 +2540,9 @@ Beside it, the link index holds each link under the keys its target spells in th
 documents' own key space — a function of the link and its document's path, never of what
 the vault holds — and backlinks are equality seeks of those keys, each link confirmed at the
 read to name one document alone. How a target resolves **derives from
-the fact, protocol first and family second**: a written `protocol://` prefix shadows the
-family, because the family says which grammar the author wrote and the protocol says what
-the address is. A protocol-free target resolves by its form, alike in both families: opening
+the fact, protocol first and the target's form second**: a written `protocol://` prefix
+shadows the family, because the family says which grammar the author wrote and the protocol
+says what the address is. A protocol-free target resolves by its form, alike in both families: opening
 with `./` or `../` it is a path from the containing document's folder, opening with `/` a
 path from the vault root, and otherwise a suffix address, and a path climbing above the
 vault root names nothing.
