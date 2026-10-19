@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(15),
-    "39bc52d212a5e74751b74aab88584cab7b8f05f625b48d85c7897f72107a8791",
+    DerivationVersion::new(16),
+    "c226e07c8f8e2fb2a23e086ff98cbcfbfe2f68f5615928d2335ac3d1e7a85815",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -289,10 +289,11 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
                 .to_vec(),
         ),
         // A block whose field split is refused, by a key that is not a
-        // string: its value's literal wikilink is still a link, with no span.
+        // string: its value's literal wikilink is still a link, and its
+        // `tags` entry still holds a tag, each with no span.
         (
             "health/refused.md",
-            b"---\n1: x\nsee: \"[[Notes]]\"\n---\n# Refused\n".to_vec(),
+            b"---\n1: x\nsee: \"[[Notes]]\"\ntags: [solo]\n---\n# Refused\n".to_vec(),
         ),
         // A task both `task` and `filed` select: a missing owner, a
         // forbidden list, a list holding two values outside their closed
@@ -1119,6 +1120,16 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         refused,
         [("Notes", true)],
         "no wikilink in a block whose split is refused is exercised"
+    );
+    let refused_tags: Vec<(&str, bool)> = document("health/refused.md")
+        .tags
+        .iter()
+        .map(|tag| (tag.fact.name.as_str(), tag.fact.span.is_none()))
+        .collect();
+    assert_eq!(
+        refused_tags,
+        [("solo", true)],
+        "no tag in a block whose split is refused is exercised"
     );
     assert!(
         projection

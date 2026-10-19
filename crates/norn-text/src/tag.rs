@@ -62,7 +62,8 @@ pub struct Tag {
     ///
     /// `None` only for a frontmatter tag whose entry's bytes cannot be named
     /// as one span, which is the same refusal the field layer makes about a
-    /// value it cannot locate exactly.
+    /// value it cannot locate exactly — every tag of a block whose field split
+    /// was refused among them.
     pub span: Option<SourceSpan>,
 }
 

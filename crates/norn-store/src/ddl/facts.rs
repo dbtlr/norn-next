@@ -22,11 +22,14 @@
 //! single snapshot may hold onto one. That is why nothing references these
 //! tables: a finding cites a path and a target, never a link row.
 //!
-//! # Spans are body-relative
+//! # Spans are positions in the whole file
 //!
-//! Every `span_*` triple here is the position `norn-text` reported, which is
-//! relative to the document **body**. `documents.body_offset` is the frame;
-//! see [`crate::ddl::documents`].
+//! Every `span_*` triple here is a position in the whole file: the byte offset
+//! counts from the file's first byte, and the line and the column from its
+//! first line, the frontmatter block included. They are the positions an
+//! editor, an agent and Obsidian's metadata cache report. `documents.body`
+//! holds the body alone, so a reader indexing it takes `documents.body_offset`
+//! away from a span's byte offset; see [`crate::ddl::documents`].
 //!
 //! # `links` stores syntax and never resolution
 //!
@@ -153,7 +156,7 @@
 //! anchor readings are sought through.
 //!
 //! `body_offset` is where the heading construct ends and the section's body
-//! begins, and `inside_container` says the heading sits inside a blockquote or
+//! begins, a byte offset in the whole file like the heading's span, and `inside_container` says the heading sits inside a blockquote or
 //! a list item. They are the two heading facts a section-addressed mutation
 //! cannot recompute without re-reading the file, so storing them is what makes
 //! this table a lossless mirror of the fact rather than a summary of it.

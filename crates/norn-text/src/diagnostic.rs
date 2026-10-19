@@ -64,8 +64,8 @@ pub enum DiagnosticCode {
     /// An integer outside `i64`. It is carried as a float.
     FrontmatterIntegerOutOfRange,
     /// The block parses, and its field spans cannot be trusted. The value
-    /// model still reads whole; field texts and what is derived from them are
-    /// not reported, and field edits refuse.
+    /// model still reads whole; field texts are not reported, a tag or link
+    /// the value holds is reported with no place, and field edits refuse.
     FrontmatterNotEditable,
 }
 

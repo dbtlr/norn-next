@@ -75,7 +75,7 @@ use norn_wire::{
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(15);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(16);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -723,7 +723,10 @@ pub(crate) fn map_document(
             cause: UnreadBlock::of(refusal),
             problem: refusal.problem(),
         });
-    let scan = document.scan_body();
+    // The body is read once, and before the facts take their own copy of it:
+    // the scan builds a tree of several bodies and frees it as it returns, so
+    // a copy made first would stand beside that tree.
+    let scan = document.source_scan();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -1476,7 +1479,7 @@ pub(crate) fn frontmatter_field_links(bytes: &[u8]) -> Vec<(String, LinkFact)> {
 /// from its bytes: for a caller that parsed the document for another reason
 /// and reads its links off that one parse.
 pub(crate) fn parsed_links(document: &Document<'_>) -> Vec<LinkFact> {
-    links_of(document, &document.scan_body())
+    links_of(document, &document.source_scan())
 }
 
 /// The document `source` spells, as the text layer parses it: the one parse
@@ -1497,9 +1500,9 @@ thread_local! {
     pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The links `document`, whose body `scan` read, holds: its frontmatter's
-/// wikilinks, then its body's.
-fn links_of(document: &Document<'_>, scan: &norn_text::BodyScan<'_>) -> Vec<LinkFact> {
+/// The links `document`, whose body `scan` read, holds, each placed in the
+/// whole file: its frontmatter's wikilinks, then its body's.
+fn links_of(document: &Document<'_>, scan: &norn_text::SourceScan<'_>) -> Vec<LinkFact> {
     document
         .frontmatter_field_wikilinks()
         .into_iter()
@@ -2726,6 +2729,44 @@ rules:
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
         assert_eq!(facts.tags.len(), 2);
+    }
+
+    /// **Every stored span is a position in the whole file**: its byte offset
+    /// counts from the file's first byte and its line and column from the
+    /// file's first line, the frontmatter block included, for a body link, a
+    /// heading, a block and a body tag alike. A frontmatter-held position the
+    /// same bytes name beside them, so no two facts of one document are in
+    /// different frames. A heading's body offset is a whole-file offset too.
+    #[test]
+    fn every_stored_span_is_a_position_in_the_whole_file() {
+        let source = "---\ntitle: t\nrelated: \"[[front]]\"\n---\n# Heading\nsee [[target]] and #body\nblock ^id\n";
+        let facts = map_document(
+            "note.md",
+            source.as_bytes(),
+            norn_fs::ContentHash::of(source.as_bytes()).to_string(),
+            &ContentModel::none(),
+        )
+        .unwrap()
+        .facts;
+        let at = |needle: &str| {
+            let offset = source.find(needle).expect("the needle is in the source");
+            span(norn_text::SourceSpan::at(source, offset))
+        };
+        assert_eq!(facts.links.len(), 2);
+        assert_eq!(facts.links[0].span, Some(at("[[front]]")));
+        assert_eq!(facts.links[1].span, Some(at("[[target]]")));
+        assert_eq!(facts.headings.len(), 1);
+        assert_eq!(facts.headings[0].span, at("# Heading"));
+        assert_eq!(
+            facts.headings[0].body_offset,
+            source.find("see [[target]]").unwrap() as u64,
+            "a heading's body offset is where the section's bytes start in the file"
+        );
+        assert_eq!(facts.blocks.len(), 1);
+        assert_eq!(facts.blocks[0].span, Some(at("^id")));
+        assert_eq!(facts.tags.len(), 1);
+        assert_eq!(facts.tags[0].span, Some(at("#body")));
+        assert_eq!(facts.tags[0].span.unwrap().line, 6);
     }
 
     /// **Every heading and every heading anchor carries the readings the

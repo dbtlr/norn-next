@@ -122,9 +122,10 @@
 //!   column; see [`crate::ddl::fts`] for what that buys and what it costs.
 //! - `body_hash` — the hash of `body`, in the value class `content_hash` holds.
 //! - `body_offset` — where `body` begins inside the document. **Every span
-//!   this schema stores is body-relative**, because that is the frame
-//!   `norn-text` reports them in; this column is the one place that frame is
-//!   named, and adding it turns a body-relative span into a document offset.
+//!   this schema stores is a position in the whole file**, frontmatter
+//!   included, while `body` holds the body alone; this column is the offset
+//!   between the two, and taking it away from a span's byte offset gives the
+//!   position in `body`.
 //! - `frontmatter` — the canonical JSON projection of the frontmatter block.
 //!   `NULL` means **no projection exists**: either the document carries no
 //!   frontmatter block, or it carries one that did not parse. An empty block

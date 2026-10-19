@@ -3,13 +3,14 @@
 //!
 //! **A get reads no vault bytes.** The body and the headings this reader is
 //! handed are the snapshot's own rows of the document — the body the store
-//! derived, and the headings read out of that body at derivation, with their
-//! offsets into it — so a section or a block is cut from the text the
-//! snapshot holds, at the instant the snapshot was established, whatever the
-//! file on disk holds by then. The reader converts the stored headings back to
-//! the `norn-text` headings they were derived from, and answers what
-//! `norn_text::resolve_section` and `BodyScan::block_extent` answer over that
-//! body.
+//! derived, and the headings read out of the document at derivation — so a
+//! section or a block is cut from the text the snapshot holds, at the instant
+//! the snapshot was established, whatever the file on disk holds by then. The
+//! store hands the reader each byte offset as a position in that body, the
+//! stored whole-file position less where the body begins. The reader converts
+//! the stored headings back to the `norn-text` headings they were derived
+//! from, and answers what `norn_text::resolve_section` and
+//! `BodyScan::block_extent` answer over that body.
 
 use std::ops::Range;
 
@@ -23,8 +24,17 @@ impl DocumentText for TextLayer {
     /// At most five linear passes over `headings`: one converting each stored heading
     /// to the `norn-text` heading it was derived from, and the at most four
     /// `norn_text::resolve_section` makes over those.
-    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
-        let headings: Vec<Heading> = headings.iter().map(text_heading).collect();
+    fn section(
+        &self,
+        headings: &[HeadingFact],
+        body: &str,
+        body_offset: usize,
+        anchor: &str,
+    ) -> Option<SectionAt> {
+        let headings: Vec<Heading> = headings
+            .iter()
+            .map(|heading| text_heading(heading, body_offset))
+            .collect();
         let span =
             norn_text::resolve_section(&headings, body, SectionAddress::first(anchor)).ok()?;
         Some(SectionAt {
@@ -33,13 +43,16 @@ impl DocumentText for TextLayer {
         })
     }
 
-    fn block(&self, body: &str, marker: usize) -> Range<usize> {
-        BodyScan::new(body).block_extent(marker)
+    fn block(&self, body: &str, body_offset: usize, marker: u64) -> Range<usize> {
+        BodyScan::new(body).block_extent(in_body(marker, body_offset))
     }
 }
 
-/// The `norn-text` heading a stored heading was derived from.
-fn text_heading(heading: &HeadingFact) -> Heading {
+/// The `norn-text` heading a stored heading was derived from, its offsets
+/// into the body that begins at `body_offset` in the document. The line and
+/// the column stay the stored ones, positions in the whole file, which the
+/// resolver does not read.
+fn text_heading(heading: &HeadingFact, body_offset: usize) -> Heading {
     Heading {
         level: heading.level,
         text: heading.text.clone(),
@@ -47,17 +60,22 @@ fn text_heading(heading: &HeadingFact) -> Heading {
         span: SourceSpan {
             line: offset(heading.span.line),
             column: offset(heading.span.column),
-            byte_offset: offset(heading.span.byte_offset),
+            byte_offset: in_body(heading.span.byte_offset, body_offset),
         },
-        body_offset: offset(heading.body_offset),
+        body_offset: in_body(heading.body_offset, body_offset),
         inside_container: heading.inside_container,
     }
 }
 
-/// A stored position as a `usize`. The store hands this reader only byte
-/// offsets that are positions in the body it hands with them, so an offset
-/// always converts; a line or a column past the address space saturates, and
-/// the resolver reads neither to cut a body.
+/// A stored whole-file byte offset as a position in the body that begins at
+/// `body_offset`. The store hands this reader only byte offsets that are
+/// positions in that body, so the subtraction never underflows.
+fn in_body(stored: u64, body_offset: usize) -> usize {
+    offset(stored).saturating_sub(body_offset)
+}
+
+/// A stored position as a `usize`. A line or a column past the address space
+/// saturates, and the resolver reads neither to cut a body.
 fn offset(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }

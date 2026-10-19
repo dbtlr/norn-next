@@ -136,27 +136,39 @@ use statement::{Spelled, compose};
 /// included. The host's get handler implements it so, and the store's own
 /// suite hands a get the same `norn-text` reading.
 ///
-/// **Every offset a reader is handed is a position in the body it is handed
-/// with**: each heading's offset and body offset and each block marker is at
-/// or before the body's end and on a character boundary. A get checks the
-/// stored offsets against the body before it calls the reader and refuses the
-/// read as damage where one names no position, so no reader slices a body at
-/// an offset its bytes cannot hold.
+/// **Every offset a reader is handed is a position in the whole file, and the
+/// body it is handed with begins at `body_offset` in that file**: the store
+/// holds each span as a position in the document, frontmatter included, and
+/// the body without the block. A reader takes `body_offset` away from a
+/// heading's offset and body offset and from a block marker to index the body.
+/// A get checks the stored offsets against the body before it calls the
+/// reader and refuses the read as damage where one names no position in it —
+/// before the body's start, past its end, or inside a character — so no reader
+/// slices a body at an offset its bytes cannot hold. The ranges a reader
+/// answers are in the body.
 pub trait DocumentText {
     /// The section `anchor` names among `headings` — the document's headings
-    /// in document order — in `body`, taking the first heading the anchor
-    /// matches, and `None` where it matches none.
+    /// in document order — in `body`, which begins at `body_offset` in the
+    /// document, taking the first heading the anchor matches, and `None` where
+    /// it matches none.
     ///
     /// **An implementation makes a constant number of linear passes over
     /// `headings`**, visiting each heading at most once a pass, and reads no
     /// heading it is not handed, so what the match compares is at most that
     /// constant times what [`GetWork::anchor_headings`] counts. The host's
     /// reader states its own count of passes beside its implementation.
-    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt>;
+    fn section(
+        &self,
+        headings: &[HeadingFact],
+        body: &str,
+        body_offset: usize,
+        anchor: &str,
+    ) -> Option<SectionAt>;
 
-    /// The bytes of `body` the block holds whose definition's `^` marker
-    /// stands at `marker`.
-    fn block(&self, body: &str, marker: usize) -> Range<usize>;
+    /// The bytes of `body`, which begins at `body_offset` in the document, the
+    /// block holds whose definition's `^` marker stands at `marker` in the
+    /// document.
+    fn block(&self, body: &str, body_offset: usize, marker: u64) -> Range<usize>;
 }
 
 /// The section a heading anchor names: which heading opens it, by its index
@@ -603,19 +615,22 @@ impl Snapshot {
             .into_iter()
             .collect::<Result<_, StoreError>>()?;
         work.anchor_headings += headings.len() as u64;
-        let body = self.body_of(named.document, lookups)?;
+        let held = self.body_of(named.document, lookups)?;
         for heading in &headings {
-            let at = held_offset(&body, heading.span.byte_offset, "a heading's offset")?;
-            let body_at = held_offset(&body, heading.body_offset, "a heading's body offset")?;
+            let at = held.offset(heading.span.byte_offset, "a heading's offset")?;
+            let body_at = held.offset(heading.body_offset, "a heading's body offset")?;
             if body_at < at {
                 return Err(StoreError::Damaged {
                     what: format!(
-                        "the store holds a heading at {at} whose body starts before it, at {body_at}"
+                        "the store holds a heading at {} whose body starts before it, at {}",
+                        heading.span.byte_offset, heading.body_offset
                     ),
                 });
             }
         }
-        let Some(at) = text.section(&headings, &body, anchor) else {
+        let start = held.start;
+        let body = held.text;
+        let Some(at) = text.section(&headings, &body, start, anchor) else {
             return Ok((
                 GetReport::record(DocumentRow::new(named.wire), []),
                 vec![Unsatisfied::missing_section(anchor)],
@@ -668,9 +683,10 @@ impl Snapshot {
             None => BodyText::new("", 0).expect("an empty head heads an empty whole"),
             Some(span) => {
                 let body = self.body_of(named.document, lookups)?;
-                let marker = held_offset(&body, span.byte_offset, "a block's marker")?;
-                let range = text.block(&body, marker);
+                body.offset(span.byte_offset, "a block's marker")?;
+                let range = text.block(&body.text, body.start, span.byte_offset);
                 let held = body
+                    .text
                     .get(range.clone())
                     .ok_or_else(|| outside("a block's bytes", range.end))?;
                 bounded_body(held)
@@ -682,19 +698,24 @@ impl Snapshot {
         ))
     }
 
-    /// One document's whole body.
-    fn body_of(&self, document: i64, lookups: &mut Lookups) -> Result<String, StoreError> {
-        self.run_statement(
-            &mut lookups.ran,
-            compose(&Spelled::DocumentBody { document }),
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|problem| error::sql("reading a document's body", problem))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| StoreError::Damaged {
-            what: format!("the document at row {document} has no row"),
-        })
+    /// One document's whole body, with where it begins in the document.
+    fn body_of(&self, document: i64, lookups: &mut Lookups) -> Result<HeldBody, StoreError> {
+        let (text, start) = self
+            .run_statement(
+                &mut lookups.ran,
+                compose(&Spelled::DocumentBody { document }),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|problem| error::sql("reading a document's body", problem))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Damaged {
+                what: format!("the document at row {document} has no row"),
+            })?;
+        let start = usize::try_from(start).map_err(|_| StoreError::Damaged {
+            what: format!("the document at row {document} holds a body starting at {start}"),
+        })?;
+        Ok(HeldBody { text, start })
     }
 
     /// One page of the collection `selector` names on the named document, a
@@ -893,20 +914,33 @@ impl Snapshot {
     }
 }
 
-/// `offset` as a position in `body`: at or before its end, on a character
-/// boundary. The headings and the blocks are read out of the body when it is
-/// derived, so a stored offset that names no position in it is a row that
-/// disagrees with the body it was derived from, which is damage.
-fn held_offset(body: &str, offset: u64, what: &str) -> Result<usize, StoreError> {
-    usize::try_from(offset)
-        .ok()
-        .filter(|&at| body.is_char_boundary(at))
-        .ok_or_else(|| StoreError::Damaged {
-            what: format!(
-                "the store holds {what} at {offset}, which is no position in a body of {} bytes",
-                body.len()
-            ),
-        })
+/// One document's body and where it begins in the document, as the store
+/// holds them.
+struct HeldBody {
+    text: String,
+    start: usize,
+}
+
+impl HeldBody {
+    /// The whole-file byte `offset` as a position in the body: at or after the
+    /// body's start, at or before its end, on a character boundary. The
+    /// headings and the blocks are read out of the document when it is
+    /// derived, each at a position in the whole file, so a stored offset that
+    /// names no position in the body is a row that cannot be what derivation
+    /// wrote, which is damage.
+    fn offset(&self, offset: u64, what: &str) -> Result<usize, StoreError> {
+        usize::try_from(offset)
+            .ok()
+            .and_then(|at| at.checked_sub(self.start))
+            .filter(|&at| self.text.is_char_boundary(at))
+            .ok_or_else(|| StoreError::Damaged {
+                what: format!(
+                    "the store holds {what} at {offset}, which is no position in a body of {} bytes starting at {}",
+                    self.text.len(),
+                    self.start
+                ),
+            })
+    }
 }
 
 /// The document reader named bytes or a heading the document does not hold.

@@ -294,7 +294,9 @@ impl Document<'_> {
     /// An entry without a literal place is respelled by rewriting the tags field
     /// in its own spelling where that field reads back, as it does for a flow-list
     /// item. A folded scalar, and an escaped block-list item followed by another
-    /// entry, are refused.
+    /// entry, are refused. A block whose field split was refused holds only
+    /// unplaced tags and no field to rewrite, so a batch respelling one of them
+    /// is refused with [`RewriteSkip::WouldCorruptFrontmatter`].
     ///
     /// # Errors
     /// The shared proof refuses the batch if its edited facts or frontmatter differ.

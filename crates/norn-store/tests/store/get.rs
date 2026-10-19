@@ -14,8 +14,8 @@ use norn_store::{
     BODY_ROW_CEILING, BlockFact, CANDIDATE_HEAD, ContentModel, DocumentFacts, DocumentText,
     FindStatement, FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten,
     HeadingFact, LinkAnchor, LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal,
-    ReadStatement, SectionAt, Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource,
-    TargetAmbiguity, Validation, induced_failure,
+    ReadStatement, SectionAt, Snapshot, SnapshotReader, Store, StoreError, StoredPathOrder,
+    TagFact, TagSource, TargetAmbiguity, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -54,8 +54,17 @@ fn ignoring(globs: &[&str]) -> ContentModel {
 struct Text;
 
 impl DocumentText for Text {
-    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
-        let headings: Vec<Heading> = headings.iter().map(text_heading).collect();
+    fn section(
+        &self,
+        headings: &[HeadingFact],
+        body: &str,
+        body_offset: usize,
+        anchor: &str,
+    ) -> Option<SectionAt> {
+        let headings: Vec<Heading> = headings
+            .iter()
+            .map(|heading| text_heading(heading, body_offset))
+            .collect();
         let span =
             norn_text::resolve_section(&headings, body, SectionAddress::first(anchor)).ok()?;
         Some(SectionAt {
@@ -64,13 +73,15 @@ impl DocumentText for Text {
         })
     }
 
-    fn block(&self, body: &str, marker: usize) -> Range<usize> {
-        BodyScan::new(body).block_extent(marker)
+    fn block(&self, body: &str, body_offset: usize, marker: u64) -> Range<usize> {
+        let marker = usize::try_from(marker).expect("an offset fits usize");
+        BodyScan::new(body).block_extent(marker - body_offset)
     }
 }
 
-fn text_heading(heading: &HeadingFact) -> Heading {
+fn text_heading(heading: &HeadingFact, body_offset: usize) -> Heading {
     let at = |value: u64| usize::try_from(value).expect("an offset fits usize");
+    let in_body = |value: u64| at(value) - body_offset;
     Heading {
         level: heading.level,
         text: heading.text.clone(),
@@ -78,20 +89,30 @@ fn text_heading(heading: &HeadingFact) -> Heading {
         span: SourceSpan {
             line: at(heading.span.line),
             column: at(heading.span.column),
-            byte_offset: at(heading.span.byte_offset),
+            byte_offset: in_body(heading.span.byte_offset),
         },
-        body_offset: at(heading.body_offset),
+        body_offset: in_body(heading.body_offset),
         inside_container: heading.inside_container,
     }
 }
 
 /// A document whose headings and block definitions are the ones `norn-text`
-/// reads out of `body`, as a host derives them.
+/// reads out of `body` behind a frontmatter block, as a host derives them:
+/// each span a position in the whole file, so the body is not where the file
+/// starts.
 fn parsed(at: &str, body: &str) -> DocumentFacts {
-    let scan = BodyScan::new(body);
+    let source = format!("---\ntitle: t\n---\n{body}");
+    let read = norn_text::Document::parse(&source);
+    assert_eq!(
+        read.body(),
+        body,
+        "the fixture's frontmatter bounds its body"
+    );
     let mut facts = document(at, &format!("hash-{at}"), body);
+    facts.body_offset = read.body_start() as u64;
+    facts.byte_length = source.len() as u64;
     let wide = |value: usize| value as u64;
-    facts.headings = scan
+    facts.headings = read
         .headings()
         .iter()
         .map(|heading| HeadingFact {
@@ -108,7 +129,7 @@ fn parsed(at: &str, body: &str) -> DocumentFacts {
             inside_container: heading.inside_container,
         })
         .collect();
-    facts.blocks = scan
+    facts.blocks = read
         .block_ids()
         .iter()
         .map(|block| BlockFact {
@@ -827,13 +848,19 @@ struct Recording {
 }
 
 impl DocumentText for Recording {
-    fn section(&self, headings: &[HeadingFact], body: &str, anchor: &str) -> Option<SectionAt> {
+    fn section(
+        &self,
+        headings: &[HeadingFact],
+        body: &str,
+        body_offset: usize,
+        anchor: &str,
+    ) -> Option<SectionAt> {
         self.handed.borrow_mut().push(headings.to_vec());
-        Text.section(headings, body, anchor)
+        Text.section(headings, body, body_offset, anchor)
     }
 
-    fn block(&self, body: &str, marker: usize) -> Range<usize> {
-        Text.block(body, marker)
+    fn block(&self, body: &str, body_offset: usize, marker: u64) -> Range<usize> {
+        Text.block(body, body_offset, marker)
     }
 }
 
@@ -953,6 +980,53 @@ fn a_block_anchor_answers_its_block_or_reports_it_missing() {
         )
     );
     assert_eq!(missing.unsatisfied, [Unsatisfied::missing_block("zz")]);
+}
+
+/// **A document with a frontmatter block stores its headings and its blocks at
+/// whole-file positions, and a get still cuts the right text**: the body the
+/// store holds begins `body_offset` bytes into the file, so a get takes that
+/// away from each stored offset before it indexes the body. A heading or a
+/// block marker stored inside the frontmatter, before the body begins, names
+/// no position in the body and is damage.
+#[test]
+fn a_section_and_a_block_are_cut_from_a_body_behind_frontmatter() {
+    let body = "# One
+first ^b1
+
+## Two
+second
+";
+    let framed = parsed("notes/framed.md", body);
+    assert!(
+        framed.body_offset > 0,
+        "the fixture has a frontmatter block"
+    );
+    assert_eq!(
+        framed.headings[0].span.byte_offset, framed.body_offset,
+        "a heading is stored at its position in the whole file"
+    );
+    let vault = Vault::holding("get-framed", Sensitive, std::slice::from_ref(&framed));
+    assert_eq!(section(&vault, "framed#Two").3, "second\n");
+    let gotten = vault.get(&getting("framed#^b1"));
+    let GetReport::Block { body, .. } = gotten.report else {
+        panic!("`^b1` answered no block");
+    };
+    assert_eq!(body.text(), "first ^b1");
+
+    // A heading and a block marker each stored inside the frontmatter block.
+    let mut heading_in_block = framed.clone();
+    heading_in_block.headings[0].span.byte_offset = 1;
+    let mut marker_in_block = framed;
+    marker_in_block.blocks[0].span = Some(span(1, 1, 1));
+    for (damaged, anchor) in [
+        (heading_in_block, "framed#One"),
+        (marker_in_block, "framed#^b1"),
+    ] {
+        let vault = Vault::holding("get-framed-damage", Sensitive, &[damaged]);
+        let PageRefusal::Store(StoreError::Damaged { .. }) = vault.refusal(&getting(anchor)) else {
+            panic!("`{anchor}` was not refused as damage");
+        };
+    }
 }
 
 // ---- collection pages ----

@@ -20,7 +20,7 @@ use crate::frontmatter::render::{
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
-use crate::link::{Link, parse_wikilinks_in_text};
+use crate::link::{BlockId, Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
 use crate::tag::{Tag, frontmatter_tag_name};
@@ -66,7 +66,8 @@ pub enum EditError {
     /// The block parses, and its field spans cannot be trusted: the scanner
     /// and the parser disagree somewhere in it, so no field in it is
     /// addressable. The value model still reads whole; the reads built on
-    /// field spans report nothing. No edit is attempted.
+    /// field spans report no field text, and a tag or link the value holds is
+    /// reported with no place. No edit is attempted.
     ///
     /// `cause` names which disagreement it was, because the three shapes ask
     /// for three different edits to the block.
@@ -211,6 +212,92 @@ impl From<SectionError> for EditError {
     }
 }
 
+/// One reading of a document's body whose answers are in source coordinates:
+/// a [`BodyScan`] and the origin it is one `body_start` from, taken from
+/// [`Document::source_scan`].
+///
+/// Each accessor rebases what the one scan reported onto the bytes the
+/// document was read from, with line and column counted from the start of
+/// the source, so a caller never adds an offset by hand and never builds a
+/// second scan of the same body to ask a second question.
+#[derive(Debug, Clone)]
+pub struct SourceScan<'a> {
+    source: &'a str,
+    body_start: usize,
+    scan: BodyScan<'a>,
+}
+
+impl SourceScan<'_> {
+    /// Every heading in the body, in source coordinates.
+    pub fn headings(&self) -> Vec<Heading> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .headings()
+            .iter()
+            .map(|heading| Heading {
+                span: cursor.span_at(heading.span.byte_offset + self.body_start),
+                body_offset: heading.body_offset + self.body_start,
+                ..heading.clone()
+            })
+            .collect()
+    }
+
+    /// Every `[[…]]` token in the body, code excluded, in source coordinates.
+    pub fn wikilinks(&self) -> Vec<Link> {
+        self.rebased(self.scan.wikilinks())
+    }
+
+    /// Every link token in the body, both families, in document order, code
+    /// excluded, in source coordinates.
+    pub fn links(&self) -> Vec<Link> {
+        self.rebased(self.scan.links())
+    }
+
+    /// Every `#tag` in the body, in document order, in source coordinates.
+    pub fn tags(&self) -> Vec<Tag> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .tags()
+            .into_iter()
+            .map(|tag| Tag {
+                span: tag
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..tag
+            })
+            .collect()
+    }
+
+    /// Every trailing block-id definition in the body, in document order, in
+    /// source coordinates. A definition's span is its `^` marker.
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        let mut cursor = LineCursor::new(self.source);
+        self.scan
+            .block_ids()
+            .into_iter()
+            .map(|block| BlockId {
+                span: cursor.span_at(block.span.byte_offset + self.body_start),
+                ..block
+            })
+            .collect()
+    }
+
+    /// Rebase link spans the body scan reports, offsets into the body, onto
+    /// the source.
+    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        links
+            .into_iter()
+            .map(|link| Link {
+                span: link
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..link
+            })
+            .collect()
+    }
+}
+
 /// A document read as syntax: its frontmatter block, its body, and where every
 /// top-level field's bytes are.
 ///
@@ -269,7 +356,8 @@ impl<'a> Document<'a> {
                 Diagnostic::warning(
                     DiagnosticCode::FrontmatterNotEditable,
                     "the frontmatter block's field spans cannot be trusted, so field edits refuse \
-                     and no field text is reported; the block still reads whole",
+                     and no field text is reported, and a tag or link it holds has no place; the \
+                     block still reads whole",
                 )
                 .with_detail(cause.problem()),
             );
@@ -359,8 +447,8 @@ impl<'a> Document<'a> {
     /// where it did not.
     ///
     /// A refused split reaches a reader as absence — no fields, no field
-    /// texts, no frontmatter tags or wikilinks — and this is the state that
-    /// separates that absence from a block holding nothing, the same way
+    /// texts, and a frontmatter tag or wikilink with no place — and this is
+    /// the state that separates that absence from a block holding nothing, the same way
     /// [`Document::frontmatter_refusal`] separates an unread block from a
     /// document carrying none. It is the cause
     /// [`EditError::FrontmatterNotEditable`] carries, readable without
@@ -390,7 +478,8 @@ impl<'a> Document<'a> {
     /// not a field's text and is not reported here, and neither is any string
     /// of a block whose split was refused. A frontmatter value's links are
     /// read through [`Document::frontmatter_wikilinks`], which reads those
-    /// too.
+    /// too, and its `tags` entry through [`Document::frontmatter_tags`], which
+    /// reads a refused block's from the parsed value.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
         self.frontmatter_texts(Depth::Fields)
     }
@@ -510,6 +599,20 @@ impl<'a> Document<'a> {
         BodyScan::new(self.body)
     }
 
+    /// One CommonMark reading of the body, answered in source coordinates.
+    ///
+    /// The accessors below each read the body afresh; a caller that asks
+    /// several questions of one document takes this once and asks the view,
+    /// so the body's traversal, and the heap it builds while it runs, is paid
+    /// once rather than once per question.
+    pub fn source_scan(&self) -> SourceScan<'a> {
+        SourceScan {
+            source: self.source,
+            body_start: self.body_start,
+            scan: self.scan_body(),
+        }
+    }
+
     /// Every heading in the body, in source coordinates.
     ///
     /// There are two origins in this crate and they are one `body_start`
@@ -518,27 +621,18 @@ impl<'a> Document<'a> {
     /// is how an offset from one origin gets used against the other, so the
     /// rebase is here and a caller never adds anything.
     pub fn headings(&self) -> Vec<Heading> {
-        let scan = self.scan_body();
-        let mut cursor = LineCursor::new(self.source);
-        scan.headings()
-            .iter()
-            .map(|heading| Heading {
-                span: cursor.span_at(heading.span.byte_offset + self.body_start),
-                body_offset: heading.body_offset + self.body_start,
-                ..heading.clone()
-            })
-            .collect()
+        self.source_scan().headings()
     }
 
     /// Every `[[…]]` token in the body, code excluded, in source coordinates.
     pub fn wikilinks(&self) -> Vec<Link> {
-        self.rebased(self.scan_body().wikilinks())
+        self.source_scan().wikilinks()
     }
 
     /// Every link token in the body, both families, in document order, code
     /// excluded, in source coordinates.
     pub fn links(&self) -> Vec<Link> {
-        self.rebased(self.scan_body().links())
+        self.source_scan().links()
     }
 
     /// Every `#tag` in the body, in document order, in source coordinates.
@@ -546,17 +640,13 @@ impl<'a> Document<'a> {
     /// Frontmatter tags are a separate answer: see
     /// [`Document::frontmatter_tags`].
     pub fn tags(&self) -> Vec<Tag> {
-        let mut cursor = LineCursor::new(self.source);
-        self.scan_body()
-            .tags()
-            .into_iter()
-            .map(|tag| Tag {
-                span: tag
-                    .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
-                ..tag
-            })
-            .collect()
+        self.source_scan().tags()
+    }
+
+    /// Every trailing block-id definition in the body, in document order, in
+    /// source coordinates. A definition's span is its `^` marker.
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        self.source_scan().block_ids()
     }
 
     /// The tags the frontmatter `tags` field declares, in document order.
@@ -568,7 +658,17 @@ impl<'a> Document<'a> {
     /// tag and no complaint; judging it is validation's venue, not this
     /// crate's. No other field is scanned, and no field is scanned for body
     /// tokens.
+    ///
+    /// A block whose split the field layer refused
+    /// ([`Document::split_refusal`]) still parses to a value, and its `tags`
+    /// entry is read from that value: a string, or the strings of a sequence,
+    /// each tag unplaced — its `span` is `None` — since no byte in such a
+    /// block is attributable to a field. A string nested deeper under `tags`
+    /// is not the field's own and is not read.
     pub fn frontmatter_tags(&self) -> Vec<Tag> {
+        if self.split_refusal.is_some() {
+            return self.refused_frontmatter_tags();
+        }
         let mut cursor = LineCursor::new(self.source);
         self.field_texts()
             .into_iter()
@@ -580,6 +680,24 @@ impl<'a> Document<'a> {
                     span: text.range.map(|range| cursor.span_at(range.start)),
                 })
             })
+            .collect()
+    }
+
+    /// The unplaced tags of a block whose split was refused, read from the
+    /// parsed `tags` entry.
+    fn refused_frontmatter_tags(&self) -> Vec<Tag> {
+        let Some(Value::Map(map)) = &self.frontmatter else {
+            return Vec::new();
+        };
+        let entries: Vec<&str> = match map.get(TAGS_FIELD) {
+            Some(Value::String(text)) => vec![text],
+            Some(Value::Sequence(items)) => items.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        entries
+            .into_iter()
+            .filter_map(frontmatter_tag_name)
+            .map(|name| Tag { name, span: None })
             .collect()
     }
 
@@ -619,8 +737,8 @@ impl<'a> Document<'a> {
     /// ([`Document::split_refusal`]) still parses to a value, and the index
     /// projects that value's fields, so its links are reported too — every
     /// one unplaced, a literal one included, since no byte in such a block is
-    /// attributable to a field. Its tags are not: [`Document::frontmatter_tags`]
-    /// reads the `tags` field's own texts, which a refused split withholds.
+    /// attributable to a field. Its tags are reported unplaced as well, from
+    /// the `tags` entry of the value: see [`Document::frontmatter_tags`].
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         self.frontmatter_field_wikilinks()
             .into_iter()
@@ -656,20 +774,6 @@ impl<'a> Document<'a> {
             }
         }
         links
-    }
-
-    /// Rebase body-relative link spans onto the source.
-    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
-        let mut cursor = LineCursor::new(self.source);
-        links
-            .into_iter()
-            .map(|link| Link {
-                span: link
-                    .span
-                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
-                ..link
-            })
-            .collect()
     }
 
     /// Write `value` at `field`, returning the whole edited document.

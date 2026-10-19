@@ -116,7 +116,8 @@
 //! [`Document::frontmatter_wikilinks`] is that surface, reporting every token
 //! any string the value holds carries, placed where the source names its
 //! bytes and with no span where it cannot, and [`Document::frontmatter_tags`]
-//! is the tag half.
+//! is the tag half, which reads a block whose field split was refused from
+//! its parsed `tags` entry, every tag with no span.
 //!
 //! # Code is opaque
 //!
@@ -152,7 +153,9 @@ mod value;
 
 pub use body::BodyScan;
 pub use diagnostic::{Diagnostic, DiagnosticCode};
-pub use document::{Document, EditError, FieldLink, FieldText, TAGS_FIELD, frontmatter_reads_back};
+pub use document::{
+    Document, EditError, FieldLink, FieldText, SourceScan, TAGS_FIELD, frontmatter_reads_back,
+};
 pub use frontmatter::{
     BlockRefusal, FRONTMATTER_MAX_BYTES, Field, RenderError, ScalarContext, SplitRefusal,
     ValueStyle, opens_frontmatter, render_document,

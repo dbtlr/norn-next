@@ -154,7 +154,7 @@ pub(crate) fn compose(spelled: &Spelled<'_>) -> Ran {
             vec![Value::Integer(*document), Value::Text((*id).to_string())],
         ),
         Spelled::DocumentBody { document } => (
-            "SELECT d.body FROM documents AS d WHERE d.id = ?1".to_string(),
+            "SELECT d.body, d.body_offset FROM documents AS d WHERE d.id = ?1".to_string(),
             vec![Value::Integer(*document)],
         ),
         Spelled::CollectionPage {

@@ -6,8 +6,8 @@
 //! terminators and the quoting of untouched values all survive.
 
 use norn_text::{
-    DiagnosticCode, Document, EditError, LineEnding, Mapping, SourceSpan, SplitRefusal, Value,
-    render_document,
+    DiagnosticCode, Document, EditError, LineEnding, Mapping, RewriteSkip, SourceSpan,
+    SplitRefusal, Tag, TagRewrite, Value, render_document,
 };
 
 fn set(source: &str, field: &str, value: Value) -> Result<String, EditError> {
@@ -986,10 +986,10 @@ fn an_explicit_merge_directive_is_never_deleted_by_a_neighbours_remove() {
 /// rule refuses. The value model reads whole — every field's value is
 /// still there to be read — while the reads that report a field's *bytes* go
 /// empty, because the refusal is exactly the statement that no bytes can be
-/// attributed to a field. A frontmatter tag in such a block is therefore not
-/// reported, the same answer every other refused block already gives. A
-/// frontmatter wikilink is the value's rather than the field's: the value
-/// still holds it, so it is reported, with no place in the source.
+/// attributed to a field. A frontmatter tag in such a block is therefore
+/// reported with no place, as a flow-sequence tag is, and a frontmatter
+/// wikilink is the value's rather than the field's: the value still holds it,
+/// so it is reported, with no place in the source.
 #[test]
 fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
     let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\ntags: [alpha]\n\
@@ -997,7 +997,13 @@ fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
     let document = Document::parse(source);
 
     assert!(document.field_texts().is_empty());
-    assert!(document.frontmatter_tags().is_empty());
+    assert_eq!(
+        document.frontmatter_tags(),
+        [Tag {
+            name: "alpha".into(),
+            span: None
+        }]
+    );
     let links = document.frontmatter_wikilinks();
     let unplaced: Vec<(&str, bool)> = links
         .iter()
@@ -1015,6 +1021,72 @@ fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
     );
     assert_eq!(map.get("link"), Some(&Value::String("[[Note]]".into())));
     assert_eq!(map.get("title"), Some(&Value::String("t".into())));
+}
+
+/// A refused block's `tags` entry is read from the parsed value, because no
+/// bytes can be attributed to the field: a string, or the strings of a
+/// sequence, each as an unplaced tag under the grammar a placed one follows.
+/// A string nested deeper under `tags` is not the field's own, and no other
+/// field's strings are tags.
+#[test]
+fn a_refused_blocks_tags_are_its_tags_entrys_own_strings_unplaced() {
+    let refused = |tags: &str| {
+        format!("---\nbase: &b {{title: x}}\n? <<\n: *b\nother: [zeta]\n{tags}\n---\nbody\n")
+    };
+    let names = |tags: &str| {
+        let source = refused(tags);
+        let document = Document::parse(&source);
+        assert!(document.split_refusal().is_some(), "for {tags:?}");
+        document
+            .frontmatter_tags()
+            .into_iter()
+            .map(|tag| (tag.name, tag.span))
+            .collect::<Vec<_>>()
+    };
+    let unplaced = |names: &[&str]| -> Vec<(String, Option<SourceSpan>)> {
+        names.iter().map(|name| (name.to_string(), None)).collect()
+    };
+
+    assert_eq!(names("tags: alpha"), unplaced(&["alpha"]));
+    assert_eq!(names("tags: '#alpha'"), unplaced(&["alpha"]));
+    assert_eq!(
+        names("tags:\n  - alpha\n  - '#beta'\n  - area/gamma"),
+        unplaced(&["alpha", "beta", "area/gamma"])
+    );
+    assert_eq!(names("tags: [alpha, beta]"), unplaced(&["alpha", "beta"]));
+    // Strings the grammar does not describe make no tag.
+    assert_eq!(names("tags: [alpha, 'not a tag']"), unplaced(&["alpha"]));
+    // A string nested under `tags` is not the field's own, and a map or a
+    // number holds none.
+    assert_eq!(
+        names("tags: [alpha, {k: beta}, [gamma], 3]"),
+        unplaced(&["alpha"])
+    );
+    assert!(names("tags: {k: beta}").is_empty());
+    assert!(names("tags: 3").is_empty());
+    assert!(names("topics: [alpha]").is_empty());
+}
+
+/// A refused block's tags are unplaced, so a tag rewrite has no bytes to edit
+/// in it. Rewriting a name the block holds refuses the batch rather than
+/// leaving the block's `tags` claiming a name the proof expects respelled,
+/// and a batch that names none of the block's tags edits the body as it does
+/// anywhere else.
+#[test]
+fn a_tag_rewrite_never_edits_the_unplaced_tags_of_a_refused_block() {
+    let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntags: [alpha]\n---\n#alpha #omega\n";
+    let document = Document::parse(source);
+    assert_eq!(document.frontmatter_tags().len(), 1);
+
+    assert_eq!(
+        document.rewrite_tags(&[TagRewrite::new("alpha", "beta")], str::to_lowercase),
+        Err(RewriteSkip::WouldCorruptFrontmatter)
+    );
+    let rewritten = document
+        .rewrite_tags(&[TagRewrite::new("omega", "sigma")], str::to_lowercase)
+        .expect("a proven edit");
+    assert_eq!(rewritten.rewritten, [Ok(1)]);
+    assert_eq!(rewritten.text, source.replace("#omega", "#sigma"));
 }
 
 /// The step-over that keeps a quoted scalar's lines out of the scan stops at

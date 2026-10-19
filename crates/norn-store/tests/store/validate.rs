@@ -3509,12 +3509,13 @@ impl norn_store::DocumentText for NoText {
         &self,
         _: &[norn_store::HeadingFact],
         _: &str,
+        _: usize,
         _: &str,
     ) -> Option<norn_store::SectionAt> {
         None
     }
 
-    fn block(&self, _: &str, _: usize) -> std::ops::Range<usize> {
+    fn block(&self, _: &str, _: usize, _: u64) -> std::ops::Range<usize> {
         0..0
     }
 }
