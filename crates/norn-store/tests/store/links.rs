@@ -645,7 +645,7 @@ fn addressed() -> Vec<DocumentFacts> {
 }
 
 /// **A link is judged by resolving it first, and its address is read
-/// protocol first and family second**, on either root: `[[v1.2]]` names
+/// protocol first and form second**, on either root: `[[v1.2]]` names
 /// `v1.2.md`; `[[photo.png]]` naming no document is an attachment and not
 /// judged, while `[[diagram.png]]` names `diagram.png.md` and is healthy; a
 /// `vault://` link of either family is a path from the vault root; a Markdown

@@ -60,15 +60,13 @@ static BLOCK_ID_RE: LazyLock<Regex> =
 /// resolution nobody chose is the defect this enum exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkFamily {
-    /// `[[…]]`, the vault idiom. A protocol-free wikilink stem is a
-    /// right-to-left, segment-aligned path *suffix*: `glossary` addresses any
-    /// `**/glossary.md`, `norn/glossary` only `**/norn/glossary.md`, and
-    /// never anything relative to the document it was written in.
+    /// `[[…]]`, the vault idiom. A protocol-free target is read by its form
+    /// ([`Resolution::Form`]), and its text is taken as written, never
+    /// percent-decoded.
     Wikilink,
     /// `[title](target)`, an inline Markdown link. A protocol-free destination
-    /// is a filesystem path resolved against the containing document's
-    /// directory — `./`, `../`, or a bare segment — and against the vault root
-    /// when the path is rooted. Exact, with no ambiguity class.
+    /// is read by its form ([`Resolution::Form`]), as a wikilink's target is,
+    /// once the resolver has percent-decoded each of its segments.
     ///
     /// Reference-style links, autolinks and images are not this family and
     /// produce no link fact — see [`crate::BodyScan`].
@@ -77,7 +75,7 @@ pub enum LinkFamily {
 
 /// How a resolver is meant to reach what a link addresses.
 ///
-/// **Protocol first, family second.** A recognized `protocol://` prefix
+/// **Protocol first, form second.** A recognized `protocol://` prefix
 /// shadows the family, because the family says which grammar the author wrote
 /// and the protocol says what the address is: `[t](https://example.com)` is
 /// not a relative path and `[[https://x|Docs]]` is not a suffix address, so
