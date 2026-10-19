@@ -252,6 +252,61 @@ fn a_markdown_backlink_is_respelled_from_its_holder() {
     );
 }
 
+/// **A Markdown image embedding a moved document is respelled like a link and
+/// keeps its `!`**: `![](note.md)` is a backlink of the document it names, so
+/// its destination is respelled from its holder in the escaping it was written
+/// in, its alt text, angle brackets and anchor kept, and one written beside a
+/// plain link to the same destination is the one rewrite of that key.
+#[test]
+fn a_moved_documents_markdown_image_embeds_are_respelled_keeping_the_bang() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "A\n"),
+        (
+            "sub/h.md",
+            "![pic *one*](../notes/a.md#Part) ![](</notes/a.md>) [l](../notes/a.md) ![](../notes/a.md)\n",
+        ),
+    ]);
+    let cascades = fixture.moved(vec![moving("notes/a.md", "archive/b.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            markdown("sub/h.md", "../notes/a.md", "../archive/b.md"),
+            markdown("sub/h.md", "/notes/a.md", "/archive/b.md"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("sub/h.md").as_deref(),
+        Some(
+            "![pic *one*](../archive/b.md#Part) ![](</archive/b.md>) [l](../archive/b.md) \
+             ![](../archive/b.md)\n"
+        )
+    );
+}
+
+/// **A moved holder's image reaches the same file**: the holder's own
+/// relative image destination is read from where it stood and respelled from
+/// where it lands, as any of its relative links is.
+#[test]
+fn a_moved_holders_relative_image_reaches_the_same_file() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "# H\n![d](../img/pic.png) ![](./c.md)\n"),
+        ("img/pic.png", "png"),
+        ("notes/c.md", "C\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("notes/a.md", "archive/deep/a.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            markdown("archive/deep/a.md", "../img/pic.png", "../../img/pic.png"),
+            markdown("archive/deep/a.md", "./c.md", "../../notes/c.md"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("archive/deep/a.md").as_deref(),
+        Some("# H\n![d](../../img/pic.png) ![](../../notes/c.md)\n")
+    );
+}
+
 /// **An ambiguous backlink is skipped as ambiguous**: `[[a]]` names two
 /// documents, one of them moved, so which it names is not known; it is left
 /// as written, and the forecast says why in place of saying it is

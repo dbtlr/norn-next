@@ -3464,6 +3464,15 @@ mod tests {
             assert_eq!(held.content_hash, streamed.content_hash().to_hex(), "{at}");
             assert_eq!(held.links, document_links(bytes), "{at}");
         }
+        // The Markdown image beside the wikilink embeds is a held link of its
+        // own, an embedding Markdown one.
+        let embeds = document_links(documents[2].1);
+        assert!(
+            embeds.iter().any(|link| link.embed
+                && link.family == norn_store::LinkFamily::Markdown
+                && link.target == "images/photo.jpg"),
+            "the image is not held as a Markdown embed: {embeds:?}"
+        );
         assert!(
             documents
                 .iter()

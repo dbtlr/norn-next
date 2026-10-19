@@ -256,6 +256,60 @@ fn a_delete_rewriting_its_links_respells_each_backlink_in_its_own_form() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **A Markdown image embedding a document is a backlink of it, and an image
+/// of a file that is no document is none**: a plain delete of `a.md` is
+/// unresolved for the `![](a.md)` embed alone, while `![](pic.png)` names no
+/// document and is not judged.
+#[test]
+fn a_markdown_image_embed_is_a_backlink_and_an_attachment_image_is_not() {
+    let fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("pic.png", "png"),
+        ("h.md", "![shown](a.md) ![](pic.png)\n"),
+        ("k.md", "![](pic.png)\n"),
+    ]);
+    let resolution = fixture.planned(vec![deleting("a.md")]);
+    assert_eq!(
+        resolution.unresolved,
+        [UnresolvedOperation::new(
+            deleting("a.md"),
+            UnresolvedReason::has_backlinks(vec![path("h.md")], 1),
+        )]
+    );
+}
+
+/// **A delete leaving an image embed broken advises it, and one rewriting it
+/// respells the image keeping its `!`**.
+#[test]
+fn a_deleted_documents_image_embed_is_left_broken_or_respelled_keeping_the_bang() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "A\n"),
+        ("archive/c.md", "C\n"),
+        ("h.md", "![alt](notes/a.md#Part)\n"),
+    ]);
+    let broken = fixture.resolution(vec![breaking("notes/a.md")]);
+    assert_eq!(
+        broken.forecast.links,
+        [LinkAdvisory::left_broken(key(
+            "h.md",
+            LinkFamily::Markdown,
+            "notes/a.md"
+        ))]
+    );
+
+    let rewritten = fixture.resolution(vec![rewriting("notes/a.md", "c")]);
+    assert_eq!(
+        rewritten.plan.operations[0].cascade,
+        [markdown("h.md", "notes/a.md", "archive/c.md")]
+    );
+    applied(fixture.apply(rewritten.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("![alt](archive/c.md#Part)\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **Every cascade rewrite of a rewriting delete publishes before the
 /// document is removed**: the own writes the applier records, in the order
 /// they land, put each holder the delete respells ahead of the removal, so a
