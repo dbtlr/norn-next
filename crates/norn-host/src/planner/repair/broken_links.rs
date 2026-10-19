@@ -1,10 +1,10 @@
 //! Move-following: the derived answer to a selected broken link whose
 //! removed target's recorded bytes identify one live document.
 //!
-//! **A link's grammar decides which tombstones it reads.** A suffix wikilink
-//! reads by suffix; a relative or rooted Markdown link reads the exact path
-//! it names from its holder. A `vault://` wikilink reads both root paths its
-//! name can reduce to, as live resolution does. The deaths are pooled,
+//! **A link's address decides which tombstones it reads.** A suffix-addressed
+//! link of either family reads by suffix; a `./`, `../` or `/` link of either
+//! family reads the exact path it names from its holder. A `vault://` link
+//! reads both root paths its name can reduce to, as live resolution does. The deaths are pooled,
 //! distinct by path and in path order, stopping at two. Quarantine is
 //! excluded, and ambiguity-ignore never narrows these reads.
 //!
