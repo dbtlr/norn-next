@@ -3,10 +3,12 @@
 //! judged by.
 //!
 //! A link row carries the documents its target resolves to now and the health
-//! that gives it, on a find's links column and a get's links page alike. A
-//! wikilink's target is a suffix address read through the one resolver; a
-//! Markdown link's is a path joined to its document's directory; a link is
-//! judged by resolving it first, and one addressed elsewhere is not judged. A
+//! that gives it, on a find's links column and a get's links page alike. Both
+//! families read a target by its form (ADR 0040): an unprefixed one is a
+//! suffix address read through the one resolver, its exact vault path first;
+//! `./` and `../` are paths from the holder's folder and `/` from the vault
+//! root. A link is judged by resolving it first, and one addressed elsewhere
+//! is not judged. A
 //! `links_to` part matches the documents holding a link that resolves to
 //! exactly the one document its own target names.
 
@@ -110,8 +112,8 @@ fn source_links() -> Vec<LinkFact> {
         markdown("../x/my%20note.md"),
         // 7: above the vault root.
         markdown("../../escape.md"),
-        // 8: never reduced.
-        markdown("../x/y"),
+        // 8: a path no document stands at, with or without `.md`.
+        markdown("../x/z"),
         // 9: a protocol.
         link(LinkFamily::Markdown, Some("https"), "example.com", None),
         // 10: an attachment.
@@ -313,6 +315,206 @@ fn names(health: LinkHealth, paths: &[&str]) -> (LinkHealth, Vec<String>, u64) {
     )
 }
 
+// ---- where a target is read from (ADR 0040) ----
+
+/// **The form chooses where a target is read from, alike in both
+/// families.** From `x/sources/holder.md`: `./` and `../` read from the
+/// holder's folder, folding `.` and `..`, and a climb above the vault root
+/// names nothing; `/` reads from the vault root; an unprefixed target is a
+/// suffix address, `.md` optional, so `t.md` and `t` reach `else/t.md` in
+/// another folder, `choice.md` names the copy beside the holder and the one
+/// elsewhere alike, ambiguous, and `targets/p.md` the deeper copy beside the
+/// holder and the one under `x/` alike (the probe's M08), where `./` names
+/// the local one alone (M04, M09).
+#[test]
+fn both_families_read_a_target_from_where_its_form_says() {
+    use LinkHealth::{Ambiguous, Broken, Healthy};
+    let targets = [
+        "x/t/x.md",
+        "a/b/x.md",
+        "else/t.md",
+        "x/sources/choice.md",
+        "other/choice.md",
+        "x/targets/p.md",
+        "x/sources/targets/p.md",
+    ];
+    let cases: [(&str, LinkHealth, &[&str]); 12] = [
+        ("./choice", Healthy, &["x/sources/choice.md"]),
+        ("./choice.md", Healthy, &["x/sources/choice.md"]),
+        ("../t/x", Healthy, &["x/t/x.md"]),
+        ("../sources/./../t/x.md", Healthy, &["x/t/x.md"]),
+        ("/a/b/x", Healthy, &["a/b/x.md"]),
+        ("../../..", Broken, &[]),
+        ("t.md", Healthy, &["else/t.md"]),
+        ("t", Healthy, &["else/t.md"]),
+        (
+            "choice.md",
+            Ambiguous,
+            &["other/choice.md", "x/sources/choice.md"],
+        ),
+        (
+            "targets/p.md",
+            Ambiguous,
+            &["x/sources/targets/p.md", "x/targets/p.md"],
+        ),
+        ("./targets/p.md", Healthy, &["x/sources/targets/p.md"]),
+        ("../targets/p", Healthy, &["x/targets/p.md"]),
+    ];
+    for order in [Sensitive, Folding] {
+        for family in [LinkFamily::Wikilink, LinkFamily::Markdown] {
+            let mut documents: Vec<_> = targets.iter().map(|at| holding(at, vec![])).collect();
+            documents.push(holding(
+                "x/sources/holder.md",
+                cases
+                    .iter()
+                    .map(|(target, ..)| link(family, None, target, None))
+                    .collect(),
+            ));
+            let linked = Linked::holding(
+                &format!("links-forms-{order:?}-{family:?}"),
+                order,
+                &documents,
+            );
+            let rows = linked.links("x/sources/holder.md");
+            for (row, (target, health, paths)) in rows.iter().zip(&cases) {
+                assert_eq!(
+                    reading(row),
+                    names(*health, paths),
+                    "{order:?} {family:?} `{target}`"
+                );
+            }
+            assert_eq!(
+                linked.backlinks("/x/t/x"),
+                ["x/sources/holder.md"],
+                "{order:?} {family:?}"
+            );
+        }
+    }
+}
+
+/// **A Markdown destination is percent-decoded segment by segment, and a
+/// wikilink's target never is.** `../t/space%20name.md` and the angle-bracket
+/// form's literal space name `t/space name.md`, `%25` decodes to `%`, the
+/// query and the anchor are cut off, and a decoded separator stays inside its
+/// segment, so `a%2Fb.md` names nothing. `[[space%20name]]` names
+/// `space%20name.md`, never `space name.md`.
+#[test]
+fn a_markdown_destination_is_decoded_by_segment_and_a_wikilink_never_is() {
+    use LinkHealth::{Broken, Healthy};
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(
+            &format!("links-decoding-{order:?}"),
+            order,
+            &[
+                holding("t/space name.md", vec![]),
+                holding("t/percent%name.md", vec![]),
+                holding("a/b.md", vec![]),
+                holding("else/t.md", vec![]),
+                holding(
+                    "sources/h.md",
+                    vec![
+                        markdown("../t/space%20name.md"),
+                        markdown("../t/space name.md"),
+                        markdown("../t/percent%25name.md"),
+                        link(LinkFamily::Markdown, None, "t.md?x=1", Some("h")),
+                        markdown("a%2Fb.md"),
+                        wikilink("space%20name"),
+                        wikilink("t/space name"),
+                    ],
+                ),
+            ],
+        );
+        let rows = linked.links("sources/h.md");
+        for (at, health, paths) in [
+            (0, Healthy, &["t/space name.md"][..]),
+            (1, Healthy, &["t/space name.md"]),
+            (2, Healthy, &["t/percent%name.md"]),
+            (3, Healthy, &["else/t.md"]),
+            (4, Broken, &[]),
+            (5, Broken, &[]),
+            (6, Healthy, &["t/space name.md"]),
+        ] {
+            assert_eq!(reading(&rows[at]), names(health, paths), "{order:?} {at}");
+        }
+        let literal = Linked::holding(
+            &format!("links-literal-percent-{order:?}"),
+            order,
+            &[
+                holding("space%20name.md", vec![]),
+                holding("space name.md", vec![]),
+                holding("h.md", vec![wikilink("space%20name")]),
+            ],
+        );
+        assert_eq!(
+            reading(&literal.links("h.md")[0]),
+            names(Healthy, &["space%20name.md"]),
+            "{order:?}"
+        );
+    }
+}
+
+/// **The exact vault path comes first, in both families, after the
+/// ambiguity-ignore globs drop.** `a/s/t/exact` names `a/s/t/exact.md` alone
+/// beside `shadow/a/s/t/exact.md`; with `archive/**` ignored, `twin` names
+/// `notes/twin.md` and `archive/twin` the archived copy, and `archive/x`
+/// names `archive/x.md` ahead of `deep/archive/x.md`. Each such link is a
+/// backlink of the document it names.
+#[test]
+fn an_exact_vault_path_comes_first_in_both_families() {
+    for order in [Sensitive, Folding] {
+        let linked = Linked::holding(
+            &format!("links-exact-{order:?}"),
+            order,
+            &[
+                holding("a/s/t/exact.md", vec![]),
+                holding("shadow/a/s/t/exact.md", vec![]),
+                holding("archive/twin.md", vec![]),
+                holding("notes/twin.md", vec![]),
+                holding("archive/x.md", vec![]),
+                holding("deep/archive/x.md", vec![]),
+                holding(
+                    "h.md",
+                    vec![
+                        wikilink("a/s/t/exact"),
+                        markdown("a/s/t/exact.md"),
+                        wikilink("twin"),
+                        markdown("twin"),
+                        wikilink("archive/twin"),
+                        wikilink("archive/x"),
+                        markdown("archive/x.md"),
+                    ],
+                ),
+            ],
+        );
+        let rows = linked.links("h.md");
+        for (row, path) in rows.iter().zip([
+            "a/s/t/exact.md",
+            "a/s/t/exact.md",
+            "notes/twin.md",
+            "notes/twin.md",
+            "archive/twin.md",
+            "archive/x.md",
+            "archive/x.md",
+        ]) {
+            assert_eq!(
+                reading(row),
+                names(LinkHealth::Healthy, &[path]),
+                "{order:?} `{}`",
+                row.target
+            );
+            assert_eq!(
+                linked.backlinks(&format!("/{path}")),
+                ["h.md"],
+                "{order:?} {path}"
+            );
+        }
+        assert_eq!(
+            linked.backlinks("/shadow/a/s/t/exact"),
+            Vec::<String>::new()
+        );
+    }
+}
+
 // ---- what a link names ----
 
 /// Wikilink health follows its candidates. Only `.md` is optional in a dotted leaf.
@@ -365,13 +567,13 @@ fn a_wikilink_is_healthy_broken_or_ambiguous_by_what_its_target_names() {
     }
 }
 
-/// **A Markdown link names the one path it joins to**, percent-decoded and
-/// never reduced: `../x/y.md` names `x/y.md`, a percent-encoded space names the
-/// document whose name holds the space, a path climbing above the vault root
-/// names nothing, and `../x/y` names the path `x/y`, which no document stands
-/// at, and never `x/y.md`. A link to its own document names it.
+/// **A Markdown path form names the path it joins to**, percent-decoded:
+/// `../x/y.md` names `x/y.md`, a percent-encoded space names the document
+/// whose name holds the space, a path climbing above the vault root names
+/// nothing, and `../x/z` names `x/z.md`, which no document stands at. A link
+/// to its own document names it.
 #[test]
-fn a_markdown_link_names_the_one_path_it_joins_to() {
+fn a_markdown_path_form_names_the_path_it_joins_to() {
     for order in [Sensitive, Folding] {
         let linked = Linked::new(&format!("links-markdown-{order:?}"), order, 0);
         let links = linked.links("src/a.md");
@@ -443,7 +645,7 @@ fn addressed() -> Vec<DocumentFacts> {
 }
 
 /// **A link is judged by resolving it first, and its address is read
-/// protocol first and family second**, on either root: `[[v1.2]]` names
+/// protocol first and form second**, on either root: `[[v1.2]]` names
 /// `v1.2.md`; `[[photo.png]]` naming no document is an attachment and not
 /// judged, while `[[diagram.png]]` names `diagram.png.md` and is healthy; a
 /// `vault://` link of either family is a path from the vault root; a Markdown
@@ -523,10 +725,14 @@ fn rooted() -> Vec<DocumentFacts> {
     all
 }
 
-/// Vault links retain their family reading, compared under one normalized key.
-/// A rooted `v1.2` names only `v1.2.md`, and names no document here.
+/// **A `vault://` link is a path from the vault root in both families**,
+/// named by the one naming rule (ADR 0040) and compared under one normalized
+/// key: `.md` is optional and no other extension is stripped, so a rooted
+/// `v1.2` names only `v1.2.md`, which no document is here. The family only
+/// takes the target text: a Markdown destination is decoded and loses its
+/// query, a wikilink's is read as written.
 #[test]
-fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
+fn a_vault_link_is_a_root_path_its_family_only_takes_the_text_of() {
     for order in [Sensitive, Folding] {
         let linked = Linked::holding(&format!("links-rooted-{order:?}"), order, &rooted());
         let folded = names(LinkHealth::Healthy, &["Notes.md"]);
@@ -538,7 +744,7 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
             ("h/w-encoded.md", names(LinkHealth::Broken, &[])),
             ("h/w-query.md", names(LinkHealth::Broken, &[])),
             ("h/w-lower.md", folded.clone()),
-            ("h/m-notes.md", names(LinkHealth::Broken, &[])),
+            ("h/m-notes.md", names(LinkHealth::Healthy, &["Notes.md"])),
             ("h/m-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
             (
                 "h/m-encoded.md",
@@ -550,6 +756,7 @@ fn a_vault_link_is_rooted_and_its_family_keeps_its_rules() {
             assert_eq!(reading(&linked.links(at)[0]), expected, "{order:?} `{at}`");
         }
         let mut notes = vec![
+            "h/m-notes.md",
             "h/m-notes-md.md",
             "h/m-query.md",
             "h/w-notes-md.md",
@@ -593,7 +800,8 @@ fn vault_and_suffix_wikilinks_both_allow_the_md_extension() {
 }
 
 /// A rooted target ending in `.md` names both its document and its
-/// `.md.md` twin. An ambiguous link is a backlink of neither document.
+/// `.md.md` twin, in either family. An ambiguous link is a backlink of
+/// neither document.
 #[test]
 fn a_rooted_wikilink_naming_two_documents_is_a_backlink_of_neither() {
     for order in [Sensitive, Folding] {
@@ -607,12 +815,14 @@ fn a_rooted_wikilink_naming_two_documents_is_a_backlink_of_neither() {
                 holding("h/b.md", vec![vault(LinkFamily::Markdown, "Notes.md")]),
             ],
         );
-        assert_eq!(
-            reading(&linked.links("h/a.md")[0]),
-            names(LinkHealth::Ambiguous, &["Notes.md", "Notes.md.md"]),
-            "{order:?}"
-        );
-        assert_eq!(linked.backlinks("Notes"), ["h/b.md"], "{order:?}");
+        for at in ["h/a.md", "h/b.md"] {
+            assert_eq!(
+                reading(&linked.links(at)[0]),
+                names(LinkHealth::Ambiguous, &["Notes.md", "Notes.md.md"]),
+                "{order:?} `{at}`"
+            );
+        }
+        assert_eq!(linked.backlinks("Notes"), Vec::<String>::new(), "{order:?}");
         assert_eq!(
             linked.backlinks("Notes.md.md"),
             Vec::<String>::new(),

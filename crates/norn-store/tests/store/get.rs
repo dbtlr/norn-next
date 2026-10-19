@@ -324,6 +324,37 @@ fn a_target_naming_one_document_answers_it_under_either_order() {
     }
 }
 
+/// **A rooted target is a path from the vault root**: a get of `/a/x` names
+/// the document at `a/x.md` alone, with or without `.md`, however many
+/// deeper documents it is a suffix of; and an unprefixed target names its
+/// exact vault path ahead of every deeper suffix match (ADR 0040).
+#[test]
+fn a_rooted_target_names_its_root_path_and_an_unprefixed_one_its_exact_path_first() {
+    for order in [Sensitive, Folding] {
+        let vault = Vault::at(
+            &format!("get-rooted-{order:?}"),
+            order,
+            &[
+                "a/x.md",
+                "deep/a/x.md",
+                "other/a/x.md",
+                "b/y.md",
+                "c/b/y.md",
+            ],
+        );
+        for spelled in ["/a/x", "/a/x.md", "/A/X", "/deep/../a/./x", "a/x"] {
+            assert_eq!(named(&vault, spelled), "a/x.md", "{order:?} `{spelled}`");
+        }
+        assert_eq!(named(&vault, "/deep/a/x"), "deep/a/x.md");
+        assert!(matches!(
+            vault.refusal(&getting("y")),
+            PageRefusal::AmbiguousTarget(_)
+        ));
+        assert_eq!(named(&vault, "b/y"), "b/y.md");
+        assert_eq!(named(&vault, "/c/b/y"), "c/b/y.md");
+    }
+}
+
 /// A target naming several documents refuses with a bounded head and a hint.
 /// A trailing `.md` reads both its written and extensionless stems.
 #[test]
@@ -365,7 +396,7 @@ fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint(
     let vault = Vault::at(
         "get-ambiguous-dotted",
         Sensitive,
-        &["v1.md", "two/v1.md.md", "one/v1.md.md"],
+        &["three/v1.md", "two/v1.md.md", "one/v1.md.md"],
     );
     let PageRefusal::AmbiguousTarget(ambiguity) = vault.refusal(&getting("v1.md")) else {
         panic!("a dotted target naming three documents answered");
@@ -381,7 +412,7 @@ fn a_target_naming_several_documents_refuses_with_the_bounded_head_and_the_hint(
         [
             ("one/v1.md.md", "one/v1.md"),
             ("two/v1.md.md", "two/v1.md"),
-            ("v1.md", "v1")
+            ("three/v1.md", "v1")
         ]
     );
     assert_eq!(head.total(), 3);
@@ -464,12 +495,25 @@ fn a_get_and_a_find_resolving_one_target_read_one_class() {
 }
 
 /// **A target naming no document refuses as unknown**, under either order,
-/// and so does a target that is no suffix address at all.
+/// and so does a target that is no suffix address at all. A `./` or `../`
+/// target is read from the folder of a document holding it, and a get's has
+/// none (ADR 0040), so it names nothing even where the path it spells
+/// stands.
 #[test]
 fn a_target_naming_no_document_refuses_as_unknown() {
     for order in [Sensitive, Folding] {
         let vault = Vault::at(&format!("get-unknown-{order:?}"), order, &["notes/a.md"]);
-        for spelled in ["missing", "other/a", "../a", "missing#Heading"] {
+        for spelled in [
+            "missing",
+            "other/a",
+            "../a",
+            "./notes/a",
+            "../notes/a",
+            "/a",
+            "/../notes/a",
+            "/notes/",
+            "missing#Heading",
+        ] {
             assert_eq!(
                 vault.refusal(&getting(spelled)),
                 PageRefusal::UnknownTarget {

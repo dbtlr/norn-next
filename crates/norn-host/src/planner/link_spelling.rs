@@ -2,9 +2,13 @@
 //! The destination is where a moved document lands, a delete's target, a
 //! wikilink rewrite's `new`, or the document a move-following fix follows.
 //! This module orders candidate spellings and picks the first the caller's
-//! resolution answer reaches uniquely. Wikilinks keep their suffix or root
-//! style and extension; Markdown links keep their relative or rooted style
-//! and percent-escaping ([`candidate_spellings`]).
+//! resolution answer reaches uniquely. A suffix-addressed link, in either
+//! family (ADR 0040), keeps its suffix style and extension, a Markdown one
+//! its percent-escaping too; a `vault://` wikilink keeps its root style and
+//! extension; a Markdown path keeps its relative or rooted style and
+//! percent-escaping ([`candidate_spellings`]). A wikilink written as a
+//! relative or rooted path is given no spelling yet, so a change that would
+//! respell one skips it.
 //!
 //! **The callers probe the candidates.** The cascade and repair ask the
 //! link index over the plan's after-state, repair through the applier's
@@ -12,27 +16,24 @@
 
 use super::links::wire_family;
 use norn_store::{DocumentPath, LinkFact};
-use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
+use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkFamily};
 
 /// Every target spelling `link` could take to name `to` from `holder`,
 /// where the plan leaves it, in the order tried by the shared rule: a
-/// wikilink's suffixes shortest first, at least two segments where the link
-/// was path-qualified, with the extension exactly where it had one; a
-/// `vault://` wikilink's root path in that style; or a Markdown link's path
-/// from the holder's folder, or the root where written rooted, in the link's
-/// percent-escaping. The first candidate resolving to the destination alone
-/// is written ([`first_resolving_spelling`]).
+/// suffix-addressed link's suffixes shortest first, at least two segments
+/// where the link was path-qualified, with the extension exactly where it
+/// had one, a Markdown destination's in its percent-escaping; a `vault://`
+/// wikilink's root path in that style; or a Markdown link's path from the
+/// holder's folder, or the root where written rooted or under `vault://`,
+/// in the link's percent-escaping. The first candidate resolving to the
+/// destination alone is written ([`first_resolving_spelling`]).
 pub(crate) fn candidate_spellings(
     holder: &norn_store::DocumentPath,
     link: &LinkFact,
     to: &DocumentPath,
 ) -> Vec<String> {
-    let written_with_extension = names_the_extension(&link.target);
-    match LinkAddress::of(
-        wire_family(link.family),
-        link.protocol.as_deref(),
-        &link.target,
-    ) {
+    let family = wire_family(link.family);
+    match LinkAddress::of(family, link.protocol.as_deref(), &link.target) {
         LinkAddress::Suffix(target) => {
             let least = if target.contains('/') {
                 2.min(to.depth())
@@ -44,26 +45,41 @@ pub(crate) fn candidate_spellings(
                 .suffix_spellings()
                 .filter(|spelling| spelling.split('/').count() >= least)
                 .partition(|spelling| spelling.ends_with(leaf) && leaf != to.stem());
-            styled(written_with_extension, with, without)
+            let spellings = styled(names_the_extension(&target), with, without);
+            if family == LinkFamily::Markdown {
+                spellings
+                    .iter()
+                    .map(|spelling| norn_store::suffix_spelling(spelling, &link.target))
+                    .collect()
+            } else {
+                spellings
+            }
         }
-        LinkAddress::RootedName(_) => {
+        LinkAddress::RootedName(target) if family == LinkFamily::Wikilink => {
             let path = to.as_str().to_string();
             let stem = strip_extension(&path).map(str::to_string);
             styled(
-                written_with_extension,
+                names_the_extension(&target),
                 vec![path],
                 stem.into_iter().collect(),
             )
         }
-        LinkAddress::Relative(_) => {
+        LinkAddress::Relative(_) if family == LinkFamily::Markdown => {
             norn_store::relative_spelling(holder, to.as_str(), &link.target)
                 .into_iter()
                 .collect()
         }
-        LinkAddress::Rooted(_) => norn_store::rooted_spelling(to.as_str(), &link.target)
-            .into_iter()
-            .collect(),
-        LinkAddress::Elsewhere | LinkAddress::HoldingDocument => Vec::new(),
+        LinkAddress::Rooted(_) | LinkAddress::RootedName(_) if family == LinkFamily::Markdown => {
+            norn_store::rooted_spelling(to.as_str(), &link.target)
+                .into_iter()
+                .collect()
+        }
+        LinkAddress::Relative(_)
+        | LinkAddress::Rooted(_)
+        | LinkAddress::RootedName(_)
+        | LinkAddress::Elsewhere
+        | LinkAddress::Unnameable(_)
+        | LinkAddress::HoldingDocument => Vec::new(),
     }
 }
 

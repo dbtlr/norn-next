@@ -275,12 +275,12 @@ fn an_ignored_place_resolves_only_where_the_target_names_it() {
                 "archive/glossary.md",
                 "archive/norn/glossary.md",
                 "docs/norn/glossary.md",
-                "glossary.md",
+                "notes/glossary.md",
             ],
         );
         assert_eq!(
             vault.resolves("glossary", &archive),
-            strings(&["docs/norn/glossary.md", "glossary.md"]),
+            strings(&["docs/norn/glossary.md", "notes/glossary.md"]),
             "a one-segment target under {order:?}"
         );
         assert_eq!(
@@ -479,8 +479,9 @@ fn an_ignored_leaf_resolves_to_any_target_longer_than_its_name() {
 
 /// **A document at the root that the schema ignores is reached by a target
 /// naming it.** With `glossary.md` ignored, the place is the document itself,
-/// and `glossary` and `glossary.md` each name that place whole, so each
-/// resolves to it beside the documents no glob ignores.
+/// and `glossary` and `glossary.md` each name that place whole; it stands at
+/// their exact vault path, so each resolves to it alone, ahead of the deeper
+/// documents no glob ignores (ADR 0040).
 #[test]
 fn an_ignored_root_level_document_resolves_to_a_target_naming_it() {
     for order in [Sensitive, Folding] {
@@ -492,11 +493,62 @@ fn an_ignored_root_level_document_resolves_to_a_target_naming_it() {
         for target in ["glossary", "glossary.md"] {
             assert_eq!(
                 vault.resolves(target, &["glossary.md"]),
-                strings(&["docs/glossary.md", "glossary.md"]),
+                strings(&["glossary.md"]),
                 "`{target}` under {order:?}"
             );
         }
     }
+}
+
+/// **The exact vault path comes first, after the ambiguity-ignore globs
+/// drop** (ADR 0040). A target names the document at its exact path alone,
+/// however many deeper documents it is a suffix of, and every one of them
+/// only where no document stands there. With `archive/**` ignored, `twin`
+/// passes over the archived copy to `notes/twin.md`, `archive/twin` names the
+/// archived copy, and `archive/x` names `archive/x.md` ahead of
+/// `deep/archive/x.md`. Comparison twins at the exact path stay ambiguous.
+#[test]
+fn the_exact_vault_path_comes_first_after_the_ignore_globs() {
+    let archive = ["archive/**"];
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::holding(
+            &format!("resolve-exact-first-{order:?}"),
+            order,
+            &[
+                "a/s/t/exact.md",
+                "shadow/a/s/t/exact.md",
+                "archive/twin.md",
+                "notes/twin.md",
+                "archive/x.md",
+                "deep/archive/x.md",
+            ],
+        );
+        for (target, named) in [
+            ("a/s/t/exact", &["a/s/t/exact.md"][..]),
+            ("a/s/t/exact.md", &["a/s/t/exact.md"]),
+            ("s/t/exact", &["a/s/t/exact.md", "shadow/a/s/t/exact.md"]),
+            ("twin", &["notes/twin.md"]),
+            ("archive/twin", &["archive/twin.md"]),
+            ("archive/x", &["archive/x.md"]),
+            ("x", &["deep/archive/x.md"]),
+        ] {
+            assert_eq!(
+                vault.resolves(target, &archive),
+                strings(named),
+                "`{target}` under {order:?}"
+            );
+        }
+    }
+    let mut twins = Vault::holding(
+        "resolve-exact-twins",
+        Sensitive,
+        &["c/Y.md", "c/y.md", "deep/c/y.md"],
+    );
+    assert_eq!(
+        twins.resolves("c/y", &[]),
+        strings(&["c/Y.md", "c/y.md"]),
+        "comparison twins at the exact path"
+    );
 }
 
 /// Findings and resolution record the same comparison class on every root.

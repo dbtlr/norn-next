@@ -420,22 +420,33 @@ pub(crate) fn heads_parameters(
 }
 
 /// [`crate::ExplainedStatement::LinkHealthTotals`]: how many documents each
-/// distinct key names, each row the arm, the key's index in its list, and the
+/// distinct key names, and how many of them stand at the key's exact path,
+/// each row the arm, the key's index in its list, the count and the exact
 /// count, over the two arms [`heads_sql`] reads. The class arm sums the
 /// disjoint admitted-index run counts from one to the key's segment count,
 /// over the same range and stored admitting counts as [`heads_sql`], so the
-/// total reads every admitted member and none the class keeps out.
+/// total reads every admitted member and none the class keeps out. Its exact
+/// count is the admitted members whose whole suffix key is the key
+/// ([`crate::resolve::exact_count`]), an equality seek of the suffix-key
+/// index, which the exact-path-first step reads where a link's exact members
+/// fill its head ([`crate::resolve::exact_members`]). A path key is exact by
+/// its own form, so its arm counts none.
 pub(crate) fn totals_sql(key: SuffixKey) -> String {
     let total = resolve::link_key_total(
         key,
         "json_extract(j.value, '$[0]')",
         "json_extract(j.value, '$[1]')",
     );
+    let exact = resolve::exact_count(
+        key,
+        "json_extract(j.value, '$[0]')",
+        "json_extract(j.value, '$[1]')",
+    );
     let path = resolve::link_key_path("dp", key, "j.value");
     format!(
-        "SELECT {CLASS_ARM}, j.key, ({total}) FROM json_each(?1) AS j
+        "SELECT {CLASS_ARM}, j.key, ({total}), ({exact}) FROM json_each(?1) AS j
         UNION ALL
-        SELECT {PATH_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dp WHERE {path})
+        SELECT {PATH_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dp WHERE {path}), 0
         FROM json_each(?2) AS j"
     )
 }

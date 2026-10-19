@@ -450,87 +450,113 @@ pub const VAULT_PROTOCOL: &str = "vault";
 const SEPARATOR: char = '/';
 
 /// How a link's target reaches documents: the one addressing selector every
-/// reading of a link — the store's keys, a row's health — reads.
+/// reading of a link — the store's keys, a row's health — reads (ADR 0040).
 ///
-/// **Protocol first, family second.** A link written with a protocol other
-/// than [`VAULT_PROTOCOL`] addresses whatever that protocol addresses. A
-/// `vault://` stem is read from the vault root, and its family keeps its own
-/// rules: a wikilink's stem is a rooted name, and a Markdown link's a path
-/// from the root. A link written with no protocol falls to its family: an
-/// empty target names the document holding the link, a wikilink's target is
-/// a suffix address, and a Markdown target is a path — unless it opens with a
-/// URI scheme, `mailto:` and `tel:` among them, which addresses no document.
+/// **The family decides how the target text is taken.** A wikilink's target
+/// is read as written, its alias and anchor already removed: nothing in it is
+/// cut off or percent-decoded, so `[[space%20name]]` names `space%20name.md`
+/// and never `space name.md`. A Markdown destination's fragment was split off
+/// (and percent-decoded) when the link was recognized; here its query, from
+/// the first `?`, is cut off, and each `/`-separated segment is
+/// percent-decoded on its own. A decoded separator stays a character inside
+/// its segment, and no vault path segment holds one, so such a destination
+/// names nothing ([`LinkAddress::Unnameable`]); so does a segment whose
+/// decoding is not UTF-8, and one that decodes to `.` or `..` from an escape,
+/// since only a step written as itself is a folder step. A Markdown
+/// destination opening with a URI scheme, `mailto:` and `tel:` among them,
+/// and a link written with any protocol but [`VAULT_PROTOCOL`], address no
+/// document.
 ///
-/// **A path is read by URL rules.** Its query — from the first `?` — is not
-/// part of it and is cut off here; the fragment was split off when the link
-/// was recognized, and a Markdown link's fragment percent-decoded there once.
-/// Splitting the path into segments, percent-decoding each, and joining it to
-/// where it is read from is the reader's. A wikilink's target and anchor,
-/// rooted or not, are read by no URL rule: nothing in them is cut off or
-/// decoded.
+/// **The form decides where the target is read from, alike in both
+/// families.** A `vault://` target is a rooted name, read from the vault root
+/// and never as a suffix. An empty target names the document holding the
+/// link. A target whose first segment is `.` or `..` is a path from the
+/// holding document's folder, one opening with `/` a path from the vault
+/// root, and any other target a suffix address: its exact vault path first,
+/// and otherwise every path it is a segment-aligned suffix of.
 ///
 /// Plain rather than `#[non_exhaustive]`: a reader matches every address, and
 /// an address nobody chose a reading for should fail to compile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkAddress<'a> {
     /// The link addresses no document of the vault, so no resolution judges
     /// it.
     Elsewhere,
+    /// A Markdown destination whose decoding names no vault path, carried as
+    /// written: a segment decoding to a separator, to bytes that are not
+    /// UTF-8, or to a `.` or `..` step.
+    Unnameable(&'a str),
     /// The link names the document holding it: an empty target.
     HoldingDocument,
-    /// A suffix address, resolved through the one resolver.
-    Suffix(&'a str),
-    /// A wikilink's name read from the vault root: it names the document at
-    /// exactly the root path one of its reductions spells — mirroring a
-    /// suffix wikilink's own two reductions: the stem as written, and, where
-    /// its leaf carries an extension, the stem with that extension stripped,
-    /// each with [`DOCUMENT_EXTENSION`] appended — and never a suffix of a
-    /// deeper path.
-    RootedName(&'a str),
-    /// A path read from the directory of the document holding the link.
-    Relative(&'a str),
+    /// An unprefixed target, resolved through the one resolver: its exact
+    /// vault path first, otherwise every path it is a segment-aligned suffix
+    /// of.
+    Suffix(Cow<'a, str>),
+    /// A `vault://` target, read from the vault root and never as a suffix.
+    RootedName(Cow<'a, str>),
+    /// A path read from the folder of the document holding the link: a
+    /// target whose first segment is `.` or `..`.
+    Relative(Cow<'a, str>),
     /// A path read from the vault root, its leading separator cut off.
-    Rooted(&'a str),
+    Rooted(Cow<'a, str>),
 }
 
 impl<'a> LinkAddress<'a> {
     /// How a link of `family`, written with `protocol` and `target`, reaches
     /// documents.
     pub fn of(family: LinkFamily, protocol: Option<&str>, target: &'a str) -> Self {
-        match protocol {
-            Some(VAULT_PROTOCOL) => match family {
-                LinkFamily::Wikilink => LinkAddress::RootedName(target),
-                LinkFamily::Markdown => LinkAddress::Rooted(without_query(target)),
-            },
-            Some(_) => LinkAddress::Elsewhere,
-            None if target.is_empty() => LinkAddress::HoldingDocument,
-            None => match family {
-                LinkFamily::Wikilink => LinkAddress::Suffix(target),
-                LinkFamily::Markdown if opens_with_a_scheme(target) => LinkAddress::Elsewhere,
-                LinkFamily::Markdown => match without_query(target) {
-                    "" => LinkAddress::HoldingDocument,
-                    path => match path.strip_prefix(SEPARATOR) {
-                        Some(rooted) => LinkAddress::Rooted(rooted),
-                        None => LinkAddress::Relative(path),
-                    },
-                },
-            },
+        let elsewhere = match protocol {
+            Some(protocol) => protocol != VAULT_PROTOCOL,
+            None => family == LinkFamily::Markdown && opens_with_a_scheme(target),
+        };
+        if elsewhere {
+            return LinkAddress::Elsewhere;
+        }
+        let read = match family {
+            LinkFamily::Wikilink => Cow::Borrowed(target),
+            LinkFamily::Markdown => {
+                let path = without_query(target);
+                match decoded_segments(path) {
+                    Some(decoded) => decoded,
+                    None => return LinkAddress::Unnameable(path),
+                }
+            }
+        };
+        if protocol.is_some() {
+            return LinkAddress::RootedName(read);
+        }
+        let first = read.split(SEPARATOR).next().unwrap_or_default();
+        if read.is_empty() {
+            LinkAddress::HoldingDocument
+        } else if read.starts_with(SEPARATOR) {
+            LinkAddress::Rooted(match read {
+                Cow::Borrowed(read) => Cow::Borrowed(&read[SEPARATOR.len_utf8()..]),
+                Cow::Owned(read) => Cow::Owned(read[SEPARATOR.len_utf8()..].to_string()),
+            })
+        } else if matches!(first, "." | "..") {
+            LinkAddress::Relative(read)
+        } else {
+            LinkAddress::Suffix(read)
         }
     }
 
     /// Whether the address's last segment carries an extension other than
     /// [`DOCUMENT_EXTENSION`], which names an attachment. An extension is what
     /// follows the last dot inside the last segment: a dot leading the
-    /// segment starts a name rather than an extension.
+    /// segment starts a name rather than an extension, and a `.` or `..`
+    /// step names a folder rather than a file.
     pub fn names_an_attachment(&self) -> bool {
-        let (LinkAddress::Suffix(address)
-        | LinkAddress::RootedName(address)
-        | LinkAddress::Relative(address)
-        | LinkAddress::Rooted(address)) = *self
-        else {
-            return false;
+        let address = match self {
+            LinkAddress::Suffix(address)
+            | LinkAddress::RootedName(address)
+            | LinkAddress::Relative(address)
+            | LinkAddress::Rooted(address) => address.as_ref(),
+            LinkAddress::Unnameable(address) => address,
+            LinkAddress::Elsewhere | LinkAddress::HoldingDocument => return false,
         };
-        leaf_extension(address).is_some_and(|extension| !is_document_extension(extension))
+        let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
+        !matches!(leaf, "." | "..")
+            && leaf_extension(leaf).is_some_and(|extension| !is_document_extension(extension))
     }
 
     /// How the address stands to judging the link: the one classification a
@@ -543,6 +569,58 @@ impl<'a> LinkAddress<'a> {
             _ => LinkAddressKind::Document,
         }
     }
+}
+
+/// `path` with each `/`-separated segment percent-decoded on its own, or
+/// `None` where a segment's decoding names no vault path segment: it holds a
+/// separator, it is not UTF-8, or it is a `.` or `..` step spelled with an
+/// escape. A `%` not followed by two hexadecimal digits is itself. A path
+/// holding no `%` is borrowed as it stands.
+fn decoded_segments(path: &str) -> Option<Cow<'_, str>> {
+    if !path.contains('%') {
+        return Some(Cow::Borrowed(path));
+    }
+    let segments = path
+        .split(SEPARATOR)
+        .map(|segment| {
+            let decoded = percent_decoded(segment)?;
+            let names_a_segment = !decoded.contains(SEPARATOR)
+                && (decoded == segment || !matches!(decoded.as_str(), "." | ".."));
+            names_a_segment.then_some(decoded)
+        })
+        .collect::<Option<Vec<String>>>()?;
+    Some(Cow::Owned(segments.join("/")))
+}
+
+/// `text` with every `%` followed by two hexadecimal digits read as the byte
+/// they spell, or `None` where the bytes that makes are not UTF-8.
+///
+/// The store's write side checks its percent-encoded spellings by reading
+/// them back through [`LinkAddress::of`], so this is the one decoding of a
+/// Markdown destination's path.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let spelled = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .filter(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
+        match spelled {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// How a link's address stands to judging it ([`LinkAddress::kind`]).

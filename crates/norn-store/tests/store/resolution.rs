@@ -281,19 +281,19 @@ fn a_rooted_wikilink_names_the_root_path_it_spells() {
 }
 
 /// **A relative link in a moved document is read from where it stood before
-/// the plan.** `[t](a.md)` in `x/b.md` names `x/a.md`; moved to `y/b.md` it
+/// the plan.** `[t](./a.md)` in `x/b.md` names `x/a.md`; moved to `y/b.md` it
 /// names `y/a.md`, which does not stand, so the move breaks it — which a
 /// reading from the new place on both sides would hide.
 #[test]
 fn a_relative_link_in_a_moved_document_is_read_from_its_source() {
     both_orders("resolution-moved-relative", |mut vault| {
-        vault.write(&[("x/a.md", "alpha\n"), ("x/b.md", "[t](a.md)\n")]);
+        vault.write(&[("x/a.md", "alpha\n"), ("x/b.md", "[t](./a.md)\n")]);
         let plan = overlay(&["y/b.md"], &["x/b.md"]);
         let (judged_links, _) =
-            vault.judge(&plan, &[probed("x/b.md", "y/b.md", "[t](a.md)\n", false)]);
+            vault.judge(&plan, &[probed("x/b.md", "y/b.md", "[t](./a.md)\n", false)]);
         assert_eq!(
             judged_links,
-            [judged("y/b.md", "a.md", "one:x/a.md", "none")]
+            [judged("y/b.md", "./a.md", "one:x/a.md", "none")]
         );
     });
 }
@@ -541,7 +541,7 @@ fn a_store_holding_landed_targets_answers_as_before_they_landed() {
 }
 
 /// **A landed target heading its class still leaves two stored documents
-/// to read.** The store has taken in `n.md`, a create the plan made, which
+/// to read.** The store has taken in `0/n.md`, a create the plan made, which
 /// heads the class `[[n]]` reads, beside `a/n.md` and `z/n.md`. The head is
 /// read two rows past the one target the key names, so with the target
 /// dropped two documents are left, and the link resolved to several before
@@ -550,12 +550,12 @@ fn a_store_holding_landed_targets_answers_as_before_they_landed() {
 fn a_landed_target_heading_a_class_leaves_two_stored_documents_to_read() {
     both_orders("resolution-landed-head", |mut vault| {
         vault.write(&[
-            ("n.md", "landed\n"),
+            ("0/n.md", "landed\n"),
             ("a/n.md", "a\n"),
             ("z/n.md", "z\n"),
             ("b.md", "[[n]]\n"),
         ]);
-        let (judged_links, _) = vault.judge(&overlay(&["n.md"], &[]), &[]);
+        let (judged_links, _) = vault.judge(&overlay(&["0/n.md"], &[]), &[]);
         assert_eq!(judged_links, [judged("b.md", "n", "several", "several")]);
     });
 }
@@ -1040,7 +1040,9 @@ fn a_heads_work_does_not_follow_the_members_its_class_admits() {
 /// ignored place, of count one, and the ignored `archive/index.md`, of count
 /// two. Each count's run is read up to the bound, so their union holds four
 /// rows; the head hands back the three its bound allows, two past the one
-/// target the plan creates.
+/// target the plan creates. `archive/index.md` stands at the link's exact
+/// path, so it leads the merged head and the link names it alone on both
+/// sides (ADR 0040).
 #[test]
 fn a_head_merged_across_admitting_counts_is_cut_to_its_bound() {
     both_orders("resolution-two-counts", |mut vault| {
@@ -1055,7 +1057,12 @@ fn a_head_merged_across_admitting_counts_is_cut_to_its_bound() {
         let (judged_links, work) = vault.judge(&overlay(&["new/archive/index.md"], &[]), &[]);
         assert_eq!(
             judged_links,
-            [judged("holder.md", "archive/index", "several", "several")]
+            [judged(
+                "holder.md",
+                "archive/index",
+                "one:archive/index.md",
+                "one:archive/index.md"
+            )]
         );
         assert_eq!(work.keys_resolved, 1);
         assert_eq!(work.head_rows, 3);
@@ -1546,4 +1553,36 @@ fn the_door_agrees_with_the_store_rebuilt_at_the_after_state() {
         compared > 0,
         "the draws moved no link, so nothing was compared"
     );
+}
+
+/// **A plan's exact-path document decides its suffix links on the side it
+/// stands** (ADR 0040): a plan creating `a/x.md` beside two deeper matches
+/// turns `[[a/x]]` and `[x](a/x.md)` from several to it alone after the
+/// plan, and one deleting it turns them back.
+#[test]
+fn a_plans_exact_path_document_decides_its_suffix_links_where_it_stands() {
+    both_orders("overlay-exact-first", |mut vault| {
+        vault.write(&[
+            ("deep/a/x.md", "x\n"),
+            ("other/a/x.md", "x\n"),
+            ("h.md", "[[a/x]] [x](a/x.md)\n"),
+        ]);
+        let (created, _) = vault.judge(&overlay(&["a/x.md"], &[]), &[]);
+        assert_eq!(
+            created,
+            [
+                judged("h.md", "a/x", "several", "one:a/x.md"),
+                judged("h.md", "a/x.md", "several", "one:a/x.md")
+            ]
+        );
+        vault.write(&[("a/x.md", "x\n")]);
+        let (deleted, _) = vault.judge(&overlay(&[], &["a/x.md"]), &[]);
+        assert_eq!(
+            deleted,
+            [
+                judged("h.md", "a/x", "one:a/x.md", "several"),
+                judged("h.md", "a/x.md", "one:a/x.md", "several")
+            ]
+        );
+    });
 }

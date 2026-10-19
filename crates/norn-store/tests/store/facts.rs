@@ -320,8 +320,10 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     store.verify_integrity().expect("a store just written to");
 }
 
-/// Links are held under normalized suffix or complete-path keys.
-/// Only `.md` opens two readings; other extensions remain in the leaf.
+/// Links are held under normalized suffix or complete-path keys (ADR 0027,
+/// ADR 0040): an unprefixed target in either family by the classes it opens,
+/// a `./`, `../`, `/` or `vault://` target by the paths it names. Only `.md`
+/// opens two readings, of either kind; other extensions remain in the leaf.
 #[test]
 fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
     let scratch = Scratch::new("link-keys");
@@ -362,12 +364,17 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(0, "glossary/norn/", Some(2)),
             key(1, "notes/", Some(1)),
             key(2, "a/x/my note.md", None),
-            key(3, "a/b/foo", None),
+            key(2, "a/x/my note.md.md", None),
+            key(3, "foo/", Some(1)),
             key(4, "top.md", None),
+            key(4, "top.md.md", None),
             key(6, "a/b/doc.md", None),
             key(8, "picture.png/", Some(1)),
+            key(9, "a/relative.md", None),
             key(10, "notes/x.md", None),
-            key(13, "a/b/q.md", None),
+            key(10, "notes/x.md.md", None),
+            key(13, "q.md/", Some(1)),
+            key(13, "q/", Some(1)),
             key(14, "notes/v1.2.md", None),
         ]
     );

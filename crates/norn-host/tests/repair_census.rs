@@ -170,7 +170,7 @@ const DOCUMENTS: [(&str, &[u8]); 15] = [
     ("zz-target.md", b"---\nzz-M: marker\n---\n# Target\n"),
     ("zzz-5c/old.md", b"# Unique census followed document\n"),
     ("zzz-5c/holder-wiki.md", b"[[zz-repair/zzz-5c/old]]\n"),
-    ("zzz-5c/holder-markdown.md", b"[old](old.md)\n"),
+    ("zzz-5c/holder-markdown.md", b"[old](./old.md)\n"),
     ("zzz-5c/heading-target.md", b"# Important Heading\n"),
     (
         "zzz-5c/heading-holder.md",

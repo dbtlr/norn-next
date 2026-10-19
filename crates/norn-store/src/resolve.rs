@@ -23,10 +23,29 @@
 //! candidate paths compare under the same key as resolution. Query path
 //! globs retain their filesystem order independently.
 //!
+//! **Exact vault path first** (ADR 0040). A suffix target names its exact
+//! vault path first, and every path it is a segment-aligned suffix of only
+//! where no admitted document stands at an exact path. A document's whole
+//! suffix key is the reversed key a target spelling its complete path opens,
+//! so a document stands at a target's exact path exactly where its suffix
+//! key equals one of the target's keys — the lower bounds of its ranges.
+//! The globs drop a candidate before this step, so a copy they keep out
+//! counts neither as an exact match nor as a deeper one; a document at an
+//! exact path is one the target spells whole, so the globs never keep it
+//! out. One reading of the rule serves every reader: [`exact_first`] spells
+//! it over a statement's rows, [`exact_count`] counts what it keeps, and
+//! [`exact_members`] applies it over a head read into memory, where a link's
+//! keys are merged.
+//!
 //! The predicates here seek the stored key columns. Each document row stores
 //! its admitting count under the pinned declaration, so every class read
 //! seeks one run of the admitted-key index per count from one to the
-//! target's segments, and never reads a member its class keeps out.
+//! target's segments, and never reads a member its class keeps out. Exact
+//! members lead every run in ladder order, since a key is the least of the
+//! rungs its range holds, so a head cut per run keeps every exact member it
+//! can. The exact-path test is an equality seek of `documents_suffix_key`
+//! per key, its stored count tested at each row it reaches, so it costs the
+//! documents standing at the target's exact paths.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -34,7 +53,7 @@ use std::collections::BTreeSet;
 use norn_db::rusqlite::functions::FunctionFlags;
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
-use norn_wire::{CaseFold, Pattern};
+use norn_wire::{CaseFold, LinkAddress, LinkFamily, Pattern};
 
 use crate::error::{self, StoreError};
 use crate::path::{
@@ -46,6 +65,11 @@ use crate::request::range_predicate_from;
 /// the least text after every text a separator-terminated suffix key opens,
 /// which is [`crate::path::prefix_successor`] itself.
 pub(crate) const SUCCESSOR_FUNCTION: &str = "norn_key_successor";
+
+/// How many values [`TargetClass::parameters`] numbers after the ranges'
+/// bounds: the target's segment count, and whether the target is rooted and
+/// so names its exact paths alone.
+pub(crate) const TARGET_PARAMETERS: usize = 2;
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
@@ -175,22 +199,55 @@ impl AmbiguityIgnore {
     }
 }
 
-/// A target's comparison-key probe, segment count and ignored places.
+/// A target's comparison-key probe, segment count and ignored places, and
+/// whether it is rooted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetClass {
     probe: SuffixProbe,
     target_segments: usize,
+    rooted: bool,
     ignore: AmbiguityIgnore,
 }
 
 impl TargetClass {
-    /// Compile a suffix target, with its anchor already split off, excluding
-    /// places named by `ignore`. The key is the same on every root.
-    /// A spelling [`suffix_probe`] refuses names no class.
+    /// Compile a target no document holds, with its anchor already split
+    /// off, excluding places named by `ignore`. The key is the same on every
+    /// root.
+    ///
+    /// The target's form chooses where it is read from (ADR 0040). A target
+    /// opening with `/` is a path from the vault root: its `.` and `..`
+    /// steps folded, it names only the documents at the exact paths it
+    /// spells, with or without `.md`, so its class is its probe's exact keys
+    /// alone. A target whose first segment is `.` or `..` is a path from the
+    /// folder of the document holding it, and a target given with no holder
+    /// has no folder, so it names no class. Any other target is a suffix
+    /// address, and a spelling [`suffix_probe`] refuses names no class.
     pub(crate) fn compile(target: &str, ignore: &AmbiguityIgnore) -> Result<Self, StoreError> {
+        let refuse = |problem| StoreError::Path {
+            path: target.to_string(),
+            problem,
+        };
+        let (read, rooted) = match LinkAddress::of(LinkFamily::Wikilink, None, target) {
+            LinkAddress::Suffix(read) => (read.into_owned(), false),
+            LinkAddress::Rooted(path) => {
+                let leaf = path.rsplit(SEPARATOR).next().unwrap_or(&path);
+                let joined = crate::link::joined(Vec::new(), &path)
+                    .filter(|_| !matches!(leaf, "" | "." | ".."))
+                    .ok_or_else(|| refuse("it climbs above the vault root or names a folder"))?;
+                (joined, true)
+            }
+            LinkAddress::Relative(_) => {
+                return Err(refuse(
+                    "it is read from the folder of a document holding it, and this target has \
+                     none",
+                ));
+            }
+            _ => return Err(refuse("it is empty")),
+        };
         Ok(TargetClass {
-            probe: suffix_probe(target)?,
-            target_segments: target.split(SEPARATOR).count(),
+            probe: suffix_probe(&read)?,
+            target_segments: read.split(SEPARATOR).count(),
+            rooted,
             ignore: ignore.clone(),
         })
     }
@@ -212,7 +269,8 @@ impl TargetClass {
         self.ignore.admits(path, self.target_segments)
     }
 
-    /// Each range's bounds, then the target's segment count.
+    /// Each range's bounds, then the target's segment count and whether it
+    /// is rooted ([`TARGET_PARAMETERS`]).
     pub(crate) fn parameters(&self) -> Vec<Value> {
         self.probe
             .ranges()
@@ -222,7 +280,10 @@ impl TargetClass {
                     Value::Text(upper.to_string()),
                 ]
             })
-            .chain([Value::Integer(self.target_segments as i64)])
+            .chain([
+                Value::Integer(self.target_segments as i64),
+                Value::Integer(i64::from(self.rooted)),
+            ])
             .collect()
     }
 }
@@ -308,12 +369,102 @@ pub(crate) fn range_total(key: SuffixKey, bounds: (&str, &str), segments: &str) 
 }
 
 /// Membership tested at one document's row key: its stored count and the
-/// target's ranges, numbered in [`TargetClass::parameters`]'s order.
+/// target's ranges, numbered in [`TargetClass::parameters`]'s order, then the
+/// exact-path step ([`target_exact_first`]).
 pub(crate) fn predicate(alias: &str, key: SuffixKey, ranges: usize, first: usize) -> String {
     let column = format!("{alias}.{}", key.column());
     let ranges_sql = range_predicate_from(&column, ranges, first);
     let segments = first + ranges * 2;
-    format!("({ranges_sql}) AND {alias}.admitting_segments <= ?{segments}")
+    format!(
+        "({ranges_sql}) AND {alias}.admitting_segments <= ?{segments} AND {}",
+        target_exact_first(alias, key, ranges, first)
+    )
+}
+
+/// The target's exact keys, the lower bounds of its ranges, as the SQL list
+/// [`exact_first`] and [`exact_count`] read, numbered from `first` in
+/// [`TargetClass::parameters`]'s order.
+fn exact_keys(ranges: usize, first: usize) -> String {
+    (0..ranges)
+        .map(|range| format!("?{}", first + range * 2))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The exact-path step over a compiled target's class rows a statement calls
+/// `alias`: [`exact_first`] over its exact keys, and, where the target is
+/// rooted, its exact keys alone.
+pub(crate) fn target_exact_first(
+    alias: &str,
+    key: SuffixKey,
+    ranges: usize,
+    first: usize,
+) -> String {
+    let keys = exact_keys(ranges, first);
+    let segments = format!("?{}", first + ranges * 2);
+    let rooted = format!("?{}", first + ranges * 2 + 1);
+    format!(
+        "({rooted} = 0 OR {alias}.{column} IN ({keys})) AND {exact}",
+        column = key.column(),
+        exact = exact_first(alias, key, &keys, &segments),
+    )
+}
+
+/// The exact-path-first step over the `documents` rows a statement calls
+/// `alias`, all in one target's class: a row stays where its suffix key is
+/// one of `exact_keys` — the target's own keys, an SQL list or subquery —
+/// or where no document admitted to a target of `segments` segments stands
+/// at one of them.
+///
+/// The test is an equality seek of `documents_suffix_key` per exact key, its
+/// stored admitting count tested on each row it reaches, so it reads the
+/// documents standing at the target's exact paths and no others.
+/// [`exact_members`] is the same step over rows read into memory, and the two
+/// must agree.
+pub(crate) fn exact_first(alias: &str, key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+    format!(
+        "({alias}.{column} IN ({exact_keys}) OR NOT EXISTS ({exact}))",
+        column = key.column(),
+        exact = exact_rows(key, exact_keys, segments),
+    )
+}
+
+/// How many documents admitted to a target of `segments` segments stand at
+/// one of its exact keys, `exact_keys`: what [`exact_first`] keeps where any
+/// stands there.
+pub(crate) fn exact_count(key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+    format!(
+        "SELECT COUNT(*) FROM ({})",
+        exact_rows(key, exact_keys, segments)
+    )
+}
+
+/// The admitted documents at one of `exact_keys`.
+fn exact_rows(key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+    let column = key.column();
+    format!(
+        "SELECT 1 FROM documents AS de WHERE de.{column} IN ({exact_keys}) \
+         AND de.admitting_segments <= {segments}"
+    )
+}
+
+/// The exact-path-first step over the members of one link's class read into
+/// memory, each its rung — its suffix key — and whatever the reader carries:
+/// where some member's rung is one of `exact_keys`, the link's own suffix
+/// keys, those members alone, and otherwise every member. It is
+/// [`exact_first`] over rows a reader merged, and the members it is given
+/// must already be the ones their class admits.
+pub(crate) fn exact_members<'m, T>(
+    exact_keys: &[&str],
+    members: impl IntoIterator<Item = (&'m str, T)>,
+) -> Vec<T> {
+    let (exact, deeper): (Vec<_>, Vec<_>) = members
+        .into_iter()
+        .partition(|(rung, _)| exact_keys.contains(rung));
+    if exact.is_empty() { deeper } else { exact }
+        .into_iter()
+        .map(|(_, member)| member)
+        .collect()
 }
 
 /// Each range's admitted runs, streamed so a caller's ceiling can stop them.
@@ -384,28 +535,35 @@ pub(crate) fn link_key_path(alias: &str, _key: SuffixKey, link_key: &str) -> Str
 /// `FROM` and `WHERE` clauses every read of a class spells, its values numbered
 /// from `?1` in [`TargetClass::parameters`]'s order.
 pub(crate) fn class_rows(class: &TargetClass) -> String {
+    let (key, ranges) = (class.probe().key(), class.probe().range_count());
     format!(
-        "FROM ({}) AS dr",
-        target_rows(class.probe().key(), class.probe().range_count(), 1, None)
+        "FROM ({}) AS dr WHERE {}",
+        target_rows(key, ranges, 1, None),
+        target_exact_first("dr", key, ranges, 1)
     )
 }
 
-/// A head bounds each range's count runs before the caller merges and cuts them.
+/// A head bounds each range's count runs before the caller merges and cuts
+/// them. Exact members lead each run, so the exact-path step after the cut
+/// keeps every one a head can hold.
 pub(crate) fn class_head_rows(class: &TargetClass, head: &str) -> String {
+    let (key, ranges) = (class.probe().key(), class.probe().range_count());
     format!(
-        "FROM ({}) AS dr",
-        target_rows(
-            class.probe().key(),
-            class.probe().range_count(),
-            1,
-            Some(head)
-        )
+        "FROM ({}) AS dr WHERE {}",
+        target_rows(key, ranges, 1, Some(head)),
+        target_exact_first("dr", key, ranges, 1)
     )
 }
 
-/// The sum of the counts of a target's disjoint ranges and admitting runs.
+/// How many documents a target names: where a rooted target, or any
+/// admitted document at an exact path, keeps the exact paths alone, those
+/// documents; otherwise the sum of the counts of the target's disjoint
+/// ranges and admitting runs.
 pub(crate) fn class_total(class: &TargetClass) -> String {
-    let segments = format!("?{}", class.probe().range_count() * 2 + 1);
+    let (key, ranges) = (class.probe().key(), class.probe().range_count());
+    let segments = format!("?{}", ranges * 2 + 1);
+    let rooted = format!("?{}", ranges * 2 + 2);
+    let exact = exact_count(key, &exact_keys(ranges, 1), &segments);
     let totals = (0..class.probe().range_count())
         .map(|range| {
             let lower = format!("?{}", range * 2 + 1);
@@ -417,7 +575,7 @@ pub(crate) fn class_total(class: &TargetClass) -> String {
         })
         .collect::<Vec<_>>()
         .join(" + ");
-    format!("SELECT {totals}")
+    format!("SELECT CASE WHEN {rooted} = 1 OR ({exact}) > 0 THEN ({exact}) ELSE {totals} END")
 }
 
 /// The resolution ladder's order over the rows [`class_rows`] reads: the

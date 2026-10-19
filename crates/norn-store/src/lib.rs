@@ -197,7 +197,10 @@ pub use increment::{
 pub use json::{
     FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json, frontmatter_of_projection,
 };
-pub use link::{named_paths, query_leaf, relative_spelling, rooted_spelling, spelled_place};
+pub use link::{
+    named_paths, query_leaf, relative_spelling, rooted_spelling, spelled_path, spelled_place,
+    suffix_spelling,
+};
 pub use moved::{MOVED_STATEMENTS, MovedPlan, MovedStatement, MovedTombstone};
 pub use read::{
     DEFAULT_PAGE, FieldMatch, FieldOrder, FindingLink, IN_VALUES_CEILING, MATCHED_DRIVE_FACTOR,

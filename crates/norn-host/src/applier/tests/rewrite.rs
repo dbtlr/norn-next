@@ -845,12 +845,12 @@ fn an_anchor_rewrite_follows_target_and_holder_moves_without_authoring_its_addre
     );
     for (documents, moved, holder, address, landed, expected) in [
         (
-            vec![("t.md", "# old\n# new\n"), ("h.md", "[x](t.md#old)\n")],
+            vec![("t.md", "# old\n# new\n"), ("h.md", "[x](./t.md#old)\n")],
             super::moving("t.md", "sub/t.md"),
             "h.md",
-            "t.md",
+            "./t.md",
             "h.md",
-            "[x](sub/t.md#new)\n",
+            "[x](./sub/t.md#new)\n",
         ),
         (
             vec![("t.md", "# old\n# new\n"), ("a/h.md", "[x](../t.md#old)\n")],

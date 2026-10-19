@@ -779,8 +779,9 @@ impl<'a> Cascade<'a> {
     /// `../Note.md` names `a/note.md`; `named_before` holds the stored path the
     /// change set's judgment resolved each link to before the plan, and the
     /// plan's operations are consulted by that path, whose spelling is the
-    /// file's own. A link that named no document is read by its spelling,
-    /// which no document stands at for an operation to carry.
+    /// file's own. A link that named no document — an attachment's, or a
+    /// broken one — is followed by the path it spells
+    /// ([`norn_store::spelled_path`]).
     fn own_relative_links(
         &self,
         targets: &[Target<'_>],
@@ -820,14 +821,17 @@ impl<'a> Cascade<'a> {
                     ),
                     LinkAddress::Relative(_)
                 );
-                if !relative {
+                // A wikilink written as a relative path is given no
+                // spelling yet ([`super::link_spelling`]), so it is left as
+                // written.
+                if !relative || wire_family(link.family) != LinkFamily::Markdown {
                     continue;
                 }
                 let named = match named_before.get(&entry(landed, link)) {
                     Some(stored) => stored.clone(),
-                    None => match &norn_store::named_paths(link, &source)[..] {
-                        [spelled] => spelled.clone(),
-                        _ => continue,
+                    None => match norn_store::spelled_path(link, &source) {
+                        Some(spelled) => spelled,
+                        None => continue,
                     },
                 };
                 let named = &named;
@@ -847,7 +851,10 @@ impl<'a> Cascade<'a> {
                 let reaches = |path: &String| {
                     norn_store::comparison_key(path) == norn_store::comparison_key(&named)
                 };
-                if norn_store::named_paths(link, &holder).iter().any(reaches) {
+                let mut still = norn_store::named_paths(link, &holder)
+                    .into_iter()
+                    .chain(norn_store::spelled_path(link, &holder));
+                if still.any(|path| reaches(&path)) {
                     continue;
                 }
                 let Some(respelled) = norn_store::relative_spelling(&holder, &named, &link.target)

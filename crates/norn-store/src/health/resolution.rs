@@ -68,7 +68,12 @@
 //! number of targets it could name — and the targets are added in memory:
 //! the store's rows that are targets are dropped, and the targets present on
 //! the side being resolved are counted in. Two rows left over tell several
-//! from one, so no key's whole class is ever counted. **The targets a key
+//! from one, so no key's whole class is ever counted. **The exact path comes
+//! first** (ADR 0040), over the same rows: a stored member standing at its
+//! key's exact path leads the key's head in ladder order, and a target's own
+//! suffix key says whether it stands at one, so where any of a link's keys
+//! holds an exact member on the side resolved, the link counts those alone
+//! ([`crate::resolve::exact_first`]). **The targets a key
 //! could name are read off the overlay once, when the key is resolved**, and
 //! kept as counts beside the head, so a link adds them in constant time
 //! however many targets the key could name: a stem every document of a plan
@@ -464,8 +469,10 @@ impl Snapshot {
         Ok(judging.finished())
     }
 
-    /// What the suffix address `address` names over the plan `overlay`, on
-    /// each side of it, read as a wikilink written with it is, a class's
+    /// What the target `address`, held by no document, names over the plan
+    /// `overlay`, on each side of it, read by its form as a wikilink written
+    /// with it is — a `/` target from the vault root, a `./` or `../` one as
+    /// naming nothing, any other as a suffix address — a class's
     /// members less the places `declared`'s ambiguity-ignore set keeps out,
     /// headed where it names several on the side `headed`; and what reading
     /// it cost.
@@ -551,12 +558,13 @@ struct Judged {
     written: bool,
 }
 
-/// What the store holds under one key, less the targets: the paths of at
-/// most two of the documents it names that the plan does not write, in
-/// ladder order; and what the targets the key could name come to.
+/// What the store holds under one key, less the targets: the rung and path
+/// of at most two of the documents it names that the plan does not write, in
+/// ladder order, those at the key's exact path first; and what the targets
+/// the key could name come to.
 #[derive(Debug, Default)]
 struct KeyHeld {
-    stored: Vec<String>,
+    stored: Vec<(String, String)>,
     members: Members,
 }
 
@@ -570,6 +578,12 @@ struct Members {
     before: Present,
     /// How many stand after the plan, and the first of them.
     after: Present,
+    /// How many of those standing before the plan stand at the key's exact
+    /// path, and the first of them.
+    exact_before: Present,
+    /// How many of those standing after the plan stand at the key's exact
+    /// path, and the first of them.
+    exact_after: Present,
     /// Whether the plan changes what stands at any of them.
     changes: bool,
     /// The places a link held under this key could name before the plan
@@ -577,6 +591,19 @@ struct Members {
     /// then the places the plan reaches, each once; shared by every link
     /// held under the key.
     before_targets: Arc<[DocumentPath]>,
+}
+
+impl Members {
+    /// The targets standing on `side`, only those at the key's exact path
+    /// where `exact`.
+    fn standing(&self, side: PlanSide, exact: bool) -> &Present {
+        match (side, exact) {
+            (PlanSide::Before, false) => &self.before,
+            (PlanSide::After, false) => &self.after,
+            (PlanSide::Before, true) => &self.exact_before,
+            (PlanSide::After, true) => &self.exact_after,
+        }
+    }
 }
 
 /// How many of a key's targets stand on one side of the plan, and the first.
@@ -764,11 +791,11 @@ impl<'a, R: Runner> Judging<'a, R> {
         keys
     }
 
-    /// What the suffix address `address` names on each side of the plan,
+    /// What the target `address`, held by no document, names on each side of the plan,
     /// and the head of what it names on the side `headed` where that is
     /// several.
     fn name(&mut self, address: &str, headed: PlanSide) -> Result<TargetNaming, StoreError> {
-        let keys = self.in_space(suffix_keys(address));
+        let keys = self.in_space(link::target_keys(address));
         self.resolve(&keys.iter().cloned().collect())?;
         self.work.links_evaluated += 1;
         let before = self.resolution(&keys, PlanSide::Before)?;
@@ -800,34 +827,58 @@ impl<'a, R: Runner> Judging<'a, R> {
         };
         let bounds: Vec<(&Key, usize)> = keys.iter().map(|key| (key, bound(self, key))).collect();
         let heads = self.heads(&bounds)?;
-        let mut named: Vec<(String, String)> = Vec::new();
-        let mut total = 0u64;
-        let mut filled: Vec<&Key> = Vec::new();
+        // Each key's rows less the targets, and the targets standing on the
+        // side asked, every one beside whether it stands at its key's exact
+        // path: exact members lead a key's rows, so any the store holds past
+        // the targets are read.
+        let mut members: Vec<(bool, (String, String))> = Vec::new();
+        let mut filled: Vec<(&Key, bool)> = Vec::new();
         for (key, bound) in &bounds {
             let rows = heads.get(*key).map(Vec::as_slice).unwrap_or_default();
-            let mut stored = Vec::with_capacity(rows.len());
             for row in rows {
                 if !self.targets(&row.1) {
-                    stored.push(row.clone());
+                    members.push((is_exact(key, &row.0), row.clone()));
                 }
             }
-            if rows.len() < *bound {
-                total += stored.len() as u64;
-            } else {
-                filled.push(key);
+            if rows.len() >= *bound {
+                let all_exact = rows.iter().all(|row| is_exact(key, &row.0));
+                filled.push((key, all_exact));
             }
-            named.extend(stored);
             for target in self.members(key).filter(|target| side.holds(target)) {
-                total += 1;
                 let rung = match key.1 {
                     Some(_) => target.path.suffix_key().to_string(),
                     None => key.0.clone(),
                 };
-                named.push((rung, target.path.as_str().to_string()));
+                members.push((
+                    is_exact(key, &rung),
+                    (rung, target.path.as_str().to_string()),
+                ));
             }
         }
-        if !filled.is_empty() {
-            total += self.stored_past_the_targets(&filled)?;
+        let exact = members.iter().any(|(exact, _)| *exact);
+        let mut named: Vec<(String, String)> = members
+            .into_iter()
+            .filter(|(at_exact, _)| *at_exact || !exact)
+            .map(|(_, member)| member)
+            .collect();
+        let mut total = named.len() as u64;
+        // A filled key holds members past its rows; where the exact path
+        // comes first, only a key whose rows are all exact holds exact ones.
+        let past: Vec<&Key> = filled
+            .into_iter()
+            .filter(|(_, all_exact)| *all_exact || !exact)
+            .map(|(key, _)| key)
+            .collect();
+        if !past.is_empty() {
+            let counted = named
+                .iter()
+                .filter(|(rung, path)| {
+                    !self.targets(path) && past.iter().any(|key| in_key(key, rung, exact))
+                })
+                .count() as u64;
+            total += self
+                .stored_past_the_targets(&past, exact)?
+                .saturating_sub(counted);
         }
         named.sort_by(|left, right| {
             crate::resolve::ladder_cmp((&left.0, &left.1), (&right.0, &right.1))
@@ -844,10 +895,11 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// How many documents the store holds under each of `filled`, keys whose
-    /// head filled its bound, at a path no target of the plan stands at: each
-    /// key's count, less the targets it could name that the store holds a
-    /// document at, which the overlay names instead.
-    fn stored_past_the_targets(&mut self, filled: &[&Key]) -> Result<u64, StoreError> {
+    /// head filled its bound, at a path no target of the plan stands at — only
+    /// those at the key's exact path where `exact` — each key's count, less
+    /// the targets it could name that the store holds a document at, which
+    /// the overlay names instead.
+    fn stored_past_the_targets(&mut self, filled: &[&Key], exact: bool) -> Result<u64, StoreError> {
         let totals = self.totals(filled)?;
         // Overlay entries replace exact stored spellings. A comparison twin
         // remains a candidate unless the overlay also changes its own path.
@@ -874,12 +926,10 @@ impl<'a, R: Runner> Judging<'a, R> {
             let standing = self
                 .members(key)
                 .filter(|target| held.contains(target.path.as_str()))
+                .filter(|target| !exact || is_exact(key, target.path.suffix_key()))
                 .count() as u64;
-            stored += totals
-                .get(*key)
-                .copied()
-                .unwrap_or_default()
-                .saturating_sub(standing);
+            let (total, exact_total) = totals.get(*key).copied().unwrap_or_default();
+            stored += if exact { exact_total } else { total }.saturating_sub(standing);
         }
         Ok(stored)
     }
@@ -1011,22 +1061,31 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// What a link held under `keys` resolves to, with every target on
-    /// `side`.
+    /// `side`: the members at its keys' exact paths where any stands there,
+    /// and every member otherwise.
     fn resolution(&self, keys: &[Key], side: PlanSide) -> Result<Resolves, StoreError> {
+        let exact = keys.iter().any(|key| {
+            let held = self.held(key);
+            held.stored.iter().any(|(rung, _)| is_exact(key, rung))
+                || held.members.standing(side, true).count > 0
+        });
         let mut total = 0usize;
         let mut one: Option<&str> = None;
         for key in keys {
             let held = self.held(key);
-            let targets = match side {
-                PlanSide::Before => &held.members.before,
-                PlanSide::After => &held.members.after,
-            };
-            total += held.stored.len() + targets.count;
+            let targets = held.members.standing(side, exact);
+            let mut stored = held
+                .stored
+                .iter()
+                .filter(|(rung, _)| !exact || is_exact(key, rung))
+                .map(|(_, path)| path.as_str());
+            let first = stored.next();
+            total += usize::from(first.is_some()) + stored.count() + targets.count;
             if total > 1 {
                 return Ok(Resolves::several());
             }
             one = one
-                .or_else(|| held.stored.first().map(String::as_str))
+                .or(first)
                 .or_else(|| targets.first.as_ref().map(DocumentPath::as_str));
         }
         Ok(match one {
@@ -1042,14 +1101,21 @@ impl<'a, R: Runner> Judging<'a, R> {
         let mut seen: BTreeSet<&DocumentPath> = BTreeSet::new();
         let mut places: Vec<DocumentPath> = Vec::new();
         for target in self.members(key) {
+            let exact = is_exact(key, target.path.suffix_key());
             if target.before {
                 members.before.add(&target.path);
+                if exact {
+                    members.exact_before.add(&target.path);
+                }
                 if seen.insert(&target.path) {
                     places.push(target.path.clone());
                 }
             }
             if target.after {
                 members.after.add(&target.path);
+                if exact {
+                    members.exact_after.add(&target.path);
+                }
             }
             members.changes |= target.changes();
         }
@@ -1091,9 +1157,9 @@ impl<'a, R: Runner> Judging<'a, R> {
             .collect();
         for (key, head) in self.heads(&bounds)? {
             let mut stored = Vec::new();
-            for (_, path) in head {
+            for (rung, path) in head {
                 if !self.targets(&path) && stored.len() < 2 {
-                    stored.push(path);
+                    stored.push((rung, path));
                 }
             }
             self.work.keys_resolved += 1;
@@ -1176,8 +1242,9 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// How many documents the store holds under each of `keys`, the places
-    /// the ambiguity-ignore set keeps out left out, in one statement.
-    fn totals(&mut self, keys: &[&Key]) -> Result<BTreeMap<Key, u64>, StoreError> {
+    /// the ambiguity-ignore set keeps out left out, beside how many of them
+    /// stand at the key's exact path, in one statement.
+    fn totals(&mut self, keys: &[&Key]) -> Result<BTreeMap<Key, (u64, u64)>, StoreError> {
         let Arms {
             classes,
             paths,
@@ -1192,16 +1259,36 @@ impl<'a, R: Runner> Judging<'a, R> {
                 Ok(Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, usize>(1)?,
-                    row.get::<_, u64>(2)?,
+                    (row.get::<_, u64>(2)?, row.get::<_, u64>(3)?),
                 )))
             },
             "counting what a target's keys name",
         )?;
         let mut totals = BTreeMap::new();
-        for (arm, at, total) in rows {
-            totals.insert(asked(&arms, arm, at, "a count")?.clone(), total);
+        for (arm, at, counts) in rows {
+            totals.insert(asked(&arms, arm, at, "a count")?.clone(), counts);
         }
         Ok(totals)
+    }
+}
+
+/// Whether a member whose rung is `rung` stands at `key`'s exact path: a
+/// suffix key equal to the member's whole suffix key. A path key names its
+/// path alone, so none of its members is exact and none is passed over.
+fn is_exact(key: &Key, rung: &str) -> bool {
+    key.1.is_some() && key.0 == rung
+}
+
+/// Whether a member whose rung is `rung` is one `key` counts: any member of
+/// its class, or only one at its exact path where `exact`.
+fn in_key(key: &Key, rung: &str, exact: bool) -> bool {
+    if exact {
+        is_exact(key, rung)
+    } else {
+        match key.1 {
+            Some(_) => rung.starts_with(key.0.as_str()),
+            None => rung == key.0,
+        }
     }
 }
 

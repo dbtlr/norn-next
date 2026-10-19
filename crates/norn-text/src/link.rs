@@ -9,13 +9,13 @@
 //! [title]( [protocol://] stem [#anchor | #^block-ref] )
 //! ```
 //!
-//! What differs between them is how a resolver is meant to read the stem, and
-//! [`Link::resolution`] is where that is decided. **Protocol first, family
-//! second**: a target opening with a recognized `protocol://` prefix addresses
-//! whatever that protocol addresses, and the form it was written in says
-//! nothing about it. Only a target with no protocol falls through to its
-//! family — a wikilink stem is a path *suffix*, an inline Markdown link's is a
-//! path *relative to the containing document*.
+//! Whether a written protocol decides what the stem addresses is
+//! [`Link::resolution`]'s to say. **Protocol first, form second**: a target
+//! opening with a recognized `protocol://` prefix addresses whatever that
+//! protocol addresses, and the grammar it was written in says nothing about
+//! it. A target with no protocol is read by its form, alike in both families
+//! (ADR 0040): `./` and `../` from the containing document's folder, `/` from
+//! the vault root, and anything else as a path *suffix*.
 //!
 //! None of those readings happens here. Matching a target to a document —
 //! suffix resolution, path joining, ambiguity, containment, a path's
@@ -60,15 +60,13 @@ static BLOCK_ID_RE: LazyLock<Regex> =
 /// resolution nobody chose is the defect this enum exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkFamily {
-    /// `[[…]]`, the vault idiom. A protocol-free wikilink stem is a
-    /// right-to-left, segment-aligned path *suffix*: `glossary` addresses any
-    /// `**/glossary.md`, `norn/glossary` only `**/norn/glossary.md`, and
-    /// never anything relative to the document it was written in.
+    /// `[[…]]`, the vault idiom. A protocol-free target is read by its form
+    /// ([`Resolution::Form`]), and its text is taken as written, never
+    /// percent-decoded.
     Wikilink,
     /// `[title](target)`, an inline Markdown link. A protocol-free destination
-    /// is a filesystem path resolved against the containing document's
-    /// directory — `./`, `../`, or a bare segment — and against the vault root
-    /// when the path is rooted. Exact, with no ambiguity class.
+    /// is read by its form ([`Resolution::Form`]), as a wikilink's target is,
+    /// once the resolver has percent-decoded each of its segments.
     ///
     /// Reference-style links, autolinks and images are not this family and
     /// produce no link fact — see [`crate::BodyScan`].
@@ -77,7 +75,7 @@ pub enum LinkFamily {
 
 /// How a resolver is meant to reach what a link addresses.
 ///
-/// **Protocol first, family second.** A recognized `protocol://` prefix
+/// **Protocol first, form second.** A recognized `protocol://` prefix
 /// shadows the family, because the family says which grammar the author wrote
 /// and the protocol says what the address is: `[t](https://example.com)` is
 /// not a relative path and `[[https://x|Docs]]` is not a suffix address, so
@@ -94,11 +92,13 @@ pub enum Resolution<'a> {
     /// is a written protocol like any other until a layer means something by
     /// it.
     Protocol(&'a str),
-    /// A path suffix, per [`LinkFamily::Wikilink`].
-    Suffix,
-    /// A path relative to the containing document, per
-    /// [`LinkFamily::Markdown`].
-    RelativePath,
+    /// No protocol was written, so the target's form says where it is read
+    /// from, alike in both families (ADR 0040): a target opening with `./` or
+    /// `../` from the containing document's folder, one opening with `/` from
+    /// the vault root, and any other as a path suffix. The family decides only
+    /// how the target text is taken — a Markdown destination is
+    /// percent-decoded, a wikilink's is not — which is the resolver's.
+    Form,
 }
 
 /// A recognized link token, decomposed and unresolved.
@@ -145,8 +145,8 @@ pub struct Link {
     ///
     /// A span being present is not a licence to splice one family's grammar
     /// over the other's: a rewrite names one family, and a wikilink rewrite
-    /// never reaches a Markdown link, whose target is relative to the
-    /// document it sits in. See [`Document::rewrite_links`](crate::Document::rewrite_links).
+    /// never reaches a Markdown link, whose target is percent-encoded where a
+    /// wikilink's is not. See [`Document::rewrite_links`](crate::Document::rewrite_links).
     pub stem_range: Option<Range<usize>>,
     /// The display title, trimmed — after `|` for a wikilink, the bracket text
     /// for a Markdown link. A Markdown link always has one, `Some("")`
@@ -207,7 +207,7 @@ impl Link {
     }
 
     /// How this link's stem is to be resolved: its protocol when it was
-    /// written with one, and otherwise its family's reading.
+    /// written with one, and otherwise its target's form.
     ///
     /// Derived rather than stored, because two fields that must agree are two
     /// fields that can disagree, and the protocol and the family are the ones
@@ -215,10 +215,7 @@ impl Link {
     pub fn resolution(&self) -> Resolution<'_> {
         match self.protocol.as_deref() {
             Some(scheme) => Resolution::Protocol(scheme),
-            None => match self.family {
-                LinkFamily::Wikilink => Resolution::Suffix,
-                LinkFamily::Markdown => Resolution::RelativePath,
-            },
+            None => Resolution::Form,
         }
     }
 }

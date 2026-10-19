@@ -366,6 +366,8 @@ impl SuffixSpellings {
             .iter()
             .flat_map(|(_, spelling, class)| {
                 let segments = spelling.split('/').count();
+                let exact_keys: Vec<&str> =
+                    class.probe().ranges().map(|(lower, _)| lower).collect();
                 class
                     .probe()
                     .ranges()
@@ -373,6 +375,7 @@ impl SuffixSpellings {
                         lower,
                         upper,
                         segments,
+                        exact_keys: exact_keys.clone(),
                     })
             })
             .collect();

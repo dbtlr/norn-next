@@ -1682,32 +1682,36 @@ mod tests {
     }
 
     /// **The text layer's reading of a link and the wire's address agree.**
-    /// `norn-text` states the syntax-only rule — protocol first, family
-    /// second — and the wire's selector refines it: the reserved `vault`
-    /// protocol is read from the vault root, a wikilink's as a rooted name and
-    /// a Markdown link's as a path, every other protocol addresses
-    /// no document, a wikilink written without one is a suffix address, and a
-    /// Markdown target written without one is a path, or addresses no
-    /// document where it opens with a URI scheme. An empty target names the
-    /// holding document under either family. The links are the ones the text
-    /// layer recognized in a body, as derivation stores them.
+    /// `norn-text` states the syntax-only rule — a written protocol first,
+    /// the target's form otherwise — and the wire's selector refines it: the
+    /// reserved `vault` protocol is read from the vault root as a rooted name
+    /// in both families, every other protocol addresses no document, and a
+    /// target written without one is read by its form alike in both
+    /// families (ADR 0040) — a suffix address unprefixed, a path from the
+    /// holder's folder after `./` or `../`, a path from the root after `/` —
+    /// or addresses no document where a Markdown destination opens with a URI
+    /// scheme. An empty target names the holding document under either
+    /// family. The links are the ones the text layer recognized in a body, as
+    /// derivation stores them.
     #[test]
     fn the_text_layers_reading_of_a_link_agrees_with_the_wires_address() {
         use norn_text::Resolution;
         use norn_wire::{LinkAddress, VAULT_PROTOCOL};
         let body = "[[notes/x]] [[vault://notes/x.md]] [[https://example.com|web]] \
-                    [[#Heading]] [[mailto:x]] [t](../y.md) [t](/z.md?raw=1) \
-                    [t](vault://notes/y.md) [t](https://example.com) \
+                    [[#Heading]] [[mailto:x]] [[../y]] [t](../y.md) [t](/z.md?raw=1) \
+                    [t](vault://notes/y.md) [t](notes/w.md) [t](https://example.com) \
                     [t](mailto:someone@example.com) [t](#frag)\n";
         let expected = [
-            LinkAddress::Suffix("notes/x"),
-            LinkAddress::RootedName("notes/x.md"),
+            LinkAddress::Suffix("notes/x".into()),
+            LinkAddress::RootedName("notes/x.md".into()),
             LinkAddress::Elsewhere,
             LinkAddress::HoldingDocument,
-            LinkAddress::Suffix("mailto:x"),
-            LinkAddress::Relative("../y.md"),
-            LinkAddress::Rooted("z.md"),
-            LinkAddress::Rooted("notes/y.md"),
+            LinkAddress::Suffix("mailto:x".into()),
+            LinkAddress::Relative("../y".into()),
+            LinkAddress::Relative("../y.md".into()),
+            LinkAddress::Rooted("z.md".into()),
+            LinkAddress::RootedName("notes/y.md".into()),
+            LinkAddress::Suffix("notes/w.md".into()),
             LinkAddress::Elsewhere,
             LinkAddress::Elsewhere,
             LinkAddress::HoldingDocument,
@@ -1722,16 +1726,13 @@ mod tests {
             };
             let address = LinkAddress::of(family, stored.protocol.as_deref(), &stored.target);
             assert_eq!(address, expected, "{}", link.raw);
-            let agrees = match (link.resolution(), address) {
-                (
-                    Resolution::Protocol(VAULT_PROTOCOL),
-                    LinkAddress::Rooted(_) | LinkAddress::RootedName(_),
-                ) => true,
+            let agrees = match (link.resolution(), &address) {
+                (Resolution::Protocol(VAULT_PROTOCOL), LinkAddress::RootedName(_)) => true,
                 (Resolution::Protocol(scheme), LinkAddress::Elsewhere) => scheme != VAULT_PROTOCOL,
-                (Resolution::Suffix, LinkAddress::Suffix(_) | LinkAddress::HoldingDocument) => true,
                 (
-                    Resolution::RelativePath,
-                    LinkAddress::Relative(_)
+                    Resolution::Form,
+                    LinkAddress::Suffix(_)
+                    | LinkAddress::Relative(_)
                     | LinkAddress::Rooted(_)
                     | LinkAddress::HoldingDocument
                     | LinkAddress::Elsewhere,

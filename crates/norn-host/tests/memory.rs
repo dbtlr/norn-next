@@ -991,11 +991,12 @@ fn fronted_body(bytes: usize) -> Vec<u8> {
 }
 
 /// A document of exactly `bytes` bytes whose body opens with a relative
-/// Markdown link to [`PLAN_RELINKED_TARGET`] and goes on in plain lines that
-/// hold no other link.
+/// Markdown link to [`PLAN_RELINKED_TARGET`] — written `./`, since an
+/// unprefixed destination is a suffix address a move leaves naming the same
+/// document (ADR 0040) — and goes on in plain lines that hold no other link.
 fn relinking_body(bytes: usize) -> Vec<u8> {
     let mut content = format!(
-        "---\nmemory_plan_size: relinked\n---\nSee [the target]({PLAN_RELINKED_TARGET}).\n"
+        "---\nmemory_plan_size: relinked\n---\nSee [the target](./{PLAN_RELINKED_TARGET}).\n"
     )
     .into_bytes();
     let line = b"a plain line of body text that names no other document\n";

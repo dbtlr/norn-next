@@ -852,7 +852,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
     let mut request = store.begin_request();
 
     for (index, at) in [
-        "glossary.md",
+        "notes/glossary.md",
         "docs/glossary.md",
         "docs/norn/glossary.md",
         "archive/docs/norn/glossary.md",
@@ -889,7 +889,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
             "docs/glossary.md",
             "docs/norn/glossary.md",
             "docs/norntest/glossary.md",
-            "glossary.md",
+            "notes/glossary.md",
         ]
     );
 
@@ -1146,6 +1146,10 @@ fn assert_cascade_seeks_the_primary_key(plan: &QueryPlan, table: &str) {
 /// `path` — and each count's run is ordered by that ladder. The union is
 /// sorted before emission.
 ///
+/// **The exact-path-first step is one equality seek** (ADR 0040): it reads the
+/// documents at the target's exact paths off `documents_suffix_key`, and no
+/// others.
+///
 /// Control: each key's index dropped, and the same bar fails under every
 /// resolution that probes it.
 #[test]
@@ -1168,14 +1172,56 @@ fn class_reads_seek_the_same_suffix_comparison_index_on_every_root() {
         );
         read.assert_no_full_scan_of("documents");
         read.assert_searches_through("documents", Access::Index(index));
-        read.assert_search_constraint(
-            "documents",
-            &format!("(admitting_segments=? AND {column}>? AND {column}<?)"),
+        let (range, exact) = (
+            format!("(admitting_segments=? AND {column}>? AND {column}<?)"),
+            format!("({column}=?)"),
         );
+        let searches = read.searches_of("documents");
+        assert!(
+            searches.iter().all(|row| {
+                (row.access() == Some(Access::Index(index))
+                    && row.constraint() == Some(range.as_str()))
+                    || (row.access() == Some(Access::Index("documents_suffix_key"))
+                        && row.constraint() == Some(exact.as_str()))
+            }),
+            "a class read searches `documents` other than by its admitted runs or its exact \
+             keys: {:?}\nemitted SQL: {}",
+            read.rows(),
+            read.sql()
+        );
+        let count = |constraint: &str| {
+            searches
+                .iter()
+                .filter(|row| row.constraint() == Some(constraint))
+                .count()
+        };
         assert_eq!(
-            read.searches_of("documents").len(),
+            count(&range),
             resolution.probe().range_count(),
             "a resolution does not open one seek per reduction: {:?}\nemitted SQL: {}",
+            read.rows(),
+            read.sql()
+        );
+        // The exact-path test is one uncorrelated subquery. SQLite lists it
+        // under each arm it pushes the filter into, by the one number it
+        // evaluates once.
+        let subqueries: std::collections::BTreeSet<&str> = searches
+            .iter()
+            .filter(|row| row.constraint() == Some(exact.as_str()))
+            .filter_map(|row| {
+                read.rows()
+                    .iter()
+                    .find(|parent| parent.id == row.parent)
+                    .map(|parent| parent.detail.as_str())
+            })
+            .collect();
+        assert!(
+            count(&exact) >= 1
+                && subqueries.len() == 1
+                && subqueries
+                    .iter()
+                    .all(|detail| detail.starts_with("SCALAR SUBQUERY")),
+            "the exact-path step is not one uncorrelated seek: {:?}\nemitted SQL: {}",
             read.rows(),
             read.sql()
         );
