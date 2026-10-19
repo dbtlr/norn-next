@@ -23,17 +23,19 @@
 //! # The link scope fence
 //!
 //! Two written forms produce link facts: `[[…]]` and the inline Markdown link
-//! `[title](target)`. Four other forms are recognized by the CommonMark parse
-//! and deliberately produce nothing, because their target lives somewhere
-//! other than the token and emitting a fact with no rewrite story behind it
-//! would be a half-supported family:
+//! `[title](target)`, whose image form `![alt](target)` is the same family
+//! with `embed` set (a transclusion of a wikilink is `![[…]]`). An image's
+//! token opens at its `!`. Constructs nest: `[![alt](i.png)](t.md)` is the
+//! outer link and the image, and `![see [here](a.md)](i.png)` is the image and
+//! the link in its alt text, because CommonMark forbids a link inside a link
+//! but not inside an image. Each is a fact of its own, ordered by where its
+//! token starts. Three other forms are recognized by the CommonMark parse and
+//! deliberately produce nothing, because their target lives somewhere other
+//! than the token and emitting a fact with no rewrite story behind it would be
+//! a half-supported family:
 //!
-//! - **Images** (`![alt](x.png)`) are a different element to the parser, and a
-//!   transclusion in this vocabulary is `![[…]]`. The fence is about which
-//!   written form produces a fact rather than about where in the document it
-//!   was written, so a link inside an image's *alt text* —
-//!   `![see [here](a.md)](i.png)` — is a link of an implemented family and **is
-//!   reported**, while the image around it still is not.
+//! - **Reference-style images**, as reference-style links below: `![alt][ref]`,
+//!   `![ref][]` and `![ref]`.
 //! - **Autolinks** (`<https://example.com>`) and bare email autolinks.
 //! - **Reference-style links** — `[text][label]`, collapsed `[label][]`, and
 //!   shortcut `[label]` — whose destination sits in a definition line
@@ -43,7 +45,8 @@
 //!   arrives as ordinary text.
 //!
 //! Producing no link fact is not the same as being unrecognized. Every one of
-//! these forms is opaque to the `#tag` scan — raw HTML and definition lines
+//! these forms, and every link and image that does produce a fact, is opaque
+//! to the `#tag` scan — raw HTML and definition lines
 //! included, wherever a definition line sits, block quotes and list items
 //! included — so a URL fragment written in one is that construct's syntax
 //! rather than a tag, and a `#tag` commented out in `<!-- … -->` stays
@@ -54,7 +57,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
 use crate::frontmatter::extract::BOM;
 use crate::heading::{Heading, SlugCounter};
@@ -107,7 +110,11 @@ impl<'a> BodyScan<'a> {
         let mut containers: Vec<usize> = Vec::new();
         let mut opened: usize = 0;
         let mut active_heading: Option<ActiveHeading> = None;
-        let mut active_link: Option<ActiveLink> = None;
+        // Inline links and images open around the event being read, innermost
+        // last. An image holds a link in its alt text and a link holds an
+        // image, so a single slot would lose the outer one when the inner
+        // opens.
+        let mut active_links: Vec<ActiveLink> = Vec::new();
         let mut active_code_block: Option<usize> = None;
         // Headings arrive in ascending order, so their positions are counted
         // once across the whole walk rather than once per heading. Link spans
@@ -169,10 +176,23 @@ impl<'a> BodyScan<'a> {
             // and the only one needed to find the destination's own bytes
             // afterwards: the closing `]` is the next one past it, however
             // many brackets the text itself carried. Every event between the
-            // link's start and its end is inside that text.
-            if let Some(active) = active_link.as_mut()
-                && !matches!(event, Event::End(TagEnd::Link))
+            // link's start and its end is inside that text, and inside the
+            // text of every link or image enclosing it. The closing event of a
+            // link or image is its own and not part of its text, so it closes
+            // the innermost one before the rest read it.
+            if matches!(event, Event::End(TagEnd::Link | TagEnd::Image))
+                && let Some(active) = active_links.pop()
+                && active.inline
             {
+                markdown_links.push(MarkdownToken {
+                    text_end: active.text_end - active.range.start,
+                    range: active.range,
+                    destination: active.destination,
+                    text: active.text,
+                    embed: active.embed,
+                });
+            }
+            for active in &mut active_links {
                 active.text_end = active.text_end.max(range.end.min(active.range.end));
             }
 
@@ -266,34 +286,25 @@ impl<'a> BodyScan<'a> {
                     }
                 }
                 // Only the inline form is a link family here; every other
-                // `LinkType` is the documented scope fence.
+                // `LinkType` is the documented scope fence. A reference-style
+                // link or image is still pushed, uncounted, so the closing
+                // event that pairs with it pops it rather than an enclosing
+                // inline one.
                 Event::Start(Tag::Link {
-                    link_type: LinkType::Inline,
+                    link_type,
                     dest_url,
                     ..
-                }) => {
-                    active_link = Some(ActiveLink {
-                        text_end: range.start + 1,
-                        range: range.clone(),
-                        destination: dest_url.into_string(),
-                        text: String::new(),
-                    });
-                }
-                Event::End(TagEnd::Link) => {
-                    if let Some(active) = active_link.take() {
-                        markdown_links.push(MarkdownToken {
-                            text_end: active.text_end - active.range.start,
-                            range: active.range,
-                            destination: active.destination,
-                            text: active.text,
-                        });
-                    }
-                }
+                }) => active_links.push(ActiveLink::opening(&range, link_type, dest_url, false)),
+                Event::Start(Tag::Image {
+                    link_type,
+                    dest_url,
+                    ..
+                }) => active_links.push(ActiveLink::opening(&range, link_type, dest_url, true)),
                 Event::Text(text) => {
                     if let Some(active) = active_heading.as_mut() {
                         active.text.push_str(&text);
                     }
-                    if let Some(active) = active_link.as_mut() {
+                    for active in &mut active_links {
                         active.text.push_str(&text);
                     }
                 }
@@ -306,7 +317,7 @@ impl<'a> BodyScan<'a> {
                     if let Some(active) = active_heading.as_mut() {
                         active.text.push(' ');
                     }
-                    if let Some(active) = active_link.as_mut() {
+                    for active in &mut active_links {
                         active.text.push(' ');
                     }
                 }
@@ -314,7 +325,7 @@ impl<'a> BodyScan<'a> {
                     if let Some(active) = active_heading.as_mut() {
                         active.text.push_str(&text);
                     }
-                    if let Some(active) = active_link.as_mut() {
+                    for active in &mut active_links {
                         active.text.push_str(&text);
                     }
                     push_code_range(&mut code_ranges, range);
@@ -329,6 +340,9 @@ impl<'a> BodyScan<'a> {
             }
         }
 
+        // A link or image closes after the ones nested in it, so the tokens
+        // arrive innermost first; the contracted order is by where they start.
+        markdown_links.sort_by_key(|token| token.range.start);
         leaves.sort_by_key(|leaf| leaf.range.start);
         debug_assert!(
             leaves
@@ -480,6 +494,7 @@ impl<'a> BodyScan<'a> {
                     &token.destination,
                     &token.text,
                     token.text_end,
+                    token.embed,
                     cursor.span_at(token.range.start),
                 )
             })
@@ -700,8 +715,9 @@ struct ActiveHeading {
     inside_container: bool,
 }
 
-/// An inline Markdown link being accumulated across the events that make it
-/// up.
+/// An inline Markdown link or image, or a reference-style one standing in the
+/// walk's nesting without producing a fact, being accumulated across the
+/// events that make it up.
 struct ActiveLink {
     range: Range<usize>,
     /// The body offset just past the furthest event seen inside the link,
@@ -709,10 +725,34 @@ struct ActiveLink {
     text_end: usize,
     destination: String,
     text: String,
+    /// Whether it is the inline form, the only one that produces a fact.
+    inline: bool,
+    /// Whether it is an image, whose token opens at the `!`.
+    embed: bool,
 }
 
-/// What the one pass saw of an inline Markdown link, before it is priced into
-/// a fact with a span.
+impl ActiveLink {
+    /// The link or image whose opening event spans `range`.
+    fn opening(
+        range: &Range<usize>,
+        link_type: LinkType,
+        dest_url: CowStr<'_>,
+        embed: bool,
+    ) -> Self {
+        ActiveLink {
+            // Past the `[`, or the `![` of an image.
+            text_end: range.start + 1 + usize::from(embed),
+            range: range.clone(),
+            destination: dest_url.into_string(),
+            text: String::new(),
+            inline: link_type == LinkType::Inline,
+            embed,
+        }
+    }
+}
+
+/// What the one pass saw of an inline Markdown link or image, before it is
+/// priced into a fact with a span.
 #[derive(Debug, Clone)]
 struct MarkdownToken {
     range: Range<usize>,
@@ -720,6 +760,8 @@ struct MarkdownToken {
     text_end: usize,
     destination: String,
     text: String,
+    /// True for an image: its token starts at the `!`.
+    embed: bool,
 }
 
 /// Record an opaque range, dropping an empty one.

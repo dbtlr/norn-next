@@ -251,8 +251,9 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
     let document = Document::parse(&source);
 
     // The universe the corpus produces, written out: every token of an
-    // implemented family, in the contracted order, with the three kinds of code
-    // and the four characterize-only forms contributing nothing.
+    // implemented family, in the contracted order, an image among them, with
+    // the three kinds of code and the characterize-only forms (an autolink and
+    // a reference-style link) contributing nothing.
     let universe = [
         (LinkFamily::Markdown, "./a.md"),
         (LinkFamily::Wikilink, "Wiki"),
@@ -261,6 +262,7 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
         (LinkFamily::Markdown, "./out.md"),
         (LinkFamily::Wikilink, "Inner"),
         (LinkFamily::Wikilink, "Tight"),
+        (LinkFamily::Markdown, "picture.png"),
         (LinkFamily::Markdown, "note#draft.md"),
         (LinkFamily::Markdown, "a"),
         (LinkFamily::Wikilink, "Proto"),
@@ -588,35 +590,111 @@ fn an_escaped_token_cannot_claim_a_later_literal_tokens_bytes() {
 
 // ── The scope fence, characterized ───────────────────────────────────────
 
-/// An image is a different element to the parser, and a transclusion in this
-/// vocabulary is `![[…]]`. Recognized, and no link fact.
+/// An inline image is a Markdown link of the family that embeds: the same
+/// fact shape as `[t](x)`, `embed` set, and the token's raw text opening at the
+/// `!` so a write over the token keeps it.
 #[test]
-fn an_image_is_recognized_and_produces_no_link() {
-    assert!(markdown_links("![alt](picture.png)\n").is_empty());
-    assert!(BodyScan::new("![alt](picture.png)\n").links().is_empty());
+fn an_inline_image_is_an_embedding_markdown_link() {
+    let link = only("see ![Alt text](./pics/note.md#Part) here\n");
+    assert_eq!(link.family, LinkFamily::Markdown);
+    assert!(link.embed);
+    assert_eq!(link.raw, "![Alt text](./pics/note.md#Part)");
+    assert_eq!(link.target, "./pics/note.md");
+    assert_eq!(link.anchor.as_deref(), Some("Part"));
+    assert_eq!(link.title.as_deref(), Some("Alt text"));
+    assert_eq!(link.protocol, None);
+    assert_eq!(link.resolution(), Resolution::Form);
+    assert_eq!(link.span.expect("a placed link").column, 5);
 }
 
-/// A link written inside an image's alt text is a link, and it is reported. It
-/// is a construct of an implemented family with its own target and its own
-/// bytes, and the image around it is still not a link — the fence is about
-/// which written form produces a fact, not about where in the document it was
-/// written.
+/// A plain Markdown link never embeds, and an image with an empty alt text
+/// and one with an angle-bracketed destination are still images.
 #[test]
-fn a_link_inside_an_images_alt_text_is_still_a_link() {
-    let links = BodyScan::new("![see [here](a.md)](i.png)\n").links();
-    assert_eq!(targets(&links), ["a.md"]);
-    assert_eq!(links[0].raw, "[here](a.md)");
-    assert_eq!(links[0].title.as_deref(), Some("here"));
+fn only_an_image_sets_embed_among_markdown_links() {
+    let links = markdown_links("[a](x.md) ![](y.md) ![b](<z w.md>)\n");
+    assert_eq!(targets(&links), ["x.md", "y.md", "z w.md"]);
+    assert_eq!(
+        links.iter().map(|link| link.embed).collect::<Vec<_>>(),
+        [false, true, true]
+    );
+    assert_eq!(links[1].raw, "![](y.md)");
+    assert_eq!(links[1].title.as_deref(), Some(""));
+    assert_eq!(links[2].raw, "![b](<z w.md>)");
 }
 
-/// An image nested inside a link is still not a link of its own, and its alt
-/// text flattens into the enclosing link's title — the same flattening every
-/// other inline element in bracket text gets.
+/// The image's whole-file span is reported through the document, past the
+/// frontmatter, and indexes the token's bytes including the `!`.
 #[test]
-fn an_image_inside_a_link_flattens_into_that_links_title() {
-    let link = only("[![alt](i.png)](./target.md)\n");
-    assert_eq!(link.target, "./target.md");
-    assert_eq!(link.title.as_deref(), Some("alt"));
+fn a_documents_image_link_indexes_its_bytes_in_the_source() {
+    let source = "---\ntitle: Note\n---\n\nLead ![d](../img/pic.png) end\n";
+    let links = Document::parse(source).links();
+    assert_eq!(links.len(), 1);
+    let range = links[0].range().expect("a placed link");
+    assert_eq!(&source[range], "![d](../img/pic.png)");
+    assert_eq!(links[0].span.expect("a placed link").line, 5);
+    assert!(links[0].embed);
+}
+
+/// Reference-style images keep their destination in a definition line, so
+/// like reference-style links they produce no link fact.
+#[test]
+fn a_reference_style_image_produces_no_link() {
+    let body = "![alt][ref] and ![ref][] and ![ref]\n\n[ref]: picture.png\n";
+    assert!(BodyScan::new(body).links().is_empty());
+}
+
+/// Nested constructs are each their own link. An image written inside a link's
+/// text yields the outer link and the image, in the order their tokens start,
+/// and the image's alt text still flattens into the outer link's title.
+#[test]
+fn an_image_inside_a_link_is_a_link_of_its_own() {
+    let body = "[![alt](i.png)](./target.md)\n";
+    let links = BodyScan::new(body).links();
+    assert_eq!(targets(&links), ["./target.md", "i.png"]);
+    assert_eq!(links[0].raw, "[![alt](i.png)](./target.md)");
+    assert_eq!(links[0].title.as_deref(), Some("alt"));
+    assert!(!links[0].embed);
+    assert_eq!(links[1].raw, "![alt](i.png)");
+    assert_eq!(links[1].title.as_deref(), Some("alt"));
+    assert!(links[1].embed);
+    for link in &links {
+        assert_eq!(&body[link.range().expect("a placed link")], link.raw);
+    }
+}
+
+/// The rule for a link written inside an image's alt text is the parser's:
+/// CommonMark forbids a link inside a link but lets an image hold one, so the
+/// image and the link inside it are both facts. The image's title is the alt
+/// text flattened, the inner link's its own text, and the destination of each
+/// is read from its own bytes.
+#[test]
+fn a_link_inside_an_images_alt_text_is_a_link_beside_the_image() {
+    let body = "![see [here](a.md)](i.png)\n";
+    let links = BodyScan::new(body).links();
+    assert_eq!(targets(&links), ["i.png", "a.md"]);
+    assert_eq!(links[0].raw, "![see [here](a.md)](i.png)");
+    assert_eq!(links[0].title.as_deref(), Some("see here"));
+    assert!(links[0].embed);
+    assert_eq!(links[1].raw, "[here](a.md)");
+    assert_eq!(links[1].title.as_deref(), Some("here"));
+    assert!(!links[1].embed);
+    for link in &links {
+        let range = link.range().expect("a placed link");
+        assert_eq!(&body[range.clone()], link.raw);
+        let stem = link.stem_range.clone().expect("a nameable stem");
+        assert_eq!(&link.raw[stem], link.target);
+    }
+}
+
+/// A reference-style link or image inside an inline link's text closes
+/// without disturbing the enclosing link: the destination is still the
+/// enclosing token's own.
+#[test]
+fn a_reference_construct_inside_an_image_leaves_the_image_whole() {
+    let body = "![a [b][ref] ![c][ref]](i.png)\n\n[ref]: other.md\n";
+    let links = BodyScan::new(body).links();
+    assert_eq!(targets(&links), ["i.png"]);
+    assert_eq!(links[0].raw, "![a [b][ref] ![c][ref]](i.png)");
 }
 
 /// An autolink is a URL written as its own text. Recognized by the parse, and

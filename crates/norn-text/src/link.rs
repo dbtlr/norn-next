@@ -64,12 +64,14 @@ pub enum LinkFamily {
     /// ([`Resolution::Form`]), and its text is taken as written, never
     /// percent-decoded.
     Wikilink,
-    /// `[title](target)`, an inline Markdown link. A protocol-free destination
-    /// is read by its form ([`Resolution::Form`]), as a wikilink's target is,
-    /// once the resolver has percent-decoded each of its segments.
+    /// `[title](target)`, an inline Markdown link, or its image form
+    /// `![alt](target)`, which is the same family with [`Link::embed`] set. A
+    /// protocol-free destination is read by its form ([`Resolution::Form`]),
+    /// as a wikilink's target is, once the resolver has percent-decoded each
+    /// of its segments.
     ///
-    /// Reference-style links, autolinks and images are not this family and
-    /// produce no link fact — see [`crate::BodyScan`].
+    /// Reference-style links and images, and autolinks, are not this family
+    /// and produce no link fact — see [`crate::BodyScan`].
     Markdown,
 }
 
@@ -120,10 +122,12 @@ pub struct Link {
     /// Which grammar recognized this token.
     pub family: LinkFamily,
     /// The exact matched text: for a wikilink the delimiters and any leading
-    /// `!`, for a Markdown link `[` through the closing `)`.
+    /// `!`, for a Markdown link `[` through the closing `)`, and for a
+    /// Markdown image `![` through the closing `)`.
     pub raw: String,
-    /// True for a wikilink embed (`![[…]]`). Always false for a Markdown
-    /// link: `![alt](x)` is an image, and images are not links here.
+    /// True for a wikilink embed (`![[…]]`) and for a Markdown image
+    /// (`![alt](x)`), whose token opens at the `!`. False for a plain Markdown
+    /// link.
     pub embed: bool,
     /// The `protocol://` prefix, sentinel excluded, when the target opens with
     /// a recognized one. `None` means written-without-a-protocol and is a
@@ -331,6 +335,7 @@ pub(crate) fn markdown_link(
     destination: &str,
     text: &str,
     text_end: usize,
+    embed: bool,
     span: SourceSpan,
 ) -> Link {
     let written = destination_span(raw, text_end);
@@ -363,7 +368,7 @@ pub(crate) fn markdown_link(
     Link {
         family: LinkFamily::Markdown,
         raw: raw.to_string(),
-        embed: false,
+        embed,
         protocol,
         stem_range: stem_start.map(|start| start..start + target.len()),
         target,

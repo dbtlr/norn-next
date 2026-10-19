@@ -550,16 +550,32 @@ fn an_escaped_destination_is_skipped_as_not_rewritable() {
     assert_eq!(reasons(&out), [RewriteSkip::LinkNotRewritable]);
 }
 
-/// Only the inline form is a Markdown link here. An image, an autolink, and a
+/// Only the inline forms are Markdown links here. An autolink and a
 /// reference-style link with its definition produce no link fact, so the index
-/// holds none of them and a rewrite leaves them as written.
+/// holds none of them and a rewrite leaves them as written; an inline image is
+/// a link and is respelled (below).
 #[test]
 fn a_form_that_produces_no_link_fact_is_never_rewritten() {
-    let source = "![alt](old.md) <old.md> [t][ref] [ref]\n\n[ref]: old.md\n";
+    let source = "<old.md> [t][ref] [ref] ![alt][ref]\n\n[ref]: old.md\n";
     let out = rewrite(source, LinkFamily::Markdown, "old.md", "new.md");
     assert_eq!(out.text, source);
     assert_eq!(out.rewritten, 0);
     assert!(out.skipped.is_empty());
+}
+
+/// An inline image is respelled over its destination alone: the `!`, the
+/// alt text, the angle brackets and the fragment stand as written, and an
+/// image nested in a link is respelled beside the link around it.
+#[test]
+fn an_inline_image_is_respelled_keeping_its_bang_and_alt_text() {
+    let source = "![a *b*](old.md#Part) and ![](<old.md>) and [![x](old.md)](old.md)\n";
+    let out = rewrite(source, LinkFamily::Markdown, "old.md", "../new.md");
+    assert_eq!(
+        out.text,
+        "![a *b*](../new.md#Part) and ![](<../new.md>) and [![x](../new.md)](../new.md)\n"
+    );
+    assert_eq!(out.rewritten, 4);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
 }
 
 // ── Exact, and proven by reading it back ─────────────────────────────────
