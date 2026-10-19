@@ -543,6 +543,7 @@ dependencies = [
  "norn-text",
  "norn-wire",
  "serde_json",
+ "unicode-normalization",
 ]
 
 [[package]]

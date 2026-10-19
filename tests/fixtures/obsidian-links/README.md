@@ -48,3 +48,5 @@ Record these limitations and repeat affected cases on a suitable filesystem befo
 This is a manual external-application probe, not an automated assertion of current Norn behavior.
 The iOS recording provides exploratory evidence for the resolution ADR.
 Cross-platform behavior and unobserved link-writing combinations remain outside its verified coverage.
+
+The parity corpus, `crates/norn-host/tests/obsidian_parity.rs`, asserts norn's answer for each recorded case against an authored expectation that agrees with these observations.
