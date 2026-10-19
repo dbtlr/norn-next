@@ -321,6 +321,40 @@ fn an_editor_atomic_save_reports_the_destination_path() {
     );
 }
 
+/// **A link inside the vault is an entry, not a way out of it.** The vault
+/// walk never follows a link, so what a linked folder outside the vault holds
+/// is no part of the vault, and a watcher that followed the link would install
+/// coverage across whatever tree it points at.
+///
+/// The closing negative is bounded by a later change, not by a clock: a
+/// backend delivers in order, so once the vault's own later write is reported,
+/// a report of the earlier write behind the link would already have arrived.
+#[test]
+fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
+    let scratch = Scratch::new("linked-folder");
+    let outside = scratch.tree.join("outside");
+    std::fs::create_dir_all(&outside).expect("a folder outside the vault");
+    std::os::unix::fs::symlink(&outside, scratch.vault().join("linked"))
+        .expect("an in-vault link to it");
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
+
+    std::fs::write(outside.join("behind.md"), b"behind\n").expect("a write behind the link");
+    std::fs::write(scratch.vault().join("after.md"), b"after\n").expect("a later vault write");
+
+    collector.wait_for("the later vault write to be reported", |seen| {
+        if seen.reported(Path::new("after.md")) {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
+    assert!(
+        !collector.seen.reported(Path::new("linked/behind.md")),
+        "a write behind an in-vault link was reported: {}",
+        collector.seen.state()
+    );
+}
+
 #[test]
 fn a_sync_catch_up_covers_every_path_across_settled_batches() {
     let scratch = Scratch::new("sync-catch-up");

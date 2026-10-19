@@ -18,24 +18,39 @@ fn tick(
     clock: &Path,
     number: u64,
 ) -> Vec<PathBuf> {
+    tick_reports(watcher, events, clock, number)
+        .into_iter()
+        .flat_map(|report| report.unwrap().paths)
+        .collect()
+}
+
+/// Every report one manual tick delivers, errors included, along with any
+/// report still queued from before it.
+fn tick_reports(
+    watcher: &PollWatcher,
+    events: &Receiver<notify::Result<Event>>,
+    clock: &Path,
+    number: u64,
+) -> Vec<notify::Result<Event>> {
     File::open(clock)
         .unwrap()
         .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000 + number))
         .unwrap();
     watcher.poll().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut paths = Vec::new();
+    let mut reports = Vec::new();
     loop {
-        let event = events
+        let report = events
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("manual tick completes within five seconds")
-            .unwrap();
-        let completed = event.paths.iter().any(|path| path == clock);
-        paths.extend(event.paths);
+            .expect("manual tick completes within five seconds");
+        let completed = report
+            .as_ref()
+            .is_ok_and(|event| event.paths.iter().any(|path| path == clock));
+        reports.push(report);
         if completed {
             let _ = watcher.content_reads();
-            paths.extend(events.try_iter().flat_map(|event| event.unwrap().paths));
-            return paths;
+            reports.extend(events.try_iter());
+            return reports;
         }
     }
 }
@@ -147,6 +162,58 @@ fn unchanged_poll_ticks_read_no_content_and_stat_changes_are_reported() {
         "new inode"
     );
     assert_eq!(watcher.content_reads() - before, 4);
+}
+
+/// **An entry the scan lists but cannot stat is gone, not a failure.** A
+/// scan lists a directory and then reads each entry's metadata, so a file an
+/// editor deletes between the two, or a symbolic link whose target does not
+/// exist, names nothing by the time it is read. Either is reported as an
+/// error, and an error from a watcher is terminal to its consumer, so one
+/// temporary file or one dangling link would end coverage for good. The
+/// entry is skipped instead, and a tick that no longer finds a path it held
+/// reports the removal.
+///
+/// The dangling link is read with links followed, because that makes the
+/// scan meet a missing entry on every tick rather than only inside a race.
+///
+/// **The watched root itself is not an entry.** A root that is gone is the
+/// loss of the whole watch, and it is still reported as an error.
+#[test]
+fn an_entry_gone_before_its_stat_is_skipped_but_a_missing_root_is_reported() {
+    let scratch = Scratch::new("norn-fs-polling-vanished");
+    let vault = scratch.join("vault");
+    let clock = scratch.join("clock");
+    fs::create_dir(&vault).unwrap();
+    fs::create_dir(&clock).unwrap();
+    fs::write(vault.join("note.md"), b"note").unwrap();
+    std::os::unix::fs::symlink(scratch.join("missing"), vault.join("dangling")).unwrap();
+    let (tx, events) = mpsc::channel();
+    let mut watcher = PollWatcher::new(
+        tx,
+        Config::default()
+            .with_manual_polling()
+            .with_compare_contents(true)
+            .with_follow_symlinks(true),
+    )
+    .unwrap();
+    watcher.watch(&vault, RecursiveMode::Recursive).unwrap();
+    watcher.watch(&clock, RecursiveMode::NonRecursive).unwrap();
+
+    for number in 0..2 {
+        let errors: Vec<_> = tick_reports(&watcher, &events, &clock, number)
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        assert!(errors.is_empty(), "tick {number} reported {errors:?}");
+    }
+
+    fs::remove_dir_all(&vault).unwrap();
+    assert!(
+        tick_reports(&watcher, &events, &clock, 2)
+            .iter()
+            .any(Result::is_err),
+        "a watched root that is gone is reported as an error"
+    );
 }
 
 /// The one stat field a whole-second case changes.
