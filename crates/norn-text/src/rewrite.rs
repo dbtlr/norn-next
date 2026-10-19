@@ -1291,7 +1291,8 @@ impl<'t> Respelling<'t> {
     /// reads as its token, except where it is the bracket text of a Markdown
     /// link beginning at the same byte — `[[a]](b)`, `shares_brackets` — and
     /// the two share the outer brackets: the text holds the token inside
-    /// them, `[a]`.
+    /// them, `[a]`. An embed shares them the same way with an image
+    /// beginning at its `!` — `![[a]](b)` — and reads as `[a]` too.
     fn read_as(link: &'t Link, new: &'t str, shares_brackets: bool) -> Option<(&'t str, &'t str)> {
         if link.family == LinkFamily::Markdown {
             return None;
@@ -1299,8 +1300,12 @@ impl<'t> Respelling<'t> {
         if !shares_brackets {
             return Some((&link.raw, new));
         }
+        // The outer brackets the two share are the Markdown construct's own:
+        // an embed's `!` precedes them (the image `![[a]](b)` begins at the
+        // embed's `!`), so it is stripped with the bracket it opens.
         fn inside(token: &str) -> Option<&str> {
-            token.get(1..token.len().checked_sub(1)?)
+            let opened = token.strip_prefix('!').unwrap_or(token);
+            opened.get(1..opened.len().checked_sub(1)?)
         }
         Some((inside(&link.raw)?, inside(new)?))
     }

@@ -1107,6 +1107,42 @@ fn a_batch_respells_both_links_sharing_brackets() {
     assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
 }
 
+/// `![[a]](b.md)` is a wikilink embed and a Markdown image sharing the bytes
+/// from the `!` on: the image's alt text is `[a]`, the embed's token inside the
+/// outer brackets. Respelling the embed alone, with or without an alias,
+/// succeeds and leaves the image's destination as it was.
+#[test]
+fn a_wikilink_embed_before_a_parenthesised_destination_is_respelled() {
+    for (source, expected) in [
+        ("![[a]](b.md)\n", "![[z]](b.md)\n"),
+        ("![[a|al]](b.md)\n", "![[z|al]](b.md)\n"),
+        (
+            "![[a#H|al]](b.md) and [[a]](b.md)\n",
+            "![[z#H|al]](b.md) and [[z]](b.md)\n",
+        ),
+    ] {
+        let out = rewrite(source, LinkFamily::Wikilink, "a", "z");
+        assert_eq!(out.text, expected, "{source:?}");
+        assert!(out.skipped.is_empty(), "{source:?}: {:?}", reasons(&out));
+    }
+}
+
+/// `![[a]](a.md)`: both facts name the moved target, and their stems do not
+/// touch, so one batch respells both without overlapping splices.
+#[test]
+fn a_batch_respells_an_embed_and_the_image_sharing_its_bytes() {
+    let out = batch(
+        "![[a]](a.md)\n",
+        &[
+            (LinkFamily::Wikilink, "a", "z"),
+            (LinkFamily::Markdown, "a.md", "z.md"),
+        ],
+    );
+    assert_eq!(out.text, "![[z]](z.md)\n");
+    assert_eq!(out.rewritten, 2);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
 /// `[t]([[b]])` is a Markdown link whose destination holds a wikilink, so the
 /// wikilink's stem lies inside the Markdown one's. Respelling the destination
 /// rewrites the wikilink's bytes and respelling the wikilink rewrites the

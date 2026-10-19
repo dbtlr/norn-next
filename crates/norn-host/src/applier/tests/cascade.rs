@@ -307,6 +307,54 @@ fn a_moved_holders_relative_image_reaches_the_same_file() {
     );
 }
 
+/// **A wikilink embed written before a parenthesised destination is respelled
+/// like any other**: `![[a]](b.md)` is the embed and a Markdown image sharing
+/// its bytes from the `!`, and a move of `a.md` respells the embed, leaves the
+/// image's own destination alone and advises nothing unrepresentable.
+#[test]
+fn a_wikilink_embed_before_a_parenthesised_destination_follows_the_move() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("b.md", "B\n"),
+        ("h.md", "![[a]](b.md) and [[a]](b.md) and ![[a|al]](b.md)\n"),
+    ]);
+    let resolution = fixture.resolution(vec![moving("a.md", "x/z.md")]);
+    assert_eq!(
+        resolution.plan.operations[0].cascade,
+        [wikilink("h.md", "a", "z")]
+    );
+    assert!(
+        resolution.forecast.links.is_empty(),
+        "{:?}",
+        resolution.forecast.links
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("![[z]](b.md) and [[z]](b.md) and ![[z|al]](b.md)\n")
+    );
+}
+
+/// **An embed and the image sharing its bytes both naming the moved document
+/// are both respelled**: their stems do not touch, so the two rewrites of
+/// `![[a]](a.md)` splice without overlap and neither is skipped.
+#[test]
+fn an_embed_and_the_image_sharing_its_bytes_both_follow_the_move() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "![[a]](a.md)\n")]);
+    let resolution = fixture.resolution(vec![moving("a.md", "x/z.md")]);
+    assert_eq!(
+        resolution.plan.operations[0].cascade,
+        [markdown("h.md", "a.md", "z.md"), wikilink("h.md", "a", "z")]
+    );
+    assert!(
+        resolution.forecast.links.is_empty(),
+        "{:?}",
+        resolution.forecast.links
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("![[z]](z.md)\n"));
+}
+
 /// **An ambiguous backlink is skipped as ambiguous**: `[[a]]` names two
 /// documents, one of them moved, so which it names is not known; it is left
 /// as written, and the forecast says why in place of saying it is
