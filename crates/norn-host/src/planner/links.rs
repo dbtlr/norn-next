@@ -582,16 +582,22 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                 )
             })
             .flatten();
-        let respelled = |decider| {
-            respells(
-                decider,
-                &change.before,
-                &change.after,
-                lineage,
-                &rewritten_to,
-                &indexed,
-                normalizer,
-            )
+        // Whether the plan's after-state respells the link its decider
+        // decides, probed at most once: `fulfilled` and `left_behind` both
+        // ask it.
+        let mut respelled_once: Option<bool> = None;
+        let mut respelled = |decider| {
+            *respelled_once.get_or_insert_with(|| {
+                respells(
+                    decider,
+                    &change.before,
+                    &change.after,
+                    lineage,
+                    &rewritten_to,
+                    &indexed,
+                    normalizer,
+                )
+            })
         };
         // A link a delete rewriting its links, or a wikilink rewrite, would
         // respell and already names what that operation names: the plan
@@ -630,7 +636,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             LinkAddress::Relative(_)
         );
         let relative_left = names_another && holder_moved && relative;
-        let left_behind = relative_left || decided.is_some_and(respelled);
+        let left_behind = relative_left || decided.is_some_and(&mut respelled);
         // Links held under one key share its places, so the places are read
         // once per key, however many documents the key names and however
         // the links of several keys interleave.
@@ -1085,9 +1091,11 @@ pub(crate) fn names_another(
     };
     match after {
         Resolves::One { path } => {
-            let now = identity(path);
+            let Some(now) = identity(path) else {
+                return false;
+            };
             let followed = lineage.carried_to(&named).map(|(to, _)| to);
-            now.as_ref() != Some(&named) && now.as_ref() != followed
+            now != named && Some(&now) != followed
         }
         Resolves::None {} | Resolves::Several {} => true,
     }
