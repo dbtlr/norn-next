@@ -18,7 +18,8 @@
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
 /// - `counter-lane case:` — the per-PR `counter gates` job's `--ignored` step,
-///   and the macOS job's `counter_gate` step.
+///   and the macOS folding-root counter job's `folding_cost` and
+///   `counter_gate` steps.
 /// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
 ///   step.
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.

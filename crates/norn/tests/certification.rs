@@ -1274,16 +1274,20 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
 }
 
 /// **The per-PR lane's job shape.** The induced-failure recovery suite runs in
-/// a job of its own beside the build job, each job's timeout is a loose runaway
-/// guard, and the macOS job runs the counter bars on its folding root.
+/// a job of its own beside the build job, the macOS counter bars on a folding
+/// root run in a job of their own beside the macOS platform job, and each
+/// job's timeout is a loose runaway guard.
 ///
-/// The split is what keeps the longest job short; the pairing below keeps it
-/// from drifting back, and keeps the suite from being dropped in the move.
-/// Neither job, and no step of the macOS job, may carry `needs:`, `if:` or
-/// `continue-on-error:`: each would serialize the job behind the build, skip
-/// it, or let it fail without failing the PR.
+/// The splits are what keep the longest jobs short; the pairings below keep
+/// them from drifting back, and keep the suites from being dropped in the move.
+/// The Linux counter gates job runs the same two lane suites on a distinct
+/// root, `folding_cost` there being the control the macOS bar is read against,
+/// so it is held to both steps as well.
+/// None of the split jobs, nor any of their steps, may carry `needs:`, `if:` or
+/// `continue-on-error:`: each would serialize the job behind another, skip it,
+/// or let it fail without failing the PR.
 #[test]
-fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_macos() {
+fn the_per_pr_lane_splits_induced_failure_recovery_and_the_macos_counter_bars() {
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
         .expect("reading the per-PR lane");
     let recovery_run = "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure";
@@ -1304,7 +1308,12 @@ fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_
 
     let recovery = ci_job(&gate, "induced-failure");
     let platform = ci_job(&gate, "platform");
-    for (job, lines) in [("induced-failure", &recovery), ("platform", &platform)] {
+    let folding = ci_job(&gate, "folding-counters");
+    for (job, lines) in [
+        ("induced-failure", &recovery),
+        ("platform", &platform),
+        ("folding-counters", &folding),
+    ] {
         for line in lines {
             let key = line.trim_start_matches("- ");
             assert!(
@@ -1328,18 +1337,54 @@ fn the_per_pr_lane_splits_induced_failure_recovery_and_runs_the_counter_bars_on_
         );
     }
 
+    for required in [
+        "name: determinism and filesystem (macOS ARM64)",
+        "runs-on: macos-15",
+        "timeout-minutes: 30",
+        "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
+    ] {
+        assert!(
+            platform.contains(&required.to_string()),
+            "the macOS platform job lacks `{required}`: {platform:?}"
+        );
+    }
     assert!(
-        platform.contains(&"timeout-minutes: 25".to_string()),
-        "the macOS job's timeout: {platform:?}"
+        !platform.iter().any(|line| line.contains("lane-suite.sh")),
+        "the macOS platform job runs a counter-lane step, which has a job of its own: {platform:?}"
     );
-    assert!(
-        platform.iter().any(|line| line
-            .contains("lane-suite.sh norn-host counter_gate --nocapture --test-threads=1")),
-        "the macOS job runs no counter_gate step: {platform:?}"
-    );
-    assert!(
-        platform.contains(&"LANE_FEATURES: induced-failure".to_string()),
-        "the macOS counter step names no feature: {platform:?}"
+
+    for required in [
+        "name: counter bars on a folding root (macOS ARM64)",
+        "runs-on: macos-15",
+        "timeout-minutes: 30",
+        "run: test \"$(uname -m)\" = arm64",
+        "- uses: Swatinem/rust-cache@v2",
+        "LANE_FEATURES: induced-failure",
+    ] {
+        assert!(
+            folding.contains(&required.to_string()),
+            "the macOS folding-root counter job lacks `{required}`: {folding:?}"
+        );
+    }
+    let gates = ci_job(&gate, "gates");
+    for suite in ["folding_cost", "counter_gate"] {
+        let step = format!("lane-suite.sh norn-host {suite} --nocapture --test-threads=1");
+        assert!(
+            folding.iter().any(|line| line.contains(&step)),
+            "the macOS folding-root counter job runs no `{suite}` step: {folding:?}"
+        );
+        assert!(
+            gates.iter().any(|line| line.contains(&step)),
+            "the Linux counter gates job runs no `{suite}` step: {gates:?}"
+        );
+    }
+    assert_eq!(
+        folding
+            .iter()
+            .filter(|line| line.starts_with("LANE_FEATURES:"))
+            .count(),
+        2,
+        "each macOS counter step names its feature: {folding:?}"
     );
 }
 
