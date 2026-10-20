@@ -899,7 +899,7 @@ impl<'a> Cascade<'a> {
                             written: true,
                         });
                     }
-                    originals.push((key.clone(), named.clone(), named_before.contains_key(&key)));
+                    originals.push((key.clone(), named.clone()));
                 }
                 rewrites.entry(key).or_insert((*owner, rewrite));
             }
@@ -917,16 +917,18 @@ impl<'a> Cascade<'a> {
                 let Some(originals) = expected.get(&entry(&holder, &change.link)) else {
                     return;
                 };
-                for (key, target, document) in originals {
+                for (key, target) in originals {
                     let reaches = match &change.after {
                         Resolves::One { path } => {
                             norn_store::comparison_key(path.as_str())
                                 == norn_store::comparison_key(target)
                         }
+                        // A file no document holds after the plan — an
+                        // attachment's, or a deleted document's left
+                        // broken — is reached by the path the link spells.
                         Resolves::None {} => {
-                            !document
-                                && norn_store::spelled_path(&change.link, &change.holder).as_deref()
-                                    == Some(target.as_str())
+                            norn_store::spelled_path(&change.link, &change.holder).as_deref()
+                                == Some(target.as_str())
                         }
                         Resolves::Several {} => false,
                     };

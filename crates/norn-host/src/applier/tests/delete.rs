@@ -861,8 +861,9 @@ fn forbidding_at(fixture: &Fixture, operations: Vec<Operation>, position: usize)
 /// **A link a cascade respells is judged by the text it had, so one whose
 /// text named the deleted document stays its backlink however it is
 /// respelled.** `v/h.md`'s `[y](./a.md)` named `v/a.md`, and moving `v/h.md` to
-/// `w/h.md` keeps it as written when the target is absent, or respells it
-/// `../v/a.md` when `v/b.md` refills the deleted document's path. A plain delete of `v/a.md` is left unresolved for that one link;
+/// `w/h.md` respells it `../v/a.md` from there — alone, and beside `[[b]]`
+/// respelled `[[a]]` toward `v/b.md` moving into the deleted document's
+/// path. A plain delete of `v/a.md` is left unresolved for that one link;
 /// a plan leaving it broken, sent back with its delete forbidding it, is
 /// refused by the applier as invalid, and nothing is written.
 #[test]
@@ -897,14 +898,14 @@ fn a_backlink_a_moved_holder_respells_still_refuses_a_plain_delete() {
         let mut breaking_first = operations.clone();
         breaking_first[0] = breaking("v/a.md");
         let plan = forbidding_at(&fixture, breaking_first, 0);
-        let respelled = plan
-            .operations
-            .iter()
-            .flat_map(|operation| &operation.cascade)
-            .any(|rewrite| *rewrite == markdown("w/h.md", "./a.md", "../v/a.md"));
-        // An absent document cannot pass read-back. A refilled path can,
-        // while the original link still counts against the plain delete.
-        assert_eq!(respelled, operations.len() == 3, "{:?}", plan.operations);
+        assert!(
+            plan.operations
+                .iter()
+                .flat_map(|operation| &operation.cascade)
+                .any(|rewrite| *rewrite == markdown("w/h.md", "./a.md", "../v/a.md")),
+            "{:?}",
+            plan.operations
+        );
         assert_eq!(
             fixture.refuses_disagreeing(plan),
             [path("v/a.md")],
