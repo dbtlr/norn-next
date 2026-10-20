@@ -27,8 +27,8 @@
 //! too: the [`VaultAddress`] a request names its vault by — a registered
 //! [`VaultName`] — the [`Verb`] a request asks for with the [`Addressing`] it
 //! carries a vault by and the [`RequestScope`] that addressing is answered
-//! from, the
-//! [`Predicate`] list a read filters by, whose path part is a glob read by the
+//! from, the [`Predicate`] list a read filters by, whose path part is a glob
+//! read by the
 //! [`Pattern`] grammar a schema's path and tag sets are written in too, and
 //! whose tag part compares under the one tag fold, [`fold_tag`], and
 //! the [`ResolutionTarget`] one

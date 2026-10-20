@@ -1264,8 +1264,7 @@ fn settled(
 /// Coverage ends first and the maintainer lock last: a lock released while a
 /// watch over the vault still stands is a window another process takes
 /// maintainership in while this one is still reporting facts about the tree.
-/// The store is closed between them, which is where a throwaway store's file
-/// goes.
+/// The store is closed between them.
 ///
 /// This is the spelling that reports the store's own teardown. The order it
 /// runs in is [`ProductionAttachment`]'s field order too, so an attachment that
