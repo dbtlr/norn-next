@@ -6,10 +6,10 @@
 //! publishes, its retained facts, the store reading its last leg recorded and
 //! its engine's report, all one instant — and then reads what lies outside
 //! the host: the two authored control files of an entry serving active
-//! fingerprints, judged against the fingerprints taken in that instant, and
-//! the vault's `.gitignore`, with whether one stands along the fallback home,
+//! fingerprints, judged against the fingerprints taken in that instant, and,
 //! where the entry's last attachment staged shadows in the vault-local
-//! fallback. It holds no reader, records no demand lease,
+//! fallback, norn's own self-ignore there, the vault's `.gitignore`, and
+//! whether one stands along the fallback home. It holds no reader, records no demand lease,
 //! schedules nothing, attaches nothing, reads nothing of the derived store,
 //! and carries no answer reading. So it answers for an unattached entry as
 //! readily as for a ready one, and an entry about to be detached for idleness
@@ -46,10 +46,11 @@ use crate::semantic::{DeliveredEngine, engine_status};
 /// an [`Advisory`], as the entry keeps it past that attachment's release.
 ///
 /// **The shadow fallback is kept as its placement alone.** Whether the vault
-/// ignores it is a fact about the vault's `.gitignore` as it is now, so it is
-/// read when `vault status` or `doctor` reports the advisory: a vault whose
-/// `.gitignore` is corrected reports the fallback as ignored at the next
-/// status, with no attach in between.
+/// ignores it is a fact about norn's own self-ignore in the fallback root and
+/// the vault's `.gitignore` as they are now, so it is read when `vault status`
+/// or `doctor` reports the advisory: a self-ignore deleted or altered after the
+/// attach warns at the next status, and a vault whose `.gitignore` is corrected
+/// reports the fallback as ignored there, with no attach in between.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttachmentAdvisory {
     /// The attachment stages its shadows in the vault-local fallback home at
@@ -70,8 +71,10 @@ pub enum AttachmentAdvisory {
 ///
 /// A fallback in use is reported with whether the vault ignores the home it
 /// names, read here from the vault at `root` by [`norn_fs::fallback_ignored`]'s
-/// rule: the root `.gitignore` and whether a `.gitignore` stands in any
-/// directory along that home. A root `.gitignore` that cannot be
+/// rule: norn's own self-ignore in the fallback root, which answers ignored
+/// while it stands unaltered, and otherwise the root `.gitignore` and whether a
+/// `.gitignore` stands in any directory along that home. A root `.gitignore`
+/// that cannot be
 /// read is reported as not ignoring the fallback: the question went
 /// unanswered, and the answer that warns is the safe one. The match carries no
 /// wildcard, so an advisory kept without a rendering here does not compile.

@@ -11610,6 +11610,60 @@ mod tests {
         );
     }
 
+    /// **Making the fallback home keeps it out of git from inside norn's own
+    /// directory, so `doctor` stays quiet over a vault with no `.gitignore`
+    /// and none is written**: the self-ignore the home's making writes covers
+    /// the fallback. Deleting it or altering it makes `doctor` name the vault
+    /// for the fallback again, and making the home again over a deleted one
+    /// writes it back and quiets the warning.
+    #[test]
+    fn the_fallback_homes_own_self_ignore_quiets_doctor_until_it_is_deleted_or_altered() {
+        let scratch = temp_base("status-fallback-self-ignore");
+        let name = VaultName::new("notes").unwrap();
+        let root = scratch.root().join("notes");
+        let ops = Arc::new(FakeOps::default());
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[(&name, &root)]), 2);
+        let key = norn_fs::MaintainershipKey::new("norn-dev", "notes", "0123").unwrap();
+        let make_home = || {
+            norn_fs::ShadowHome::resolve_stating(&root, &scratch.root().join("tmp"), &key, false)
+                .unwrap()
+        };
+        let home = make_home();
+        assert_eq!(home.placement(), norn_fs::Placement::VaultFallback);
+        let home = home
+            .directory()
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        *ops.advisories.lock().unwrap() =
+            vec![AttachmentAdvisory::TmpFallbackInUse { home: home.clone() }];
+        let _lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let fallback = |gitignored| norn_wire::Advisory::tmp_fallback_in_use(&home, gitignored);
+        let warned = [norn_wire::Attention::advisory(
+            name.clone(),
+            fallback(false),
+        )];
+        let self_ignore = root.join(".norn/tmp/.gitignore");
+
+        assert_eq!(status_of(&host, &name).advisories, [fallback(true)]);
+        assert!(doctored(&host).roll_up.attention().is_empty());
+        assert!(
+            std::fs::symlink_metadata(root.join(".gitignore")).is_err(),
+            "the vault's own .gitignore was written"
+        );
+
+        std::fs::remove_file(&self_ignore).unwrap();
+        assert_eq!(doctored(&host).roll_up.attention(), warned);
+        make_home();
+        assert!(doctored(&host).roll_up.attention().is_empty());
+
+        std::fs::write(&self_ignore, "*\n!norn-dev\n").unwrap();
+        assert_eq!(doctored(&host).roll_up.attention(), warned);
+    }
+
     /// **A `.gitignore` that cannot be read reports the fallback as not
     /// ignored**: the question went unanswered, and the answer that warns is
     /// the one given.

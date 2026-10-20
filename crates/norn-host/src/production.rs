@@ -1375,8 +1375,10 @@ fn shadow_exclusion(placement: Placement, home: &Path, root: &Path) -> Option<Pa
 /// fallback in use, or nothing where the home is under the data root.
 ///
 /// The fallback is a directory inside the vault, so a vault kept in git
-/// commits staged shadows unless it ignores them. Whether it does is read
-/// from the vault's `.gitignore` when a status reports the advisory
+/// commits staged shadows unless it ignores them. Making the home wrote
+/// norn's own self-ignore in the fallback root; whether the vault ignores the
+/// home is read from it and the vault's `.gitignore` when a status reports the
+/// advisory
 /// ([`crate::status::reported_advisories`]), so this records the placement
 /// alone.
 ///
