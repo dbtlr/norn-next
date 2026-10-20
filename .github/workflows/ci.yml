@@ -147,10 +147,13 @@ jobs:
   # a database left the way an aborted process leaves it. Without the feature
   # those files compile to zero tests, and the second filesystem this job exists
   # for would never see them.
+  #
+  # The folding-root counter bars run in a job of their own beside this one,
+  # so the longest macOS job stays well inside its guard.
   platform:
     name: determinism and filesystem (macOS ARM64)
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -162,14 +165,30 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
+      - name: Host filesystem contracts
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
+
+  # The counter bars on a folding root. Each needs APFS's case-insensitive
+  # default, so it runs on the same pinned image and architecture as the
+  # platform job, and names `induced-failure` for the same reason the counter
+  # gates job does: the host's account of its jobs is read only behind it.
+  folding-counters:
+    name: counter bars on a folding root (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Assert architecture
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
       # Spelling confirmation's per-target cost needs a real folding root.
       # The suite refuses a distinct macOS scratch volume rather than skipping.
       - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
-      - name: Host filesystem contracts
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
       # The counter bars on a folding root, where each spelling is confirmed
       # by a stored-name query rather than the distinct root's exact stat.
       - name: Counter bars on a folding root
@@ -247,7 +266,7 @@ jobs:
   # read the account, and the lane table's own test holds this step to every feature
   # the suite puts a case or a helper behind.
   #
-  # The cases live in this job and the macOS job's counter step, `#[ignore]`d
+  # The cases live in this job and the macOS folding-root counter job, `#[ignore]`d
   # with a `counter-lane case:` reason so the build job's workspace suite does not attach thousands of
   # documents beside every other test. The script is what makes the wholesale
   # `--ignored` run fail when it ran nothing.
