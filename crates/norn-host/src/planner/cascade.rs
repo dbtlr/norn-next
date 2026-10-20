@@ -930,7 +930,10 @@ impl<'a> Cascade<'a> {
                         Resolves::None {} => norn_store::spelled_path(&change.link, &change.holder)
                             .into_iter()
                             .chain(norn_store::named_paths(&change.link, &change.holder))
-                            .any(|path| path == *target),
+                            .any(|path| {
+                                norn_store::comparison_key(&path)
+                                    == norn_store::comparison_key(target)
+                            }),
                         Resolves::Several {} => false,
                     };
                     if reaches {
