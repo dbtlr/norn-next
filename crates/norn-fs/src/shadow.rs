@@ -1103,7 +1103,10 @@ mod tests {
         let self_ignore = vault.join(".norn/tmp/.gitignore");
 
         ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
-        assert_eq!(std::fs::read(&self_ignore).expect("the self-ignore"), b"*\n");
+        assert_eq!(
+            std::fs::read(&self_ignore).expect("the self-ignore"),
+            b"*\n"
+        );
         assert!(
             !scratch.exists(&vault.join(".gitignore")),
             "the vault's own .gitignore was written"
@@ -1111,7 +1114,10 @@ mod tests {
 
         std::fs::remove_file(&self_ignore).unwrap();
         ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
-        assert_eq!(std::fs::read(&self_ignore).expect("the self-ignore"), b"*\n");
+        assert_eq!(
+            std::fs::read(&self_ignore).expect("the self-ignore"),
+            b"*\n"
+        );
     }
 
     /// **The self-ignore outlives every sweep and discard, and the walk reads
