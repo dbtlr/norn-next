@@ -3100,3 +3100,36 @@ fn count_reuse_requires_half_the_lifetime_and_never_renews_the_deadline() {
             .is_ok()
     );
 }
+
+#[test]
+fn source_snapshot_counters_and_thread_sql_account_for_different_work() {
+    let store = Counting::with_bulk("count-source-vs-thread-account", 32);
+    let params = counting(vec![field("status"), field("n")]).with_limit(2);
+    let snapshot = store.snapshot();
+    let source_before = snapshot.counters().statements_executed();
+    let thread_before = SnapshotReader::statements_run_on_this_thread();
+    let page = snapshot.count(&params, &declared()).unwrap();
+    let source = snapshot.counters().statements_executed() - source_before;
+    let all = SnapshotReader::statements_run_on_this_thread() - thread_before;
+    assert_eq!(
+        all, page.work.statements,
+        "the host trace must see scratch work too"
+    );
+    assert!(
+        all > source + 32,
+        "result inserts are outside the source snapshot"
+    );
+    drop(snapshot);
+    let snapshot = store.snapshot();
+    let source_before = snapshot.counters().statements_executed();
+    let thread_before = SnapshotReader::statements_run_on_this_thread();
+    let page = snapshot
+        .count(&params.with_after(page.next.unwrap()), &declared())
+        .unwrap();
+    assert_eq!(snapshot.counters().statements_executed(), source_before);
+    assert_eq!(page.work.statements, 1);
+    assert_eq!(
+        SnapshotReader::statements_run_on_this_thread() - thread_before,
+        1
+    );
+}

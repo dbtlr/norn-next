@@ -136,6 +136,9 @@ impl CountResults {
             policy,
         }
     }
+    pub(crate) fn policy(&self) -> CountRetentionPolicy {
+        self.policy
+    }
     fn lock(&self) -> Result<MutexGuard<'_, Registry>, PageRefusal> {
         self.state
             .try_lock()

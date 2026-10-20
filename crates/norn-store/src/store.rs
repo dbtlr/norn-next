@@ -270,7 +270,9 @@ impl SnapshotReader {
     /// thread has, in the difference, every statement SQLite began for it in
     /// that stretch. A caller holding a lock across the stretch learns what
     /// ran under its lock from its own two readings, however the statements
-    /// were composed and whoever ran them on that thread.
+    /// were composed and whoever ran them on that thread. Retained-count
+    /// scratch connections count here too; [`Snapshot::counters`] separately
+    /// names source statements only.
     pub fn statements_run_on_this_thread() -> u64 {
         norn_db::statements_begun_on_this_thread()
     }
@@ -1564,13 +1566,17 @@ impl Store {
     /// behaviour moved is handed the new one, and one rebuilt for damage is
     /// handed the order it already had. It is opened under the derivation
     /// version this store was, because the deriver's version does not move
-    /// while the build that names it runs.
+    /// while the build that names it runs. Retention configuration survives;
+    /// result ownership belongs to the replacement rather than the discarded store.
     pub fn discard_and_reopen(self, order: StoredPathOrder) -> Result<Self, StoreError> {
         let path = self.database.path().to_path_buf();
         let mode = self.mode;
         let derivation = self.derivation;
+        let policy = self.count_results.policy();
         self.discard()?;
-        Self::open_in_mode(&path, mode, order, derivation)
+        let mut replacement = Self::open_in_mode(&path, mode, order, derivation)?;
+        replacement.set_count_retention(policy)?;
+        Ok(replacement)
     }
 }
 
@@ -1877,6 +1883,34 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
 mod tests {
     use super::*;
     use norn_testkit::scratch::Scratch;
+
+    #[test]
+    fn rebuilding_preserves_retention_configuration_without_reusing_result_ownership() {
+        let scratch = Scratch::new("store-rebuild-count-policy");
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let policy = crate::CountRetentionPolicy {
+            lifetime: std::time::Duration::from_secs(7),
+            max_results: 3,
+            max_result_bytes: Some(16384),
+            total_bytes: Some(24576),
+        };
+        store.set_count_retention(policy).unwrap();
+        let previous = Arc::clone(&store.count_results);
+        let rebuilt = store
+            .discard_and_reopen(StoredPathOrder::Sensitive)
+            .unwrap();
+        let actual = rebuilt.count_results.policy();
+        assert_eq!(actual.lifetime, policy.lifetime);
+        assert_eq!(actual.max_results, policy.max_results);
+        assert_eq!(actual.max_result_bytes, policy.max_result_bytes);
+        assert_eq!(actual.total_bytes, policy.total_bytes);
+        assert!(!Arc::ptr_eq(&previous, &rebuilt.count_results));
+    }
 
     /// **A reader cannot write, and it is not the writer's connection.** The
     /// open takes neither the write flag nor create, and SQLite reports the

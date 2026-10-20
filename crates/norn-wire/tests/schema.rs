@@ -1764,7 +1764,15 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<ReadFailure>(), "kind")),
-        sorted(["statement", "declaration_not_pinned"])
+        sorted([
+            "statement",
+            "declaration_not_pinned",
+            "count_cursor_expired",
+            "count_result_capacity",
+            "count_result_too_large",
+            "count_result_busy",
+            "count_result"
+        ])
     );
 }
 
@@ -2627,7 +2635,8 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
 /// type, so a surface publishing a verb publishes the continuation with the
 /// rows. A search report holds its page beside the ladder that ranked it, and
 /// a find report and a search report each hold theirs beside the rule sets
-/// their rows' findings cite.
+/// their rows' findings cite. A count page also names the original source
+/// snapshot, independently of the current answer reading.
 #[test]
 fn every_paged_read_report_is_a_page_of_its_row() {
     let find = schema_of::<FindReport>();
@@ -2644,13 +2653,28 @@ fn every_paged_read_report_is_a_page_of_its_row() {
         find["$defs"]["DocumentRow"].is_object(),
         "the page carries no definition of a document row: {find}"
     );
-    for (report, row) in [
-        (schema_of::<CountReport>(), "Tally"),
-        (schema_of::<DescribeReport>(), "Facet"),
+    let count = schema_of::<CountReport>();
+    assert_eq!(
+        count["properties"]["counted_at"]["$ref"].as_str(),
+        Some("#/$defs/Snapshot")
+    );
+    assert!(
+        count["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("counted_at"))
+    );
+    for (report, row, properties) in [
+        (count, "Tally", &["rows", "next", "moved", "counted_at"][..]),
+        (
+            schema_of::<DescribeReport>(),
+            "Facet",
+            &["rows", "next", "moved"][..],
+        ),
     ] {
         assert_eq!(
             property_names(&report),
-            ["rows", "next", "moved"].into_iter().collect()
+            properties.iter().copied().collect()
         );
         assert!(
             report["$defs"][row].is_object(),
