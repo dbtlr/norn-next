@@ -251,8 +251,9 @@ impl<O: EntryOps> Host<O> {
     /// registration refuses but a hand edit of the file can still make; no
     /// lock is held while it does. The statuses read
     /// inside the vaults as a status does: the two control files of an entry
-    /// serving active fingerprints, and the `.gitignore` of one whose last
-    /// attachment staged shadows in the vault-local fallback.
+    /// serving active fingerprints, and norn's own self-ignore and the
+    /// `.gitignore` of one whose last attachment staged shadows in the
+    /// vault-local fallback.
     pub fn doctor_registry(&self, _params: &DoctorRegistryParams) -> DoctorRegistryReport {
         let statuses = self.statuses();
         let registry = sanity(statuses.iter().map(|status| &status.registration));

@@ -1,13 +1,25 @@
-//! Whether a vault's own `.gitignore` covers the [`FALLBACK`] shadow directory.
+//! Whether a vault ignores the [`FALLBACK`] shadow directory: by norn's own
+//! self-ignore inside it, or by the vault's own `.gitignore`.
 //!
 //! The fallback home sits inside the vault, so a vault kept in git commits
 //! staged shadows unless it ignores them. Whether it does is a fact an operator
 //! acts on, and this module is the one reading of it.
 //!
-//! **The reading is a narrow rule this crate owns, not git's.** Norn never
-//! shells out to git and does not implement gitignore matching. It reads one
-//! file — `.gitignore` at the vault root, up to [`GITIGNORE_BOUND`] bytes — and
-//! answers yes only where a line names the fallback directory or the `.norn`
+//! **Norn's own self-ignore answers first.** Making a fallback home writes
+//! `.gitignore` holding `*` directly inside [`FALLBACK`]
+//! ([`SELF_IGNORE`]). That pattern ignores every name beneath the fallback
+//! root, and git never descends into a directory it ignores, so no
+//! `.gitignore` above it or below it can re-include a shadow: where that file
+//! stands at its own path holding exactly the bytes norn writes, the answer is
+//! yes whatever else the vault holds, and no file of the vault's own needs
+//! editing. The rule is narrow on purpose: the same bytes at any other path,
+//! or other bytes at that one, are not the self-ignore — they are any
+//! `.gitignore` along the home, read as the rest of this rule reads one.
+//!
+//! **Otherwise the reading is a narrow rule this crate owns, not git's.** Norn
+//! never shells out to git and does not implement gitignore matching. It reads
+//! one file — `.gitignore` at the vault root, up to [`GITIGNORE_BOUND`] bytes —
+//! and answers yes only where a line names the fallback directory or the `.norn`
 //! directory above it in one of the spellings [`covers_fallback`] lists, and no
 //! line is a negation. Where no covering line excludes `.norn` itself, git
 //! descends into `.norn` and reads the `.gitignore` of each directory it
@@ -25,8 +37,8 @@
 //!
 //! - a `.gitignore` in a directory above the vault root, where the vault is a
 //!   subdirectory of a repository;
-//! - the text of a `.gitignore` inside `.norn`, which answers no by being
-//!   there whatever it says;
+//! - the text of a `.gitignore` inside `.norn` other than norn's own
+//!   self-ignore, which answers no by being there whatever it says;
 //! - `.git/info/exclude` and the `core.excludesFile` a git configuration names;
 //! - any pattern with a wildcard other than the trailing `*` and `**` spellings
 //!   listed, such as `.*` or `.n*`, and a spelling git matches only because it
@@ -39,7 +51,7 @@ use std::path::{Component, Path};
 
 use crate::read::{Bounded, read_if_present_bounded};
 use crate::refusal::Refusal;
-use crate::shadow::FALLBACK;
+use crate::shadow::{FALLBACK, SELF_IGNORE, SELF_IGNORE_TEXT};
 
 /// The name of the file this rule reads, relative to the vault root.
 const GITIGNORE: &str = ".gitignore";
@@ -78,6 +90,12 @@ const ANCHORS: &[&str] = &["", "/", "**/"];
 /// Whether the vault at `vault_root` ignores the fallback home at `home`,
 /// vault-relative, by the rule this module states.
 ///
+/// Norn's own self-ignore — a `.gitignore` directly inside [`FALLBACK`],
+/// holding exactly the `*` line norn writes there — answers `true` for every
+/// `home` under [`FALLBACK`] before the vault root's `.gitignore` is read, so
+/// a root `.gitignore` that cannot be read is no refusal beside it. A self-ignore that is missing, altered or
+/// not a file answers nothing itself, and the reading below answers instead.
+///
 /// A vault root with no `.gitignore` covers nothing, and answers `false`, and
 /// so does one longer than 64 KiB, which is not read past that bound. A
 /// `.gitignore` that is there and cannot be read — a link, a directory, a
@@ -92,6 +110,10 @@ const ANCHORS: &[&str] = &["", "/", "**/"];
 /// vault-relative path under [`FALLBACK`] answers `false`: the directories
 /// git descends into are not known.
 pub fn fallback_ignored(vault_root: &Path, home: &Path) -> Result<bool, Refusal> {
+    let under_fallback = under_fallback(home);
+    if under_fallback && self_ignored(vault_root) {
+        return Ok(true);
+    }
     let coverage = match read_if_present_bounded(vault_root, Path::new(GITIGNORE), GITIGNORE_BOUND)?
     {
         Some(Bounded::Whole(bytes)) => covers_fallback(&bytes),
@@ -101,16 +123,37 @@ pub fn fallback_ignored(vault_root: &Path, home: &Path) -> Result<bool, Refusal>
         Coverage::None => false,
         Coverage::Directory => true,
         Coverage::Contents => {
-            home.starts_with(FALLBACK)
-                && home
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
+            under_fallback
                 && !home
                     .ancestors()
                     .take_while(|directory| !directory.as_os_str().is_empty())
                     .any(|directory| gitignore_present(&vault_root.join(directory)))
         }
     })
+}
+
+/// Whether `home` is a plain vault-relative path under [`FALLBACK`]: the
+/// directories git descends into on the way to it are then known.
+fn under_fallback(home: &Path) -> bool {
+    home.starts_with(FALLBACK)
+        && home
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// Whether norn's own [self-ignore](SELF_IGNORE) stands in the fallback root
+/// beneath `vault_root`, holding exactly the bytes norn writes there.
+///
+/// Read through the same anchored, link-refusing open the root `.gitignore`
+/// is, bounded at those bytes. Anything else — nothing at the name, other
+/// bytes, a link, a directory, a read the machine refuses — is not the
+/// self-ignore, and the rest of the rule answers instead.
+fn self_ignored(vault_root: &Path) -> bool {
+    let at = Path::new(FALLBACK).join(SELF_IGNORE);
+    matches!(
+        read_if_present_bounded(vault_root, &at, SELF_IGNORE_TEXT.len()),
+        Ok(Some(Bounded::Whole(bytes))) if bytes == SELF_IGNORE_TEXT
+    )
 }
 
 /// Whether `directory` holds an entry named `.gitignore`, of any kind, or
@@ -434,6 +477,127 @@ mod tests {
                     "{root:?} with {at} answered not ignored"
                 );
             }
+        }
+    }
+
+    /// Norn's own self-ignore, vault-relative.
+    const SELF_IGNORE_AT: &str = ".norn/tmp/.gitignore";
+
+    /// A scratch vault holding the fallback home and norn's self-ignore
+    /// beside it, its root `.gitignore` reading `root` where there is one.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the tree a case reads.
+    fn self_ignored_case(label: &str, root: Option<&str>) -> Scratch {
+        let scratch = Scratch::new(label);
+        std::fs::create_dir_all(scratch.at(HOME)).unwrap();
+        scratch.place(SELF_IGNORE_AT, b"*\n");
+        if let Some(root) = root {
+            scratch.place(GITIGNORE, format!("{root}\n").as_bytes());
+        }
+        scratch
+    }
+
+    /// **Norn's own self-ignore covers the fallback whatever the vault's
+    /// `.gitignore` says**: `*` at `.norn/tmp` ignores every name beneath it,
+    /// and git never descends into a directory it ignores, so no `.gitignore`
+    /// above or below it re-includes a shadow. A vault with no `.gitignore`,
+    /// one covering nothing, one covering only what is inside `.norn`, and
+    /// one that cannot be read all answer yes.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting the link a case reads.
+    fn norns_own_self_ignore_covers_the_fallback_whatever_the_root_says() {
+        for root in [None, Some("notes/"), Some(".norn/tmp/*"), Some("!*")] {
+            let scratch = self_ignored_case("gitignore-self", root);
+            assert_eq!(
+                fallback_ignored(&scratch.at(""), Path::new(HOME)),
+                Ok(true),
+                "the self-ignore under a root reading {root:?} answered not ignored"
+            );
+        }
+        let scratch = self_ignored_case("gitignore-self-link", None);
+        scratch.place("elsewhere", b"notes/\n");
+        std::os::unix::fs::symlink("elsewhere", scratch.at(GITIGNORE)).unwrap();
+        assert_eq!(fallback_ignored(&scratch.at(""), Path::new(HOME)), Ok(true));
+    }
+
+    /// **Only norn's exact bytes count as its self-ignore**: a file at its
+    /// name holding anything else is an alteration, which is read as any
+    /// `.gitignore` standing along the home is — no with no root line
+    /// excluding `.norn` itself — and so is a missing one.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: altering what a case reads.
+    fn an_altered_or_missing_self_ignore_does_not_cover_the_fallback() {
+        for altered in [
+            &b""[..],
+            b"*",
+            b"* \n",
+            b"*\r\n",
+            b"**\n",
+            b"*\n*\n",
+            b"*\n!norn-dev\n",
+            b"!*\n",
+        ] {
+            let scratch = self_ignored_case("gitignore-self-altered", None);
+            scratch.place(SELF_IGNORE_AT, altered);
+            assert_eq!(
+                fallback_ignored(&scratch.at(""), Path::new(HOME)),
+                Ok(false),
+                "{:?} counted as the self-ignore",
+                String::from_utf8_lossy(altered)
+            );
+        }
+        let scratch = self_ignored_case("gitignore-self-missing", Some(".norn/tmp/*"));
+        std::fs::remove_file(scratch.at(SELF_IGNORE_AT)).unwrap();
+        assert_eq!(fallback_ignored(&scratch.at(""), Path::new(HOME)), Ok(true));
+        std::fs::remove_file(scratch.at(GITIGNORE)).unwrap();
+        assert_eq!(
+            fallback_ignored(&scratch.at(""), Path::new(HOME)),
+            Ok(false)
+        );
+    }
+
+    /// **Only the file at the self-ignore's own path counts**: the same bytes
+    /// in `.norn` above it or in a directory below it are any `.gitignore`
+    /// along the home, and a directory at the self-ignore's name is not one.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the tree a case reads.
+    fn the_self_ignore_counts_only_at_its_own_path() {
+        for at in [".norn/.gitignore", ".norn/tmp/norn-dev/.gitignore"] {
+            let scratch = Scratch::new("gitignore-self-elsewhere");
+            std::fs::create_dir_all(scratch.at(HOME)).unwrap();
+            scratch.place(at, b"*\n");
+            assert_eq!(
+                fallback_ignored(&scratch.at(""), Path::new(HOME)),
+                Ok(false),
+                "the self-ignore's bytes at {at} counted"
+            );
+        }
+        let scratch = Scratch::new("gitignore-self-directory");
+        std::fs::create_dir_all(scratch.at(HOME)).unwrap();
+        std::fs::create_dir(scratch.at(SELF_IGNORE_AT)).unwrap();
+        assert_eq!(
+            fallback_ignored(&scratch.at(""), Path::new(HOME)),
+            Ok(false)
+        );
+    }
+
+    /// A home that is not under [`FALLBACK`] answers no beside the
+    /// self-ignore too: it covers only what is beneath the fallback root.
+    #[test]
+    fn the_self_ignore_covers_no_home_outside_the_fallback() {
+        let scratch = self_ignored_case("gitignore-self-home", None);
+        let root = scratch.at("");
+        for home in [
+            "elsewhere/key",
+            ".norn/key",
+            "/abs/.norn/tmp/key",
+            ".norn/tmp/../key",
+        ] {
+            assert_eq!(
+                fallback_ignored(&root, Path::new(home)),
+                Ok(false),
+                "{home}"
+            );
         }
     }
 
