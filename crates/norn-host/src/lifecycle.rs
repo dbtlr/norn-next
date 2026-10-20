@@ -25888,6 +25888,12 @@ mod tests {
                 self.0.count_leg_mint(statements);
             }
         }
+        // Real backends share the production fixtures' machine-wide watcher
+        // isolation for the whole lifetime of both attachments.
+        let _watcher_lease = norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+        );
         for polling in [false, true] {
             let scratch = norn_testkit::scratch::Scratch::new(&format!("rolling-host-{polling}"));
             let root = scratch.join("vault");
