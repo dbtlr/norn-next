@@ -3057,3 +3057,46 @@ fn a_source_query_per_page_fails_the_grouped_drain_bar() {
         assert_linear_drain(pair[0], pair[1], "source control")
     });
 }
+
+#[test]
+fn count_reuse_requires_half_the_lifetime_and_never_renews_the_deadline() {
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("count-reuse-lifetime", 16);
+    let params = counting(vec![field("status"), field("n")]).with_limit(2);
+    let now = Instant::now();
+    let at = |seconds| {
+        store
+            .snapshot()
+            .count_with_time(&params, &declared(), now + Duration::from_secs(seconds))
+            .unwrap()
+    };
+    let first = at(0).next.unwrap();
+    let reused = at(299).next.unwrap();
+    assert_eq!(
+        reused.retained_count_id(),
+        first.retained_count_id(),
+        "the same current selection reuses a young result"
+    );
+    let replacement = at(301).next.unwrap();
+    assert_ne!(
+        replacement.retained_count_id(),
+        first.retained_count_id(),
+        "a fresh count must not inherit less than half a lifetime"
+    );
+    let late = now + Duration::from_secs(601);
+    assert!(
+        matches!(
+            store
+                .snapshot()
+                .count_with_time(&params.clone().with_after(first), &declared(), late),
+            Err(PageRefusal::CountCursorExpired)
+        ),
+        "reuse cannot renew the original deadline"
+    );
+    assert!(
+        store
+            .snapshot()
+            .count_with_time(&params.with_after(replacement), &declared(), late)
+            .is_ok()
+    );
+}

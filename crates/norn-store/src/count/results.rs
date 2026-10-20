@@ -20,7 +20,9 @@ use crate::read::{
 use crate::store::Snapshot;
 
 /// Retention limits for a store's immutable grouped results. Source query
-/// sorter spill files are outside this retained-table quota.
+/// sorter spill files are outside this retained-table quota. Lifetime bounds
+/// usability; expired storage is reclaimed by the next multi-key count or
+/// when the store and its readers close.
 #[derive(Clone, Copy, Debug)]
 pub struct CountRetentionPolicy {
     pub lifetime: Duration,
@@ -385,7 +387,13 @@ fn failed(problem: impl std::fmt::Display) -> PageRefusal {
     }
 }
 fn scratch_error(problem: rusqlite::Error) -> PageRefusal {
-    failed(norn_db::sql("using disposable count results", problem))
+    // A dirty temporary pager can exhaust storage on COMMIT as well as INSERT.
+    // SQLite gives page quotas and filesystem exhaustion the same FULL code.
+    if problem.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        PageRefusal::CountResultStorageFull
+    } else {
+        failed(norn_db::sql("using disposable count results", problem))
+    }
 }
 fn record_run(
     db: &TemporaryDatabase,
@@ -762,13 +770,7 @@ impl Snapshot {
                     work.tallies_read += 1;
                     insertion
                         .execute(params_from_iter(values))
-                        .map_err(|error| {
-                            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
-                                PageRefusal::CountResultStorageFull
-                            } else {
-                                scratch_error(error)
-                            }
-                        })?;
+                        .map_err(scratch_error)?;
                     Ok::<_, PageRefusal>(())
                 });
                 for ran in &lookups.ran[source_start..] {
@@ -861,6 +863,15 @@ mod tests {
     use crate::{DerivationVersion, Store, StoredPathOrder};
     use norn_testkit::scratch::Scratch;
     use norn_wire::{GroupKey, VaultAddress, VaultName};
+
+    #[test]
+    fn a_full_scratch_statement_keeps_the_storage_remedy_in_every_phase() {
+        let error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            None,
+        );
+        assert_eq!(scratch_error(error), PageRefusal::CountResultStorageFull);
+    }
 
     #[test]
     fn reservations_price_inflight_slots_and_bytes_and_release_on_failure() {

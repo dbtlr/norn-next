@@ -442,7 +442,8 @@ impl Snapshot {
                 PageRefusal::CountResultCapacity { .. }
                 | PageRefusal::CountResultTooLarge { .. }
                 | PageRefusal::CountResultBusy
-                | PageRefusal::CountResultStorageFull,
+                | PageRefusal::CountResultStorageFull
+                | PageRefusal::CountCursorExpired,
             ) if params.after.is_none() => {
                 let (rows, next) =
                     self.page_tallies(&members, &conjunction, limit, None, lookups, &mut work)?;

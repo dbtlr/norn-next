@@ -376,6 +376,8 @@ survive. Explicit expiry makes the retained lifetime an enforceable contract.
 
 The retention deadline is an upper bound. Idle detach, restart and source-store
 replacement may end a result earlier because retention holds no demand lease.
+Expired storage is reclaimed by the next multi-key count or when store ownership
+ends; no background expiry timer is introduced.
 A fresh request reuses a result only when at least half its configured lifetime
 remains; reuse never renews the deadline. Result coordination never waits under
 the entry gate or through teardown. Teardown drops ownership without waiting

@@ -1078,7 +1078,9 @@ Disk follows the relation's bytes unless operator per-result or total quotas are
 source sorter spill is ordinary query working storage outside those quotas. Registry
 reservations include work in flight, and release disk accounting only after its connection
 closes. Native process RSS and descriptor pairs in `count_memory` bar bounded working
-memory across result sizes and release at expiry and teardown. Inspection does not
+memory across result sizes and release when a count observes expiry and at teardown.
+Expired files are reclaimed on the next multi-key count or when the store and its readers
+close; retention runs no background timer. Inspection does not
 publish a result whose report is discarded. No source snapshot or read demand survives a
 request. Coordination tries short locks, never waits for SQL under the registry lock,
 and closes expired files outside that lock. Scratch failure discards that result identity

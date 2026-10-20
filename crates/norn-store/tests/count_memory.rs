@@ -112,7 +112,7 @@ fn child(path: &Path, size: usize) {
     assert_eq!(
         open_fd_count().unwrap(),
         base,
-        "expiry closes result storage"
+        "observing expiry closes result storage"
     );
     drop(reader);
     drop(store);
