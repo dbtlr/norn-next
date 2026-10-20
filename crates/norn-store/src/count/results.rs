@@ -684,6 +684,7 @@ impl Snapshot {
             .prepare(&insert_sql)
             .map_err(scratch_error)?;
         let mut inserted: Option<Ran> = None;
+        let mut insertion_at = None;
         let orders = members
             .iter()
             .map(|member| Order::of(member, declared))
@@ -773,6 +774,9 @@ impl Snapshot {
                 for ran in &lookups.ran[source_start..] {
                     work.stepped(ran.stepped);
                 }
+                if insertion_at.is_none() && inserted.is_some() {
+                    insertion_at = Some(source_start + 1);
+                }
                 match stream {
                     Ok(()) => {}
                     Err(StreamFailure::Source(error)) => {
@@ -793,7 +797,9 @@ impl Snapshot {
             ran.stepped = Stepped::of(&insertion);
             work.statements += ran.executions;
             work.stepped(ran.stepped);
-            lookups.ran.push(ran);
+            lookups
+                .ran
+                .insert(insertion_at.expect("first insertion position"), ran);
         }
         drop(insertion);
         if let Some(error) = stream_failure {
@@ -855,6 +861,39 @@ mod tests {
     use crate::{DerivationVersion, Store, StoredPathOrder};
     use norn_testkit::scratch::Scratch;
     use norn_wire::{GroupKey, VaultAddress, VaultName};
+
+    #[test]
+    fn reservations_price_inflight_slots_and_bytes_and_release_on_failure() {
+        let owner = Arc::new(CountResults::new(CountRetentionPolicy {
+            max_results: 2,
+            max_result_bytes: Some(16384),
+            total_bytes: Some(24576),
+            ..CountRetentionPolicy::default()
+        }));
+        let time = CountTime::new(Instant::now());
+        let first = owner.reserve(time).unwrap();
+        let second = owner.reserve(time).unwrap();
+        assert_eq!(first.limit, Some(16384));
+        assert_eq!(second.limit, Some(8192));
+        assert!(matches!(
+            owner.reserve(time),
+            Err(PageRefusal::CountResultCapacity { .. })
+        ));
+        drop(first);
+        let replacement = owner.reserve(time).unwrap();
+        assert_eq!(replacement.limit, Some(16384));
+        drop((second, replacement));
+        assert_eq!(owner.lock().unwrap().occupied, 0);
+        assert_eq!(owner.lock().unwrap().slots, 0);
+        let too_small = Arc::new(CountResults::new(CountRetentionPolicy {
+            max_result_bytes: Some(4096),
+            ..CountRetentionPolicy::default()
+        }));
+        assert!(matches!(
+            too_small.reserve(time),
+            Err(PageRefusal::CountResultTooLarge { max_bytes: 4096 })
+        ));
+    }
 
     #[test]
     fn a_broken_result_is_discarded_without_damaging_the_source() {

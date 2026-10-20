@@ -85,4 +85,4 @@ pub use database::{
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{ColumnRead, EmittedPlan, PlanStep};
 pub use schema::{digest, schema_digest};
-pub use temporary::TemporaryDatabase;
+pub use temporary::{TemporaryDatabase, TemporarySetup};
