@@ -1024,7 +1024,8 @@ impl Address {
         let at = link.span.ok_or(RewriteSkip::Unplaced)?.byte_offset;
         let unvault = link.protocol.as_deref() == Some("vault")
             && self.protocol.is_none()
-            && self.target.starts_with('/');
+            && self.target.starts_with('/')
+            && !self.target.starts_with("//");
         if link.protocol != self.protocol && !unvault {
             return Err(RewriteSkip::Unrepresentable);
         }

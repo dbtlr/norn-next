@@ -925,11 +925,12 @@ impl<'a> Cascade<'a> {
                         }
                         // A file no document holds after the plan — an
                         // attachment's, or a deleted document's left
-                        // broken — is reached by the path the link spells.
-                        Resolves::None {} => {
-                            norn_store::spelled_path(&change.link, &change.holder).as_deref()
-                                == Some(target.as_str())
-                        }
+                        // broken — is reached by the path the link spells,
+                        // or one the naming rule reads it as (`.md` left off).
+                        Resolves::None {} => norn_store::spelled_path(&change.link, &change.holder)
+                            .into_iter()
+                            .chain(norn_store::named_paths(&change.link, &change.holder))
+                            .any(|path| path == *target),
                         Resolves::Several {} => false,
                     };
                     if reaches {

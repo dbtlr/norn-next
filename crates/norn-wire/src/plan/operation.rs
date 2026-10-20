@@ -940,7 +940,8 @@ fn rewrite_refusal(from: &str, to: &str) -> Option<&'static str> {
     if written_protocol(from) != written_protocol(to)
         && !(written_protocol(from) == Some("vault")
             && written_protocol(to).is_none()
-            && to.starts_with('/'))
+            && to.starts_with('/')
+            && !to.starts_with("//"))
     {
         return Some(
             "`to` is written under another protocol than `from`, and a rewrite keeps a link's protocol",
