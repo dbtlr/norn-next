@@ -622,7 +622,9 @@ side, the findings whose subject its own scope holds and that nothing it read co
 scope, at the same job end that files what it did read — after that filing, so a place the filing
 reached is not taken — on the axis the rows are pruned on. The prune is its own recording, one
 discard per subject and side rather than part of the filing's: a tear before it leaves exactly the
-state a heal that never pruned leaves. **What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
+state a heal that never pruned leaves, and a tear partway through leaves some discards made and the
+rest standing, which the next covering clean walk converges.
+**What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
 withhold it, and each of them leaves the finding standing: a walk that refused ends its job ahead
 of its own prune; a root the walk read nothing at and cannot state a standing refusal for — a name
 that vanished inside one of the walk's own windows — covers the places beneath it, so a finding

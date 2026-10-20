@@ -3761,8 +3761,9 @@ fn folded_reaches(root: &str, inner: &str, order: StoredPathOrder) -> bool {
 /// prune is not part of the reading's recording: [`prune_unaccounted`] opens its
 /// own request and discard per subject and side, so a finding leaving here is a
 /// counted discard rather than a cascade. A tear between the two, or before the
-/// prune, leaves exactly the state a heal that never pruned leaves, which the
-/// next walk whose clean scope covers the place converges.
+/// prune, leaves exactly the state a heal that never pruned leaves; a tear
+/// partway through the prune leaves some discards made and the rest standing.
+/// The next walk whose clean scope covers the place converges either.
 fn close_job(
     store: &mut Store,
     root: &Path,
