@@ -347,6 +347,8 @@ pub(super) fn persist_account(
     account: &Account,
     order: StoredPathOrder,
 ) -> Result<(), JobFailure> {
+    // Filed flags identify literal finding subjects, including old case aliases.
+    // Withheld roots below instead use the vault's path identity.
     for (path, sides) in &account.filed.places {
         let flags = sides.iter().fold(0, |flags, side| {
             flags

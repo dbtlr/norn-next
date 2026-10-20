@@ -2172,6 +2172,7 @@ where
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     let mut checked = 0;
     let mut through = Vec::new();
+    let mut walked_file = None;
     let mut complete = false;
     loop {
         if limit.as_ref().is_some_and(|limit| {
@@ -2253,6 +2254,7 @@ where
                             }
                         }
                     }
+                    walked_file = Some(spelling);
                 }
             }
             if equal {
@@ -2263,7 +2265,11 @@ where
         } else if let Some(row) = stored.get(index) {
             // An inventory can span watcher turns. Confirm a stored-only name
             // before pruning it so an earlier watcher update is never undone.
-            if let Some(vault) = vault {
+            if walked_file.as_deref() == Some(row.path.as_str()) {
+                // A flushed respelling can enter a later page of its own
+                // folded class. This exact spelling was already read; every
+                // other alias still takes its turn through the merge.
+            } else if let Some(vault) = vault {
                 match vault.fact(Path::new(row.path.as_str())).map_err(effect)? {
                     norn_fs::WalkFact::File(file) => {
                         let spelling = file
@@ -16871,44 +16877,86 @@ mod tests {
     /// The explicit merge order exercises folding semantics on any host.
     #[test]
     fn a_heal_merging_under_folded_order_updates_a_case_only_rename() {
-        let f = Fixture::watcherless("heal-folded-respelling");
-        fs::write(f.vault().join("note.md"), "same bytes").unwrap();
-        let root = f.vault();
-        let mut store = Store::open(
-            f.root.join("folded.sqlite3"),
-            StoredPathOrder::AsciiCaseInsensitive,
-            crate::DERIVATION_VERSION,
-        )
-        .unwrap();
-        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
-        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
-        for renamed in [false, true] {
-            if renamed {
-                fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+        for (from, to) in [
+            ("note.md", "Note.md"),
+            ("Note.md", "note.md"),
+            ("MiXeD.md", "Mixed.md"),
+        ] {
+            let f = Fixture::watcherless("heal-folded-respelling");
+            fs::write(f.vault().join(from), "same bytes").unwrap();
+            for neighbor in ["a.md", "z.md"] {
+                fs::write(f.vault().join(neighbor), "neighbor").unwrap();
             }
-            let mut account = Account::default();
-            merge_walk(
-                &mut store,
-                &root,
-                &[],
-                walk(&root, &[]).unwrap(),
-                norn_fs::CaseSensitivity::Insensitive,
-                HealScope::Vault,
-                ProductionPolicy::new(2, 1).unwrap(),
-                &progress.healing(),
-                &mut account,
+            let root = f.vault();
+            let mut store = Store::open(
+                f.root.join("folded.sqlite3"),
+                StoredPathOrder::AsciiCaseInsensitive,
+                crate::DERIVATION_VERSION,
             )
             .unwrap();
-            close_job(
-                &mut store,
-                &root,
-                &[],
-                ProductionPolicy::new(2, 1).unwrap(),
-                &mut account,
-            )
-            .unwrap();
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+            for renamed in [false, true] {
+                if renamed {
+                    fs::rename(root.join(from), root.join(to)).unwrap();
+                    let alias = from.trim_end_matches(".md").to_ascii_uppercase() + ".md";
+                    let declared = Declaration::read(&mut store).unwrap();
+                    store
+                        .begin_request()
+                        .apply_increment(
+                            norn_store::IncrementProvenance::Derived,
+                            [norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                                DocumentPath::new(&alias).unwrap(),
+                                "stale",
+                                "stale",
+                                5,
+                            ))],
+                            &[],
+                            declared.model.content_model(),
+                        )
+                        .unwrap();
+                }
+                let mut facts = walk(&root, &[])
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                facts.sort_by_key(|fact| {
+                    fact.path().as_path().to_str().unwrap().to_ascii_lowercase()
+                });
+                let mut account = Account::default();
+                merge_walk(
+                    &mut store,
+                    &root,
+                    &[],
+                    facts.into_iter().map(Ok),
+                    norn_fs::CaseSensitivity::Insensitive,
+                    HealScope::Vault,
+                    ProductionPolicy::new(2, 1).unwrap(),
+                    &progress.healing(),
+                    &mut account,
+                )
+                .unwrap();
+                close_job(
+                    &mut store,
+                    &root,
+                    &[],
+                    ProductionPolicy::new(2, 1).unwrap(),
+                    &mut account,
+                )
+                .unwrap();
+                let mut expected = vec![
+                    "a.md".to_owned(),
+                    "z.md".to_owned(),
+                    if renamed { to } else { from }.to_owned(),
+                ];
+                expected.sort();
+                assert_eq!(
+                    stored_paths(&mut store),
+                    expected,
+                    "{from} -> {to}, renamed={renamed}"
+                );
+            }
         }
-        assert_eq!(stored_paths(&mut store), ["Note.md"]);
     }
 
     /// Re-run when changing the rolling budgets. Clocks are evidence, never a
@@ -17052,6 +17100,7 @@ mod tests {
         let f = Fixture::new("rolling-quarantine-misses");
         fs::write(f.vault().join("changed.md"), b"\xffbefore").unwrap();
         fs::write(f.vault().join("gone.md"), b"\xffgone").unwrap();
+        fs::write(f.vault().join("MiXeD.md"), b"\xffunchanged").unwrap();
         fs::write(f.vault().join("..md"), "refused spelling").unwrap();
         let old = std::time::SystemTime::now() - Duration::from_secs(60);
         for path in ["changed.md", "gone.md", "..md"] {
@@ -17078,6 +17127,7 @@ mod tests {
             }
         }
         assert!(attachment.rolling.last_completed.is_some());
+        assert_eq!(findings_at(&mut attachment.store, "MiXeD.md").len(), 1);
         assert_eq!(
             attachment.rolling.misses,
             norn_wire::WatcherMisses {

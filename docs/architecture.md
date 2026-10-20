@@ -1540,6 +1540,8 @@ Two mechanisms carry trust, and both are contract:
   only when their descriptor-time mtime is at least **five seconds** old. Recent writes
   heal without counting. Deleted known documents count without that delivery grace.
   A file known by its content quarantine participates in the same classification.
+  Content quarantines retain literal finding-subject identities, so a case-only
+  respelling can count as a create plus a delete while its finding takes the listed spelling.
   Schema-only repairs and restored findings are not watcher misses. A successful slice
   changes neither trust nor the refusal vocabulary.
 
