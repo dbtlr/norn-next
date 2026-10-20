@@ -200,7 +200,18 @@ pub(super) fn slice(
                 match inventory.replay(record).map_err(effect)? {
                     norn_fs::WalkFact::File(file) if is_markdown(file.path().as_path()) => {
                         if let Err(quarantine) = document_path(file.path().as_path()) {
-                            pending.quarantine(file.path().as_path(), quarantine);
+                            let subject = DocumentPath::rendered(file.path().as_path());
+                            // A watcher turn can replace findings between slices.
+                            // Its newer account owns this place until the next pass.
+                            if !held(
+                                pending.store,
+                                &subject,
+                                pending.store.path_order(),
+                                NEWER_TURN,
+                                NEWER_RENDERED,
+                            )? {
+                                pending.quarantine(file.path().as_path(), quarantine);
+                            }
                         }
                     }
                     norn_fs::WalkFact::Skipped(skip) => {
@@ -237,7 +248,7 @@ pub(super) fn slice(
                     .stored_document(subject)
                     .map_err(store_effect)?
                     .is_some()
-                    || held(store, subject, order)?
+                    || held(store, subject, order, WITHHELD, RENDERED)?
                 {
                     continue;
                 }
@@ -332,6 +343,10 @@ const FILED_BYTES: u32 = 1;
 const FILED_SPELLING: u32 = 2;
 const WITHHELD: u32 = 4;
 const RENDERED: u32 = 32;
+// A vanished inventory entry withholds pruning, but does not supersede the
+// revisit of another spelling. Only a newer turn owns that authority.
+const NEWER_TURN: u32 = 64;
+const NEWER_RENDERED: u32 = 128;
 
 pub(super) fn replaced_flag(side: Decided) -> u32 {
     match side {
@@ -358,20 +373,30 @@ pub(super) fn persist_account(
             .inventory_account(path.as_str(), flags)
             .map_err(store_effect)?;
     }
-    for root in &account.withheld.roots {
+    persist_withheld(store, &account.withheld, order, WITHHELD, RENDERED)
+}
+
+fn persist_withheld(
+    store: &mut Store,
+    withheld: &Withheld,
+    order: StoredPathOrder,
+    roots_flag: u32,
+    rendered_flag: u32,
+) -> Result<(), JobFailure> {
+    for root in &withheld.roots {
         let root = match order {
             StoredPathOrder::Sensitive => root.clone(),
             StoredPathOrder::AsciiCaseInsensitive => root.to_ascii_lowercase(),
         };
         store
             .begin_request()
-            .inventory_account(&root, WITHHELD)
+            .inventory_account(&root, roots_flag)
             .map_err(store_effect)?;
     }
-    if account.withheld.rendered {
+    if withheld.rendered {
         store
             .begin_request()
-            .inventory_account("", RENDERED)
+            .inventory_account("", rendered_flag)
             .map_err(store_effect)?;
     }
     Ok(())
@@ -381,6 +406,8 @@ fn held(
     store: &mut Store,
     subject: &DocumentPath,
     order: StoredPathOrder,
+    roots_flag: u32,
+    rendered_flag: u32,
 ) -> Result<bool, JobFailure> {
     let place = match order {
         StoredPathOrder::Sensitive => subject.as_str().to_owned(),
@@ -390,7 +417,7 @@ fn held(
         .begin_request()
         .inventory_flags("")
         .map_err(store_effect)?;
-    if global & WITHHELD != 0 || global & RENDERED != 0 && subject.carries_marker() {
+    if global & roots_flag != 0 || global & rendered_flag != 0 && subject.carries_marker() {
         return Ok(true);
     }
     for ancestor in place
@@ -402,7 +429,7 @@ fn held(
             .begin_request()
             .inventory_flags(ancestor)
             .map_err(store_effect)?
-            & WITHHELD
+            & roots_flag
             != 0
         {
             return Ok(true);
@@ -412,7 +439,7 @@ fn held(
 }
 
 /// A watcher turn accounts for its own roots. The pass cannot use an older
-/// enumeration to withdraw findings that turn has since filed there.
+/// enumeration to replace or withdraw findings that turn has since filed there.
 pub(super) fn watcher_turn(
     attachment: &mut ProductionAttachment,
     batch: &norn_fs::Batch,
@@ -424,15 +451,21 @@ pub(super) fn watcher_turn(
         attachment
             .store
             .begin_request()
-            .inventory_account("", WITHHELD)
+            .inventory_account("", WITHHELD | NEWER_TURN)
             .map_err(store_effect)?;
     }
-    let mut account = Account::default();
+    let mut withheld = Withheld::default();
     for root in batch.vault_roots() {
-        account.withheld.absorb(root.as_path());
+        withheld.absorb(root.as_path());
     }
     let order = attachment.store.path_order();
-    persist_account(&mut attachment.store, &account, order)
+    persist_withheld(
+        &mut attachment.store,
+        &withheld,
+        order,
+        WITHHELD | NEWER_TURN,
+        RENDERED | NEWER_RENDERED,
+    )
 }
 
 pub(super) fn controls_changed(attachment: &mut ProductionAttachment) -> Result<(), JobFailure> {
@@ -440,7 +473,7 @@ pub(super) fn controls_changed(attachment: &mut ProductionAttachment) -> Result<
         attachment
             .store
             .begin_request()
-            .inventory_account("", WITHHELD)
+            .inventory_account("", WITHHELD | NEWER_TURN)
             .map_err(store_effect)?;
     }
     Ok(())
