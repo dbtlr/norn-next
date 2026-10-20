@@ -1526,10 +1526,14 @@ Two mechanisms carry trust, and both are contract:
   The merge also restores schema-stale rows and missing document findings. Findings accounting survives windows on disk. A bounded
   finishing pass re-files refused spellings after rows have vacated their rendered
   places, then prunes unaccounted findings by subject. Watcher turns withhold their own
-  roots from that older enumeration's re-filing and prune. A scoped watcher turn over
-  refused spellings sharing a rendered place can leave missing or stale sibling findings;
-  the next complete pass restores them. A full recovery supersedes an unfinished
+  roots from that older enumeration's prune. A full recovery supersedes an unfinished
   inventory and retains its newly covered root for the next scheduled pass.
+
+  Refused spellings that share one rendered place have a narrower convergence limit:
+  a scoped watcher turn can leave missing or stale sibling findings, and a turn between
+  finishing slices can also duplicate or omit those findings. The next complete pass
+  over the settled names restores their census. Stored documents remain correct across
+  this window; same-pass completeness of these collided-spelling findings is not guaranteed.
 
   `VaultStatus.rolling_heal` reports current pass progress, last completion, next due,
   and cumulative **watcher misses**, reset on attachment. Changed and created files count
