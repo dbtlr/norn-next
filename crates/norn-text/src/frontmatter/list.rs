@@ -11,7 +11,7 @@ use std::ops::Range;
 use crate::frontmatter::fields::{
     Field, ValueStyle, classify_value, parse_top_level_key, reparse, reparse_admitted,
 };
-use crate::span::split_lines_inclusive;
+use crate::span::{YAML_BREAKS, split_yaml_lines_inclusive, trim_yaml_line_break};
 use crate::value::Value;
 
 /// One item of a block list: the lines it is written on.
@@ -46,14 +46,14 @@ pub(crate) fn block_item_lines(
     if field.style != ValueStyle::BlockSequence {
         return None;
     }
-    let mut lines = split_lines_inclusive(&content[field.line_range.clone()]);
+    let mut lines = split_yaml_lines_inclusive(&content[field.line_range.clone()]);
     let mut line_start = field.line_range.start + lines.next()?.len();
     let mut item_indent = None;
     let mut found: Vec<BlockItem> = Vec::new();
     for line in lines {
         let start = line_start;
         line_start += line.len();
-        let text = line.trim_end_matches(['\r', '\n']);
+        let text = trim_yaml_line_break(line);
         let body = text.trim_start_matches([' ', '\t']);
         if body.is_empty() || body.starts_with('#') {
             continue;
@@ -194,7 +194,7 @@ pub(crate) const MAX_JUDGED_CANDIDATES: usize = 32;
 const BARE_PROBE: char = 'x';
 
 /// The text each comment candidate in `yaml[entry]` would truncate: for
-/// every `#`, the rest of its line up to the next [`READER_LINE_BREAKS`] or
+/// every `#`, the rest of its line up to the next [`YAML_BREAKS`] or
 /// the end of the block. A bare `#` names an empty range, at the break.
 fn comment_candidates(yaml: &str, entry: Range<usize>) -> impl Iterator<Item = Range<usize>> {
     yaml[entry.clone()]
@@ -202,22 +202,16 @@ fn comment_candidates(yaml: &str, entry: Range<usize>) -> impl Iterator<Item = R
         .map(move |(offset, _)| {
             let text = entry.start + offset + 1;
             let end = yaml[text..]
-                .find(READER_LINE_BREAKS)
+                .find(YAML_BREAKS)
                 .map_or(yaml.len(), |length| text + length);
             text..end
         })
 }
 
-/// The characters the YAML reader ends a line, and so a comment, at:
-/// libyaml's `IS_BREAK`.
-const READER_LINE_BREAKS: [char; 5] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
-
 /// The key line starting at `line_start`, without its terminator, and the
 /// offset in it just past the key's `:`.
 fn key_line(content: &str, line_start: usize) -> Option<(&str, usize)> {
-    let line = split_lines_inclusive(&content[line_start..])
-        .next()?
-        .trim_end_matches(['\r', '\n']);
+    let line = trim_yaml_line_break(split_yaml_lines_inclusive(&content[line_start..]).next()?);
     let (_, after_colon, _) = parse_top_level_key(line)?;
     Some((line, after_colon))
 }

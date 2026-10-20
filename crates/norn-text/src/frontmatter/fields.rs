@@ -86,7 +86,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::frontmatter::extract::MERGE_KEY;
-use crate::span::{SourceSpan, split_lines_inclusive};
+use crate::span::{SourceSpan, split_yaml_lines_inclusive, trim_yaml_line_break};
 use crate::value::{KeyIndex, StripReport, Value};
 
 /// Why a block's fields could not be split into spans, and so why every field
@@ -301,13 +301,13 @@ pub(crate) fn field_spans(
 /// The trailing lines of `slice` that are whole blank lines or column-0
 /// comment lines, in document order.
 ///
-/// Lines are cut on [`crate::span`]'s break rule, so a comment standing after
+/// Lines are cut on [`crate::span`]'s YAML break rule, so a comment standing after
 /// a `\r` break is one line and is the document's. Under a narrower rule the
 /// run stops short of it and removing the field deletes it.
 fn trailing_separator_run(slice: &str) -> Vec<&str> {
     let mut lines: Vec<&str> = Vec::new();
-    for line in split_lines_inclusive(slice).rev() {
-        let text = line.trim_end_matches(['\r', '\n']);
+    for line in split_yaml_lines_inclusive(slice).rev() {
+        let text = trim_yaml_line_break(line);
         if text.trim().is_empty() || text.starts_with('#') {
             lines.push(line);
         } else {
@@ -487,10 +487,10 @@ fn scan_key_lines(
     frontmatter_range: &Range<usize>,
 ) -> Result<Vec<RawKeyLine>, SplitRefusal> {
     let yaml = &content[frontmatter_range.clone()];
-    // Lines are cut on the crate's break rule, the same rule the YAML behind
-    // the seam reads, so a `\r`-broken block locates every key rather than its
+    // Lines are cut on the YAML reader's break rule, `\n`, `\r` and the
+    // Unicode breaks included, so a `\r`-broken block locates every key rather than its
     // first — which refuses every edit over the block, safely and silently.
-    let lines: Vec<&str> = split_lines_inclusive(yaml).collect();
+    let lines: Vec<&str> = split_yaml_lines_inclusive(yaml).collect();
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
     let mut accumulated = frontmatter_range.start;
     for line in &lines {
@@ -508,7 +508,7 @@ fn scan_key_lines(
             continue;
         }
         let line_start = line_starts[index];
-        let trimmed_line = line.trim_end_matches(['\r', '\n']);
+        let trimmed_line = trim_yaml_line_break(line);
 
         if opens_explicit_key(trimmed_line) {
             return Err(SplitRefusal::ExplicitKeyIndicator {

@@ -139,10 +139,40 @@ impl<'a> LineCursor<'a> {
 /// that spans a break. A per-line test then answers for two lines at once —
 /// masking or matching the pair on whichever one the test happens to read.
 pub(crate) fn split_lines_inclusive(content: &str) -> LinesInclusive<'_> {
+    lines_inclusive(content, MARKDOWN_BREAKS)
+}
+
+/// Split `content` into lines, terminator included, on the YAML reader's break
+/// rule: [`split_lines_inclusive`]'s three breaks plus U+0085, U+2028 and
+/// U+2029.
+///
+/// Frontmatter YAML is the one text in the crate that reads those three as
+/// line breaks, so a scan that locates YAML nodes by line uses this splitter;
+/// a scan over CommonMark text does not, because CommonMark does not end a line
+/// at them. Cutting YAML on the narrower rule is how a `- ` written after one
+/// goes uncounted while a `- ` inside a block literal is counted.
+pub(crate) fn split_yaml_lines_inclusive(content: &str) -> LinesInclusive<'_> {
+    lines_inclusive(content, YAML_BREAKS)
+}
+
+/// The characters [`split_lines_inclusive`] ends a line at.
+const MARKDOWN_BREAKS: &[char] = &['\n', '\r'];
+
+/// The characters [`split_yaml_lines_inclusive`] ends a line at: libyaml's
+/// `IS_BREAK`.
+pub(crate) const YAML_BREAKS: &[char] = &['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
+
+/// `line` without the terminator that ends it, on the YAML reader's rule.
+pub(crate) fn trim_yaml_line_break(line: &str) -> &str {
+    line.trim_end_matches(YAML_BREAKS)
+}
+
+fn lines_inclusive<'a>(content: &'a str, breaks: &'static [char]) -> LinesInclusive<'a> {
     LinesInclusive {
         content,
         start: 0,
         end: content.len(),
+        breaks,
     }
 }
 
@@ -163,11 +193,13 @@ pub(crate) struct LinesInclusive<'a> {
     /// boundary.
     start: usize,
     end: usize,
+    /// The characters that end a line.
+    breaks: &'static [char],
 }
 
 impl<'a> LinesInclusive<'a> {
-    /// Where the break at `at` ends, given that `at` is a break byte inside
-    /// the unconsumed range.
+    /// Where the break at `at` ends, given that `at` is a break character
+    /// inside the unconsumed range.
     fn past_break(&self, at: usize) -> usize {
         let bytes = self.content.as_bytes();
         // `\r\n` is one break, so it terminates one line rather than opening
@@ -175,7 +207,7 @@ impl<'a> LinesInclusive<'a> {
         if bytes[at] == b'\r' && at + 1 < self.end && bytes[at + 1] == b'\n' {
             at + 2
         } else {
-            at + 1
+            at + self.content[at..].chars().next().map_or(1, char::len_utf8)
         }
     }
 }
@@ -187,11 +219,7 @@ impl<'a> Iterator for LinesInclusive<'a> {
         if self.start >= self.end {
             return None;
         }
-        let bytes = self.content.as_bytes();
-        let stop = match bytes[self.start..self.end]
-            .iter()
-            .position(|&byte| byte == b'\n' || byte == b'\r')
-        {
+        let stop = match self.content[self.start..self.end].find(self.breaks) {
             Some(offset) => self.past_break(self.start + offset),
             None => self.end,
         };
@@ -207,23 +235,24 @@ impl<'a> DoubleEndedIterator for LinesInclusive<'a> {
             return None;
         }
         let bytes = self.content.as_bytes();
+        let region = &self.content[self.start..self.end];
         // The last line runs to `end`. Step onto the first byte of whatever
         // terminates it, if anything does: the `\r` of a pair rather than its
         // `\n`, so the pair is not mistaken for two breaks.
-        let mut last = self.end - 1;
-        if bytes[last] == b'\n' && last > self.start && bytes[last - 1] == b'\r' {
+        let final_char = region.chars().next_back()?;
+        let mut last = self.end - final_char.len_utf8();
+        if final_char == '\n' && last > self.start && bytes[last - 1] == b'\r' {
             last -= 1;
         }
         // A line the slice ends inside carries no terminator, so the search
         // for the break above it covers those bytes too.
-        let above = if bytes[last] == b'\n' || bytes[last] == b'\r' {
+        let above = if self.breaks.contains(&final_char) {
             last
         } else {
             self.end
         };
-        let begin = bytes[self.start..above]
-            .iter()
-            .rposition(|&byte| byte == b'\n' || byte == b'\r')
+        let begin = self.content[self.start..above]
+            .rfind(self.breaks)
             .map_or(self.start, |offset| self.past_break(self.start + offset));
         let line = &self.content[begin..self.end];
         self.end = begin;
