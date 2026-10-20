@@ -11,7 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 use norn_fs::{
-    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
+    Batch, CaseSensitivity, OwnWrites, PathNormalizer, RescanScope, Subscription, WatchError,
+    watch, watch_polling,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::scratch;
@@ -31,6 +32,10 @@ const SYNCHRONIZATION_DEADLINE: Duration = budget().work();
 /// reporting. Not a Markdown document, and named so a reader of a leftover
 /// scratch tree knows what put it there.
 const CANARY: &str = "watch-canary";
+
+/// One way to establish coverage: [`watch`] for the native backend,
+/// [`watch_polling`] for the poll backend.
+type Establish = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
 const fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
@@ -183,8 +188,14 @@ impl Collector {
     /// through it, and every later wait would be met by that rescan rather
     /// than by the change the case made.
     fn start(vault: &Path, schema: &Path) -> Self {
+        Self::start_over(watch, vault, schema)
+    }
+
+    /// The same start, over the backend `establish` selects.
+    fn start_over(establish: Establish, vault: &Path, schema: &Path) -> Self {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
-        let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
+        let (subscription, _own_writes) =
+            establish(vault, schema).expect("watch coverage is active");
         let mut collector = Self::adopt(subscription, lease);
         let canary = vault.join(CANARY);
         wait_until("the backend to report a canary write", budget(), || {
@@ -437,7 +448,20 @@ fn an_in_vault_schema_whose_folder_does_not_stand_yet_is_covered_once_written() 
 /// original target and its watcher still stand.
 #[cfg(unix)]
 #[test]
-fn retargeting_a_registered_symbolic_link_root_ends_coverage() {
+fn retargeting_a_registered_symbolic_link_root_ends_native_coverage() {
+    retargeting_a_registered_symbolic_link_root_ends_coverage(watch);
+}
+
+/// The poll backend reports a retargeted link as a changed stat, not as a
+/// rename, and that must end coverage just the same.
+#[cfg(unix)]
+#[test]
+fn retargeting_a_registered_symbolic_link_root_ends_polled_coverage() {
+    retargeting_a_registered_symbolic_link_root_ends_coverage(watch_polling);
+}
+
+#[cfg(unix)]
+fn retargeting_a_registered_symbolic_link_root_ends_coverage(establish: Establish) {
     use std::os::unix::fs::symlink;
 
     let scratch = Scratch::new("symbolic-link-root-retarget");
@@ -447,7 +471,7 @@ fn retargeting_a_registered_symbolic_link_root_ends_coverage() {
     std::fs::create_dir(&next).expect("the next vault root");
     symlink(scratch.vault(), &registered).expect("the registered root link");
     let covered = std::fs::canonicalize(&registered).expect("the covered vault root");
-    let mut collector = Collector::start(&registered, &scratch.schema());
+    let mut collector = Collector::start_over(establish, &registered, &scratch.schema());
 
     symlink(&next, &replacement).expect("the replacement root link");
     std::fs::rename(&replacement, &registered).expect("retargeting the registered root");
@@ -466,7 +490,18 @@ fn retargeting_a_registered_symbolic_link_root_ends_coverage() {
 /// canonical directory the backend already covers.
 #[cfg(unix)]
 #[test]
-fn retargeting_a_symbolic_link_ancestor_ends_coverage() {
+fn retargeting_a_symbolic_link_ancestor_ends_native_coverage() {
+    retargeting_a_symbolic_link_ancestor_ends_coverage(watch);
+}
+
+#[cfg(unix)]
+#[test]
+fn retargeting_a_symbolic_link_ancestor_ends_polled_coverage() {
+    retargeting_a_symbolic_link_ancestor_ends_coverage(watch_polling);
+}
+
+#[cfg(unix)]
+fn retargeting_a_symbolic_link_ancestor_ends_coverage(establish: Establish) {
     use std::os::unix::fs::symlink;
 
     let scratch = Scratch::new("symbolic-link-ancestor-retarget");
@@ -479,7 +514,7 @@ fn retargeting_a_symbolic_link_ancestor_ends_coverage() {
     symlink(&first, &active).expect("the registered ancestor link");
     let registered = active.join("vault");
     let covered = std::fs::canonicalize(&registered).expect("the covered vault root");
-    let mut collector = Collector::start(&registered, &scratch.schema());
+    let mut collector = Collector::start_over(establish, &registered, &scratch.schema());
 
     symlink(&next, &replacement).expect("the replacement ancestor link");
     std::fs::rename(&replacement, &active).expect("retargeting the registered ancestor");
