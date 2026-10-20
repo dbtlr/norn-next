@@ -69,6 +69,8 @@ pub struct ReadTally {
     /// other protocol in this crate opens — a target hashed to judge it, a
     /// copy's source, or a shadow.
     pub document_opens: u64,
+    /// Content bytes read and hashed through the counted document reader.
+    pub document_bytes: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
     /// it tells a symbolic link from a non-directory with, [`crate::Vault::reach`]'s
@@ -141,6 +143,7 @@ pub struct ReadTally {
 thread_local! {
     static TALLY: Cell<ReadTally> = const { Cell::new(ReadTally {
         document_opens: 0,
+        document_bytes: 0,
         stats: 0,
         walk_dirents: 0,
         write_dirents: 0,
@@ -303,6 +306,10 @@ pub(crate) fn count_document_read(path: &std::path::Path) {
     let _ = path;
 }
 
+pub(crate) fn count_document_bytes(bytes: u64) {
+    bump(|tally| tally.document_bytes += bytes);
+}
+
 pub(crate) fn count_stat() {
     bump(|tally| tally.stats += 1);
 }
@@ -399,6 +406,7 @@ mod tests {
             window.finish(),
             ReadTally {
                 document_opens: 1,
+                document_bytes: 0,
                 stats: 1,
                 walk_dirents: 4,
                 write_dirents: 0,

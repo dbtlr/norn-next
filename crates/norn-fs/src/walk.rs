@@ -35,6 +35,7 @@
 //! inside it changing, and it refuses.
 
 mod faults;
+pub mod inventory;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -115,6 +116,7 @@ pub fn walk_subtree(
 /// Opening proves the root's case behavior once, so a caller
 /// deciding many names against one vault pays for that proof once rather than
 /// per name.
+#[derive(Clone)]
 pub struct Vault {
     root: Arc<PathBuf>,
     root_fd: Arc<OwnedFd>,
@@ -150,6 +152,49 @@ impl Vault {
     /// deciding names against it.
     pub fn normalizer(&self) -> &PathNormalizer {
         &self.normalizer
+    }
+
+    /// Observe a single inventoried name through the vault's anchored descent.
+    /// A directory is deferred to the next inventory, with no authority over
+    /// its descendants. Content is still read only by `FileFact::read_optional`.
+    #[allow(clippy::disallowed_methods)]
+    pub fn fact(&self, relative: &Path) -> Result<WalkFact, WalkError> {
+        let path = self.normalize(relative)?;
+        let reason = match self.reach(relative)? {
+            Reach::Refused(skip) => return Ok(WalkFact::Skipped(skip)),
+            Reach::Stands {
+                kind: PathKind::RegularFile,
+                at,
+            } => {
+                let path = at;
+                match open_regular_at(self.root_fd.as_fd(), path.as_path()).map_err(|source| {
+                    environment(source.operation(), relative, source.into_error())
+                })? {
+                    Reached::Regular(fd) => {
+                        crate::reads::count_stat();
+                        let metadata = fs::File::from(fd)
+                            .metadata()
+                            .map_err(|error| environment("stating", relative, error))?;
+                        return Ok(WalkFact::File(FileFact {
+                            root: self.root.clone(),
+                            root_fd: self.root_fd.clone(),
+                            path,
+                            stat: stat(&metadata),
+                        }));
+                    }
+                    Reached::Nothing(_) => SkipReason::Vanished,
+                }
+            }
+            Reach::Stands {
+                kind: PathKind::Other,
+                ..
+            } => match open_subtree(self, &path)? {
+                Frontier::Skipped(skip) => return Ok(WalkFact::Skipped(skip)),
+                Frontier::Open(_) => SkipReason::Vanished,
+            },
+            Reach::Stands { .. } => SkipReason::Vanished,
+        };
+        Ok(WalkFact::Skipped(SkipFact { path, reason }))
     }
 
     /// What this vault's walk finds at `relative`: the notation it states in
