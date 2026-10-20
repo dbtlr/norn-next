@@ -1530,8 +1530,8 @@ Two mechanisms carry trust, and both are contract:
   inventory and retains its newly covered root for the next scheduled pass.
 
   Refused spellings that share one rendered place have a narrower convergence limit:
-  a scoped watcher turn can leave missing or stale sibling findings, and a turn between
-  finishing slices can also duplicate or omit those findings. The next complete pass
+  a scoped watcher turn can leave missing or stale sibling findings, and a turn during
+  the pass can also duplicate or omit those findings. The next complete pass
   over the settled names restores their census. Stored documents remain correct across
   this window; same-pass completeness of these collided-spelling findings is not guaranteed.
 
