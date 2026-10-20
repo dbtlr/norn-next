@@ -126,6 +126,7 @@ use norn_wire::{
 use super::compose::{After, Composition, Kept, Skipped};
 use super::control::role_at;
 use super::lineage::{Drawn, Lineage, Relink, Removal, Retarget};
+use super::view::identity_of;
 use crate::derivation::document_links;
 
 /// Where the links a plan does not write are judged: what each link the plan
@@ -509,7 +510,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let named_by_old: BTreeSet<NormalizedPath> = retargeted
         .values()
         .filter_map(|named| match &named.old.before {
-            Resolves::One { path } => normalizer.normalize(Path::new(path.as_str())).ok(),
+            Resolves::One { path } => Some(identity_of(normalizer, path)),
             _ => None,
         })
         .collect();
@@ -534,12 +535,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     let spellings: BTreeMap<_, _> = targets
         .iter()
-        .filter_map(|target| {
-            normalizer
-                .normalize(Path::new(target.path().as_str()))
-                .ok()
-                .map(|file| (file, target.path()))
-        })
+        .map(|target| (identity_of(normalizer, target.path()), target.path()))
         .collect();
     let mut twin_keys: BTreeMap<String, Vec<EntryKey>> = BTreeMap::new();
     // Each delete a link naming its document contradicts.
@@ -1003,7 +999,7 @@ pub(crate) fn reach(
     normalizer: &PathNormalizer,
     written: &WrittenLinks,
 ) -> Reached {
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(normalizer, path);
     // The spelling each file standing before the plan is written at, which
     // a moved document's links are read from before the plan. Where its
     // content stood is a fact of the file's path and lineage, so a file
@@ -1012,7 +1008,7 @@ pub(crate) fn reach(
     let stood: BTreeMap<NormalizedPath, &DocumentPath> = targets
         .iter()
         .filter(|target| target.stood)
-        .filter_map(|target| Some((identity(target.path)?, target.path)))
+        .map(|target| (identity(target.path), target.path))
         .collect();
     let mut overlay = PathOverlay::new();
     let mut probed = Vec::new();
@@ -1020,7 +1016,7 @@ pub(crate) fn reach(
     for target in targets {
         let stored = stored_path(target.path);
         let file = identity(target.path);
-        overlay = if replaces(target, file.as_ref(), lineage) {
+        overlay = if replaces(target, &file, lineage) {
             overlay.replacing(stored.clone())
         } else {
             overlay.with(stored.clone(), target.before, target.after.is_some())
@@ -1028,16 +1024,15 @@ pub(crate) fn reach(
         let Some(links) = target.links() else {
             continue;
         };
-        let before_holder = file
-            .as_ref()
-            .and_then(|file| lineage.source(file))
+        let before_holder = lineage
+            .source(&file)
             .and_then(|drawn| stood.get(&drawn.from).copied())
             .map(stored_path)
             .unwrap_or_else(|| stored.clone());
         for link in links.iter().cloned() {
-            let rewritten = file.as_ref().is_some_and(|file| written.holds(file, &link));
-            if let (true, Some(file)) = (rewritten, file.as_ref()) {
-                originals.extend(written.originals(file, &link).map(|original| ProbedLink {
+            let rewritten = written.holds(&file, &link);
+            if rewritten {
+                originals.extend(written.originals(&file, &link).map(|original| ProbedLink {
                     before_holder: before_holder.clone(),
                     after_holder: stored.clone(),
                     link: original,
@@ -1080,10 +1075,10 @@ pub(crate) struct Reached {
 /// is not drawn from what stood there before — created, or carried there by
 /// a move from another file. An edit in place, and a document moved away and
 /// back, leave the same document there.
-fn replaces(target: &Target<'_>, file: Option<&NormalizedPath>, lineage: &Lineage) -> bool {
+fn replaces(target: &Target<'_>, file: &NormalizedPath, lineage: &Lineage) -> bool {
     target.before
         && target.after.is_some()
-        && file.is_some_and(|file| lineage.source(file).is_none_or(|drawn| drawn.from != *file))
+        && lineage.source(file).is_none_or(|drawn| drawn.from != *file)
 }
 
 /// **The one rule a link follows a move by**: where a link resolved before
@@ -1110,13 +1105,13 @@ pub(crate) fn left_behind<'l>(
     lineage: &'l Lineage,
     normalizer: &PathNormalizer,
 ) -> Option<(&'l NormalizedPath, &'l Drawn)> {
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(normalizer, path);
     let Resolves::One { path } = before else {
         return None;
     };
-    let (to, drawn) = lineage.carried_to(&identity(path)?)?;
+    let (to, drawn) = lineage.carried_to(&identity(path))?;
     match after {
-        Resolves::One { path } if identity(path).as_ref() == Some(to) => None,
+        Resolves::One { path } if identity(path) == *to => None,
         _ => Some((to, drawn)),
     }
 }
@@ -1139,18 +1134,14 @@ pub(crate) fn names_another(
     lineage: &Lineage,
     normalizer: &PathNormalizer,
 ) -> bool {
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(normalizer, path);
     let Resolves::One { path } = before else {
         return false;
     };
-    let Some(named) = identity(path) else {
-        return false;
-    };
+    let named = identity(path);
     match after {
         Resolves::One { path } => {
-            let Some(now) = identity(path) else {
-                return false;
-            };
+            let now = identity(path);
             lineage.source(&now).map(|drawn| drawn.from) != Some(named)
         }
         Resolves::None {} | Resolves::Several {} => true,
@@ -1170,8 +1161,7 @@ pub(crate) fn removed_by<'l>(
     let Resolves::One { path } = before else {
         return None;
     };
-    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
-    lineage.removed_by(&file)
+    lineage.removed_by(&identity_of(normalizer, path))
 }
 
 /// What the `rewrite_to` of each delete of the plan rewriting the links
@@ -1202,10 +1192,7 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
 /// The one document the target `named` names where the plan leaves the
 /// vault, as the file the vault's rule reads and the path the store names:
 /// what a rewriting delete's backlinks, or a wikilink rewrite's wikilinks,
-/// are respelled toward. `None` where it names no one document. The
-/// document-path grammar refuses every spelling the vault's rule refuses, so
-/// a document it names always normalizes; the arm for one that does not is
-/// the conservative answer, never a panic, and no target reaches it.
+/// are respelled toward. `None` where it names no one document.
 pub(crate) fn rewrite_destination(
     named: &TargetNaming,
     normalizer: &PathNormalizer,
@@ -1213,8 +1200,7 @@ pub(crate) fn rewrite_destination(
     let Resolves::One { path } = &named.after else {
         return None;
     };
-    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
-    Some((file, stored_path(path)))
+    Some((identity_of(normalizer, path), stored_path(path)))
 }
 
 /// **The one rule a delete's cascade follows**: whether a link that
@@ -1240,9 +1226,7 @@ pub(crate) fn rewritten_for(
         .get(&removal.position)
         .and_then(|target| rewrite_destination(target, normalizer));
     match (after, target) {
-        (Resolves::One { path }, Some((target, _))) => {
-            normalizer.normalize(Path::new(path.as_str())).ok().as_ref() != Some(&target)
-        }
+        (Resolves::One { path }, Some((target, _))) => identity_of(normalizer, path) != target,
         _ => true,
     }
 }
@@ -1287,7 +1271,7 @@ impl RetargetNaming {
         let Resolves::One { path } = &self.old.before else {
             return None;
         };
-        lineage.landing(&normalizer.normalize(Path::new(path.as_str())).ok()?)
+        lineage.landing(&identity_of(normalizer, path))
     }
 }
 
@@ -1627,9 +1611,9 @@ pub(crate) fn respells(
     indexed: &Retargets<'_>,
     normalizer: &PathNormalizer,
 ) -> bool {
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(normalizer, path);
     let one = |resolves: &Resolves| match resolves {
-        Resolves::One { path } => identity(path),
+        Resolves::One { path } => Some(identity(path)),
         _ => None,
     };
     match decider {
@@ -1844,11 +1828,9 @@ impl WrittenLinks {
                 to,
                 ..
             } = &operation.kind
-                && let (Ok(file), Some(family)) = (
-                    normalizer.normalize(Path::new(path.as_str())),
-                    family_name(*syntax),
-                )
+                && let Some(family) = family_name(*syntax)
             {
+                let file = identity_of(normalizer, path);
                 let anchor = if *syntax == LinkFamily::Markdown {
                     norn_text::decode_markdown_fragment(to)
                 } else {
@@ -1870,10 +1852,8 @@ impl WrittenLinks {
                 .iter()
                 .map(|rewrite| (&rewrite.path, rewrite.syntax, &rewrite.from, &rewrite.to));
             for (path, syntax, from, to) in authored.into_iter().chain(cascaded) {
-                if let (Ok(file), Some(syntax)) = (
-                    normalizer.normalize(Path::new(path.as_str())),
-                    family_name(syntax),
-                ) {
+                if let Some(syntax) = family_name(syntax) {
+                    let file = identity_of(normalizer, path);
                     let destinations = if syntax == "markdown" {
                         super::link_spelling::spelling_variants(LinkFamily::Markdown, to)
                     } else {

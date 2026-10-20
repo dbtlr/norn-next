@@ -144,7 +144,7 @@ use crate::applier::Held;
 use crate::clock::OneReading;
 use crate::derivation::Declared;
 use crate::planner::links::LinkIndex;
-use crate::planner::view::{Barrier, Body, Entry, VaultView};
+use crate::planner::view::{Barrier, Body, Entry, VaultView, identity_of};
 
 /// What a batch of findings plans to.
 #[derive(Debug, Default, PartialEq)]
@@ -355,8 +355,8 @@ pub(crate) trait Reading {
     fn destination(&self, path: &DocumentPath) -> Result<Destination, Self::Error>;
 
     /// The place `path` names, by the identity the root's case rule gives
-    /// it; `None` where it names none.
-    fn place(&self, path: &DocumentPath) -> Option<NormalizedPath>;
+    /// it.
+    fn place(&self, path: &DocumentPath) -> NormalizedPath;
 
     /// Hand `each` every link `probed` names that the plan `overlay`
     /// describes reaches, and every link the index holds under a key that
@@ -440,9 +440,7 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     /// that no document whose bytes can be read stands there: what a repair
     /// composes a document's fixes onto.
     fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
-        let Some(at) = self.place(path) else {
-            return Ok(Before::Unread);
-        };
+        let at = self.place(path);
         Ok(match self.view.entry(&at).map_err(Unread::View)? {
             Entry::Document {
                 body: Body::Held(bytes),
@@ -457,10 +455,7 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     /// destination, which a shared view answers again from memory.
     fn destination(&self, path: &DocumentPath) -> Result<Destination, Self::Error> {
         let normalizer = self.view.normalizer();
-        let place = match normalizer.normalize(std::path::Path::new(path.as_str())) {
-            Ok(place) => place,
-            Err(error) => return Ok(Destination::Closed(error.to_string())),
-        };
+        let place = identity_of(normalizer, path);
         Ok(
             match self.view.streamed_entry(&place).map_err(Unread::View)? {
                 Entry::Absent { at } => {
@@ -489,11 +484,8 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
         )
     }
 
-    fn place(&self, path: &DocumentPath) -> Option<NormalizedPath> {
-        self.view
-            .normalizer()
-            .normalize(std::path::Path::new(path.as_str()))
-            .ok()
+    fn place(&self, path: &DocumentPath) -> NormalizedPath {
+        identity_of(self.view.normalizer(), path)
     }
 
     fn links(
@@ -815,7 +807,7 @@ mod tests {
             panic!("`{path}` was read as a destination for a plan of no fix")
         }
 
-        fn place(&self, path: &DocumentPath) -> Option<NormalizedPath> {
+        fn place(&self, path: &DocumentPath) -> NormalizedPath {
             panic!("`{path}` was placed for a plan of no fix")
         }
 
@@ -1033,7 +1025,7 @@ mod tests {
             fn destination(&self, _: &DocumentPath) -> Result<Destination, Self::Error> {
                 panic!("no route")
             }
-            fn place(&self, _: &DocumentPath) -> Option<NormalizedPath> {
+            fn place(&self, _: &DocumentPath) -> NormalizedPath {
                 panic!("no place")
             }
             fn links(

@@ -10,13 +10,14 @@ use norn_wire::{
     ResolvedPlan, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::observe::{TargetState, identity, observe, units};
+use super::observe::{TargetState, observe, units};
 use super::outcome::{ApplyOutcome, Refused};
 use super::schema::Citations;
 use super::stage::{Links, check, drifted_checks};
 use crate::derivation::Declared;
 use crate::planner::compose::touched;
 use crate::planner::resolve::{PlanningFailure, resolve};
+use crate::planner::view::identity_of;
 use crate::planner::view::{TreeView, VaultView};
 
 /// What becomes of one operation of a refused plan.
@@ -319,16 +320,17 @@ fn fates(
     let count = plan.operations.len();
     let mut by_identity: BTreeMap<NormalizedPath, Vec<usize>> = BTreeMap::new();
     for (index, transition) in plan.transitions.iter().enumerate() {
-        if let Some(identity) = identity(normalizer, transition.path.as_str()) {
-            by_identity.entry(identity).or_default().push(index);
-        }
+        by_identity
+            .entry(identity_of(normalizer, &transition.path))
+            .or_default()
+            .push(index);
     }
     let files: Vec<Vec<NormalizedPath>> = plan
         .operations
         .iter()
         .map(|operation| {
             touched(operation)
-                .filter_map(|path| identity(normalizer, path.as_str()))
+                .map(|path| identity_of(normalizer, path))
                 .collect()
         })
         .collect();

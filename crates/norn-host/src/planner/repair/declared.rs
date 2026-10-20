@@ -2058,7 +2058,7 @@ mod tests {
             self.over.destination(path)
         }
 
-        fn place(&self, path: &DocumentPath) -> Option<norn_fs::NormalizedPath> {
+        fn place(&self, path: &DocumentPath) -> norn_fs::NormalizedPath {
             self.over.place(path)
         }
 

@@ -23,7 +23,6 @@
 //! one check, since composition needs the order the first one settles.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
@@ -34,6 +33,7 @@ use norn_wire::{
 use super::compose::touches;
 use super::control::role_at;
 use super::links::{family_name, rewrite_destination};
+use super::view::identity_of;
 
 /// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,24 +189,20 @@ impl Lineage {
         order: &[usize],
         normalizer: &PathNormalizer,
     ) -> Lineage {
-        let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
+        let identity = |path: &DocumentPath| identity_of(normalizer, path);
         let mut lineage = Lineage::default();
         let mut rewritten: Vec<(usize, NormalizedPath)> = Vec::new();
         for &position in order {
             let kind = &operations[position].kind;
             match kind {
                 OperationKind::CreateDocument { path, .. } => {
-                    if let Some(file) = identity(path.as_str()) {
-                        lineage.at_end.insert(file, None);
-                    }
+                    lineage.at_end.insert(identity(path), None);
                 }
                 // A control-file write carries the whole of what it writes,
                 // drawing on no file, as a create does.
                 OperationKind::WriteControlFile { .. } => {
-                    if let Some(path) = touches(kind).next()
-                        && let Some(file) = identity(path.as_str())
-                    {
-                        lineage.at_end.insert(file, None);
+                    if let Some(path) = touches(kind).next() {
+                        lineage.at_end.insert(identity(path), None);
                     }
                 }
                 // Planning expands a creation by rule, one for one, into a
@@ -220,16 +216,15 @@ impl Lineage {
                 // though the content it removes is one the plan created; only
                 // one removing a before-state can have links naming it.
                 OperationKind::DeleteDocument { path, backlinks } => {
-                    if let Some(file) = identity(path.as_str()) {
-                        if let Some(drawn) = lineage.source(&file) {
-                            lineage.removed.insert(drawn.from, lineage.removals.len());
-                        }
-                        lineage.removals.push(Removal {
-                            position,
-                            backlinks: backlinks.clone(),
-                        });
-                        lineage.at_end.insert(file, None);
+                    let file = identity(path);
+                    if let Some(drawn) = lineage.source(&file) {
+                        lineage.removed.insert(drawn.from, lineage.removals.len());
                     }
+                    lineage.removals.push(Removal {
+                        position,
+                        backlinks: backlinks.clone(),
+                    });
+                    lineage.at_end.insert(file, None);
                 }
                 // An edit in place: a `str_replace` or a document-local kind,
                 // each touching the one document it names.
@@ -245,17 +240,13 @@ impl Lineage {
                 | OperationKind::InsertBeforeHeading { .. }
                 | OperationKind::InsertAfterHeading { .. } => {
                     if let Some(path) = touches(kind).next()
-                        && let Some(file) = identity(path.as_str())
-                        && let Some(source) = lineage.source(&file)
+                        && let Some(source) = lineage.source(&identity(path))
                     {
                         lineage.edited.insert(position, source.from);
                     }
                 }
                 OperationKind::MoveDocument { from, to } => {
-                    let (Some(from), Some(to)) = (identity(from.as_str()), identity(to.as_str()))
-                    else {
-                        continue;
-                    };
+                    let (from, to) = (identity(from), identity(to));
                     if from == to {
                         continue;
                     }
@@ -286,27 +277,24 @@ impl Lineage {
                 OperationKind::RewriteLink {
                     path, syntax, from, ..
                 } => {
-                    if let Some(file) = identity(path.as_str()) {
-                        crate::evidence::count_rewrite_selection_step();
-                        lineage
-                            .relinks
-                            .entry((file.clone(), family_name(*syntax), from.clone()))
-                            .or_insert(Relink {
-                                position,
-                                holder: file.clone(),
-                                syntax: *syntax,
-                                from: from.clone(),
-                            });
-                        rewritten.push((position, file));
-                    }
+                    let file = identity(path);
+                    crate::evidence::count_rewrite_selection_step();
+                    lineage
+                        .relinks
+                        .entry((file.clone(), family_name(*syntax), from.clone()))
+                        .or_insert(Relink {
+                            position,
+                            holder: file.clone(),
+                            syntax: *syntax,
+                            from: from.clone(),
+                        });
+                    rewritten.push((position, file));
                 }
                 // Name rewrites edit the holder where the plan leaves it,
                 // so their source is read after the lineage walk finishes.
                 OperationKind::RewriteAnchor { path, .. }
                 | OperationKind::RewriteTag { path, .. } => {
-                    if let Some(file) = identity(path.as_str()) {
-                        rewritten.push((position, file));
-                    }
+                    rewritten.push((position, identity(path)));
                 }
                 // A folder move arrives expanded into the moves it makes.
                 OperationKind::MoveFolder { .. } => {}
@@ -482,21 +470,19 @@ impl Carried {
         lineage: &Lineage,
         normalizer: &PathNormalizer,
     ) -> Carried {
-        let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
+        let identity = |path: &DocumentPath| identity_of(normalizer, path);
         let mut files = moved_only(operations, normalizer);
         for file in lineage.edited.values() {
             files.remove(file);
         }
         for operation in operations {
             for rewrite in &operation.cascade {
-                if let Some(drawn) =
-                    identity(rewrite.path.as_str()).and_then(|holder| lineage.source(&holder))
-                {
+                if let Some(drawn) = lineage.source(&identity(&rewrite.path)) {
                     files.remove(&drawn.from);
                 }
             }
             if let OperationKind::MoveDocument { from, to } = &operation.kind
-                && let (Some(from), Some(to)) = (identity(from.as_str()), identity(to.as_str()))
+                && let (from, to) = (identity(from), identity(to))
                 && from == to
                 && let Some(drawn) = lineage.source(&from)
                 && drawn.from != from
@@ -553,15 +539,13 @@ pub(crate) fn moved_only(
     operations: &[Operation],
     normalizer: &PathNormalizer,
 ) -> BTreeSet<NormalizedPath> {
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(normalizer, path);
     let mut ends = BTreeSet::new();
     let mut named_otherwise = BTreeSet::new();
     for operation in operations {
         let moves = matches!(operation.kind, OperationKind::MoveDocument { .. });
         for path in touches(&operation.kind) {
-            let Some(file) = identity(path) else {
-                continue;
-            };
+            let file = identity(path);
             if moves && role_at(path.as_str()).is_none() {
                 ends.insert(file);
             } else {
@@ -569,10 +553,8 @@ pub(crate) fn moved_only(
             }
         }
         for condition in &operation.conditions {
-            if let AuthorCondition::ExpectedValue { path, .. } = condition
-                && let Some(file) = identity(path)
-            {
-                named_otherwise.insert(file);
+            if let AuthorCondition::ExpectedValue { path, .. } = condition {
+                named_otherwise.insert(identity(path));
             }
         }
     }

@@ -76,7 +76,7 @@ use norn_wire::{
 use super::links::LinkIndex;
 use super::resolve::{PlanningFailure, Resolution, resolve_leaving_out};
 use super::rule::{self, Rules};
-use super::view::{Entry, Remembered, VaultView};
+use super::view::{Entry, Remembered, VaultView, identity_of};
 
 /// What a `where` target's predicates match: the documents, in path order,
 /// or why the builder could not apply them as asked, in words.
@@ -348,12 +348,7 @@ fn changed_since_indexed<V: VaultView>(
     document: &MatchedDocument,
     view: &V,
 ) -> Result<Option<UnresolvedReason>, V::Error> {
-    let Ok(identity) = view
-        .normalizer()
-        .normalize(Path::new(document.path.as_str()))
-    else {
-        return Ok(None);
-    };
+    let identity = identity_of(view.normalizer(), &document.path);
     Ok(match view.entry(&identity)? {
         Entry::Document { hash, .. } if hash.hex() != document.indexed => {
             Some(UnresolvedReason::no_longer_resolves(format!(

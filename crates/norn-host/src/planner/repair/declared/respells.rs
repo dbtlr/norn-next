@@ -226,18 +226,15 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
     let place = |path: &DocumentPath| vault.place(path);
     let origins: BTreeMap<NormalizedPath, usize> = routes
         .iter()
-        .filter_map(|(at, passed)| Some((place(&passed.from)?, *at)))
+        .map(|(at, passed)| (place(&passed.from), *at))
         .collect();
     let mut documents: BTreeMap<NormalizedPath, BTreeSet<usize>> = BTreeMap::new();
     for (at, draft) in drafts.iter().enumerate() {
         let Some(compositions) = draft.compositions() else {
             continue;
         };
-        let lands = draft.passed().and_then(|(passed, _)| place(&passed.to));
-        for stands in [place(&compositions.reckoned.start.at), lands]
-            .into_iter()
-            .flatten()
-        {
+        let lands = draft.passed().map(|(passed, _)| place(&passed.to));
+        for stands in std::iter::once(place(&compositions.reckoned.start.at)).chain(lands) {
             documents.entry(stands).or_default().insert(at);
         }
     }
@@ -261,7 +258,7 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         let Resolves::One { path } = &change.before else {
             return;
         };
-        let Some(route) = place(path).and_then(|named| origins.get(&named)) else {
+        let Some(route) = origins.get(&place(path)) else {
             return;
         };
         if !may_respell(&change.link, &crossing) {
@@ -271,7 +268,7 @@ pub(in crate::planner::repair) fn respelling<R: Reading>(
         // it; a place two routes land at names each.
         let holder = DocumentPath::new(change.holder.as_str())
             .expect("a stored document path is a wire document path");
-        let holders: Vec<Holder> = match place(&holder).and_then(|held| documents.get(&held)) {
+        let holders: Vec<Holder> = match documents.get(&place(&holder)) {
             Some(batch) => batch.iter().copied().map(Holder::Batch).collect(),
             None => vec![Holder::Outside(holder)],
         };

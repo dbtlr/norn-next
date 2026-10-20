@@ -3,14 +3,13 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::path::Path;
 
 use norn_fs::NormalizedPath;
 use norn_wire::{DocumentPath, Operation, OperationId, OperationKind, PlanFault};
 
 use super::lineage::moved_only;
 use super::resolve::PlanningFailure;
-use super::view::{Entry, VaultView};
+use super::view::{Entry, VaultView, identity_of};
 
 /// Which operations each operation runs after, by position.
 ///
@@ -198,12 +197,12 @@ fn vacating_requirements<V: VaultView>(
         arrivals: Vec<usize>,
         vacaters: Vec<usize>,
     }
-    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(view.normalizer(), path);
     let streamed = moved_only(operations, view.normalizer());
     let mut traffic: BTreeMap<NormalizedPath, Traffic> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
-        let arrives = arrives_at(&operation.kind).and_then(identity);
-        let vacated = vacates(&operation.kind).and_then(identity);
+        let arrives = arrives_at(&operation.kind).map(identity);
+        let vacated = vacates(&operation.kind).map(identity);
         if arrives.is_some() && arrives == vacated {
             continue;
         }

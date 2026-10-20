@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{DocumentPath, OperationKind, ResolvedPlan};
 
-use super::observe::identity;
 use crate::planner::compose::touched;
+use crate::planner::view::identity_of;
 
 /// Every path at which `plan`'s transitions do not name exactly the files its
 /// operations touch — each holder an operation's link cascade rewrites
@@ -39,29 +39,29 @@ pub(super) fn shape_disagrees(
     let mut respelled: BTreeSet<NormalizedPath> = BTreeSet::new();
     for operation in &plan.operations {
         for path in touched(operation) {
-            if let Some(file) = identity(normalizer, path.as_str()) {
-                touching.entry(file).or_default().insert(path);
-            }
+            touching
+                .entry(identity_of(normalizer, path))
+                .or_default()
+                .insert(path);
         }
         if let OperationKind::MoveDocument { from, to } = &operation.kind
             && from != to
-            && let Some(file) = identity(normalizer, from.as_str())
-            && identity(normalizer, to.as_str()).as_ref() == Some(&file)
+            && identity_of(normalizer, from) == identity_of(normalizer, to)
         {
-            respelled.insert(file);
+            respelled.insert(identity_of(normalizer, from));
         }
     }
     let mut disagreeing = Vec::new();
     let mut carried: BTreeMap<NormalizedPath, BTreeSet<&DocumentPath>> = BTreeMap::new();
     for transition in &plan.transitions {
         let path = &transition.path;
-        match identity(normalizer, path.as_str()) {
-            Some(file) if touching.contains_key(&file) => {
-                if !carried.entry(file).or_default().insert(path) {
-                    disagreeing.push(path.clone());
-                }
+        let file = identity_of(normalizer, path);
+        if touching.contains_key(&file) {
+            if !carried.entry(file).or_default().insert(path) {
+                disagreeing.push(path.clone());
             }
-            _ => disagreeing.push(path.clone()),
+        } else {
+            disagreeing.push(path.clone());
         }
     }
     for (file, spellings) in &carried {

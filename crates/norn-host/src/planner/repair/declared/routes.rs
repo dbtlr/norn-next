@@ -140,7 +140,7 @@ pub(super) fn route<R: Reading>(
     let Some((first, rest)) = proposals.split_first() else {
         return skipped(skip(row, SkipReason::NoDeclaredFix));
     };
-    let place = |to: &DocumentPath| vault.place(to).ok_or_else(|| to.clone());
+    let place = |to: &DocumentPath| vault.place(to);
     if rest
         .iter()
         .any(|proposal| place(&proposal.value) != place(&first.value))

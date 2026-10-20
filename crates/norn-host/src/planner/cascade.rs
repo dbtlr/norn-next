@@ -119,6 +119,7 @@ use super::links::{
     respells, retarget_namings, rewrite_destination, rewrite_targets, selecting, spelled,
     stored_path, wire_family,
 };
+use super::view::identity_of;
 
 /// What a plan's moves, deletes and wikilink rewrites generate from the
 /// links naming what they carry away, remove or retarget.
@@ -309,7 +310,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
                     .insert(retarget.position, destination.clone());
             }
             None => {
-                unresolved.insert(retarget.position, unretargeted(retarget, named, normalizer));
+                unresolved.insert(retarget.position, unretargeted(retarget, named));
             }
         }
     }
@@ -483,7 +484,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
             super::link_spelling::spelling_variants(wire_family(broken.link.family), candidate)
                 .iter().all(|spelling| matches!(
                     answered.get(&entry(&holder, &spelled(&broken.link, spelling))),
-                    Some(Resolves::One { path }) if cascade.identity(path.as_str()).as_ref() == Some(&broken.to)
+                    Some(Resolves::One { path }) if identity_of(cascade.normalizer, path) == broken.to
                 ))
         });
         let Some(candidate) = reads_back else {
@@ -528,11 +529,11 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
 
 /// Why the delete `removal` rewriting the links naming its document does not
 /// resolve, its `rewrite_to` naming `named` after the plan rather than one
-/// document a link can be respelled toward: one at a path the vault's rule
-/// refuses, said so (a backstop no target reaches, since the document-path
-/// grammar refuses every such path); several, headed as a read heads an
-/// ambiguous target; or none — the document the delete removes itself, said
-/// so, or no document at all.
+/// document a link can be respelled toward: several, headed as a read heads
+/// an ambiguous target; or none — the document the delete removes itself,
+/// said so, or no document at all. A target naming one document after the
+/// plan is never handed here: the delete is kept by it
+/// (`Removal::kept_by`).
 fn unnamed(
     removal: &Removal,
     named: Option<&TargetNaming>,
@@ -540,25 +541,10 @@ fn unnamed(
     normalizer: &PathNormalizer,
 ) -> UnresolvedReason {
     let address = removal.rewrite_to().unwrap_or_default();
-    if let Some(named) = named {
-        match (&named.after, &named.candidates) {
-            // A document the vault's rule does not name is no file a link can
-            // be respelled toward: the delete is left out saying so, never
-            // landed leaving the links it was to rewrite. The document-path
-            // grammar refuses every such path, so no target reaches this.
-            (Resolves::One { path }, _) => {
-                return UnresolvedReason::no_longer_resolves(format!(
-                    "`rewrite_to` `{address}` names `{path}`, which is no path the links naming the removed document can be rewritten toward"
-                ));
-            }
-            (Resolves::Several {}, Some(candidates)) => {
-                return UnresolvedReason::ambiguous_target(
-                    AmbiguousEnd::Target,
-                    candidates.clone(),
-                );
-            }
-            _ => {}
-        }
+    if let Some(named) = named
+        && let (Resolves::Several {}, Some(candidates)) = (&named.after, &named.candidates)
+    {
+        return UnresolvedReason::ambiguous_target(AmbiguousEnd::Target, candidates.clone());
     }
     let itself = named.and_then(|named| match &named.before {
         Resolves::One { path } => removed_by(&named.before, lineage, normalizer)
@@ -580,15 +566,9 @@ fn unnamed(
 /// has no document to retarget its wikilinks to
 /// ([`RetargetNaming::destination`]): its `old` names several documents
 /// before the plan, headed there; its `new` names none or several where the
-/// plan leaves the vault, the latter headed, or one at a path the vault's
-/// rule refuses (a backstop no target reaches, since the document-path
-/// grammar refuses every such path); or the two name one document where
-/// the plan leaves it, so no wikilink would change.
-fn unretargeted(
-    retarget: &Retarget,
-    named: &RetargetNaming,
-    normalizer: &PathNormalizer,
-) -> UnresolvedReason {
+/// plan leaves the vault, the latter headed; or the two name one document
+/// where the plan leaves it, so no wikilink would change.
+fn unretargeted(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
     let (old, new) = (&retarget.old, &retarget.new);
     match (&named.old.before, &named.old.candidates) {
         (Resolves::Several {}, Some(candidates)) => {
@@ -604,11 +584,6 @@ fn unretargeted(
     match (&named.new.after, &named.new.candidates) {
         (Resolves::Several {}, Some(candidates)) => {
             UnresolvedReason::ambiguous_target(AmbiguousEnd::Target, candidates.clone())
-        }
-        (Resolves::One { path }, _) if rewrite_destination(&named.new, normalizer).is_none() => {
-            UnresolvedReason::no_longer_resolves(format!(
-                "`new` `{new}` names `{path}`, which is no path the wikilinks naming `{old}` can be retargeted toward"
-            ))
         }
         (Resolves::One { path }, _) => UnresolvedReason::no_longer_resolves(format!(
             "`old` `{old}` and `new` `{new}` name the same document, `{path}` where the plan leaves it, so no wikilink would change"
@@ -983,11 +958,10 @@ fn entry(holder: &DocumentPath, link: &LinkFact) -> EntryKey {
 
 #[cfg(test)]
 mod tests {
-    use norn_fs::CaseSensitivity;
     use norn_store::TargetNaming;
     use norn_wire::{DocumentPath, Resolves, UnresolvedReason};
 
-    use super::{PathNormalizer, Retarget, RetargetNaming, unretargeted};
+    use super::{Retarget, RetargetNaming, unretargeted};
 
     /// **A wikilink rewrite with no document to retarget to says why in
     /// words**: a `new` naming one document at a path no link can be
@@ -995,7 +969,6 @@ mod tests {
     /// named, where the plan leaves it, says the two name one document.
     #[test]
     fn a_rewrite_with_no_document_to_retarget_to_says_why() {
-        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
         let retarget = Retarget {
             position: 0,
             id: None,
@@ -1008,7 +981,7 @@ mod tests {
                 old: TargetNaming::new(one("a.md"), Resolves::none(), None),
                 new: TargetNaming::new(Resolves::none(), one(new), None),
             };
-            match unretargeted(&retarget, &named, &normalizer) {
+            match unretargeted(&retarget, &named) {
                 UnresolvedReason::NoLongerResolves { detail, .. } => detail,
                 other => panic!("no longer resolves: {other:?}"),
             }

@@ -10,6 +10,7 @@ use norn_fs::Batch;
 use norn_wire::{DocumentPath, FileState};
 
 use super::schema::Citations;
+use crate::planner::view::identity_of;
 
 /// What applying a resolved plan came to.
 ///
@@ -315,9 +316,7 @@ fn heal_targets<'a>(
 ) -> Batch {
     let mut heal = Batch::default();
     for (target, absent) in targets {
-        let Ok(path) = normalizer.normalize(std::path::Path::new(target.as_str())) else {
-            return Batch::rescan(norn_fs::RescanScope::Vault);
-        };
+        let path = identity_of(normalizer, target);
         heal.merge(if absent {
             Batch::vault_removal(path)
         } else {

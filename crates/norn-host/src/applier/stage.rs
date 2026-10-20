@@ -15,7 +15,7 @@ use norn_wire::{
 };
 
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, misread, observe,
+    TargetState, Unit, failed_conditions, is_create, is_removal, misread, observe,
     recorded_lineage, transition_index, units,
 };
 use super::place::{Ground, Landing};
@@ -31,6 +31,7 @@ use crate::planner::links::{
     Holding, LinkIndex, Target, change_set, entry_key, failed_address_resolutions, vouched,
     vouched_block,
 };
+use crate::planner::view::identity_of;
 use crate::planner::view::{Body, Entry, TreeView, VaultView, wire_hash};
 use crate::refusal::PageRefused;
 
@@ -698,8 +699,8 @@ where
             _ => {
                 // The source where this apply still sees it at that hash,
                 // else the target the copy landed at.
-                let seen = identity(view.normalizer(), source.as_str())
-                    .and_then(|file| index_of.get(&file))
+                let seen = index_of
+                    .get(&identity_of(view.normalizer(), source))
                     .is_some_and(|&index| matches!(states[index], TargetState::AtBefore(Some(_))));
                 let at = if seen { source } else { written };
                 let (links, read) = read_carried(at, state, view)?;
@@ -726,9 +727,7 @@ where
     V::Error: std::fmt::Display,
 {
     let drifted = |holds: FileState| Unfit::Refused(vec![RefusedCheck::drifted(at.clone(), holds)]);
-    let Some(file) = identity(view.normalizer(), at.as_str()) else {
-        return Err(drifted(FileState::absent()));
-    };
+    let file = identity_of(view.normalizer(), at);
     match view
         .entry(&file)
         .map_err(|error| Unfit::Failed(error.to_string()))?
@@ -897,11 +896,8 @@ impl Judging<'_> {
             if role_at(path.as_str()).is_some() {
                 continue;
             }
-            let file = identity(self.normalizer, path.as_str());
-            let source = file
-                .as_ref()
-                .and_then(|file| self.lineage.source(file))
-                .map(|source| source.from.clone());
+            let file = identity_of(self.normalizer, path);
+            let source = self.lineage.source(&file).map(|source| source.from.clone());
             let drawn_from = source
                 .as_ref()
                 .and_then(|source| index_of.get(source).copied());
