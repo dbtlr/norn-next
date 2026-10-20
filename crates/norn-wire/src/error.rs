@@ -246,7 +246,8 @@ pub enum AnswerShape {
 /// Why the store answered a read with no rows, as `host/read-failed` carries
 /// it.
 ///
-/// Neither is anything a client's request can change. A read the store finds
+/// Retention refusals distinguish a restart after expiry from retryable
+/// capacity or coordination and an operator quota that must change. A read the store finds
 /// its derived data damaged for is not one of these: it answers
 /// `host/entry-untrusted` with the untrusted reason whose `kind` is
 /// `store_damaged_rebuilding`.
@@ -254,6 +255,16 @@ pub enum AnswerShape {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ReadFailure {
+    /// A retained count expired or its store was replaced. Start a new count.
+    CountCursorExpired {},
+    /// Retained storage cannot admit this continuation. Retry after expiry.
+    CountResultCapacity { retry_after_millis: Option<u64> },
+    /// An operator disk quota is too small; restarting cannot help.
+    CountResultTooLarge { max_bytes: u64 },
+    /// Result coordination is occupied. Retry the same continuation.
+    CountResultBusy {},
+    /// Disposable count storage failed; source-store trust is unaffected.
+    CountResult {},
     /// The store refused a statement the read ran: its file, its driver or
     /// its environment refused, and the detail is the store's own account.
     /// A fault of the environment may pass, so the same read may later be
@@ -273,6 +284,22 @@ pub enum ReadFailure {
 }
 
 impl ReadFailure {
+    pub const fn count_cursor_expired() -> Self {
+        Self::CountCursorExpired {}
+    }
+    pub const fn count_result_capacity(retry_after_millis: Option<u64>) -> Self {
+        Self::CountResultCapacity { retry_after_millis }
+    }
+    pub const fn count_result_too_large(max_bytes: u64) -> Self {
+        Self::CountResultTooLarge { max_bytes }
+    }
+    pub const fn count_result_busy() -> Self {
+        Self::CountResultBusy {}
+    }
+    pub const fn count_result() -> Self {
+        Self::CountResult {}
+    }
+
     /// A statement the store refused.
     pub const fn statement() -> Self {
         ReadFailure::Statement {}

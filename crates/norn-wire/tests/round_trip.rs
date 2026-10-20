@@ -59,6 +59,28 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
+#[test]
+fn a_retained_tally_cursor_carries_its_result_without_changing_legacy_keys() {
+    let legacy = CursorKey::tally([Some("open".to_string()), None]);
+    assert_eq!(
+        serde_json::to_value(&legacy).expect("legacy key"),
+        serde_json::json!({"row": "tally", "group": ["open", null]})
+    );
+    let cursor = Cursor::retained_count(
+        Snapshot::new("epoch", 1, None, None),
+        [Some("open".to_string()), None],
+        "result-1",
+        "selection-1",
+    );
+    assert_eq!(cursor.key(), &legacy);
+    assert_eq!(cursor.retained_count_id(), Some("result-1"));
+    let rendered = serde_json::to_string(&cursor).expect("an opaque cursor");
+    assert_eq!(
+        serde_json::from_str::<Cursor>(&rendered).expect("a retained continuation"),
+        cursor
+    );
+}
+
 /// Every cause a lost watcher carries.
 fn watcher_loss_causes() -> Vec<WatcherLossCause> {
     vec![
@@ -1914,6 +1936,35 @@ fn a_request_refusal_crosses_as_the_shape_facts_it_names() {
 /// no schema.
 #[test]
 fn a_failed_read_crosses_as_the_failure_it_names() {
+    for (failure, expected) in [
+        (
+            ReadFailure::count_cursor_expired(),
+            r#"{"kind":"count_cursor_expired"}"#,
+        ),
+        (
+            ReadFailure::count_result_capacity(Some(20)),
+            r#"{"kind":"count_result_capacity","retry_after_millis":20}"#,
+        ),
+        (
+            ReadFailure::count_result_capacity(None),
+            r#"{"kind":"count_result_capacity","retry_after_millis":null}"#,
+        ),
+        (
+            ReadFailure::count_result_too_large(8192),
+            r#"{"kind":"count_result_too_large","max_bytes":8192}"#,
+        ),
+        (
+            ReadFailure::count_result_busy(),
+            r#"{"kind":"count_result_busy"}"#,
+        ),
+        (ReadFailure::count_result(), r#"{"kind":"count_result"}"#),
+    ] {
+        assert_eq!(wire(&failure), expected);
+        assert_eq!(
+            serde_json::from_str::<ReadFailure>(expected).unwrap(),
+            failure
+        );
+    }
     assert_eq!(
         wire(&ErrorDetail::read_failed(
             ReadFailure::statement(),

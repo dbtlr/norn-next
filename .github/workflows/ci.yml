@@ -359,5 +359,7 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
+      - name: Store count memory bars
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
       - name: Host memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

@@ -28,6 +28,197 @@ use norn_wire::{
 
 // ---- fixtures ----
 
+#[test]
+fn a_retained_count_keeps_its_source_view_after_writes_and_schema_reload() {
+    let mut store = Counting::with_bulk("count-frozen-view", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let first = store.count(&params);
+    let source = first.snapshot.clone();
+    let first_cursor = first.next.clone().expect("more groups");
+    assert!(first_cursor.retained_count_id().is_some());
+    let extra = tagged(
+        document("bulk/new.md", "hash-new", "new").with_frontmatter(
+            Some(map(vec![
+                ("status", string("filed")),
+                ("n", string("1000")),
+            ])),
+            &declared(),
+        ),
+        &["bulk"],
+    );
+    write_documents(&mut store.store.begin_request(), &[extra]);
+    store
+        .store
+        .begin_request()
+        .pin_vault_schema(b"new-schema", "new-schema")
+        .expect("reload schema");
+    let current_model = ContentModel::under("new-schema")
+        .declare("status")
+        .declare("n");
+    let mut rows = first.tallies;
+    let mut next = Some(first_cursor.clone());
+    while let Some(cursor) = next {
+        let counted = store
+            .snapshot()
+            .count(&params.clone().with_after(cursor), &current_model)
+            .expect("frozen page");
+        assert_eq!(counted.snapshot, source);
+        assert!(counted.moved.is_empty());
+        let counted_at = counted.clone().into_report().2.counted_at;
+        assert_eq!(
+            counted_at, source,
+            "the original source is explicit on the wire"
+        );
+        rows.extend(counted.tallies);
+        next = counted.next;
+    }
+    let expected = (0..32)
+        .map(|at| tally(&[Some("filed"), Some(&at.to_string())], 1))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected);
+    let replay = store
+        .snapshot()
+        .count(&params.clone().with_after(first_cursor), &current_model)
+        .expect("replay");
+    assert_eq!(replay.tallies, expected[3..6]);
+    let current = store
+        .snapshot()
+        .count(&params.clone().with_limit(1000), &current_model)
+        .expect("a new count reads current state");
+    assert_eq!(current.tallies.len(), 33);
+    assert_ne!(current.snapshot, source);
+}
+
+/// Expiry and changed-request positions are independent of hidden server state.
+#[test]
+fn retained_count_expiry_and_request_rebinding_do_not_depend_on_client_sleep() {
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("count-expiry", 16);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(2);
+    let now = Instant::now();
+    let first = store
+        .snapshot()
+        .count_with_time(&params, &declared(), now)
+        .expect("first page");
+    let cursor = first.next.expect("a continuation");
+    let resumed = params.clone().with_after(cursor.clone()).with_limit(3);
+    let page = store
+        .snapshot()
+        .count_with_time(&resumed, &declared(), now)
+        .expect("changed page size");
+    assert_eq!(
+        page.tallies,
+        (2..5)
+            .map(|at| tally(&[Some("filed"), Some(&at.to_string())], 1))
+            .collect::<Vec<_>>()
+    );
+    let late = now + Duration::from_secs(601);
+    let changed = resumed
+        .clone()
+        .with_predicates([Predicate::tag("bulk"), Predicate::equal_to("n", "15")]);
+    let changed = store
+        .snapshot()
+        .count_with_time(&changed, &declared(), late)
+        .expect("a new selection uses the tuple position even after expiry");
+    assert_eq!(
+        changed.tallies,
+        vec![tally(&[Some("filed"), Some("15")], 1)]
+    );
+    assert!(matches!(
+        store
+            .snapshot()
+            .count_with_time(&resumed, &declared(), late),
+        Err(PageRefusal::CountCursorExpired)
+    ));
+    let fresh = store
+        .snapshot()
+        .count_with_time(&params, &declared(), late)
+        .expect("restart");
+    assert_ne!(
+        fresh.next.as_ref().unwrap().retained_count_id(),
+        cursor.retained_count_id()
+    );
+}
+
+/// A complete drain must not repeatedly sort the unreturned suffix.
+#[test]
+fn a_two_key_drain_costs_the_tallies_it_returns() {
+    use std::time::Instant;
+
+    let mut readings = Vec::new();
+    for shape in ["constant", "null", "balanced", "unique"] {
+        for filtered in [false, true] {
+            let mut pair = Vec::new();
+            for size in [256_usize, 1024] {
+                let prefixes = size.isqrt();
+                let documents = (0..size)
+                    .map(|at| {
+                        let mut fields = vec![("n", string(&(10_000 + at).to_string()))];
+                        let prefix = match shape {
+                            "constant" => Some("filed".to_string()),
+                            "null" => None,
+                            "balanced" => Some(format!("prefix-{:04}", at % prefixes)),
+                            "unique" => Some(format!("prefix-{at:04}")),
+                            _ => unreachable!(),
+                        };
+                        if let Some(prefix) = prefix {
+                            fields.push(("status", string(&prefix)));
+                        }
+                        tagged(
+                            document(&format!("cost/{at:04}.md"), &format!("hash-{at}"), "body")
+                                .with_frontmatter(Some(map(fields)), &declared()),
+                            &["cost"],
+                        )
+                    })
+                    .collect();
+                let store = Counting::with_documents("two-key-drain-cost", documents);
+                let mut params = counting(vec![field("status"), field("n")]).with_limit(16);
+                if filtered {
+                    params = params.with_predicates([Predicate::tag("cost")]);
+                }
+                let started = Instant::now();
+                let mut work = norn_store::CountWork::default();
+                let mut pages = 0;
+                let mut tallies = 0;
+                let mut documents_counted = 0;
+                loop {
+                    let counted = store.count(&params);
+                    pages += 1;
+                    tallies += counted.tallies.len();
+                    documents_counted += counted.tallies.iter().map(|t| t.count).sum::<u64>();
+                    work.statements += counted.work.statements;
+                    work.tallies_read += counted.work.tallies_read;
+                    work.full_scan_steps += counted.work.full_scan_steps;
+                    work.sorts += counted.work.sorts;
+                    work.vm_steps += counted.work.vm_steps;
+                    let Some(next) = counted.next else { break };
+                    params = params.with_after(next);
+                    assert!(pages <= size, "the drain must terminate");
+                }
+                assert_eq!(tallies, size + if filtered { 0 } else { 5 });
+                assert_eq!(
+                    documents_counted,
+                    size as u64 + if filtered { 0 } else { 7 }
+                );
+                eprintln!(
+                    "NORN-430 shape={shape} filtered={filtered} size={size} pages={pages} \
+                     tallies={tallies} elapsed_us={} work={work:?}",
+                    started.elapsed().as_micros()
+                );
+                pair.push(work.vm_steps);
+            }
+            readings.push((shape, filtered, pair));
+        }
+    }
+    for (shape, filtered, pair) in readings {
+        assert_linear_drain(pair[0], pair[1], &format!("{shape}, filtered={filtered}"));
+    }
+}
+
 /// The fingerprint of the schema the fixture pins.
 const COUNT_SCHEMA: &str = "count-schema";
 
@@ -1872,6 +2063,7 @@ fn a_count_runs(statement: ReadStatement) -> bool {
     matches!(
         statement,
         ReadStatement::Count(_)
+            | ReadStatement::CountResult(_)
             | ReadStatement::Find(
                 FindStatement::ActiveFingerprint
                     | FindStatement::KnownKey
@@ -2616,4 +2808,252 @@ fn a_single_key_continuation_skips_its_whole_position_group() {
             true,
         );
     }
+}
+
+#[test]
+fn count_retention_capacity_quota_and_inspection_have_distinct_outcomes() {
+    use norn_store::CountRetentionPolicy;
+    use std::time::{Duration, Instant};
+    let mut store = Counting::with_bulk("count-retention-policy", 64);
+    // Policy is set before handles are minted; reopen the fixture's store reader.
+    drop(store.reader);
+    store
+        .store
+        .set_count_retention(CountRetentionPolicy {
+            max_results: 1,
+            ..CountRetentionPolicy::default()
+        })
+        .expect("policy before reader");
+    store.reader = Arc::new(store.store.open_reader().reader.unwrap());
+    let params = counting(vec![field("status"), field("n")]).with_limit(2);
+    let now = Instant::now();
+    // Explaining a discarded report consumes no retained slot.
+    for _ in 0..3 {
+        store.plans(&params);
+    }
+    let first = store
+        .snapshot()
+        .count_with_time(&params, &declared(), now)
+        .unwrap();
+    assert!(first.next.as_ref().unwrap().retained_count_id().is_some());
+    let other = params.clone().with_predicates([Predicate::tag("bulk")]);
+    let fallback = store
+        .snapshot()
+        .count_with_time(&other, &declared(), now)
+        .unwrap();
+    let legacy = fallback.next.unwrap();
+    assert!(legacy.retained_count_id().is_none());
+    let continuation = other.with_after(legacy);
+    assert!(matches!(
+        store
+            .snapshot()
+            .count_with_time(&continuation, &declared(), now),
+        Err(PageRefusal::CountResultCapacity {
+            retry_after_millis: Some(_)
+        })
+    ));
+    write_documents(
+        &mut store.store.begin_request(),
+        &[document("moved.md", "moved", "body")],
+    );
+    let late = now + Duration::from_secs(601);
+    let admitted = store
+        .snapshot()
+        .count_with_time(&continuation, &declared(), late)
+        .unwrap();
+    assert!(
+        admitted
+            .next
+            .as_ref()
+            .unwrap()
+            .retained_count_id()
+            .is_some()
+    );
+    assert_eq!(admitted.moved, vec![norn_wire::Moved::Generation]);
+    assert_eq!(
+        admitted.tallies,
+        vec![
+            tally(&[Some("filed"), Some("2")], 1),
+            tally(&[Some("filed"), Some("3")], 1)
+        ]
+    );
+
+    drop(store);
+    let mut store = Counting::with_bulk("count-quota-policy", 64);
+    drop(store.reader);
+    store
+        .store
+        .set_count_retention(CountRetentionPolicy {
+            max_result_bytes: Some(8192),
+            ..CountRetentionPolicy::default()
+        })
+        .unwrap();
+    store.reader = Arc::new(store.store.open_reader().reader.unwrap());
+    // Wide keys exceed the configured relation quota; the source remains readable.
+    let wide = (0..32)
+        .map(|at| {
+            document(&format!("wide/{at}.md"), &format!("wide-{at}"), "body").with_frontmatter(
+                Some(map(vec![
+                    ("status", string(&format!("{at}-{}", "x".repeat(4096)))),
+                    ("n", string("1")),
+                ])),
+                &declared(),
+            )
+        })
+        .collect::<Vec<_>>();
+    write_documents(&mut store.store.begin_request(), &wide);
+    let fallback = store.count(&params);
+    assert!(
+        fallback
+            .next
+            .as_ref()
+            .unwrap()
+            .retained_count_id()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .snapshot()
+            .count(&params.with_after(fallback.next.unwrap()), &declared())
+            .unwrap_err(),
+        PageRefusal::CountResultStorageFull
+    );
+    assert_eq!(store.count(&counting(Vec::new())).tallies[0].count, 103);
+}
+
+#[test]
+fn retained_tuple_positions_keep_null_empty_nul_and_unicode_in_byte_order() {
+    let labels = [
+        None,
+        Some(""),
+        Some("\0"),
+        Some("a"),
+        Some("a\0"),
+        Some("a\0z"),
+        Some("aé"),
+        Some("é"),
+        Some("😀"),
+    ];
+    let documents = labels
+        .iter()
+        .enumerate()
+        .flat_map(|(at, label)| {
+            ["", "\0", "z", "é"]
+                .into_iter()
+                .enumerate()
+                .map(move |(bt, tail)| {
+                    let mut entries = vec![("aliases", string(tail))];
+                    if let Some(label) = label {
+                        entries.push(("status", string(label)));
+                    }
+                    tagged(
+                        document(
+                            &format!("tuple/{at}-{bt}.md"),
+                            &format!("tuple-{at}-{bt}"),
+                            "body",
+                        )
+                        .with_frontmatter(Some(map(entries)), &declared()),
+                        &["tuple"],
+                    )
+                })
+        })
+        .collect();
+    let store = Counting::with_documents("count-tuple-bytes", documents);
+    let mut params = counting(vec![field("status"), field("aliases")])
+        .with_predicates([Predicate::tag("tuple")])
+        .with_limit(1);
+    let mut rows = Vec::new();
+    loop {
+        let page = store.count(&params);
+        rows.extend(page.tallies);
+        let Some(next) = page.next else { break };
+        params = params.with_after(next);
+    }
+    let expected = labels
+        .into_iter()
+        .flat_map(|label| ["", "\0", "z", "é"].map(|tail| tally(&[label, Some(tail)], 1)))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected);
+}
+
+#[test]
+fn retained_result_plans_seek_the_tuple_and_census_the_actual_population() {
+    use norn_store::{COUNT_RESULT_STATEMENTS, CountResultStatement as R};
+    let store = Counting::with_bulk("count-result-plans", 64);
+    let params = counting(vec![field("status"), field("n")]).with_limit(2);
+    let plans = store.plans(&params);
+    let mut seen = BTreeSet::new();
+    for emitted in &plans {
+        if let ReadStatement::CountResult(statement) = emitted.statement {
+            seen.insert(statement.slot());
+            assert!(
+                emitted
+                    .plan
+                    .reads
+                    .iter()
+                    .all(|read| !DOCUMENT_PAYLOAD
+                        .contains(&(read.table.as_str(), read.column.as_str()))),
+                "scratch read payload: {emitted:?}"
+            );
+            if statement == R::Insert {
+                assert_eq!(emitted.executions, 69);
+            }
+        }
+    }
+    assert_eq!(seen, (0..COUNT_RESULT_STATEMENTS).collect());
+    for (slot, statement) in R::all().into_iter().enumerate() {
+        assert_eq!(slot, statement.slot());
+    }
+    let first = store.count(&params);
+    let continuation = params.with_after(first.next.unwrap());
+    let resumed = store.plans(&continuation);
+    assert_eq!(resumed.len(), 1, "a retained page consults no source SQL");
+    assert_eq!(resumed[0].statement, ReadStatement::CountResult(R::Page));
+    let judge = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        rows_of(plan, "result").assert_searches_through("result", Access::PrimaryKey);
+        rows_of(plan, "result").assert_search_constraint("result", "(tuple>?)");
+        assert!(!sorts_the_page(plan));
+    };
+    let actual = plan(&resumed[0]);
+    judge(&actual);
+    let mutant = rewritten(&actual, |detail| {
+        detail.replace("SEARCH result USING PRIMARY KEY (tuple>?)", "SCAN result")
+    });
+    failure_of("result page without tuple seek", || judge(&mutant));
+}
+
+fn assert_linear_drain(small: u64, large: u64, label: &str) {
+    assert!(
+        large <= small * 5,
+        "four times the tallies exceeded linear drain work: {label}: {small} -> {large}"
+    );
+}
+
+#[test]
+fn a_source_query_per_page_fails_the_grouped_drain_bar() {
+    let pair = [256, 1024].map(|size| {
+        let store = Counting::with_bulk("count-source-control", size);
+        let mut params = counting(vec![field("status"), field("n")])
+            .with_predicates([Predicate::tag("bulk")])
+            .with_limit(16);
+        let mut vm = 0;
+        let mut tallies = 0;
+        loop {
+            let page = store
+                .snapshot()
+                .count_without_retention(&params, &declared())
+                .unwrap();
+            vm += page.work.vm_steps;
+            tallies += page.tallies.len();
+            let Some(next) = page.next else { break };
+            params = params.with_after(next);
+        }
+        assert_eq!(tallies, size);
+        vm
+    });
+    eprintln!("source-per-page control: {pair:?}");
+    failure_of("repeated source aggregation", || {
+        assert_linear_drain(pair[0], pair[1], "source control")
+    });
 }

@@ -52,40 +52,32 @@
 //! typed member's position back as its label's typed sort key — which is the
 //! group's, because the typed key is a function of the raw value under the
 //! schema the snapshot pins, and a cursor minted in a typed grouping names
-//! that schema's fingerprint and is refused under any other.
+//! that schema's fingerprint. A source continuation refuses a different
+//! fingerprint; a retained continuation keeps its original order.
 //!
-//! # A grouped page is two sections
+//! # Source aggregation and retained results
 //!
-//! The tallies whose leading member is `null` stand first: a walk of the
-//! documents — the matched ones where a part keeps what it seeks — probing
-//! each for a value under the leading key. Then the tallies whose leading
-//! member holds a value: a seek of the leading member's value index from the
-//! page's position where no filter drives the page, and the matched
-//! documents' own leading values where one does. [`CountStatement`] names both
-//! and what each reads.
+//! Tallies with a null leading member come from a document walk, probing for
+//! absence under that key. Valued tallies use the leading value index or the
+//! matched documents. The shared adaptive page drive bounds single-key valued
+//! windows and chooses a keeping filter at doubling budgets. A null section
+//! costs the smallest keeping filter's seek, or a document walk without one.
 //!
-//! **What an unfiltered grouped count costs is linear in the vault's
-//! documents.** Its valued section reads the leading key's rows from the
-//! page's position on — and, grouped by one key, stops at the page's bound —
-//! and its `null` section walks every document, since a document holding no
-//! value is found by no seek of the rows that hold one.
+//! Multi-key aggregation cannot stream arbitrary tuple order from a per-key
+//! index. It runs once and streams complete tallies into an anonymous SQLite
+//! result relation with a normalized tuple primary key. Subsequent pages seek
+//! that relation; neither its source snapshot nor a demand lease is retained.
+//! Native memory stays bounded while result bytes spill to disk. Active result
+//! count and absolute lifetime are bounded by [`CountRetentionPolicy`]; disk
+//! quotas are optional. Fresh first pages fall back to the source page path
+//! on capacity, quota or coordination contention. Continuations refuse those
+//! conditions explicitly rather than silently recomputing an expired result.
 //!
-//! **The page drive chooses how valued groups are read** ([`Snapshot::drive_page`]):
-//! a part keeping at most the budget drives from its matched documents;
-//! otherwise the page walks the leading value index and tests every part per
-//! document. Its window counts value rows, not groups, and ends at a leading
-//! sort key, including every row there so a tally is complete. The budget
-//! doubles to the shared ceiling; past it the walk continues without a bound.
-//! A count reads once per request; each cursor continues the tuple position
-//! and chooses its driver afresh.
-//! A broad part's single-key valued drain walks each value row a bounded
-//! number of times; a small part's cost follows what it matched. Groupings of
-//! several keys still sort the tuples a section reads. A `null` section is
-//! driven by a keeping part found by asking at doubling caps, so its cost
-//! follows the smallest part's seek, within the cap's factor of two or the
-//! page's scale. The probes may count rows a part later rejects; with no
-//! keeping part it walks the vault. With one key it is one tally, read once
-//! per drain.
+//! A retained continuation keeps the original counts, typed normalizers,
+//! reports and advisories across document and schema changes. Its source is
+//! [`Counted::snapshot`] (`counted_at` on the wire); the host still acquires a
+//! current trusted reading for each request. Changed grouping or predicates
+//! detach the retained identity and use ordinary tuple-position judgment.
 //!
 //! # A conjunction means what it means to a find
 //!
@@ -106,7 +98,11 @@
 //! orders the groups — and is advised as a grouping where the key holds both
 //! offset spellings, before the conjunction's parts are advised.
 
+mod results;
 mod statement;
+pub(crate) use results::CountResults;
+pub use results::{COUNT_RESULT_STATEMENTS, CountResultStatement, CountRetentionPolicy};
+use results::{CountOrigin, CountSource, CountTime, RetainPage, TallyPage};
 
 use norn_db::EmittedPlan;
 use norn_wire::{
@@ -159,25 +155,30 @@ impl Counted {
         (
             self.unsatisfied,
             self.advisories,
-            Page::new(self.tallies, self.next, self.moved),
+            CountReport::new(
+                Page::new(self.tallies, self.next, self.moved),
+                self.snapshot,
+            ),
         )
     }
 }
 
 /// What one count read, by kind.
 ///
-/// **The tally counters are the page drive's cost as SQLite ran it**,
+/// **The tally counters are the count's cost as SQLite ran it**,
 /// read off each statement's own status once its rows are read and summed over
-/// the tally statements, walk windows and driver probes the page ran — never
+/// the tally statements, walk windows, driver probes, result setup, inserts
+/// and result pages the count ran — never
 /// the probes its conjunction's compilation ran. They are counters rather
 /// than a plan's words, so a pair of counts over two vault sizes reads whether
 /// a count's work grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CountWork {
-    /// The statements the count ran, each counted on the snapshot as it ran.
+    /// Source and disposable-result statement executions. The snapshot
+    /// counter names source statements only.
     pub statements: u64,
-    /// The tallies the tally statements handed back: one past the bound where
-    /// a next page exists.
+    /// Tallies streamed during population plus rows read for this page,
+    /// including one past the bound where a next page exists.
     pub tallies_read: u64,
     /// Steps the page drive took through a loop no constraint bounds —
     /// a table or an index read end to end.
@@ -217,6 +218,8 @@ impl CountWork {
 /// values it ran with.
 #[derive(Clone, Debug)]
 pub struct CountPlan {
+    /// Executions of this prepared SQL; bulk insertion keeps one bounded record.
+    pub executions: u64,
     /// The statement, named by the builder that names it: a tally statement,
     /// or a probe the conjunction's compilation ran.
     pub statement: ReadStatement,
@@ -250,11 +253,47 @@ impl Snapshot {
         params: &CountParams,
         declared: &ContentModel,
     ) -> Result<Counted, PageRefusal> {
-        self.run_count(params, declared, &mut Lookups::default())
+        self.count_with_time(params, declared, std::time::Instant::now())
+    }
+
+    /// Negative control: repeat the source aggregation on every page.
+    #[cfg(feature = "induced-failure")]
+    #[doc(hidden)]
+    pub fn count_without_retention(
+        &self,
+        params: &CountParams,
+        declared: &ContentModel,
+    ) -> Result<Counted, PageRefusal> {
+        let mut lookups = Lookups::default();
+        lookups.count_source_only = true;
+        self.run_count(
+            params,
+            declared,
+            &mut lookups,
+            CountTime::new(std::time::Instant::now()),
+        )
+    }
+
+    /// Count using an explicit monotonic request time for result retention.
+    /// Elapsed work within the call advances this time normally.
+    pub fn count_with_time(
+        &self,
+        params: &CountParams,
+        declared: &ContentModel,
+        now: std::time::Instant,
+    ) -> Result<Counted, PageRefusal> {
+        self.run_count(
+            params,
+            declared,
+            &mut Lookups::default(),
+            CountTime::new(now),
+        )
     }
 
     /// Every statement [`Snapshot::count`] runs for `params`, in the order it
-    /// runs them, each with the plan SQLite reported for it.
+    /// runs them, each with the plan SQLite reported for it. Repeated result
+    /// inserts share one record with their execution count and first bindings;
+    /// the recorder never retains a record per output group.
     ///
     /// This is the count itself, run on this snapshot, and each plan is taken
     /// of the very text and values its statement ran with, as
@@ -266,14 +305,26 @@ impl Snapshot {
         declared: &ContentModel,
     ) -> Result<Vec<CountPlan>, PageRefusal> {
         let mut lookups = Lookups::default();
-        self.run_count(params, declared, &mut lookups)?;
-        Ok(
-            self.explained(lookups.ran, |statement, filters, plan| CountPlan {
-                statement,
-                filters,
-                plan,
-            })?,
-        )
+        lookups.capture_results = true;
+        self.run_count(
+            params,
+            declared,
+            &mut lookups,
+            CountTime::new(std::time::Instant::now()),
+        )?;
+        lookups
+            .ran
+            .into_iter()
+            .map(|ran| {
+                let plan = self.explain_run(&ran)?;
+                Ok(CountPlan {
+                    executions: ran.executions,
+                    statement: ran.statement,
+                    filters: ran.filters,
+                    plan,
+                })
+            })
+            .collect()
     }
 
     /// The count [`Snapshot::count`] answers and [`Snapshot::count_plans`]
@@ -283,12 +334,32 @@ impl Snapshot {
         params: &CountParams,
         declared: &ContentModel,
         lookups: &mut Lookups,
+        time: CountTime,
     ) -> Result<Counted, PageRefusal> {
         let started = self.counters().statements_executed();
         let limit = page_limit(params.limit)?;
+        let detached;
+        let params = if params
+            .after
+            .as_ref()
+            .is_some_and(|cursor| cursor.retained_count_id().is_some())
+        {
+            if let Some(mut answer) = self.resume_retained_count(params, limit, lookups, time)? {
+                answer.work.statements += self.counters().statements_executed() - started;
+                return Ok(answer);
+            }
+            detached = {
+                let mut copy = params.clone();
+                copy.after = copy.after.as_ref().map(Cursor::without_retained_count);
+                copy
+            };
+            &detached
+        } else {
+            params
+        };
         self.declaration_pinned(declared, lookups)?;
         let (members, mut reports) = self.members(&params.by, declared, lookups)?;
-        let conjunction = self.compile_conjunction(
+        let mut conjunction = self.compile_conjunction(
             &params.predicates,
             ResolvesPart::NotApplicable,
             declared,
@@ -306,17 +377,7 @@ impl Snapshot {
             }
         };
 
-        let mut work = CountWork::default();
-        let (tallies, next) = self.page_tallies(
-            &members,
-            &conjunction,
-            limit,
-            resume.as_deref(),
-            lookups,
-            &mut work,
-        )?;
         let snapshot = self.reading_facts(order, lookups)?;
-        let next = next.map(|last| Cursor::new(snapshot.clone(), last.cursor_key()));
         let grouped_dates = members
             .iter()
             .filter_map(|member| match (member.shape, member.key) {
@@ -327,9 +388,82 @@ impl Snapshot {
             });
         let advisories =
             self.offset_advisories(&conjunction.date_comparisons(grouped_dates), lookups)?;
-        reports.extend(conjunction.reports);
+        reports.extend(std::mem::take(&mut conjunction.reports));
         let unsatisfied = self.resolve(reports, declared, lookups)?;
-        work.statements = self.counters().statements_executed() - started;
+        let origin = CountOrigin {
+            snapshot: snapshot.clone(),
+            unsatisfied: unsatisfied.clone(),
+            advisories: advisories.clone(),
+        };
+        let mut work = CountWork::default();
+        let retain = members.len() > 1 && !conjunction.matches_nothing;
+        #[cfg(feature = "induced-failure")]
+        let retain = retain && !lookups.count_source_only;
+        let retained = if retain {
+            self.retained_tallies(
+                RetainPage {
+                    params,
+                    origin,
+                    limit,
+                    after: resume.as_deref(),
+                    time,
+                },
+                CountSource {
+                    members: &members,
+                    conjunction: &conjunction,
+                    declared,
+                },
+                lookups,
+                &mut work,
+            )
+        } else {
+            self.page_tallies(
+                &members,
+                &conjunction,
+                limit,
+                resume.as_deref(),
+                lookups,
+                &mut work,
+            )
+            .map(|(rows, next)| TallyPage {
+                rows,
+                next,
+                result_id: None,
+            })
+            .map_err(PageRefusal::from)
+        };
+        let TallyPage {
+            rows: tallies,
+            next,
+            result_id,
+        } = match retained {
+            Ok(page) => page,
+            Err(
+                PageRefusal::CountResultCapacity { .. }
+                | PageRefusal::CountResultTooLarge { .. }
+                | PageRefusal::CountResultBusy
+                | PageRefusal::CountResultStorageFull,
+            ) if params.after.is_none() => {
+                let (rows, next) =
+                    self.page_tallies(&members, &conjunction, limit, None, lookups, &mut work)?;
+                TallyPage {
+                    rows,
+                    next,
+                    result_id: None,
+                }
+            }
+            Err(problem) => return Err(problem),
+        };
+        let next = next.map(|last| match &result_id {
+            Some(id) => Cursor::retained_count(
+                snapshot.clone(),
+                last.group,
+                id,
+                results::selection_digest(params),
+            ),
+            None => Cursor::new(snapshot.clone(), last.cursor_key()),
+        });
+        work.statements += self.counters().statements_executed() - started;
         Ok(Counted {
             tallies,
             next,
@@ -440,7 +574,7 @@ impl Snapshot {
             )?
             .into_page(limit)
         };
-        work.tallies_read = page.read;
+        work.tallies_read += page.read;
         work.stepped(page.stepped);
         Ok((page.rows, page.next))
     }
@@ -472,7 +606,8 @@ impl Snapshot {
             | ReadStatement::CandidateDocument
             | ReadStatement::Moved(_)
             | ReadStatement::HeldFrontmatter(_)
-            | ReadStatement::RepairAdvisory(_) => (false, 0),
+            | ReadStatement::RepairAdvisory(_)
+            | ReadStatement::CountResult(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {
             let mut group: Vec<Option<String>> = Vec::with_capacity(width);
@@ -628,7 +763,7 @@ impl Paged for CountPages<'_> {
             driver,
             past: section.past.as_deref(),
             until: until.map(String::as_str),
-            rows,
+            rows: Some(rows),
             offset: 0,
         });
         let read = Ran::new(section.statement, composed)
@@ -655,7 +790,7 @@ impl Paged for CountPages<'_> {
             driver: Driver::Walked,
             past: section.past.as_deref(),
             until: None,
-            rows: 1,
+            rows: Some(1),
             offset,
         });
         snapshot

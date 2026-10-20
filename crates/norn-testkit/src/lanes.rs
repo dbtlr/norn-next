@@ -80,6 +80,7 @@ use crate::workflows::{CiSteps, LANE_FEATURES, LANE_SCRIPT, ci_steps_in};
 pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
     ("norn-fixtures", &["memory-lane case:", "soak-lane case:"]),
     ("norn-fs", &["memory-lane case:"]),
+    ("norn-store", &["memory-lane case:"]),
     (
         "norn-host",
         &["counter-lane case:", "memory-lane case:", "soak-lane case:"],

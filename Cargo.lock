@@ -565,6 +565,7 @@ dependencies = [
  "norn-testkit",
  "norn-text",
  "norn-wire",
+ "serde_json",
  "sha2",
  "unicode-normalization",
 ]

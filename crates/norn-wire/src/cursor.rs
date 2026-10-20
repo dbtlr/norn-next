@@ -12,7 +12,8 @@
 //! fields are parsed and then re-encoded, and a string that is not byte for
 //! byte that re-encoding names no position: a spelling that carries a field
 //! the fields do not hold, writes them in another order, or leaves an optional
-//! one out is a string this crate never minted. Canonicality is what makes the
+//! one out where its canonical form includes it is a string this crate never
+//! minted. Retained-count metadata is omitted for legacy tuple envelopes. Canonicality is what makes the
 //! opaque string comparable as a value rather than as a structure a reader
 //! would have to normalize first.
 //!
@@ -29,7 +30,12 @@
 //! carrying its own total order, because two row types with one key shape
 //! would be two orders sharing a spelling.
 //!
-//! **Movement is reported, never hidden.** A continuation against a changed
+//! **Movement is reported against the source being paged.** A retained count
+//! continuation reads its original result and reports no movement relative to
+//! `counted_at`; the outer answer reading reports current acquisition and trust.
+//! Expired retained results refuse rather than silently re-aggregating. A tuple
+//! continuation newly admitted to retention reports ordinary source movement.
+//! A source continuation against a changed
 //! establishment still answers: what moved rides back with the page so a
 //! consumer can say how the ground shifted. Four rules decide a continuation,
 //! read against the snapshot the cursor carries:
@@ -54,7 +60,7 @@
 //! The report is in one fixed order — epoch, generation, sidecar revision — so
 //! a consumer reads it rather than sorting it.
 //!
-//! **The one thing that is refused is a change of *order*.** The rows a key
+//! **A source continuation refuses a change of *order*.** The rows a key
 //! names are in a sequence that no longer exists, so the page is refused
 //! rather than answered from a position that means something else. A cursor
 //! minted under no fingerprint was ordered rawly, and a raw order does not
@@ -703,6 +709,12 @@ pub struct HitResume<'a> {
     pub moved: Vec<Moved>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct RetainedCount {
+    id: String,
+    binding: String,
+}
+
 /// Where a page stopped.
 ///
 /// On the wire a cursor is one opaque string a client passes back unchanged.
@@ -710,13 +722,54 @@ pub struct HitResume<'a> {
 pub struct Cursor {
     snapshot: Snapshot,
     key: CursorKey,
+    retained_count: Option<RetainedCount>,
 }
 
 impl Cursor {
     /// The cursor a page minted at `key`, under the establishment `snapshot`
     /// it was answered from.
     pub const fn new(snapshot: Snapshot, key: CursorKey) -> Self {
-        Cursor { snapshot, key }
+        Cursor {
+            snapshot,
+            key,
+            retained_count: None,
+        }
+    }
+
+    /// Continue an immutable count result, with its tuple position kept in the key.
+    pub fn retained_count(
+        snapshot: Snapshot,
+        group: impl IntoIterator<Item = Option<String>>,
+        id: impl Into<String>,
+        binding: impl Into<String>,
+    ) -> Self {
+        Self {
+            snapshot,
+            key: CursorKey::tally(group),
+            retained_count: Some(RetainedCount {
+                id: id.into(),
+                binding: binding.into(),
+            }),
+        }
+    }
+
+    /// The immutable result this count continuation reads, if one was admitted.
+    pub fn retained_count_id(&self) -> Option<&str> {
+        self.retained_count
+            .as_ref()
+            .map(|result| result.id.as_str())
+    }
+
+    /// The selection digest bound to a retained result.
+    pub fn retained_count_binding(&self) -> Option<&str> {
+        self.retained_count
+            .as_ref()
+            .map(|result| result.binding.as_str())
+    }
+
+    /// The tuple position, detached from a retained result when the request changes.
+    pub fn without_retained_count(&self) -> Self {
+        Self::new(self.snapshot.clone(), self.key.clone())
     }
 
     /// The establishment this page was answered from, which is what a
@@ -817,6 +870,8 @@ impl Cursor {
 struct CursorFields {
     snapshot: Snapshot,
     key: CursorKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_count: Option<RetainedCount>,
 }
 
 /// The characters a cursor is spelled in.
@@ -835,6 +890,7 @@ impl Serialize for Cursor {
         let fields = CursorFields {
             snapshot: self.snapshot.clone(),
             key: self.key.clone(),
+            retained_count: self.retained_count.clone(),
         };
         let json = serde_json::to_vec(&fields).map_err(serde::ser::Error::custom)?;
         serializer.serialize_str(&base64url::encode(&json))
@@ -862,9 +918,13 @@ impl<'de> Deserialize<'de> for Cursor {
                 "{NO_POSITION}: one position has one spelling, and this is not it"
             )));
         }
+        if fields.retained_count.is_some() && !matches!(fields.key, CursorKey::Tally { .. }) {
+            return Err(D::Error::custom(NO_POSITION));
+        }
         Ok(Cursor {
             snapshot: fields.snapshot,
             key: fields.key,
+            retained_count: fields.retained_count,
         })
     }
 }

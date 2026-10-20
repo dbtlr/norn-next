@@ -1,9 +1,11 @@
 ---
-status: accepted
+status: superseded
 date: 2026-09-27
 ---
 
 # 0030 — wire reads run on store-minted snapshot readers, a read's hold is demand, a read does not restart a recovery only a change to the vault can answer, a read waits for the facts it met, and teardown never waits for one
+
+Superseded by [ADR 0041](0041-snapshot-readers-and-retained-count-results.md).
 
 Supersedes [ADR 0029](0029-a-read-waits-for-the-facts-it-met.md), whose reader, lifetime
 rule, demand lease, read stance, bound and prices this decision restates whole. ADR 0029

@@ -117,7 +117,7 @@ The set of vault documents satisfying the same resolution target when that targe
 Whether a link in a vault document that addresses a document names exactly one, and whether that one holds the heading or block the link names. A link that fails is broken (it names none, and names no attachment), ambiguous (it names several), or has a missing anchor; each failure is a finding about that one link. A link that names exactly one document through `vault://`, a scheme Obsidian cannot open, is also a finding, which a missing anchor takes precedence over. A link addressed outside the vault, or one that names an attachment and finds no document, is not judged.
 
 **Answer reading**:
-The trust state and store generation a vault report was answered under, carried on the report so a consumer judges the answer without a second request. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
+The current request's trust state and store generation, carried on the report so a consumer judges the answer without a second request. A retained count report separately names the original source state in `counted_at`; its rows remain fixed while the answer reading describes current acquisition and trust. Every search answer also declares the search ladder it ran, the lexical floor alone included, so no consumer infers a ladder from an absence: each rung that ran, each model and, for a model that holds derived state, how far that state trailed the store; a model applied at request time holds none and reports no lag.
 _Avoid_: Reading (unqualified; a walk refusal that stands is also a reading)
 
 **Search ladder**:
@@ -229,7 +229,7 @@ _Avoid_: Event queue, event bus
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
 **Cursor envelope**:
-A typed continuation position — where a page stopped, and what it was read against — rendered as one opaque string on the wire. A client holds the string unchanged and never decodes or branches on what it carries.
+A typed continuation position — where a page stopped, and what it was read against — rendered as one opaque string on the wire. A retained count continuation also names a result with a bounded lifetime; expiry requires restarting the count. A client holds the string unchanged and never decodes or branches on what it carries.
 _Avoid_: Cursor (unqualified) — elsewhere in this glossary "cursor" names a change-feed position, a different concept from the wire continuation
 
 **Watermark**:

@@ -229,7 +229,8 @@ pub(crate) struct Tallies<'a> {
     pub(crate) until: Option<&'a str>,
     /// Source rows passed before a window reads its one leading value.
     pub(crate) offset: usize,
-    pub(crate) rows: usize,
+    /// None streams the complete relation into retained storage.
+    pub(crate) rows: Option<usize>,
 }
 
 /// One tally statement and its parameters, in the numbering the text states.
@@ -474,9 +475,11 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
             sorts.join(", ")
         ));
     }
-    let limit = binder.bind(Value::Integer(
-        i64::try_from(tallies.rows).expect("a page's tally count fits i64"),
-    ));
-    sql.push_str(&format!("\n                     LIMIT {limit}"));
+    if let Some(rows) = tallies.rows {
+        let limit = binder.bind(Value::Integer(
+            i64::try_from(rows).expect("a page's tally count fits i64"),
+        ));
+        sql.push_str(&format!("\n                     LIMIT {limit}"));
+    }
     (sql, binder.into_values())
 }

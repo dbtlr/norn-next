@@ -1,0 +1,399 @@
+---
+status: accepted
+date: 2026-10-20
+---
+
+# 0041 — wire reads run on store-minted snapshot readers, a read's hold is demand, a read does not restart a recovery only a change to the vault can answer, a read waits for the facts it met, and teardown never waits for one, and retained count results have a bounded lifetime
+
+Supersedes [ADR 0030](0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md).
+Its reader, demand lease, recovery restraint, stance, acquisition bound, teardown
+rule and prices are restated whole below. Retained multi-key count continuations
+add the explicit data-origin exception in the final section. Every other source
+read keeps the same freshness contract.
+
+The store's one writer connection sits behind `&mut`, inside the attachment that every
+lifecycle job holds for its whole duration — so a wire read borrowing it would serialize
+behind every warm job that holds the store while trust stays `Ready` (polls, maintenance,
+plan application), and the timing-barred query shapes would measure orchestration where the
+acceptance contract bars SQL. Heals are not the motivating case: the first heal runs before
+any reader exists, and every later heal takes trust out of `Ready`. Under the stance ruled
+below, a read waits out the heals that take in a change — a watcher batch's reconcile and a
+vault schema reload's — and refuses at once during the heals that follow withdrawn trust —
+a recovery's and a rebuild's. A shared borrow of the live store cannot
+serve reads either — a `&self` cannot exist while a job holds the attachment mutably. Wire
+reads therefore run on dedicated read-only handles `norn-store` mints from a live `Store` —
+opened read-only with `query_only` set, carrying the read builders and their `EXPLAIN` seam
+so the gates exercise the connection reads actually use, and keeping the
+no-connections-outside-store rule whole. The host holds the handle in entry state **beside
+the attachment, never inside it**.
+
+Each source read is one WAL snapshot transaction, **established under the entry gate lock in the
+same critical section that reads trust** — established by a read statement, because a bare
+deferred `BEGIN` takes no snapshot — so the trust label and the snapshot describe the same
+instant; the read itself runs outside the lock. **No acquisition waits for the entry's
+connection while it holds that lock.** Under the gate it tries for the connection without
+blocking and establishes the snapshot there where it is free; where another read holds the
+connection, the acquisition gives the gate back, waits outside it under the demand it has
+already recorded, takes the gate again and reads the published demand afresh before it
+establishes. Where the entry has stopped serving, or its reader is no longer the one waited
+for, the acquisition gives the connection back and answers what the entry now publishes
+under the stance ruled below: where the entry settles without answering the read, it waits;
+where the entry answers the read on a reader other than the one it waited for, it acquires
+that reader, within the same bound; and it refuses with what the entry publishes only where
+the entry neither settles nor serves — lost trust, a release, a park. **The wait for the
+connection ends at the read's bound**: a read that finds the connection still held past it
+refuses as reader-unavailable, since the entry serves and only its read seam is taken.
+
+ADR 0015 priced that contention as "the hot per-entry lock riding across that one
+statement — a cheap read alone, a wait where a concurrent read still holds the one reader",
+and it priced it wrong. A lock held across a wait for a resource that only another holder
+of the same lock can release is not a slow path: one read in flight and one concurrent
+acquisition freeze every gate-taking surface of that entry — status, demand, the reap loop
+and job-leg completion among them — with no mutation and no second vault needed to reach
+it. That price is withdrawn. What contention costs instead is the second reading a
+contended acquisition takes, and what the withdrawal keeps is the coupling itself: every
+snapshot is still established under the entry gate, in the same critical section that reads
+the published demand, so the state a read answers under and the snapshot it answers from
+still describe one instant. The uninterrupted critical section per read that the old
+pricing bought was buying the deadlock.
+
+A snapshot sees the last committed increment, never a torn one,
+never blocks the writer, and may trail in-flight derivation; trust state, not the
+connection, is what buys the right to answer. On the one reader, concurrent reads serialize
+against each other, and that measured contention — not an assumption — is what mints more
+readers through the same seam: the pool is the carved extension point, not the starting
+shape. A reader never concludes a heal rung: its open bypasses inspection and rebuild, and
+`query_only` makes derivation impossible by construction, which turns the warm-read
+zero-derivation-counter bar structural.
+
+The lifetime rule is carried by one seam, never by per-site discipline. The reader is
+minted where the coverage it reads is installed, as one move under the lock that publishes
+the trust label beside them — a fallible mint that cannot panic, since an unwind under the
+entry gate poisons it, and whose blocking open is a priced cost of that hold — and it goes
+back before the store it was minted from closes, at the window every teardown enters,
+with the identity-refusal route carrying the rule around that window. A read in flight
+shares the entry's one handle rather than taking it out, so the teardown that empties the
+slot closes no handle a read is running on, and no new read begins once the slot is empty.
+
+**A read's hold is a demand lease, taken under the same hold of the entry gate that reads
+the published demand and clones the handle.** What the lease buys is what it buys every
+other caller: it holds the entry's idle interval open for as long as the read runs and
+restarts it when the hold drops, it clears the idle deadline, it withdraws an idle detach
+that is scheduled and not yet in flight, it raises the recovery the entry owes and gives
+that demand back with the hold, and where the entry is free to run it, it schedules the
+work the entry owes, read as a chain: the attach where the entry holds no coverage, and
+under that the rebuild it owes, the recovery beneath that, and the reconcile where it owes
+neither — with the read answering under what that work publishes, and under the state it
+found where the work publishes none. The one recovery a read's demand neither raises nor
+schedules is a recovery only a change to the vault can answer, while nothing has changed
+since it failed, as ruled below. A read asks for the owed recovery because what a read wants from an
+untrusted vault is exactly that it become answerable again; a read workload that never
+healed the vault it reads would be a dead end. So an idle teardown neither runs under a
+read nor precedes one into the entry, and a workload of reads alone keeps an attached vault
+attached and an untrusted one converging wherever a recovery can make it converge. **Teardown never waits for a read**, and the
+lease changes nothing about that: a refusal or a destruction moves first and consults no read, and a job leg failing its way
+into a release consults none either. Through any of them the read keeps answering from the
+handle it holds and from nothing else — no move states that the file behind that handle
+outlives the teardown, and nothing pins one that would. The read path states that absence
+rather than leaving it open: a read that a teardown runs under is answering against files
+the teardown may already have unlinked. The pin stands beside the lease and keeps its own
+narrow job, which is to say that the entry is held by work outside its lock.
+
+**A read's demand differs from every other demand in two steps: it withdraws no park, and
+it does not restart a recovery only a change to the vault can answer.** The first is ruled
+here and the second in its own section below. An ordinary demand retires the registry's parks — a duplicate root, a root the
+registry could not read — where maintainer contention is not already answering it, because
+withdrawing them is how a caller asks for the acquisition that classifies those roots
+again; a contended entry keeps every park it stands on, since no acquisition follows a
+demand the contention answers. A read asks for no such acquisition under any condition; it
+asks for an answer, and a vault the registry has parked has none to give. A read against a parked
+entry therefore refuses with the park's own code — identity refused, duplicate root and
+maintainer contention alike — and schedules nothing.
+
+## A read does not restart a recovery only a change to the vault can answer
+
+**A recovery only a change to the vault can answer is the one owed where the entry's own
+declaration withholds trust**: the coverage stands, the ops say nothing may be derived under
+the declaration it read — a vault schema this build cannot read — and the entry publishes
+that cause as untrusted and owes the recovery that reads the declaration again. An attach, a
+recovery and a rebuild each end that way over such a declaration. Reading the same bytes
+again reaches the same verdict, so a recovery restarted with nothing changed is work that
+cannot succeed.
+
+**Its cause is unchanged while the entry has taken in no fact since the attempt ended.** The
+entry already keeps its position in the stream of facts it takes in, and the attempt that
+failed records that position where it publishes its cause. A read's demand compares the two,
+and while they are equal it raises no recovery and schedules none: the read is refused as
+`host/entry-untrusted`, carrying the cause. No reconcile runs over an entry that owes a
+recovery, so a watcher fact is the one thing that moves the position there. Any fact moves
+it, not only a fact about a control file: editors replace a control file by writing a
+temporary file and renaming it over the original, so a filter on the file's own name would
+under-report the correction, and the recovery an unrelated edit restarts is the priced cost
+of over-reporting. An attempt that
+itself took in a fact while it ran records nothing, because what it read may be older than
+that fact, and the next read's demand asks for the recovery again.
+
+**A change to a control file is a fact to such an entry.** Watcher facts about the two
+control files are otherwise discarded before they reach the lifecycle, because an explicit
+reload is what replaces an active declaration. An attachment whose declaration withholds
+trust has no active declaration to replace, and a changed control file is exactly the change
+that can heal it, so over such an attachment a control-file change — or a rescan of the
+schema source, which the watcher reports where the folder a vault schema outside the vault
+sits in is replaced — reaches the lifecycle as a fact. It is inert to a reconcile, which
+derives documents and reads no control file.
+
+**Every other demand is unchanged.** A client's demand still raises and schedules the owed
+recovery whatever the position says, because a client asking is itself the evidence that the
+attempt is wanted. Every other recovery a read meets — for an environmental refusal or a
+lost watcher — is still restarted by a read's demand,
+because its cause can heal outside the vault's bytes, where no fact the entry takes in would
+say so.
+
+### Known limit
+
+A vault schema whose `schema_source` lies outside the watcher's coverage yields no fact
+when it changes, so a read goes on answering its old cause; only a client's demand, or a
+reload, reads it again and heals it.
+
+## A read waits for the facts it met
+
+**Whether a read waits is its stance, and the stance is read under the entry gate, in the
+same critical section that reads the published demand.** There are two stances.
+
+- **Settle.** An entry that entered warming from `Ready`, with no withdrawal of trust in
+  between, settles, and a read that meets it waits. That is an entry taking in a change: a
+  polled watcher batch, a reconcile turn, or a vault schema reload.
+- **Refuse.** Everything else refuses at once, with its reason: an entry that has never
+  served, an entry that lost trust — a watcher overflow or loss, an environmental refusal,
+  damaged derived state — a release, a detach or a drop, and every park. Warming entered
+  from untrusted, which is a recovery's or a rebuild's, refuses at once, although it too runs
+  over coverage that was once `Ready`.
+
+Warming published by a reconcile and warming published by a recovery or a rebuild carry the
+same trust label, so the label does not say how warming was entered. The entry's own state
+holds that fact, beside the published demand, and the stance is read from it.
+
+**The wait obeys the standing rule: no acquisition waits while it holds the entry gate.** A
+settling read gives the gate back, waits outside it on a signal that moves when the stance
+changes or when the entry has derived further through the facts it has taken in, takes the
+gate again, and reads the published demand afresh.
+
+**A settling read waits for the facts it met, never for the ones that arrive after it.**
+Under the first hold that finds the entry settling, the read records how far the facts the
+entry has taken in run at that instant, and it never moves that record. It establishes its
+snapshot, in the same critical section that reads the published demand, at the first of two
+things it observes: the entry `Ready`, or the entry having derived every fact up to that
+record with a reader standing beside it. Either way the snapshot holds every fact the entry
+knew of when the read met it, so **it is never older than the change the read arrived
+during**. A vault schema reload waits for `Ready`, because it replaces the reader: a read it
+settles answers from the reader minted once `Ready` returns. **A settling read that finds a
+new reader after the wait acquires that reader and answers from it, under the same bound**;
+it refuses only where the entry neither settles nor serves — lost trust, a release, a park.
+The demand it recorded before the wait holds the entry across it, as it does across a wait
+for the connection.
+
+**The answer reports what it was taken under.** The trust an answer carries is what the
+entry published at the instant its snapshot was established. Where later facts are still
+being derived, that is warming in its healing phase, not `Ready`, and the answer says so.
+The generation it carries is the store's committed write generation.
+
+**The wait is fair.** It never runs until the vault falls quiet: a vault edited faster than
+one reconcile turn takes still answers a read that meets it, once the facts that read met are
+derived. Past its bound, the read refuses as still indexing, under the `host/entry-not-ready`
+code, with the message "this vault is still indexing a change".
+
+**Teardown never waits for a read, and a waiting read is no exception.** A teardown's
+publication moves the stance to refuse, which wakes every waiting read, and each of them
+takes the gate again and refuses with what the entry then publishes, unless the entry has
+reached `Ready` again before that retake.
+
+**The bound is operational containment, not a performance threshold.** It keeps a read from
+waiting on a change that does not converge, and it states nothing about how fast a change
+should settle. It is a lifecycle policy value, and its production value equals the settle
+ceiling already authored for one vault walk: 5 seconds. The bound runs from the read's
+first take of the entry gate and covers every wait the read takes: that first take, the wait
+for the connection and the wait for the change together, and the retake of the gate after
+each. **A take of the entry gate past the bound refuses the read: the first take as
+reader-unavailable, before the read records any demand, and a retake as still indexing on
+the change wait and as reader-unavailable on the connection wait, with the demand the read
+recorded going back with the next hold of the gate.**
+
+### Drivers
+
+- **Least surprise.** A client that edits a note and then queries it sees the edit, even
+  while other notes are being edited.
+- **Trust over speed.** A source read never answers from a state it knows is stale.
+  A retained count continuation identifies its original source separately from current trust.
+- **No retry burden on every client.** Without the wait, every client, agents included,
+  must catch a refusal and retry after each edit it makes.
+
+### Known limit
+
+While a background maintenance scan holds the entry, the entry stays `Ready` and does not yet
+see an edit made moments before, so a read in that window can miss that edit; this is
+accepted as rare.
+
+## Alternatives
+
+The alternative was the pin as a teardown veto — an entry that cannot be torn down while
+any read is in flight, which is what the first of these records asserted. It loses on what
+a read holds: nothing. What defers the give-back at a refusal or a destruction is coverage
+custody, not the pin — the leg is out with the entry's coverage and the give-back is the
+leg's own end; a read holds no coverage, so at those sites the entry is still holding its
+own and the refusal or the destruction is itself what reaches detach, under the live hold
+rather than at a leg's end. Granting a read that deferral would put reader count in front
+of exactly the moves that must make progress — a conflict being refused, a host coming
+down, a maintainership already lost — while buying nothing the shared handle does not
+already carry. The alternative to the lease was to refuse a read while a detach stands
+scheduled. It answers the same safety question and loses twice: it makes a vault unreadable
+for the length of a teardown the caller's own demand would have cancelled, and it would be
+a second rule about a demanded entry in a lifecycle that already has one.
+
+Four alternatives to the wait were rejected:
+
+- **Keep refusing.** It pushes the retry onto every client, for every edit.
+- **Answer only from `Ready`.** Under steady edits no `Ready` is published, so every read
+  that meets the vault starves until its bound and refuses.
+- **Answer from the last `Ready` snapshot.** That answer is stale, and a read that answers
+  stale breaks the trust the trust state exists to carry.
+- **Check the watcher on every read.** The substrate maintains trust by signal and by
+  schedule, never per request.
+
+Three alternatives to holding back a recovery only a change can answer were rejected:
+
+- **Keep restarting it, and let the warming answer carry the prior cause.** The host still
+  runs a full recovery per read that cannot succeed, and the read is still refused as not
+  ready rather than with the cause the client has to act on.
+- **Fingerprint the control files on every read that meets such an entry.** It is a
+  per-request check where the substrate maintains trust by signal, and the watcher already
+  carries the signal.
+- **Hold back every recovery a read meets.** An environmental refusal or a lost watcher can
+  heal outside the vault's bytes, where no fact the entry takes in says so, and a read
+  workload would then never heal it.
+
+## Prices
+
+The price of the second connection per attached entry is named: three descriptors, a second
+page cache and prepared-statement cache under the gated memory ceiling, and a held snapshot
+pinning the write-ahead log against checkpointing — checkpointing stays passive, which is
+what keeps the reader's never-blocks-the-writer guarantee whole, and the bounded read shapes
+are what keep the WAL pin short. The lifetime rule prices one more: a read that a throwaway
+teardown runs under finishes against files the teardown has unlinked, and its descriptors
+ride until the hold drops. The lease prices another: a vault under continuous read
+traffic is a vault the idle budget stops bounding, which is what the idle interval is for, and the
+lease's restart on drop is what keeps that honest. The wait prices another: a read that
+meets a change holds its caller for up to the bound, and its demand holds the entry's idle
+interval open for as long as it waits. Answering before `Ready` prices another: an
+answer can be taken while later facts are still being derived; it says so in the trust it
+carries, and a client that needs those later facts must read that trust rather than assume
+`Ready`. Holding back a recovery only a change can answer prices the last one: a declaration
+corrected by a change the watcher never reports is answered to reads by its old cause until
+another change arrives or a client demands the vault, and the watcher's contract to
+over-report freely and under-report never is what keeps that window closed.
+
+## Retained count results
+
+### Context
+
+A count grouped by several keys orders arbitrary tuples. The store's per-key
+indexes cannot hand those tuples back in that order. Repeating the aggregation
+on each page makes a full drain quadratic when the groups grow with the input.
+Walking one member within a fixed prefix improves some distributions, but does
+not establish bounded drain work across arbitrary distributions. Maintaining
+every possible grouping would move combinatorial storage and maintenance onto
+document writes.
+
+### Decision
+
+A multi-key count aggregates complete tallies once and streams them into a
+disk-backed temporary result. Further pages seek that result in tuple order.
+The result belongs to the store that admitted it and is shared by that store's
+readers. It retains neither a source snapshot nor a read demand lease between
+requests. Source readers keep their existing read-only protection.
+
+A result has an absolute deadline and explicit memory, descriptor and admission bounds. An admitted
+result is retained within those bounds; unsuccessful admission follows the
+first-page and continuation rules below. An admitted result is
+not evicted to admit another request before its deadline. An expired or lost
+retained continuation refuses and requires restarting the count; it never silently
+repeats aggregation. Restart, detach and
+rebuild may end retained results. Replaying and branching an unexpired cursor envelope
+remain valid, including after another branch reaches the final page.
+
+A retained continuation reads the original result, even after source documents
+or the schema change. A fresh count reads current data. Every count report
+names its `counted_at` source snapshot; the outer answer reading still describes
+the current request's trust and acquisition. This is an explicit exception to
+the data-freshness rule restated above for retained multi-key count continuations only.
+All the acquisition, trust, lease and teardown rules remain in force, as do its
+freshness rules for every source query. The reader, lease, stance, bound and prices inherited from ADR 0030 are restated
+in full above; this section adds the retained-result exception.
+
+The retained cursor envelope names the result beside its source snapshot; its
+key remains the tuple labels. Its page size may change. Original typed orders,
+reports and advisories stay with the retained result rather than being judged
+under a later schema. A lost result expires, including after store replacement,
+regardless of source movement. Complete-tally labels, typed equality, null
+ordering, list cross products and distinct-document counts keep their meaning.
+
+A tuple position reused under different grouping or predicates starts a count
+under that request, with the existing order and width checks. It cannot read
+the previous request's retained rows. A legacy tuple continuation may admit a
+retained result once. When retention cannot admit a fresh first page, that
+page keeps its existing source-query behavior and returns a tuple-only
+continuation. Retention capacity is never reported as an empty or partial
+successful count. A continuation unable to establish retained state refuses
+explicitly. Every admission refusal is distinct from expiry and says whether retrying
+the same continuation can succeed. Only expiry calls for a restart. The improved drain guarantee applies to admitted retained results.
+
+The source aggregation uses the existing count composer and filter fragments.
+Scratch failures are result failures and never evidence that lane-1 is damaged.
+Cost accounting includes source aggregation, result population, and result
+paging. Acceptance includes bounded memory for SQLite's sorter as well as its
+table cache. Source contributions and key bytes govern population cost; the
+number of distinct output groups alone does not describe it. Optional retained-table disk quotas do not bound source aggregation spill
+files, which remain ordinary SQLite query working storage. There is no
+additional result-size cutoff by default: disk usage follows the result bytes,
+subject to the filesystem and SQLite limits. An operator may configure per-result
+and total disk quotas; those can refuse admission and identify whether to
+retry after capacity becomes available or increase the configured quota where the
+cause is established. SQLite cannot distinguish an exhausted page cap from an
+exhausted filesystem; an ambiguous storage-full failure names both remedies and
+allows retrying the continuation. File descriptors are priced per active result
+alongside memory and disk. Inspection through `count_plans` does not retain a
+new result whose report is discarded.
+
+### Consequences
+
+The first multi-key page may do more work before it can answer. Subsequent
+pages avoid re-aggregating the unreturned suffix. Zero-key and single-key
+counts keep their existing execution path. No permanent grouping projection
+is maintained on document writes.
+
+An evictable cache with recomputation would preserve indefinitely reusable
+tuple-only cursor envelopes, but would guarantee the improved cost only while its entries
+survive. Explicit expiry makes the retained lifetime an enforceable contract.
+
+The retention deadline is an upper bound. Idle detach, restart and source-store
+replacement may end a result earlier because retention holds no demand lease.
+A fresh request reuses a result only when at least half its configured lifetime
+remains; reuse never renews the deadline. Result coordination never waits under
+the entry gate or through teardown. Teardown drops ownership without waiting
+for a population or result-page lock; an already-running read finishes on its
+own handles.
+
+A continuation whose envelope names the same retained result reports no movement.
+A continuation that admits a result reports movement from its envelope's snapshot
+to `counted_at`, by the ordinary rules.
+Source movement is visible by comparing `counted_at` with the outer answer
+reading. Changing selection is detected from its canonical digest in the cursor
+envelope even when the old result is gone; it follows ordinary tuple-position
+judgment under the new request rather than reading the old relation.
+
+The prices added to the inherited reader contract are explicit: one small
+page cache and at most one spilled temporary-file descriptor per active result,
+result bytes on disk, and source sorter working storage during population.
+Source snapshots and WAL pins end with each request. Native process memory and
+descriptor pairs cover the fixed working set across vault sizes; Rust allocation
+counts alone do not see SQLite. `count_plans` records real execution but does not
+leave a new retained result behind when its report is discarded.

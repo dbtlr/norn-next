@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::address::VaultAddress;
-use crate::cursor::{Cursor, CursorKey, Page};
+use crate::cursor::{Cursor, CursorKey, Moved, Page, Snapshot};
 use crate::predicate::Predicate;
 
 /// What a tally is grouped by.
@@ -112,7 +112,28 @@ impl Tally {
 /// Each tally counts the documents in its group, and a document holding
 /// several values under a grouped key stands in the group of each, so the
 /// counts can sum past the documents the request matched.
-pub type CountReport = Page<Tally>;
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct CountReport {
+    pub rows: Vec<Tally>,
+    pub next: Option<Cursor>,
+    pub moved: Vec<Moved>,
+    /// The source state counted, fixed across a retained multi-key drain.
+    /// The outer answer reading describes the current request's acquisition.
+    pub counted_at: Snapshot,
+}
+
+impl CountReport {
+    pub fn new(page: Page<Tally>, counted_at: Snapshot) -> Self {
+        let Page { rows, next, moved } = page;
+        Self {
+            rows,
+            next,
+            moved,
+            counted_at,
+        }
+    }
+}
 
 /// What a `count` request carries.
 ///

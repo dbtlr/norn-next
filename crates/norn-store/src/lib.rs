@@ -155,7 +155,10 @@ mod store;
 mod validate;
 mod write_path;
 
-pub use count::{COUNT_STATEMENTS, CountPlan, CountStatement, CountWork, Counted, GroupMember};
+pub use count::{
+    COUNT_RESULT_STATEMENTS, COUNT_STATEMENTS, CountPlan, CountResultStatement,
+    CountRetentionPolicy, CountStatement, CountWork, Counted, GroupMember,
+};
 pub use counters::{DerivationCounters, SnapshotCounters};
 pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;

@@ -1046,7 +1046,7 @@ parts per document, in windows ending at a whole leading group. Every trailing m
 reached by the document. A work bar reads
 the same statements' SQLite counters over two vault sizes: a count narrowed to the same
 documents costs the same at both and steps through no full scan, and an unfiltered
-grouped count is linear in the vault — its `null` section walks every document once;
+single-key count reads its `null` section once per drain;
 a broad filtered single-key continuation costs the same as its matched set grows, and a
 fixed broad match costs the same first page as unmatched documents grow the vault. A
 second pair holds the documents and their groups fixed and grows their bodies from 64 bytes
@@ -1056,6 +1056,45 @@ bar holds the bytes: over every grouping the work bar reads, under every part a 
 applies, and at each continuation the plan bars resume, no statement a count runs — tally or
 compilation probe — reads a document's body, its frontmatter or the full-text body column,
 judged on the columns the plan handout reports each statement reads.
+
+Multi-key counts stream one complete source aggregation into an anonymous, disk-backed
+SQLite result relation. Its normalized tuple primary key orders nulls, typed sort keys,
+folded tags and raw UTF-8 bytes; complete labels and distinct-document counts remain the
+source composer's responsibility. `norn-db` owns the disposable open and driver recording;
+`norn-store` owns result SQL. The result has no migration, epoch or permanent projection.
+Source handles remain read-only. Subsequent pages seek the result rather than sorting the
+source suffix. Drain work is barred over constant, null, balanced and unique leading
+members, with and without filters, including source aggregation and result insertion.
+Result statements have a separate closed census: configuration, create, begin, insert,
+commit, page, size and identity. Plans are captured on the connection that runs them;
+bulk insertions keep one record with an execution count instead of growing the recorder
+with the result. Snapshot counters count source work; `CountWork` and the host's statement
+trace also count disposable-result work. Payload bars cover both connections.
+
+Results are store-owned and shared by readers, including readers minted by schema reload.
+The production defaults retain at most 32 results for ten minutes each, with a 64 KiB
+SQLite page cache apiece and at most one spilled result-file descriptor per result.
+Disk follows the relation's bytes unless operator per-result or total quotas are set;
+source sorter spill is ordinary query working storage outside those quotas. Registry
+reservations include work in flight, and release disk accounting only after its connection
+closes. Native process RSS and descriptor pairs in `count_memory` bar bounded working
+memory across result sizes and release at expiry and teardown. Inspection does not
+publish a result whose report is discarded. No source snapshot or read demand survives a
+request. Coordination tries short locks, never waits for SQL under the registry lock,
+and closes expired files outside that lock. Scratch failure discards that result identity
+and never marks the source damaged.
+
+A retained count's rows, typed orders, reports and advisories stay fixed at `counted_at`.
+The outer answer reading describes current trust and acquisition. A continuation of that
+same result reports no movement; one newly admitting a tuple continuation reports ordinary
+movement to its source. Expired or lost results require restart, including after idle
+detach or store replacement. Busy and capacity refusals are retryable, and a quota established by admission
+checks names the quota. SQLite reports allocated-page exhaustion and filesystem exhaustion
+with the same code, so a storage-full refusal conservatively names both remedies. Fresh first pages fall back to source paging on admission refusal, with a
+tuple-only cursor. Changed selections are detected by their digest before result lookup
+and follow normal tuple-position checks even after expiry. Reuse never renews the absolute
+deadline and requires at least half the configured lifetime to remain. ADR 0041 records
+the retained-continuation exception to source freshness and restates the reader contract.
 
 **The findings-for-path shape has a builder** too: the validate builder reads the findings
 standing under the active fingerprint — every finding recorded under the schema the
@@ -2194,7 +2233,7 @@ without consulting a read, and a read in flight stops none of them. Through such
 read keeps answering from the handle it holds until it completes, and nothing promises the
 database file outlives the teardown for it: that is the contract the read path states, and its
 price is the accepted one: a read holds no coverage, so no teardown waits on it. [ADR
-0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md) records the rationale
+0041](decisions/0041-snapshot-readers-and-retained-count-results.md) records the rationale
 and the priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
@@ -2224,7 +2263,7 @@ A park keeps its own code. Where the demand is serving, the refusal is reader-un
 which is an entry serving every surface but this one.
 
 **A read that meets a change waits for it, as [ADR
-0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md) rules.** Warming splits
+0041](decisions/0041-snapshot-readers-and-retained-count-results.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles, and every other state refuses at once with its reason,
@@ -2302,7 +2341,7 @@ entry is free to run it, the read's demand also schedules the work the entry owe
 chain: the attach where the entry holds no coverage, and under that the rebuild it owes, the
 recovery beneath that, and the reconcile where it owes neither. **A read's demand neither
 raises nor schedules a recovery only a change to the vault can answer while nothing has
-changed**, as [ADR 0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md)
+changed**, as [ADR 0041](decisions/0041-snapshot-readers-and-retained-count-results.md)
 rules. A cause is held back when re-reading the vault's own bytes reaches the same verdict
 and the change that heals it is a fact the watcher reports; every other cause retries. That
 recovery is the one owed where the entry's own declaration withholds trust — a vault schema
@@ -3916,7 +3955,7 @@ reply rides in the job. The seam holds these invariants; which gate hold carries
 bound by the applier's lifecycle tests.
 
 - **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
-  raises, under ADR 0030's chain, and refuses at once with the code a read would carry where
+  raises, under ADR 0041's chain, and refuses at once with the code a read would carry where
   the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
   unknown vault, or a registration change holding the entry. Over an entry that serves reads
   with no reader standing, it asks for the reader again as a read does, and refuses with
