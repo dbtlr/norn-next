@@ -90,6 +90,7 @@ use crate::store::Store;
 use crate::write_path::WriteStatement;
 
 mod instrument;
+mod inventory;
 pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
 
 /// Maximum row count any paged reader accepts.
@@ -668,7 +669,7 @@ impl<'a> Request<'a> {
     /// reconciling `a`. The scope carries the root's own row where the root is a
     /// path a document can be stored under, and no exact row where it is a
     /// directory only.
-    fn stored_documents_in_range_after_ordered(
+    pub fn stored_documents_in_range_after_ordered(
         &self,
         scope: SubjectScope<'_>,
         after: Option<&DocumentPath>,
@@ -1650,11 +1651,9 @@ impl<'a> Request<'a> {
 
 /// The stored subjects one act addresses.
 ///
-/// These are the three ranges the ordered document pages take, named once for
+/// The ranges the ordered document pages take, named once for
 /// the callers that range over findings by the same scope a walk ranges over
-/// rows by: a walk of the whole vault, a walk rooted at a path a document can be
-/// stored under, and a walk rooted at a directory that names no document and
-/// still holds documents.
+/// rows by: the whole vault, a subtree, a directory, or a path window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubjectScope<'a> {
     /// Every subject the store holds.
@@ -1665,6 +1664,12 @@ pub enum SubjectScope<'a> {
     /// A directory's segment-aligned descendants. The directory is not a path a
     /// document is stored under, so no exact subject is in it.
     Under(&'a DirectoryPrefix),
+    /// An exclusive lower path key and inclusive optional upper key. Bytes
+    /// preserve the ordering of filesystem names the document grammar refuses.
+    Window {
+        after: &'a [u8],
+        through: Option<&'a [u8]>,
+    },
 }
 
 impl<'a> SubjectScope<'a> {
@@ -1672,7 +1677,7 @@ impl<'a> SubjectScope<'a> {
     /// or `None` where the scope is bounded by nothing.
     fn bounds(self) -> Option<(Option<&'a str>, (String, String))> {
         match self {
-            SubjectScope::Vault => None,
+            SubjectScope::Vault | SubjectScope::Window { .. } => None,
             SubjectScope::Subtree(root) => Some((Some(root.as_str()), root.descendant_bounds())),
             SubjectScope::Under(prefix) => Some((None, prefix.descendant_bounds())),
         }
@@ -2397,6 +2402,32 @@ fn scope_page_predicate(
     index_order: StoredPathOrder,
     scope_order: StoredPathOrder,
 ) -> String {
+    if let SubjectScope::Window { through, .. } = scope {
+        let collation = scope_order.collation();
+        let cursor = match index_order {
+            StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)",
+            StoredPathOrder::AsciiCaseInsensitive => {
+                "(?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)"
+            }
+        };
+        let opening = if index_order == scope_order {
+            format!(
+                "path >= MAX(COALESCE(?1, CAST(?2 AS TEXT)){collation}, CAST(?2 AS TEXT)){collation}"
+            )
+        } else {
+            "path > COALESCE(?1, '')".to_owned()
+        };
+        let upper = if through.is_some() {
+            format!("path <= CAST(?3 AS TEXT){collation}")
+        } else {
+            "?3 IS NULL".to_owned()
+        };
+        // NOT keeps the exclusive scope test residual: the coalesced floor
+        // owns the seek. A nullable OR on the upper bound would scan the tail.
+        return format!(
+            "{opening} AND {upper} AND NOT(path <= CAST(?2 AS TEXT){collation}) AND {cursor}"
+        );
+    }
     let bounded = scope.bounds().is_some();
     let seek = index_order.collation();
     let fold = scope_order.collation();
@@ -2437,7 +2468,13 @@ fn scope_page_predicate(
 /// the cursor alone where a scope is bounded by nothing, and the cursor with the
 /// exact subject and the descendant range where it is bounded by paths.
 fn first_parameter_after_scope(scope: SubjectScope<'_>) -> usize {
-    if scope.bounds().is_some() { 5 } else { 2 }
+    if matches!(scope, SubjectScope::Window { .. }) {
+        4
+    } else if scope.bounds().is_some() {
+        5
+    } else {
+        2
+    }
 }
 
 /// The cursor and the scope's bounds, in the order [`scope_page_predicate`]
@@ -2445,6 +2482,11 @@ fn first_parameter_after_scope(scope: SubjectScope<'_>) -> usize {
 fn scope_page_parameters(scope: SubjectScope<'_>, after: Option<&DocumentPath>) -> Vec<Value> {
     let text = |value: &str| Value::Text(value.to_string());
     let mut bound = vec![after.map_or(Value::Null, |after| text(after.as_str()))];
+    if let SubjectScope::Window { after, through } = scope {
+        bound.push(Value::Blob(after.to_vec()));
+        bound.push(through.map_or(Value::Null, |through| Value::Blob(through.to_vec())));
+        return bound;
+    }
     if let Some((exact, (lower, upper))) = scope.bounds() {
         bound.push(exact.map_or(Value::Null, text));
         bound.push(Value::Text(lower));
