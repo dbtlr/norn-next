@@ -1501,6 +1501,12 @@ fn suffix_backlinks_keep_their_segment_floor_or_the_whole_shorter_path() {
 
 #[test]
 fn a_target_twin_skips_backlinks_and_a_moved_holders_own_relative_links() {
+    // `b/Note.md` and `b/note.md` are twins only where both can stand.
+    if !super::volume_tells_case_apart(
+        "a_target_twin_skips_backlinks_and_a_moved_holders_own_relative_links",
+    ) {
+        return;
+    }
     let mut fixture = Fixture::new(&[
         ("a/Note.md", "Target\n"),
         ("b/note.md", "Twin\n"),
