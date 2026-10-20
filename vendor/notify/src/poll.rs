@@ -82,6 +82,11 @@ mod data {
 
     use super::ScanEventHandler;
 
+    /// Whether a scan error says the entry it names is not there.
+    fn is_not_found(error: Option<&io::Error>) -> bool {
+        error.is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+    }
+
     /// Builder for [`WatchData`] & [`PathData`].
     pub(super) struct DataBuilder {
         emitter: EventEmitter,
@@ -299,6 +304,15 @@ mod data {
                 .into_iter()
                 .filter_map(|entry_res| match entry_res {
                     Ok(entry) => Some(entry),
+                    // An entry below the root that names nothing any more
+                    // was removed between listing and reading, or is a
+                    // dangling link being followed. It is skipped rather
+                    // than reported: a later scan that no longer finds a
+                    // path it held reports the removal.
+                    Err(err) if err.depth() > 0 && is_not_found(err.io_error()) => {
+                        log::trace!("skipping vanished entry {err:?}");
+                        None
+                    }
                     Err(err) => {
                         log::warn!("walkdir error scanning {err:?}");
                         if let Some(io_error) = err.io_error() {
@@ -323,6 +337,11 @@ mod data {
                             }
                         }
                         Some(MetaPath::from_parts_unchecked(path, metadata))
+                    }
+                    // The same race, met at the entry's own metadata read.
+                    Err(e) if entry.depth() > 0 && is_not_found(e.io_error()) => {
+                        log::trace!("skipping vanished entry {:?}", entry.path());
+                        None
                     }
                     Err(e) => {
                         // emit event.

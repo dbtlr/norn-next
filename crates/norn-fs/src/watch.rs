@@ -1082,7 +1082,12 @@ fn establish(
                     // or for the next attach or recovery heal. The increment
                     // re-hashes every reported path, preserving content-hash
                     // authority.
-                    .with_compare_contents(true),
+                    .with_compare_contents(true)
+                    // The vault walk never follows a link, so neither does
+                    // the watch: a followed link that dangles fails every
+                    // tick, and one that resolves covers a tree outside the
+                    // vault.
+                    .with_follow_symlinks(false),
             )
             .map_err(backend)?,
         ),
@@ -1301,7 +1306,10 @@ fn native_watcher(
         return Err(refusal);
     }
     Ok(Box::new(
-        notify::RecommendedWatcher::new(handler, Config::default()).map_err(backend)?,
+        // As for polling: inotify following a link would install watches
+        // across whatever tree an in-vault link points at.
+        notify::RecommendedWatcher::new(handler, Config::default().with_follow_symlinks(false))
+            .map_err(backend)?,
     ))
 }
 
@@ -3551,6 +3559,56 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// **A dangling symbolic link costs a polled vault nothing.** The vault
+    /// walk never follows a link, so a link whose target is missing is one
+    /// more entry in the tree. Polling that followed it would read the
+    /// missing target as a backend error on every tick, and a backend error
+    /// is terminal: a vault holding one broken link would never serve.
+    ///
+    /// The forbidden shape is a terminal subscription, read at an observed
+    /// point: a document written after the watch is established is reported,
+    /// so every tick that walked over the link ran before that report did.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_polled_vault_holding_a_dangling_link_stays_live_and_reports_changes() {
+        let scratch = Scratch::new("polling-dangling-link");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(vault.join("notes")).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        std::os::unix::fs::symlink(scratch.path("missing"), vault.join("notes/dangling")).unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.begin_heal();
+
+        std::fs::write(vault.join("notes/after.md"), "after\n").unwrap();
+
+        norn_testkit::wait::wait_until(
+            "the polled vault to take up the document written after the watch",
+            watch_budget(),
+            || {
+                let state = subscription.state.lock().expect("watch state poisoned");
+                let taken = state.pending.as_ref().is_some_and(|pending| {
+                    pending
+                        .batch
+                        .vault_roots()
+                        .iter()
+                        .any(|root| root.as_path() == Path::new("notes/after.md"))
+                });
+                match (&state.terminal, taken) {
+                    (None, true) => norn_testkit::wait::Observed::Met(()),
+                    (terminal, _) => {
+                        norn_testkit::wait::Observed::Pending(format!("terminal: {terminal:?}"))
+                    }
+                }
+            },
+        )
+        .unwrap();
+        subscription
+            .finish_heal()
+            .expect("the heal window closes over live coverage");
+        assert_eq!(subscription.state(), SubscriptionState::Live);
     }
 
     // -----------------------------------------------------------------------

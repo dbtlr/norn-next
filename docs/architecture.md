@@ -1470,6 +1470,9 @@ Two mechanisms carry trust, and both are contract:
   unchanged goes unreported by polling. The drift scans below are the mechanism that closes
   that gap; until they are built, such an edit waits for a later change to the same path or
   for the next attach or recovery heal.
+  **The watch covers what the walk reads.** Neither backend follows a link inside the vault,
+  so a dangling link costs nothing and a tree a link points at outside the vault is not
+  covered; a file a poll lists and then cannot stat is a removal, not a failed backend.
   **Reporting less and reporting nothing are two states, and they resume differently.** A
   watcher still covering the vault that dropped or overflowed notifications re-heals on the
   host's own dispatch; coverage that *ended* — a failed backend, a vault root that left the

@@ -6,10 +6,11 @@ wired in through `[patch.crates-io]` in the workspace manifest.
 ## `notify`
 
 Patches the `notify` 8.2.0 release from crates.io. The patch adds two
-capabilities: an event-history barrier for the FSEvents backend, in
-`src/fsevent.rs` and inert on every platform except macOS, and stat-gated
-content hashing for the poll backend, in `src/poll.rs` and active on every
-platform.
+capabilities and one correction: an event-history barrier for the FSEvents
+backend, in `src/fsevent.rs` and inert on every platform except macOS;
+stat-gated content hashing for the poll backend, in `src/poll.rs` and active
+on every platform; and a poll scan that skips an entry gone before its stat,
+also in `src/poll.rs`.
 
 ### FSEvents event-history barrier
 
@@ -67,9 +68,22 @@ compares modification times only to the whole second. The patch changes that:
 whole size in reads. The release has no stat gate on its content comparison
 and no way to observe how much content a tick read.
 
+### Poll scans skip vanished entries
+
+A poll scan lists each directory and then reads each listed entry's metadata.
+The release reports every failure on the way as an error event, so an entry
+removed between the two reads, such as an editor's temporary file, is an
+error, and so is a dangling link when links are followed. The patch skips an
+entry below the watched root whose read fails with `NotFound`; the next scan
+that does not find a path it held reports the removal. A watched root that is
+gone, and every other error kind, are still reported.
+
+`norn-fs` needs this because a backend error is terminal to a subscription,
+so one file deleted in the middle of a tick would end coverage of the vault.
+
 ### Removal
 
 Delete this directory and the `[patch.crates-io]` entry when a published
-`notify` release carries equivalents of both capabilities. Where a release
-carries only one, keep the patch and drop the changes that release made
-redundant.
+`notify` release carries equivalents of both capabilities and the
+correction. Where a release carries only some of them, keep the patch and
+drop the changes that release made redundant.
