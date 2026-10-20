@@ -9,14 +9,11 @@
 //! serving what it was serving; `activated` is what says which of the two
 //! happened.
 //!
-//! **A reload carries a vault address, as every vault-scope request does.** A
-//! root addresses a throwaway attach, which holds no control files to
-//! re-read, so the host refuses one here the way it refuses one for a read.
+//! **A reload carries a vault address, as every vault-scope request does.**
 //!
 //! The refusals are the ones a reload answers with: `host/unknown-vault` for a
 //! name this host serves no vault under, `host/entry-held` for an entry a
-//! registration change holds, `host/unsupported-attach-mode` for an address that
-//! names a root, the park's own code for an entry standing on a
+//! registration change holds, the park's own code for an entry standing on a
 //! park — `host/duplicate-root`, `host/maintainer-contended`, or
 //! `host/entry-untrusted` for a root the registry cannot read — exactly as
 //! `vault status` answers it, `host/entry-not-ready` for an entry holding
@@ -58,9 +55,7 @@ pub enum ReloadOutcome {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ReloadParams {
-    /// The vault to reload. An address naming a root is refused
-    /// `host/unsupported-attach-mode`: a throwaway attach holds no control
-    /// files to re-read.
+    /// The vault to reload.
     pub vault: VaultAddress,
     /// Whether to validate the authored control files without putting them
     /// into service. `false` applies what the authored control files changed;

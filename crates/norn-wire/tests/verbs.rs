@@ -485,10 +485,7 @@ fn every_verbs_params_carry_the_vault_its_addressing_says_it_does() {
 
 /// Every verb that carries a vault names it by the one vault address the
 /// vocabulary has, read off the registry's own addressing rather than off a
-/// second list. `vault status` and `vault reload` are in that set: a root
-/// addresses a throwaway attach, which has no lifecycle to observe and holds
-/// no control files to re-read, and refusing one is the host's job rather
-/// than a narrower type's.
+/// second list. `vault status` and `vault reload` are in that set.
 #[test]
 fn every_verb_that_carries_a_vault_names_it_by_the_one_vault_address() {
     for spelling in verb_table() {

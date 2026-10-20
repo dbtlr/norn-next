@@ -10,7 +10,6 @@ use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{ContentHash, Refusal};
 use norn_wire::{ErrorEnvelope, ReloadParams, ReloadReport, TrustState, VaultName};
 
-use crate::address::registered_name;
 use crate::lifecycle::{Demand, EntryOps, Host, HostError};
 use crate::planner::control::SchemaSite;
 use crate::{JobFailure, Registration};
@@ -153,10 +152,7 @@ impl<O: EntryOps> Host<O> {
         &self,
         params: &ReloadParams,
     ) -> Result<Result<ReloadReport, ErrorEnvelope>, HostError> {
-        let name = match registered_name(&params.vault) {
-            Ok(name) => name,
-            Err(refused) => return Ok(Err(refused)),
-        };
+        let name = params.vault.registered_name();
         let judged = if params.dry_run {
             self.judge_reload(name)
         } else {

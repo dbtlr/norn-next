@@ -1264,8 +1264,7 @@ fn settled(
 /// Coverage ends first and the maintainer lock last: a lock released while a
 /// watch over the vault still stands is a window another process takes
 /// maintainership in while this one is still reporting facts about the tree.
-/// The store is closed between them, which is where a throwaway store's file
-/// goes.
+/// The store is closed between them.
 ///
 /// This is the spelling that reports the store's own teardown. The order it
 /// runs in is [`ProductionAttachment`]'s field order too, so an attachment that
@@ -4283,7 +4282,6 @@ fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
 #[allow(clippy::disallowed_methods)] // test fixtures impersonate external editors and cleanup.
 mod tests {
     use super::*;
-    use crate::AttachMode;
     use crate::derivation::{UnreadBlock, map_document};
     use crate::lifecycle::answered;
     use norn_config::registry::{SchemaSource, VaultRoot};
@@ -4591,7 +4589,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
 
         let refused = wait_until(
             "the attach to be refused",
@@ -5149,7 +5147,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
 
         let error = wait_until(
             "the retained config parse error",
@@ -5176,7 +5174,7 @@ mod tests {
         assert_eq!(inspection.active_fingerprints, None);
 
         fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
-        let _retry = host.demand(&name, AttachMode::Durable).unwrap();
+        let _retry = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let inspection = host.inspect(&name).expect("the served vault");
         assert!(inspection.active_fingerprints.is_some());
@@ -5201,7 +5199,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let active = host.inspect(&name).unwrap().active_fingerprints;
@@ -5250,7 +5248,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let active = host.inspect(&name).unwrap().active_fingerprints;
 
@@ -5288,7 +5286,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         (host, name, lease)
     }
@@ -5567,7 +5565,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let active = host.inspect(&name).unwrap().active_fingerprints;
 
@@ -5675,7 +5673,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
 
         let untrusted = wait_untrusted(&host, &name);
         let norn_wire::UntrustedReason::SchemaUnreadable { detail, .. } = &untrusted else {
@@ -5701,7 +5699,7 @@ mod tests {
         )
         .unwrap();
         drop(lease);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let mut store = Store::open(
@@ -5739,7 +5737,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let mut store = Store::open(
@@ -5823,7 +5821,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
         let evidence_before = evidence.read();
@@ -6330,7 +6328,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
 
@@ -6783,7 +6781,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
@@ -6849,7 +6847,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         symlink(&next, &replacement).unwrap();
@@ -6885,7 +6883,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         assert_eq!(
             host.authored_drift(&name),
@@ -7598,7 +7596,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_state(&host, &name, norn_wire::TrustState::Ready);
             (host, name, lease)
         }
@@ -7819,7 +7817,7 @@ mod tests {
                 },
             )
             .unwrap();
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_state(&host, &name, norn_wire::TrustState::Ready);
             (host, name, lease, armed, recoveries)
         }
@@ -7929,7 +7927,7 @@ mod tests {
 
             fs::write(f.vault().join("c.md"), "delta delta\n").unwrap();
             fs::write(f.vault().join("d.md"), "epsilon epsilon\n").unwrap();
-            let _recovering = host.demand(&name, AttachMode::Durable).unwrap();
+            let _recovering = host.demand(&name).unwrap();
             wait_until(
                 "the demanded recovery to return",
                 lifecycle_budget(),
@@ -8040,7 +8038,7 @@ mod tests {
                 let _ = delivery_resumes.recv();
             });
 
-            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let _lease = host.demand(&name).unwrap();
             delivery_entered
                 .recv_timeout(Duration::from_secs(15))
                 .expect("the attach to deliver the engine");
@@ -8386,7 +8384,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
@@ -8487,7 +8485,7 @@ mod tests {
             policy,
         )
         .unwrap();
-        let lease = first.demand(&name, AttachMode::Durable).unwrap();
+        let lease = first.demand(&name).unwrap();
         wait_state(&first, &name, norn_wire::TrustState::Ready);
         drop(lease);
         drop(first);
@@ -8512,7 +8510,7 @@ mod tests {
         assert_eq!(inspection.trust, norn_wire::TrustState::Unattached);
         assert_eq!(inspection.active_fingerprints, None);
 
-        let _lease = second.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = second.demand(&name).unwrap();
         wait_state(&second, &name, norn_wire::TrustState::Ready);
         let seen = receiver.seen.lock().unwrap();
         assert_eq!(seen[0].0, name);
@@ -14480,7 +14478,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let plan = norn_wire::AuthoredPlan::new(
@@ -14535,11 +14533,11 @@ mod tests {
         )
         .unwrap();
 
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         // A demand against a ready entry schedules nothing, which is the whole
         // difference from an entry left untrusted by one bad document.
-        let second = host.demand(&name, AttachMode::Durable).unwrap();
+        let second = host.demand(&name).unwrap();
         assert!(matches!(
             second.outcome(),
             crate::Demand::State(norn_wire::TrustState::Ready)
@@ -15859,7 +15857,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(lease);
 
@@ -16043,7 +16041,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let answered = host.init(&norn_wire::InitParams::new(
@@ -16104,7 +16102,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
 
         let plan = norn_wire::AuthoredPlan::new(
@@ -16370,7 +16368,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _ = host.demand(&name, AttachMode::Durable).unwrap();
+        let _ = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         // Armed before the edit, so the reconcile the watcher schedules for it
         // is held at its entry and the in-flight leg it published on the way in
@@ -16542,7 +16540,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, "replacement").unwrap();
@@ -16805,7 +16803,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         lose_coverage.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_until(
@@ -16831,7 +16829,7 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         // The recovery runs for a demand that is still outstanding, so the
         // lease lives until the entry is serving again.
-        let demand = host.demand(&name, AttachMode::Durable).unwrap();
+        let demand = host.demand(&name).unwrap();
         wait_until(
             "the recovery to reach its block",
             lifecycle_budget(),
@@ -16955,7 +16953,7 @@ mod tests {
 
         /// Attach the registered vault, then let it idle out.
         fn attach_and_idle(host: &crate::Host<ProductionEntryOps>) {
-            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            let lease = host.demand(&notes()).unwrap();
             wait_state(host, &notes(), norn_wire::TrustState::Ready);
             drop(lease);
             host.reap_idle(Instant::now() + Duration::from_secs(61))
@@ -17003,7 +17001,7 @@ mod tests {
             assert_eq!(report.registration.root, directory);
             assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
             assert_eq!(listed(&host), [notes()]);
-            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            let lease = host.demand(&notes()).unwrap();
             wait_state(&host, &notes(), norn_wire::TrustState::Ready);
             drop(lease);
         }
@@ -17415,7 +17413,7 @@ mod tests {
                         while began.elapsed() < offset {
                             std::hint::spin_loop();
                         }
-                        drop(host.demand(&notes(), AttachMode::Durable).unwrap());
+                        drop(host.demand(&notes()).unwrap());
                     });
                     start.wait();
                     let answer =
@@ -17562,7 +17560,7 @@ mod tests {
             )
             .unwrap();
             register(&host, &f.vault()).expect("the vault is registered");
-            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            let lease = host.demand(&notes()).unwrap();
             wait_state(&host, &notes(), norn_wire::TrustState::Ready);
             drop(lease);
             host
@@ -17624,7 +17622,7 @@ mod tests {
 
         /// Attach the registered vault and answer what a find over it finds.
         fn attached_and_found(host: &crate::Host<ProductionEntryOps>) -> (Vec<String>, String) {
-            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            let lease = host.demand(&notes()).unwrap();
             wait_state(host, &notes(), norn_wire::TrustState::Ready);
             let found = found(host);
             drop(lease);
@@ -17653,7 +17651,7 @@ mod tests {
             .expect("the idle vault is edited");
 
             assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
-            let lease = host.demand(&notes(), AttachMode::Durable).unwrap();
+            let lease = host.demand(&notes()).unwrap();
             wait_state(&host, &notes(), norn_wire::TrustState::Ready);
             let pinned = host
                 .inspect(&notes())
@@ -17802,7 +17800,7 @@ mod tests {
                         while began.elapsed() < offset {
                             std::hint::spin_loop();
                         }
-                        drop(host.demand(&notes(), AttachMode::Durable).unwrap());
+                        drop(host.demand(&notes()).unwrap());
                     });
                     start.wait();
                     let answer = host.vault_set(&moving_to(&roots[target]));

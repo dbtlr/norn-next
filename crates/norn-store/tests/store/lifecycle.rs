@@ -585,8 +585,8 @@ fn a_path_that_looks_like_a_uri_is_a_filename() {
 }
 
 /// A throwaway store's file does not outlive it, whether it is closed or
-/// dropped. Disposable derivation is what an unregistered root gets, and it
-/// would otherwise accumulate on disk.
+/// dropped, so the ephemeral stores tests derive into do not accumulate on
+/// disk.
 #[test]
 fn a_throwaway_store_tears_its_file_down() {
     let scratch = Scratch::new("throwaway");

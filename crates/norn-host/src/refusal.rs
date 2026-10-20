@@ -54,9 +54,9 @@
 use norn_semantic::EngineError;
 use norn_store::{PageRefusal, ReadBound, StoreError};
 use norn_wire::{
-    AnswerShape, AttachMode, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope,
-    MaintainerIdentity, Published, ReadFailure, ReloadFailure, RequestBound, RequestPart,
-    TrustState, UntrustedReason, VaultName,
+    AnswerShape, ControlFile, ControlFileFailure, ErrorDetail, ErrorEnvelope, MaintainerIdentity,
+    Published, ReadFailure, ReloadFailure, RequestBound, RequestPart, TrustState, UntrustedReason,
+    VaultName,
 };
 
 use crate::lifecycle::{
@@ -121,7 +121,6 @@ impl Demand {
             }
             Demand::UnknownVault => Err(Unserved::UnknownVault.answer(name)),
             Demand::EntryHeld => Err(Unserved::EntryHeld.answer(name)),
-            Demand::UnsupportedMode(mode) => Err(unsupported_attach_mode(mode)),
         }
     }
 }
@@ -190,17 +189,6 @@ fn unknown_vault(name: &VaultName) -> ErrorEnvelope {
     ErrorEnvelope::new(
         format!("this host serves no vault under the name `{name}`"),
         ErrorDetail::unknown_vault(name.clone()),
-    )
-}
-
-/// The envelope a request for an attach mode this host has no lifecycle for is
-/// refused with — whether a demand named the mode, or the address a request
-/// named its vault by asked for it.
-pub(crate) fn unsupported_attach_mode(mode: AttachMode) -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        "this host attaches registered vaults durably and holds no lifecycle for the attach \
-         mode this request asks for",
-        ErrorDetail::unsupported_attach_mode(mode),
     )
 }
 
@@ -853,7 +841,7 @@ fn answer_state(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
 
 #[cfg(test)]
 mod tests {
-    use norn_wire::{AttachMode, MaintainerIdentity, NameSet, WarmingPhase, WatcherLossCause};
+    use norn_wire::{MaintainerIdentity, NameSet, WarmingPhase, WatcherLossCause};
 
     use crate::registry::AliasConflict;
 
@@ -891,7 +879,6 @@ mod tests {
         IdentityRefused,
         UnknownVault,
         EntryHeld,
-        UnsupportedMode,
     }
 
     impl Shape {
@@ -905,8 +892,7 @@ mod tests {
                 Shape::DuplicateRoot => Some(Shape::IdentityRefused),
                 Shape::IdentityRefused => Some(Shape::UnknownVault),
                 Shape::UnknownVault => Some(Shape::EntryHeld),
-                Shape::EntryHeld => Some(Shape::UnsupportedMode),
-                Shape::UnsupportedMode => None,
+                Shape::EntryHeld => None,
             }
         }
     }
@@ -937,7 +923,6 @@ mod tests {
             Demand::IdentityRefused(_) => Shape::IdentityRefused,
             Demand::UnknownVault => Shape::UnknownVault,
             Demand::EntryHeld => Shape::EntryHeld,
-            Demand::UnsupportedMode(_) => Shape::UnsupportedMode,
         }
     }
 
@@ -1018,10 +1003,6 @@ mod tests {
                 Some(ErrorDetail::unknown_vault(asked())),
             ),
             (Demand::EntryHeld, Some(ErrorDetail::entry_held(asked()))),
-            (
-                Demand::UnsupportedMode(AttachMode::Throwaway),
-                Some(ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)),
-            ),
         ]
     }
 

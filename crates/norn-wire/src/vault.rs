@@ -16,9 +16,6 @@
 //! address.** All three are vault-scope requests, and every vault-scope params type in the vocabulary
 //! names its vault by a [`VaultAddress`](crate::VaultAddress) —
 //! [`Addressing`](crate::Addressing) says so for every verb that carries one.
-//! An address naming a root asks for a throwaway attach, which has no
-//! lifecycle to observe and nothing to reload, so the host refuses it
-//! `host/unsupported-attach-mode` here as it does for every read.
 //!
 //! **None of them carries an answer reading.** A status and a reload are
 //! lifecycle observations rather than reads: a status is taken off what an

@@ -13,11 +13,11 @@
 use norn_wire::{
     Addressing, AdvisoriesOmitted, Advisory, AdvisoryValueType, AmbiguousEnd, Anchor,
     AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams, ApplyReport,
-    AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, BlockRow, BodyText,
-    CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories, Confidence,
-    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
-    DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
+    Attention, AuthorCondition, AuthoredPlan, AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD,
+    Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection, CollectionPage,
+    CollectionSelector, Column, ComparedBy, ComputedAdvisories, Confidence, ContainerKind,
+    ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DeleteParams,
+    DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
     DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentPathHead, DocumentRow, Drift,
     EditParams, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
     ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath,
@@ -138,7 +138,6 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<ErrorDetail>(),
         schema_of::<NameSet>(),
         schema_of::<ErrorEnvelope>(),
-        schema_of::<AttachMode>(),
         schema_of::<VaultName>(),
         schema_of::<VaultRoot>(),
         schema_of::<SchemaSource>(),
@@ -559,7 +558,6 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode",
             "host/already-served",
             "host/entry-held",
             "host/entry-not-ready",
@@ -590,32 +588,6 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "engine/unavailable",
             "engine/failed",
         ])
-    );
-}
-
-/// A refused mode advertises the mode as a nested enum, so a surface renders
-/// the branchable fact rather than a sentence naming it.
-#[test]
-fn a_refused_mode_advertises_the_typed_mode_it_carries() {
-    let schema = schema_of::<ErrorDetail>();
-    let refused = branches(&schema)
-        .iter()
-        .find(|branch| tag_constant(branch, "code") == Some("host/unsupported-attach-mode"))
-        .expect("the unsupported-attach-mode branch");
-    assert_eq!(
-        property_names(refused),
-        ["code", "mode"].into_iter().collect()
-    );
-    assert_eq!(
-        refused["properties"]["mode"]["$ref"].as_str(),
-        Some("#/$defs/AttachMode")
-    );
-    assert_eq!(
-        sorted(branches(&schema_of::<AttachMode>()).iter().map(|branch| {
-            string_constant(branch)
-                .unwrap_or_else(|| panic!("a mode branch is not a pinned string: {branch}"))
-        })),
-        sorted(["durable", "throwaway"])
     );
 }
 
@@ -747,7 +719,6 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
-            "host/unsupported-attach-mode",
             "host/already-served",
             "host/entry-held",
             "host/entry-not-ready",
@@ -1060,30 +1031,26 @@ fn a_poll_backend_advertises_its_bare_string() {
     );
 }
 
-/// An address advertises its `by` tag, and each branch refers to the grammar
-/// its payload is parsed through rather than restating it as a bare string.
+/// An address advertises its `by` tag, and its one branch, a registered name,
+/// refers to the grammar its payload is parsed through rather than restating
+/// it as a bare string.
 #[test]
-fn a_vault_address_advertises_its_by_tag_and_the_grammars_behind_it() {
+fn a_vault_address_advertises_its_by_tag_and_the_grammar_behind_it() {
     let schema = schema_of::<VaultAddress>();
+    assert_eq!(sorted(tag_constants(&schema, "by")), sorted(["name"]));
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "by") == Some("name"))
+        .expect("the name branch");
+    assert_eq!(property_names(branch), ["by", "name"].into_iter().collect());
     assert_eq!(
-        sorted(tag_constants(&schema, "by")),
-        sorted(["name", "root"])
+        branch["properties"]["name"]["$ref"].as_str(),
+        Some("#/$defs/VaultName")
     );
-    for (tag, field, definition) in [("name", "name", "VaultName"), ("root", "root", "VaultRoot")] {
-        let branch = branches(&schema)
-            .iter()
-            .find(|branch| tag_constant(branch, "by") == Some(tag))
-            .unwrap_or_else(|| panic!("the {tag} branch"));
-        assert_eq!(property_names(branch), ["by", field].into_iter().collect());
-        assert_eq!(
-            branch["properties"][field]["$ref"].as_str(),
-            Some(format!("#/$defs/{definition}").as_str())
-        );
-        assert!(
-            schema["$defs"][definition].is_object(),
-            "the referenced definition is absent: {schema}"
-        );
-    }
+    assert!(
+        schema["$defs"]["VaultName"].is_object(),
+        "the referenced definition is absent: {schema}"
+    );
 }
 
 // ── The verb registry ────────────────────────────────────────────────────

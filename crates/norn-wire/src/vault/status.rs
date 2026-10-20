@@ -10,9 +10,7 @@
 //! verb. A client that wants one vault's own standing asks for that vault by
 //! name.
 //!
-//! **A status carries a vault address, as every vault-scope request does.** A
-//! root addresses a throwaway attach, which has no lifecycle to observe, so
-//! the host refuses one here the way it refuses one for a read.
+//! **A status carries a vault address, as every vault-scope request does.**
 //!
 //! **One vault's standing is held behind an indirection in the report.** It is
 //! several times the width of the roll-up beside it, and the box prices that
@@ -23,8 +21,7 @@
 //! reports its park, an unattached entry reports that it is unattached, and
 //! neither is a refusal: asking where a vault stands never attaches one. The
 //! refusals are `host/unknown-vault`, for a name this host serves no vault under,
-//! `host/entry-held`, for an entry a registration change holds, and
-//! `host/unsupported-attach-mode`, for an address that names a root.
+//! and `host/entry-held`, for an entry a registration change holds.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,9 +35,7 @@ use crate::status::{RollUp, VaultStatus};
 pub struct StatusParams {
     /// The vault to report on. A vault named here reports that entry's
     /// standing; `null` reports the roll-up over every entry this
-    /// installation serves. An address naming a root is refused
-    /// `host/unsupported-attach-mode`: a throwaway attach has no lifecycle to
-    /// observe.
+    /// installation serves.
     pub vault: Option<VaultAddress>,
 }
 

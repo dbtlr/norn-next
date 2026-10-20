@@ -16,20 +16,20 @@
 use norn_wire::{
     Addressing, AdvisoriesOmitted, Advisory, AdvisoryValueType, AmbiguousEnd, Anchor,
     AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget, ApplyMode, ApplyParams, ApplyReport,
-    AttachMode, Attention, AuthorCondition, AuthoredPlan, AuthoredValue, Backlinks, BlockRow,
-    BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding,
-    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories,
-    Confidence, ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure,
-    CountParams, Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
-    DocumentPath, DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments,
-    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet,
-    FacetKind, FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams,
-    FindReport, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict,
-    IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
-    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAddressKind,
-    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    Attention, AuthorCondition, AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText,
+    CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome, Citation, CitedFinding, Collection,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ComputedAdvisories, Confidence,
+    ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams,
+    Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams, DescribeParams,
+    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath,
+    DocumentPathHead, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, HygieneConflict, IllegalContentHash,
+    IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams, InitReport,
+    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAddressKind, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
     ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
     NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
@@ -90,11 +90,6 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
     reasons
 }
 
-/// Every mode a demand asks for its derived state under.
-fn attach_modes() -> Vec<AttachMode> {
-    vec![AttachMode::Durable, AttachMode::Throwaway]
-}
-
 /// Every kind a finding is filed under.
 fn finding_kinds() -> Vec<FindingKind> {
     FindingKind::ALL.to_vec()
@@ -142,7 +137,6 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostEntryUntrusted,
         ReasonCode::HostMaintainerContended,
         ReasonCode::HostUnknownVault,
-        ReasonCode::HostUnsupportedAttachMode,
         ReasonCode::HostAlreadyServed,
         ReasonCode::HostEntryHeld,
         ReasonCode::HostEntryNotReady,
@@ -321,11 +315,6 @@ fn error_details() -> Vec<ErrorDetail> {
         details.push(ErrorDetail::engine_unavailable(rung, "the slot is empty"));
         details.push(ErrorDetail::engine_failed(rung, "the answer failed"));
     }
-    details.extend(
-        attach_modes()
-            .into_iter()
-            .map(ErrorDetail::unsupported_attach_mode),
-    );
     details.extend(apply_details());
     details.extend(migration_refusals().into_iter().flat_map(|reason| {
         [ControlFile::Schema, ControlFile::Config]
@@ -395,10 +384,7 @@ fn directories() -> Vec<Directory> {
 
 /// Every way a request addresses a vault.
 fn vault_addresses() -> Vec<VaultAddress> {
-    let mut addresses: Vec<VaultAddress> =
-        vault_names().into_iter().map(VaultAddress::name).collect();
-    addresses.extend(vault_roots().into_iter().map(VaultAddress::root));
-    addresses
+    vault_names().into_iter().map(VaultAddress::name).collect()
 }
 
 /// Every verb the registry holds.
@@ -1249,14 +1235,6 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
         "the causes built here are not the causes the vocabulary holds"
     );
     assert_eq!(
-        attach_modes()
-            .iter()
-            .map(flat_string)
-            .collect::<BTreeSet<_>>(),
-        advertised::<AttachMode>(None),
-        "the modes built here are not the modes the vocabulary holds"
-    );
-    assert_eq!(
         warming_phases()
             .iter()
             .map(flat_string)
@@ -1688,13 +1666,6 @@ fn every_reason_code_survives_the_round_trip() {
 }
 
 #[test]
-fn every_attach_mode_survives_the_round_trip() {
-    for mode in attach_modes() {
-        round_trip(&mode);
-    }
-}
-
-#[test]
 fn every_vault_name_survives_the_round_trip() {
     for name in vault_names() {
         round_trip(&name);
@@ -1866,45 +1837,6 @@ fn the_two_damage_reasons_are_told_apart_by_their_kind() {
             "the database disk image is malformed"
         )),
         r#"{"kind":"store_damaged_awaiting_demand","detail":"the database disk image is malformed"}"#
-    );
-}
-
-/// A mode is the bare string it is written as, and a string outside the pair
-/// is refused rather than defaulted: a mode a later version writes stops a
-/// reader of this one instead of arriving as the durable mode and being served
-/// under terms nobody asked for.
-#[test]
-fn an_attach_mode_is_the_bare_string_it_renders_as() {
-    let strings = ["durable", "throwaway"];
-    assert_eq!(attach_modes().len(), strings.len());
-    for (mode, string) in attach_modes().into_iter().zip(strings) {
-        let json = format!("\"{string}\"");
-        assert_eq!(wire(&mode), json);
-        assert_eq!(
-            serde_json::from_str::<AttachMode>(&json).expect("reading a mode back"),
-            mode
-        );
-    }
-    assert!(
-        serde_json::from_str::<AttachMode>(r#""ephemeral""#).is_err(),
-        "a mode nobody wrote was read as one of the two"
-    );
-}
-
-/// A refused mode crosses as the typed mode rather than as prose, so a client
-/// that asks for more than one learns which of them the host refused.
-#[test]
-fn a_refused_mode_crosses_as_the_mode_that_was_named() {
-    assert_eq!(
-        wire(&ErrorEnvelope::new(
-            "the host holds no lifecycle for that mode",
-            ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway),
-        )),
-        concat!(
-            r#"{"code":"host/unsupported-attach-mode","#,
-            r#""message":"the host holds no lifecycle for that mode","#,
-            r#""detail":{"code":"host/unsupported-attach-mode","mode":"throwaway"}}"#
-        )
     );
 }
 
@@ -2663,27 +2595,23 @@ fn a_root_is_one_spelling_as_text_and_as_a_path() {
     assert_eq!(root.to_string(), "/home/person/notes");
 }
 
-/// An address is an object tagged `by`, and the two ways a request names a
-/// vault are told apart by that tag rather than by which key is present.
+/// An address is an object tagged `by`, and a registered name is the one way
+/// it names a vault: an address by root names no registration, so it is
+/// refused on the way in rather than refused by the host (ADR 0033).
 #[test]
 fn a_vault_address_is_an_object_tagged_by() {
     assert_eq!(
         wire(&VaultAddress::name(name("notes"))),
         r#"{"by":"name","name":"notes"}"#
     );
-    assert_eq!(
-        wire(&VaultAddress::root(
-            VaultRoot::new("/home/person/notes").expect("an absolute root")
-        )),
-        r#"{"by":"root","root":"/home/person/notes"}"#
-    );
     assert!(
         serde_json::from_str::<VaultAddress>(r#"{"by":"url","url":"norn://notes"}"#).is_err(),
         "an address nobody minted read back as one"
     );
     assert!(
-        serde_json::from_str::<VaultAddress>(r#"{"by":"root","root":"notes"}"#).is_err(),
-        "a relative root read back as an address"
+        serde_json::from_str::<VaultAddress>(r#"{"by":"root","root":"/home/person/notes"}"#)
+            .is_err(),
+        "an address by root read back as one"
     );
 }
 

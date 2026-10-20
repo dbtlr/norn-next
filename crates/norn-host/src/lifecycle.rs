@@ -13,9 +13,8 @@ use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
-    AnswerReading, AttachMode, ErrorDetail, ErrorEnvelope, MaintainerIdentity, PlanDocument,
-    TrustState, UntrustedReason, VaultAnswer, VaultName, VaultSetParams, WarmingPhase,
-    WatcherLossCause,
+    AnswerReading, ErrorDetail, ErrorEnvelope, MaintainerIdentity, PlanDocument, TrustState,
+    UntrustedReason, VaultAnswer, VaultName, VaultSetParams, WarmingPhase, WatcherLossCause,
 };
 
 use crate::apply::PlanGround;
@@ -810,12 +809,12 @@ impl From<JobFailure> for EntryReloadFailure {
 /// release that publishes Unattached over it, so the answer names what keeps
 /// the entry from re-arming rather than what its resources are doing.
 ///
-/// Two variants name no entry at all: a demand for a name the registry does not
-/// hold, and a demand for a mode this host has no lifecycle for. Both are read
-/// before an entry is touched, and both answer through the one mapping every
-/// other demand answers through, so a refusal the host can make is a refusal
-/// the vocabulary spells. A third names an entry out of service while a
-/// registration change holds it, and answers through that same mapping.
+/// One variant names no entry at all: a demand for a name the registry does not
+/// hold. It is read before an entry is touched, and answers through the one
+/// mapping every other demand answers through, so a refusal the host can make
+/// is a refusal the vocabulary spells. Another names an entry out of service
+/// while a registration change holds it, and answers through that same
+/// mapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Demand {
     State(TrustState),
@@ -828,8 +827,6 @@ pub enum Demand {
     /// or an edit of its registration — and the entry asked is out of
     /// service until that change commits or is refused.
     EntryHeld,
-    /// The mode the demand named, which this host holds no lifecycle for.
-    UnsupportedMode(AttachMode),
 }
 
 /// Why a door finds no entry in service under a name: the set serves none, or
@@ -2616,10 +2613,9 @@ fn hand_on_carried_damage<A: SnapshotSource>(
     )
 }
 
-/// A lease answering `outcome` that holds no entry: the answer to a mode this
-/// host holds no lifecycle for, to a name the serving set does not serve, and
-/// to an entry out of service. It holds nothing, so nothing is withdrawn when
-/// it is dropped.
+/// A lease answering `outcome` that holds no entry: the answer to a name the
+/// serving set does not serve, and to an entry out of service. It holds
+/// nothing, so nothing is withdrawn when it is dropped.
 fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O> {
     DemandLease {
         outcome,
@@ -5337,18 +5333,7 @@ impl<O: EntryOps> Host<O> {
     /// therefore keeps the registry's parks too: they are withdrawn for the
     /// acquisition that reads those roots again, and no acquisition follows a
     /// demand the contention answers.
-    ///
-    /// The mode says how the derived state this demand asks for is held, and it
-    /// is answered before any lease is recorded: a demand this host has no
-    /// lifecycle for is refused rather than served under another mode, and it
-    /// leaves the entry standing exactly where it found it, parks included. The
-    /// refusal is a lease holding nothing, on the same terms an unregistered
-    /// name is answered under: nothing is recorded against an entry, so nothing
-    /// is withdrawn when the lease is dropped.
-    pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        if !matches!(mode, AttachMode::Durable) {
-            return Ok(unheld_lease(name, Demand::UnsupportedMode(mode)));
-        }
+    pub fn demand(&self, name: &VaultName) -> Result<DemandLease<O>, HostError> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(unheld_lease(name, Demand::UnknownVault));
         };
@@ -5443,16 +5428,7 @@ impl<O: EntryOps> Host<O> {
     /// The parks the registry raises are the demand's own to withdraw, and the
     /// attach it schedules is the read that adjudicates them, so this call adds
     /// nothing for them.
-    ///
-    /// The retry carries the mode the demand it stands in for would carry: a
-    /// park is retired for the demand that follows it, and that demand asks for
-    /// its derived state the same way any other does. A mode this host has no
-    /// lifecycle for is refused here before the contention park is retired, so
-    /// a retry the mode refuses retires nothing.
-    pub fn retry(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        if !matches!(mode, AttachMode::Durable) {
-            return Ok(unheld_lease(name, Demand::UnsupportedMode(mode)));
-        }
+    pub fn retry(&self, name: &VaultName) -> Result<DemandLease<O>, HostError> {
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             // An entry out of service answers the demand below with its
@@ -5462,7 +5438,7 @@ impl<O: EntryOps> Host<O> {
                 state.maintainer_contended = None;
             }
         }
-        self.demand(name, mode)
+        self.demand(name)
     }
 
     /// Take one read's hold on an entry: the handle its reads run on, the
@@ -10646,7 +10622,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.block_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(
             *lease.outcome(),
             Demand::State(TrustState::warming(
@@ -10678,7 +10654,7 @@ mod tests {
         ops.heal_in_attach.store(true, Ordering::SeqCst);
         ops.block_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         assert_eq!(
             host.state(&name),
@@ -10694,7 +10670,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         for _ in 0..20 {
-            let _ = host.demand(&name, AttachMode::Durable).unwrap();
+            let _ = host.demand(&name).unwrap();
         }
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -10705,7 +10681,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(host.reload(&name), Err(ReloadRefusal::Unsupported));
@@ -10733,7 +10709,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let entry = host.shared.entries.get(&name).unwrap();
@@ -10799,7 +10775,7 @@ mod tests {
             Roots::Created(&[(&name, root.as_path())]),
             1,
         ));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let asking = Arc::clone(&host);
@@ -10853,7 +10829,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let reloading = Arc::clone(&host);
@@ -10907,7 +10883,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let judging = Arc::clone(&host);
@@ -10938,7 +10914,7 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciled = ops.reconciles.load(Ordering::SeqCst);
 
@@ -10983,7 +10959,7 @@ mod tests {
             ]),
             1,
         ));
-        let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
+        let _reloaded_lease = host.demand(&reloaded).unwrap();
         wait_for_state(&host, &reloaded, TrustState::Ready);
 
         let reloading = Arc::clone(&host);
@@ -10991,7 +10967,7 @@ mod tests {
         let reload = thread::spawn(move || reloading.reload(&reload_name));
         wait_for_flag("reload_started", &ops.reload_started);
         *ops.continuous_handoff_poll_for.lock().unwrap() = Some(reloaded.clone());
-        let _sibling_lease = host.demand(&sibling, AttachMode::Durable).unwrap();
+        let _sibling_lease = host.demand(&sibling).unwrap();
         ops.reload_release.store(true, Ordering::SeqCst);
 
         let sibling_ready = wait_until(
@@ -11033,7 +11009,7 @@ mod tests {
             .store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _initial_lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _initial_lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
@@ -11050,7 +11026,7 @@ mod tests {
             "an untrusted entry answered a read from the handle it kept"
         );
 
-        let _recovery_lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _recovery_lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let read = host
             .begin_read(&name)
@@ -11073,7 +11049,7 @@ mod tests {
             .store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
@@ -11183,7 +11159,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let status = status_of(&host, &name);
@@ -11213,7 +11189,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         let released = Instant::now();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -11235,7 +11211,7 @@ mod tests {
         ops.block_attach.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         assert_eq!(
@@ -11254,7 +11230,7 @@ mod tests {
         ops.withholds_trust.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         let untrusted = TrustState::untrusted(UntrustedReason::schema_unreadable(
             "this fake withholds trust",
         ));
@@ -11275,7 +11251,7 @@ mod tests {
         ops.contend_attach.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_park(
             &host,
             &name,
@@ -11307,7 +11283,7 @@ mod tests {
                 Roots::Created(&[(&name, &root)]),
                 2,
             );
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let parked = park_entry(&host, &name, &root, park);
 
@@ -11332,7 +11308,7 @@ mod tests {
             .store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
         assert_eq!(
@@ -11361,7 +11337,7 @@ mod tests {
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let status = status_of(&host, &name);
@@ -11372,10 +11348,9 @@ mod tests {
         assert!(status.reads_refusing.is_some(), "{status:?}");
     }
 
-    /// **A name the host serves nothing under is refused as unknown**, and a
-    /// root is refused as the throwaway attach it asks for.
+    /// **A name the host serves nothing under is refused as unknown.**
     #[test]
-    fn a_status_refuses_an_unknown_name_and_a_root() {
+    fn a_status_refuses_an_unknown_name() {
         let notes = VaultName::new("notes").unwrap();
         let host =
             host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[&notes]), 1);
@@ -11383,14 +11358,6 @@ mod tests {
         assert_eq!(
             status_refused(&host, &status_params(&unregistered)),
             ErrorDetail::unknown_vault(unregistered)
-        );
-        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-notes").unwrap();
-        assert_eq!(
-            status_refused(
-                &host,
-                &norn_wire::StatusParams::new().with_vault(norn_wire::VaultAddress::root(root))
-            ),
-            ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
         );
     }
 
@@ -11421,18 +11388,18 @@ mod tests {
         );
 
         ops.withholds_trust.store(true, Ordering::SeqCst);
-        let _untrusted_lease = host.demand(&untrusted, AttachMode::Durable).unwrap();
+        let _untrusted_lease = host.demand(&untrusted).unwrap();
         let reason = UntrustedReason::schema_unreadable("this fake withholds trust");
         wait_for_state(&host, &untrusted, TrustState::untrusted(reason.clone()));
         ops.withholds_trust.store(false, Ordering::SeqCst);
 
         let link = norn_wire::Advisory::symlink_skipped("away.md");
         *ops.advisories.lock().unwrap() = vec![linked("away.md")];
-        let _ready_lease = host.demand(&ready, AttachMode::Durable).unwrap();
+        let _ready_lease = host.demand(&ready).unwrap();
         wait_for_state(&host, &ready, TrustState::Ready);
         ops.advisories.lock().unwrap().clear();
 
-        let _parked_lease = host.demand(&parked, AttachMode::Durable).unwrap();
+        let _parked_lease = host.demand(&parked).unwrap();
         wait_for_state(&host, &parked, TrustState::Ready);
         let conflict = conflict_over(&parked);
         refuse_conflict(&host.shared, &conflict);
@@ -11496,7 +11463,7 @@ mod tests {
             ]),
             2,
         );
-        let _lease = host.demand(&alpha, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&alpha).unwrap();
         wait_for_state(&host, &alpha, TrustState::Ready);
 
         let report = doctored(&host);
@@ -11559,7 +11526,7 @@ mod tests {
         *ops.advisories.lock().unwrap() = vec![falling_back()];
         let mut leases = Vec::new();
         for name in [&ignoring, &exposed] {
-            leases.push(host.demand(name, AttachMode::Durable).unwrap());
+            leases.push(host.demand(name).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
         }
         let attaches = ops.attaches.load(Ordering::SeqCst);
@@ -11629,7 +11596,7 @@ mod tests {
         std::fs::write(covered.join(".gitignore"), "/.norn/\n").unwrap();
         *ops.advisories.lock().unwrap() = vec![falling_back()];
         *ops.control_root.lock().unwrap() = Some(covered);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
@@ -11668,7 +11635,7 @@ mod tests {
         );
 
         for name in [&alpha, &beta] {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
+            drop(host.demand(name).unwrap());
             wait_for_park(
                 &host,
                 name,
@@ -11738,24 +11705,6 @@ mod tests {
         }
     }
 
-    /// **An address naming a root asks for a throwaway attach**, which holds
-    /// no control files to re-read.
-    #[test]
-    fn vault_reload_refuses_a_root_as_an_unsupported_attach() {
-        let notes = VaultName::new("notes").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[&notes]), 1);
-        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-notes").unwrap();
-        for dry_run in [false, true] {
-            let params = norn_wire::ReloadParams::new(norn_wire::VaultAddress::root(root.clone()));
-            let params = if dry_run { params.dry_run() } else { params };
-            assert_eq!(
-                reload_refused(&host, &params),
-                ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
-            );
-        }
-    }
-
     /// **An entry nothing has attached holds nothing to reload yet.**
     #[test]
     fn vault_reload_refuses_an_unattached_entry_as_not_ready() {
@@ -11779,7 +11728,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
@@ -11803,7 +11752,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let conflict = conflict_over(&name);
         refuse_conflict(&host.shared, &conflict);
@@ -11833,7 +11782,7 @@ mod tests {
         ops.contend_attach.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_park(
             &host,
             &name,
@@ -11861,7 +11810,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let parked = park_entry(&host, &name, &root, Park::Identity);
@@ -11884,7 +11833,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let holding = Arc::clone(&host);
         let held = name.clone();
@@ -11909,7 +11858,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         for dry_run in [false, true] {
             assert_eq!(
@@ -11930,7 +11879,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let detail = "the reloaded database disagrees with its own schema";
         let damaged = ErrorDetail::reload_failed(norn_wire::ReloadFailure::store_damaged(detail));
@@ -11969,7 +11918,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         for (released, dry_run) in [(1, true), (2, false)] {
@@ -12010,7 +11959,7 @@ mod tests {
         *ops.store_reading_at_attach.lock().unwrap() = Some(fake_reading(3));
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(recorded_store_reading(&host, &name), Some(fake_reading(3)));
 
@@ -12033,7 +11982,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the vault is served");
         let epoch = entry.gate.lock().unwrap().claim.epoch();
@@ -12057,7 +12006,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         for (arming, message, dry_run) in [
@@ -12070,7 +12019,7 @@ mod tests {
                 ErrorDetail::entry_untrusted(UntrustedReason::leg_unwound(message))
             );
             arming.store(false, Ordering::SeqCst);
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
         }
 
@@ -12174,7 +12123,7 @@ mod tests {
                 1,
             ));
             for name in [&queued, &holding] {
-                drop(host.demand(name, AttachMode::Durable).unwrap());
+                drop(host.demand(name).unwrap());
                 wait_for_state(&host, name, TrustState::Ready);
             }
             ops.block_reload.store(true, Ordering::SeqCst);
@@ -12239,7 +12188,7 @@ mod tests {
                 1,
             ));
             for name in [&queued, &holding, &filling] {
-                drop(host.demand(name, AttachMode::Durable).unwrap());
+                drop(host.demand(name).unwrap());
                 wait_for_state(&host, name, TrustState::Ready);
             }
             ops.block_reload.store(true, Ordering::SeqCst);
@@ -12305,7 +12254,7 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         host.shared
@@ -12356,7 +12305,7 @@ mod tests {
             ops.reload_supported.store(true, Ordering::SeqCst);
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let _lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             // `Ready` is published before the attach leg ends, and a reload
             // admitted while that leg stands is left to its end's dispatch,
@@ -12381,7 +12330,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.contend_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let initial = host.demand(&name, AttachMode::Durable).unwrap();
+        let initial = host.demand(&name).unwrap();
         let contended = ErrorDetail::maintainer_contended(MaintainerIdentity::unknown());
         wait_until(
             "the contended attach to park the entry",
@@ -12407,13 +12356,13 @@ mod tests {
             initial.completion(),
             Demand::MaintainerContended(_)
         ));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
         settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         drop(lease);
         drop(initial);
-        drop(host.retry(&name, AttachMode::Durable).unwrap());
+        drop(host.retry(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
@@ -12427,7 +12376,7 @@ mod tests {
     fn demand_during_in_flight_detach_reports_the_release_rather_than_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        let initial = host.demand(&name, AttachMode::Durable).unwrap();
+        let initial = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(initial);
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -12436,7 +12385,7 @@ mod tests {
         let releasing = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
         assert_eq!(host.state(&name), answered(releasing.clone()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(
             lease.completion(),
             Demand::State(releasing),
@@ -12488,7 +12437,7 @@ mod tests {
     ) {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -12642,7 +12591,7 @@ mod tests {
         name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
         lose_coverage_through_a_driven_poll(ops, host, name, "gone");
-        Some(host.demand(name, AttachMode::Durable).unwrap())
+        Some(host.demand(name).unwrap())
     }
 
     /// Watcher facts schedule the reconcile that reports the failure, and the
@@ -12753,8 +12702,8 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let host = host_without_ambient_polling(ops, Roots::Absent(&[&a, &b]), 2);
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
+        drop(host.demand(&b).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_state(&host, &b, TrustState::Ready);
         (host, a, b)
@@ -12845,7 +12794,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -12896,7 +12845,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -12944,7 +12893,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -13011,7 +12960,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -13044,7 +12993,7 @@ mod tests {
             assert!(!state.owes_a_rung(), "the entry owes a rung over no store");
         }
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -13064,7 +13013,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -13080,7 +13029,7 @@ mod tests {
         assert!(entry.gate.lock().unwrap().owes_a_rung());
 
         ops.panic_in_recover.store(true, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, unwound(RECOVER_PANIC));
         {
             let state = entry.gate.lock().unwrap();
@@ -13094,7 +13043,7 @@ mod tests {
         }
 
         ops.panic_in_recover.store(false, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             ops.recovers.load(Ordering::SeqCst),
@@ -13113,7 +13062,7 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&a, &b]), 1);
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
 
         ops.panic_in_reconcile.store(true, Ordering::SeqCst);
@@ -13121,7 +13070,7 @@ mod tests {
         poll_watchers(&host.shared);
         wait_for_state(&host, &a, unwound(RECONCILE_PANIC));
 
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
+        drop(host.demand(&b).unwrap());
         wait_for_state(&host, &b, TrustState::Ready);
     }
 
@@ -13144,7 +13093,7 @@ mod tests {
         );
 
         ops.panic_in_attach.store(true, Ordering::SeqCst);
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
         wait_for_state(&host, &a, unwound(ATTACH_PANIC));
 
         assert!(
@@ -13166,7 +13115,7 @@ mod tests {
             RegistryEntry::new(b.clone(), VaultRoot::new(&root).unwrap()),
         )
         .expect("a name the set does not serve joins it");
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
+        drop(host.demand(&b).unwrap());
         wait_for_state(&host, &b, TrustState::Ready);
 
         drop(host);
@@ -13203,8 +13152,8 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
+        drop(host.demand(&b).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_state(&host, &b, TrustState::Ready);
 
@@ -13228,7 +13177,7 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Ready);
 
         *ops.panic_in_poll_at.lock().unwrap() = None;
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
     }
 
@@ -13354,7 +13303,7 @@ mod tests {
         // The lease stands until `Ready` is seen: once it goes, `Ready` lasts
         // only until the first reap tick past the idle bound, a window a slow
         // attach can shrink below the wait's own polling.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -13377,9 +13326,9 @@ mod tests {
             host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&idle, &held]), 1);
         // Each attach is waited for before the next is asked, so no dispatch
         // meets a full queue that only a tick would retry.
-        drop(host.demand(&idle, AttachMode::Durable).unwrap());
+        drop(host.demand(&idle).unwrap());
         wait_for_state(&host, &idle, TrustState::Ready);
-        let _lease = host.demand(&held, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&held).unwrap();
         wait_for_state(&host, &held, TrustState::Ready);
         wait_for_no_claim(&host, &idle);
         wait_for_no_claim(&host, &held);
@@ -13421,16 +13370,16 @@ mod tests {
             Roots::Absent(&[&subject, &running, &queued]),
             1,
         );
-        let _lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
         wait_for_no_claim(&host, &subject);
 
         // The one worker is inside an attach and the one channel slot holds
         // the next, so the reload's dispatch finds the queue full.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let running_lease = host.demand(&running, AttachMode::Durable).unwrap();
+        let running_lease = host.demand(&running).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
-        let queued_lease = host.demand(&queued, AttachMode::Durable).unwrap();
+        let queued_lease = host.demand(&queued).unwrap();
         let answer = a_reload_left_to_the_retry(&host, &subject);
         let entry = host.shared.entries.get(&subject).unwrap();
         dispatch_pending(&host.shared, &entry).unwrap();
@@ -13492,11 +13441,11 @@ mod tests {
         );
         // Each attach is waited for before the next is asked, so no dispatch
         // meets a full queue that only a tick would retry.
-        drop(host.demand(&idle, AttachMode::Durable).unwrap());
+        drop(host.demand(&idle).unwrap());
         wait_for_state(&host, &idle, TrustState::Ready);
-        let _held_lease = host.demand(&held, AttachMode::Durable).unwrap();
+        let _held_lease = host.demand(&held).unwrap();
         wait_for_state(&host, &held, TrustState::Ready);
-        let _reloading_lease = host.demand(&reloading, AttachMode::Durable).unwrap();
+        let _reloading_lease = host.demand(&reloading).unwrap();
         wait_for_state(&host, &reloading, TrustState::Ready);
         for name in [&idle, &held, &reloading] {
             wait_for_no_claim(&host, name);
@@ -13529,7 +13478,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -13569,7 +13518,7 @@ mod tests {
         // asks for the root to be read again, which is the acquisition a
         // released entry is answered by.
         ops.panic_in_reconcile.store(false, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
     }
@@ -13589,7 +13538,7 @@ mod tests {
         let entry = host.shared.entries.get(&name).expect("z is registered");
 
         *ops.panic_in_attach_at.lock().unwrap() = Some(name.clone());
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, unwound(ATTACH_PANIC));
 
         assert_eq!(
@@ -13620,13 +13569,13 @@ mod tests {
 
         // The pool's one slot outlives the run, so the vault beside it attaches
         // on the same worker.
-        drop(host.demand(&bystander, AttachMode::Durable).unwrap());
+        drop(host.demand(&bystander).unwrap());
         wait_for_state(&host, &bystander, TrustState::Ready);
 
         // A fresh demand call is the door an untrusted entry is served through,
         // and it is answered — with the lease from the first attempt still held.
         *ops.panic_in_attach_at.lock().unwrap() = None;
-        let second = host.demand(&name, AttachMode::Durable).unwrap();
+        let second = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -13661,7 +13610,7 @@ mod tests {
             Roots::Created(&[(&a, root_a.as_path()), (&b, root_b.as_path())]),
             1,
         );
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
 
         // b's registered root becomes a's root, so the conflict is the one b's
@@ -13671,7 +13620,7 @@ mod tests {
         std::fs::remove_dir(&root_b).unwrap();
         symlink(&root_a, &root_b).unwrap();
         *ops.panic_in_detach_at.lock().unwrap() = Some(a.clone());
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
+        drop(host.demand(&b).unwrap());
 
         // b is refused over the conflict exactly as it would be over a detach
         // that returned cleanly: the panic underneath changes nothing b's own
@@ -13701,7 +13650,7 @@ mod tests {
         *ops.panic_in_detach_at.lock().unwrap() = None;
         std::fs::remove_file(&root_b).unwrap();
         std::fs::create_dir_all(&root_b).unwrap();
-        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        drop(host.demand(&a).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
 
         std::mem::forget(host);
@@ -13734,7 +13683,7 @@ mod tests {
         // and a fresh attach reaches it twice: once to file the identity
         // claim, once to release it. Both go through poison that stays
         // standing, and the attach still completes.
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -13756,7 +13705,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
 
@@ -13783,7 +13732,7 @@ mod tests {
         // absorbed is left for a fresh attach to work around. The demand is
         // what withdraws the identity park the refusal raised.
         *ops.panic_in_detach_at.lock().unwrap() = None;
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
 
         std::mem::forget(host);
@@ -13800,7 +13749,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
 
@@ -13822,7 +13771,7 @@ mod tests {
         // The read is held past the re-demand: the fresh attach this asks for
         // unwinds with the read's pin standing beside it.
         *ops.panic_in_attach_at.lock().unwrap() = Some(subject.clone());
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, unwound(ATTACH_PANIC));
 
         assert_eq!(
@@ -13840,7 +13789,7 @@ mod tests {
         // The entry recovers: nothing about the attach panic it absorbed is
         // left for a fresh demand to work around, once the arming lifts.
         *ops.panic_in_attach_at.lock().unwrap() = None;
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
 
         std::mem::forget(host);
@@ -13854,7 +13803,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).unwrap();
 
@@ -13879,7 +13828,7 @@ mod tests {
         assert!(!entry.gate.lock().unwrap().pinned());
 
         ops.panic_in_reconcile.store(false, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -13893,7 +13842,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
@@ -13921,7 +13870,7 @@ mod tests {
         // and the detach is what gives the same residue back there: the two
         // calls do not double up.
         ops.panic_in_reconcile.store(false, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now() + Duration::from_secs(3600))
             .unwrap();
@@ -13945,7 +13894,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
@@ -13968,7 +13917,7 @@ mod tests {
         // The entry recovers, and a fresh attach acquires past the residue
         // the panicked detach left for the discard to close out.
         *ops.panic_in_detach_at.lock().unwrap() = None;
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -14007,7 +13956,7 @@ mod tests {
         let poll = thread::spawn(move || poll_watchers(&polling));
         wait_for_flag("poll_started", &ops.poll_started);
 
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -14118,7 +14067,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -14195,7 +14144,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -14223,7 +14172,7 @@ mod tests {
             state.retire_registry_parks();
         }
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         {
             let state = entry.gate.lock().unwrap();
@@ -14308,7 +14257,7 @@ mod tests {
         // The demand withdraws the conflict park, so the lease is recorded
         // against an entry whose release is still in flight and free to
         // re-acquire when it ends.
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         assert_eq!(*lease.outcome(), Demand::State(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -14336,7 +14285,7 @@ mod tests {
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         let installing = Demand::State(TrustState::warming(
             WarmingPhase::InstallingCoverage,
             0,
@@ -14368,7 +14317,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -14376,7 +14325,7 @@ mod tests {
         wait_for_flag("detach_started", &ops.detach_started);
 
         refuse_root_identity(&root);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
 
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_until(
@@ -14419,7 +14368,7 @@ mod tests {
     fn every_surface_answers_the_widest_park_standing_over_the_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         let entry = host.shared.entries.get(&a).unwrap();
         let conflict = a_conflict([a.clone(), b.clone()]);
         let refused_detail = |detail: &ErrorDetail| {
@@ -14470,7 +14419,7 @@ mod tests {
     fn a_poll_schedules_no_demanded_work_against_a_parked_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
 
         // The entry a refusal leaves behind where a leg is registered: the
         // coverage stays parked in the entry, the conflict park stands, and
@@ -14518,7 +14467,7 @@ mod tests {
         refuse_conflict(&host.shared, &a_conflict([a.clone(), b.clone()]));
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
-        let retried = host.retry(&a, AttachMode::Durable).unwrap();
+        let retried = host.retry(&a).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
         drop((retried, host));
@@ -14551,7 +14500,7 @@ mod tests {
         // schedules is the classification that refuses it.
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
-        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease = host.demand(&b).unwrap();
         wait_until(
             "the lease to answer the duplicate root",
             lifecycle_wait_budget(),
@@ -14575,7 +14524,7 @@ mod tests {
         // the read that retires the park.
         std::fs::remove_file(&b_root).unwrap();
         std::fs::create_dir(&b_root).unwrap();
-        let recovered = host.demand(&b, AttachMode::Durable).unwrap();
+        let recovered = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         assert_eq!(
             lease.completion(),
@@ -14612,7 +14561,7 @@ mod tests {
             .collect::<Vec<_>>();
         let host = host_over_roots(Arc::clone(&ops), &served, 2);
         let warm = &names[0];
-        drop(host.demand(warm, AttachMode::Durable).unwrap());
+        drop(host.demand(warm).unwrap());
         wait_for_state(&host, warm, TrustState::Ready);
 
         let before = host.shared.entries.classifications();
@@ -14622,7 +14571,7 @@ mod tests {
              counter below pins nothing"
         );
         for _ in 0..8 {
-            let lease = host.demand(warm, AttachMode::Durable).unwrap();
+            let lease = host.demand(warm).unwrap();
             assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
         }
         assert_eq!(
@@ -14648,7 +14597,7 @@ mod tests {
     fn a_parked_entry_refuses_at_the_status_surface_too() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         refuse_conflict(&host.shared, &a_conflict([a.clone(), b.clone()]));
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
@@ -14684,7 +14633,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.contend_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_park(
             &host,
             &name,
@@ -14785,7 +14734,7 @@ mod tests {
             2,
         );
         // Only b is attached, so the coverage the poll below reports on is b's.
-        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
 
         // b's registered root becomes a second name for a's, and the watcher
@@ -14839,7 +14788,7 @@ mod tests {
             Roots::Created(&[(&name, root.as_path())]),
             1,
         );
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
 
@@ -14916,7 +14865,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         drive(&host, &ops, &name, lease);
@@ -14995,7 +14944,7 @@ mod tests {
             poll_watchers(&host.shared);
             wait_for_state(host, name, backend_lost());
             ops.block_recover.store(true, Ordering::SeqCst);
-            let recovering = host.demand(name, AttachMode::Durable).unwrap();
+            let recovering = host.demand(name).unwrap();
             wait_for_flag("recover_started", &ops.recover_started);
             report_coverage_lost(ops, name);
             drop((lease, recovering));
@@ -15066,7 +15015,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).unwrap();
         let lost_at = entry.gate.lock().unwrap().claim.epoch();
@@ -15077,7 +15026,7 @@ mod tests {
             .unwrap();
         wait_for_detaches(&ops, 1, "the reaper to tear the idle entry down");
         wait_for_published_label(&host, &name, TrustState::Unattached);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
 
@@ -15126,7 +15075,7 @@ mod tests {
             Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
             2,
         );
-        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
 
         // A maintenance leg is held open over b, so the drain that ends it is
@@ -15179,7 +15128,7 @@ mod tests {
             Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
             2,
         );
-        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
 
         // The watcher backend stops. The entry parks its coverage and owes a
@@ -15198,7 +15147,7 @@ mod tests {
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
 
-        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&b).unwrap();
         let conflict = a_conflict([a.clone(), b.clone()]);
         wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
         assert_eq!(
@@ -15243,21 +15192,21 @@ mod tests {
             2,
         );
 
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
         wait_for_state(&host, &b, backend_lost());
 
         ops.block_recover.store(true, Ordering::SeqCst);
-        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&b).unwrap();
         wait_for_flag("recover_started", &ops.recover_started);
 
         std::fs::rename(&b_root, &moved_b_root).unwrap();
         symlink("b", &b_root).unwrap();
         std::fs::remove_dir(&a_root).unwrap();
         symlink(&moved_b_root, &a_root).unwrap();
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
 
         let conflict = a_conflict([a.clone(), b.clone()]);
         wait_until(
@@ -15313,17 +15262,17 @@ mod tests {
             2,
         );
 
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
         wait_for_state(&host, &b, backend_lost());
 
         ops.block_recover.store(true, Ordering::SeqCst);
-        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&b).unwrap();
         wait_for_flag("recover_started", &ops.recover_started);
 
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
@@ -15376,14 +15325,14 @@ mod tests {
             2,
         );
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
         wait_for_state(&host, &name, backend_lost());
 
         ops.block_recover.store(true, Ordering::SeqCst);
-        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&name).unwrap();
         wait_for_flag("recover_started", &ops.recover_started);
         std::fs::rename(&root, &previous).unwrap();
         std::fs::create_dir(&root).unwrap();
@@ -15422,14 +15371,14 @@ mod tests {
             2,
         );
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
         wait_for_state(&host, &name, backend_lost());
 
         ops.block_recover.store(true, Ordering::SeqCst);
-        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&name).unwrap();
         wait_for_flag("recover_started", &ops.recover_started);
         refuse_root_identity(&root);
         ops.recover_release.store(true, Ordering::SeqCst);
@@ -15473,14 +15422,14 @@ mod tests {
             2,
         );
 
-        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
         wait_for_state(&host, &b, backend_lost());
 
         let acquisition_gate = attach_gate(&host.shared);
-        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&b).unwrap();
         let entry = host.shared.entries.get(&b).unwrap();
         wait_until(
             "the recovery job to register its leg",
@@ -15570,7 +15519,7 @@ mod tests {
                 .maintainer_contended = Some(MaintainerIdentity::unknown());
         }
 
-        let contended = host.demand(&a, AttachMode::Durable).unwrap();
+        let contended = host.demand(&a).unwrap();
         assert_eq!(
             *contended.outcome(),
             Demand::MaintainerContended(MaintainerIdentity::unknown()),
@@ -15606,7 +15555,7 @@ mod tests {
 
         // The retry retires the contention, so the demand inside it withdraws
         // the conflict park and the attach it schedules reads the roots again.
-        let retried = host.retry(&a, AttachMode::Durable).unwrap();
+        let retried = host.retry(&a).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
 
         drop((contended, retried, host));
@@ -15621,7 +15570,7 @@ mod tests {
     fn a_lease_answers_its_completion_under_the_name_it_holds() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease = host.demand(&a).unwrap();
         {
             let entry = host.shared.entries.get(&a).unwrap();
             let mut state = entry.gate.lock().unwrap();
@@ -15635,7 +15584,7 @@ mod tests {
         );
 
         let missing = VaultName::new("ledger").unwrap();
-        let unknown = host.demand(&missing, AttachMode::Durable).unwrap();
+        let unknown = host.demand(&missing).unwrap();
         let refusal = unknown.answer().expect_err("an unregistered vault refuses");
         assert_eq!(
             refusal.detail(),
@@ -15654,14 +15603,14 @@ mod tests {
     fn a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.lost_poll.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(*lease.outcome(), Demand::State(releasing()));
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -15685,16 +15634,16 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.lost_recover.store(true, Ordering::SeqCst);
         lose_coverage_through_a_driven_poll(&ops, &host, &name, "gone");
-        let recovering = host.demand(&name, AttachMode::Durable).unwrap();
+        let recovering = host.demand(&name).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(*lease.outcome(), Demand::State(releasing()));
 
         ops.block_attach.store(true, Ordering::SeqCst);
@@ -15755,15 +15704,15 @@ mod tests {
             Roots::Absent(&[&working, &holding, &holding_too]),
             2,
         );
-        let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let working_lease = host.demand(&working).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
 
         // Both workers inside an attach they cannot leave: nothing takes a job
         // out of the channel from here, so what the channel holds below is
         // what this case put in it.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        let holding_too_lease = host.demand(&holding_too, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
+        let holding_too_lease = host.demand(&holding_too).unwrap();
         wait_until(
             "both workers to reach an attach that blocks",
             lifecycle_wait_budget(),
@@ -15846,14 +15795,14 @@ mod tests {
     fn a_demand_raised_during_a_contended_teardown_stays_parked() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.contend_poll.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert!(matches!(lease.outcome(), Demand::MaintainerContended(_)));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -15893,7 +15842,7 @@ mod tests {
         // The lease is held until the release is armed: the idle interval here
         // is zero, so an entry with no lease on it is reapable the instant it
         // attaches, and the reap this test is about is the armed one.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -15916,7 +15865,7 @@ mod tests {
 
         // The facts went back with the resources they described, so the
         // coverage installed next owes nothing to a vault it never watched.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -15936,7 +15885,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -15964,7 +15913,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         // A reconcile leg holding the entry's coverage, blocked inside the ops
@@ -16020,7 +15969,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
@@ -16080,7 +16029,7 @@ mod tests {
             1,
         );
         for name in [&poisoned, &bystander] {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
+            drop(host.demand(name).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
         }
         let shared = Arc::clone(&host.shared);
@@ -16131,7 +16080,7 @@ mod tests {
             1,
         );
         for name in [&poisoned, &bystander] {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
+            drop(host.demand(name).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
         }
         let shared = Arc::clone(&host.shared);
@@ -16187,13 +16136,13 @@ mod tests {
             Roots::Absent(&[&subject, &running, &queued]),
             1,
         );
-        let _lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
         wait_for_no_claim(&host, &subject);
         ops.block_attach.store(true, Ordering::SeqCst);
-        let running_lease = host.demand(&running, AttachMode::Durable).unwrap();
+        let running_lease = host.demand(&running).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
-        let queued_lease = host.demand(&queued, AttachMode::Durable).unwrap();
+        let queued_lease = host.demand(&queued).unwrap();
         let _answer = a_reload_left_to_the_retry(&host, &subject);
         let entry = host.shared.entries.get(&subject).unwrap();
         let job = entry
@@ -16240,7 +16189,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
@@ -16322,7 +16271,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
@@ -16394,7 +16343,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
@@ -16470,7 +16419,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         {
             let entry = host.shared.entries.get(&name).unwrap();
@@ -16504,7 +16453,7 @@ mod tests {
     fn a_relabelled_release_window_still_schedules_nothing() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -16520,7 +16469,7 @@ mod tests {
             state.trust = TrustState::Unattached;
         }
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert!(
             !matches!(
                 lease.outcome(),
@@ -16546,7 +16495,7 @@ mod tests {
     fn idle_deadline_begins_when_the_final_demand_lease_ends() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         // Elapsed time is the subject here, so these two sleeps are the test's
         // own clock rather than a wait: the first spends more than the idle
@@ -16566,7 +16515,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let idle_after = Duration::from_millis(200);
         let (host, name) = fixture(Arc::clone(&ops), idle_after);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         // The test's own clock, not a wait: it spends the whole idle interval
         // and more while the lease is held, so the reap that follows is the
@@ -16596,7 +16545,7 @@ mod tests {
 
         let first = vec![linked("away")];
         *ops.advisories.lock().unwrap() = first.clone();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(advisories(&host), first);
 
@@ -16607,7 +16556,7 @@ mod tests {
 
         let second = vec![falling_back()];
         *ops.advisories.lock().unwrap() = second.clone();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(advisories(&host), second);
     }
@@ -16621,7 +16570,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         *ops.advisories.lock().unwrap() = vec![linked("before.md")];
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             host.inspect(&name).unwrap().advisories,
@@ -16655,7 +16604,7 @@ mod tests {
     fn idle_reap_releases_the_attachment_and_returns_to_unattached() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
@@ -16670,7 +16619,7 @@ mod tests {
     fn dispatcher_reaps_idle_attachment_despite_watcher_churn() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         // One batch reported and waited for while the lease still holds the
@@ -16699,7 +16648,7 @@ mod tests {
     fn demand_lease_cancels_queued_detach_until_client_work_ends() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now()).unwrap();
         settle();
@@ -16715,7 +16664,7 @@ mod tests {
         let (host, name) = attached_awaiting_recovery(&ops);
         settle();
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -16758,7 +16707,7 @@ mod tests {
         ] {
             let ops = Arc::new(FakeOps::default());
             let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-            let held = host.demand(&name, AttachMode::Durable).unwrap();
+            let held = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             *ops.terminal_poll.lock().expect("terminal poll poisoned") = Some(error);
             wait_for_state(&host, &name, expected);
@@ -16781,7 +16730,7 @@ mod tests {
     fn a_published_watcher_cause_outlives_the_ticks_that_follow_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         let expected = backend_lost();
@@ -16835,7 +16784,7 @@ mod tests {
     fn contention_reported_by_a_poll_parks_the_entry_until_retry() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.contend_poll.store(true, Ordering::SeqCst);
         wait_for_published_label(&host, &name, TrustState::Unattached);
@@ -16850,13 +16799,13 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(matches!(
-            host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+            host.demand(&name).unwrap().outcome(),
             Demand::MaintainerContended(_)
         ));
         settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
 
-        let retried = host.retry(&name, AttachMode::Durable).unwrap();
+        let retried = host.retry(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         drop((retried, held));
@@ -16872,7 +16821,7 @@ mod tests {
         let (host, name) = attached_awaiting_recovery(&ops);
         // Held across the wait: the recovery this test counts is the one this
         // lease asks for, and a lease dropped before it runs withdraws it.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
         drop(lease);
@@ -16886,7 +16835,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert!(matches!(host.state(&name), Ok(TrustState::Warming { .. })));
 
@@ -16902,7 +16851,7 @@ mod tests {
         ops.block_reconcile_at.store(1, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert_eq!(
             host.state(&name),
@@ -16919,7 +16868,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         // The handoff drain's own batch source, not the source the driven poll
@@ -16940,7 +16889,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         // See the sibling saturation test above: the handoff drain's own
@@ -16986,7 +16935,7 @@ mod tests {
     fn terminal_failure_during_recover_stays_watcher_untrusted() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().expect("terminal poll poisoned") =
             Some(WatchError::Backend("gone".into()));
@@ -16998,7 +16947,7 @@ mod tests {
         ops.terminal_recover.store(true, Ordering::SeqCst);
         // Held across the wait: the recovery that fails below is the one this
         // lease asks for, and a lease dropped before it runs withdraws it.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, backend_lost());
         drop(lease);
     }
@@ -17007,7 +16956,7 @@ mod tests {
     fn terminal_failure_during_reconcile_stays_watcher_untrusted() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.terminal_reconcile.store(true, Ordering::SeqCst);
         // The reconcile is scheduled by a dispatcher tick that finds facts:
@@ -17021,7 +16970,7 @@ mod tests {
     fn failed_reconcile_requires_demand_recovery_before_later_facts_can_be_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
@@ -17045,7 +16994,7 @@ mod tests {
         );
         // Held across the wait; see the sibling recover-side test below for
         // why an immediately dropped lease here can wedge the entry.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert!(ops.reconciles.load(Ordering::SeqCst) > failed_count);
@@ -17062,7 +17011,7 @@ mod tests {
     fn a_read_after_a_rebuild_carries_the_declaration_the_rebuild_pinned() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             host.begin_read(&name)
@@ -17106,7 +17055,7 @@ mod tests {
     fn a_read_over_an_untrusted_entry_whose_work_is_held_answers_untrusted() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_reconcile_at, &name);
@@ -17151,7 +17100,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
 
@@ -17198,7 +17147,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let hold = host
@@ -17255,7 +17204,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let hold = host
@@ -17308,7 +17257,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let hold = host
@@ -17355,7 +17304,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
 
@@ -17405,7 +17354,7 @@ mod tests {
     fn a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_reconcile_at, &name);
@@ -17462,7 +17411,7 @@ mod tests {
     fn damage_found_by_scheduled_maintenance_reaches_rung_three() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_maintenance_at, &name);
@@ -17508,7 +17457,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_maintenance_at, &name);
@@ -17584,7 +17533,7 @@ mod tests {
     fn damage_a_watcher_poll_reports_reaches_rung_three() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_rebuild.store(true, Ordering::SeqCst);
@@ -17625,7 +17574,7 @@ mod tests {
         ops.block_rebuild.store(true, Ordering::SeqCst);
         ops.damaged_recover.store(true, Ordering::SeqCst);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
             "the recovered database reports a malformed index",
         ));
@@ -17663,7 +17612,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let detail = "the reloaded database disagrees with its own schema";
@@ -17715,7 +17664,7 @@ mod tests {
         ));
 
         ops.damaged_attach.store(true, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, awaiting.clone());
         wait_for_no_leg(&host, &name);
         settle();
@@ -17752,7 +17701,7 @@ mod tests {
             );
         }
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -17777,7 +17726,7 @@ mod tests {
     fn a_rebuild_ends_the_reader_over_the_discarded_store_and_mints_another() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.readers.opened.load(Ordering::SeqCst), 1);
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 0);
@@ -17831,8 +17780,8 @@ mod tests {
         let sibling = VaultName::new("sibling").unwrap();
         let host =
             host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&damaged, &sibling]), 2);
-        drop(host.demand(&damaged, AttachMode::Durable).unwrap());
-        drop(host.demand(&sibling, AttachMode::Durable).unwrap());
+        drop(host.demand(&damaged).unwrap());
+        drop(host.demand(&sibling).unwrap());
         wait_for_state(&host, &damaged, TrustState::Ready);
         wait_for_state(&host, &sibling, TrustState::Ready);
 
@@ -17882,7 +17831,7 @@ mod tests {
     fn a_rebuild_that_is_still_damaged_releases_the_entry_rather_than_looping() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_reconcile_at, &name);
@@ -17911,7 +17860,7 @@ mod tests {
         ops.environmental_recover.store(true, Ordering::SeqCst);
         // Held across both waits below: a lease dropped before either state
         // is reached would withdraw the recovery request it raised.
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(
             &host,
             &name,
@@ -17930,7 +17879,7 @@ mod tests {
             ))
         );
         drop(lease);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 2);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
@@ -17951,7 +17900,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_reconcile.store(true, Ordering::SeqCst);
@@ -17985,7 +17934,7 @@ mod tests {
     fn host_drop_waits_for_in_flight_work_and_its_attachment_teardown() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         // A dispatcher tick reporting facts is what puts a reconcile in
@@ -18011,7 +17960,7 @@ mod tests {
     fn host_drop_detaches_an_idle_attachment_before_returning() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         drop(host);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -18023,7 +17972,7 @@ mod tests {
     /// raised against the entry has to survive.
     fn attached_awaiting_recovery(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
         let (host, name) = fixture(Arc::clone(ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         wait_for_state(&host, &name, backend_lost());
@@ -18072,7 +18021,7 @@ mod tests {
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
     ) -> DemandLease<Arc<FakeOps>> {
-        let lease = host.demand(name, AttachMode::Durable).unwrap();
+        let lease = host.demand(name).unwrap();
         assert_eq!(
             host.state(name),
             answered(backend_lost()),
@@ -18165,7 +18114,7 @@ mod tests {
     fn a_lease_predating_a_terminal_poll_failure_does_not_recover_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         claim_for_a_poll(&ops);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
@@ -18181,7 +18130,7 @@ mod tests {
         );
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
 
-        let retry = host.demand(&name, AttachMode::Durable).unwrap();
+        let retry = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -18196,7 +18145,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).unwrap();
         let (epoch, attachment) = {
@@ -18265,7 +18214,7 @@ mod tests {
     fn a_recovery_demand_withdrawn_inside_a_claim_is_not_served_to_another_lease() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         wait_for_state(&host, &name, backend_lost());
@@ -18281,7 +18230,7 @@ mod tests {
         );
         assert_eq!(host.state(&name), answered(backend_lost()));
 
-        let retry = host.demand(&name, AttachMode::Durable).unwrap();
+        let retry = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -18314,7 +18263,7 @@ mod tests {
     fn a_spent_recovery_demand_does_not_withdraw_the_one_a_later_lease_raised() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = attached_awaiting_recovery(&ops);
-        let spent = host.demand(&name, AttachMode::Durable).unwrap();
+        let spent = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
 
@@ -18431,7 +18380,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.queued.load(Ordering::SeqCst), 0);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
@@ -18530,9 +18479,9 @@ mod tests {
         )
         .unwrap();
 
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
         wait_for_flag("a_started", &ops.a_started);
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         wait_for_flag("b_started", &ops.b_started);
         wait_for_state(&host, &b, TrustState::Ready);
 
@@ -18561,9 +18510,9 @@ mod tests {
             },
         )
         .unwrap();
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
         wait_for_flag("a_started", &ops.a_started);
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         ops.release_a.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_state(&host, &b, TrustState::Ready);
@@ -18591,11 +18540,11 @@ mod tests {
             },
         )
         .unwrap();
-        let a = host.demand(&names[0], AttachMode::Durable).unwrap();
+        let a = host.demand(&names[0]).unwrap();
         wait_for_flag("a_started", &ops.a_started);
-        let b = host.demand(&names[1], AttachMode::Durable).unwrap();
+        let b = host.demand(&names[1]).unwrap();
         let started = Instant::now();
-        let c = host.demand(&names[2], AttachMode::Durable).unwrap();
+        let c = host.demand(&names[2]).unwrap();
         assert!(started.elapsed() < Duration::from_millis(50));
         assert!(matches!(
             c.outcome(),
@@ -18629,9 +18578,9 @@ mod tests {
         .unwrap();
         host.dispatcher_stop.send(()).unwrap();
         host.dispatcher.take().unwrap().join().unwrap();
-        let a = host.demand(&names[0], AttachMode::Durable).unwrap();
+        let a = host.demand(&names[0]).unwrap();
         wait_for_flag("a_started", &ops.a_started);
-        let b = host.demand(&names[1], AttachMode::Durable).unwrap();
+        let b = host.demand(&names[1]).unwrap();
 
         let entry = host.shared.entries.get(&names[2]).unwrap();
         let jobs_guard = host.shared.jobs.lock().unwrap();
@@ -18818,9 +18767,9 @@ mod tests {
             },
         )
         .unwrap();
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
         wait_for_flag("a_started", &ops.a_started);
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
         ops.release_a.store(true, Ordering::SeqCst);
@@ -18871,8 +18820,8 @@ mod tests {
             },
         )
         .unwrap();
-        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
-        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        let a_lease = host.demand(&a).unwrap();
+        let b_lease = host.demand(&b).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_state(&host, &b, TrustState::Ready);
 
@@ -18919,7 +18868,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
         wait_for_flag("poll_started", &ops.poll_started);
@@ -18957,7 +18906,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_poll.store(true, Ordering::SeqCst);
@@ -18971,7 +18920,7 @@ mod tests {
         // schedule against yet.
         std::fs::remove_file(&root).unwrap();
         std::fs::create_dir_all(&root).unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             1,
@@ -19006,7 +18955,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         // Watcher facts schedule the reconcile, and blocking it is what holds
@@ -19021,7 +18970,7 @@ mod tests {
             "the refusal raised no park"
         );
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert!(
             entry_park(&host, &name).is_none(),
             "the demand left the registry's park standing over the entry"
@@ -19070,7 +19019,7 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         ops.terminal_attach.store(true, Ordering::SeqCst);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, backend_lost());
         settle();
         assert_eq!(
@@ -19090,7 +19039,7 @@ mod tests {
         );
 
         drop(lease);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -19110,7 +19059,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_poll.store(true, Ordering::SeqCst);
@@ -19138,7 +19087,7 @@ mod tests {
             "the invalidation left work scheduled against the poll it superseded"
         );
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         ops.poll_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -19177,9 +19126,9 @@ mod tests {
         );
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
 
         refuse_root_identity(&subject_root);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -19209,7 +19158,7 @@ mod tests {
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         refuse_root_identity(&root);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -19230,120 +19179,6 @@ mod tests {
         assert_the_identity_park_stands_on_both_surfaces(&host, &name);
 
         drop((lease, host));
-    }
-
-    /// The demand seam carries the attach mode, and the mode it holds no
-    /// lifecycle for is answered at the seam: the lease that comes back holds
-    /// nothing, carries the refusal, and leaves the entry as it stood.
-    ///
-    /// The refusal rides the demand vocabulary, so it is read where every other
-    /// refusal is read — off the lease's completion, and in the wire vocabulary
-    /// through the envelope that completion answers with, carrying the mode
-    /// that was named.
-    ///
-    /// The parks below are what say the refusal comes before the entry is
-    /// touched, one for each door. The fixture's root is one the registry reads
-    /// without complaint, so the recheck [`Host::demand`] runs retires an
-    /// identity park: a park still standing after a refused demand is a demand
-    /// that answered the mode before it read the registry, and the lease count
-    /// beside it says the same about the entry's own state. [`Host::retry`]
-    /// retires the contention park on its way to the demand behind it, so a
-    /// park still standing after a refused retry is a retry that answered the
-    /// mode first.
-    #[test]
-    fn a_throwaway_demand_is_refused_before_the_entry_is_touched() {
-        let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let entry = host.shared.entries.get(&name).unwrap();
-
-        entry.gate.lock().unwrap().identity_refused = Some("the root cannot be read".into());
-        let refused = host
-            .demand(&name, AttachMode::Throwaway)
-            .expect("the mode is refused through the demand vocabulary, not the error channel");
-        assert_eq!(
-            refused.completion(),
-            Demand::UnsupportedMode(AttachMode::Throwaway),
-            "the seam admitted a mode it holds no lifecycle for"
-        );
-        let envelope = refused
-            .answer()
-            .expect_err("a mode the host holds no lifecycle for is a refusal");
-        assert_eq!(
-            envelope.detail(),
-            &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway),
-            "the refusal names another mode"
-        );
-        {
-            let state = entry.gate.lock().unwrap();
-            assert_eq!(
-                state.identity_refused.as_deref(),
-                Some("the root cannot be read"),
-                "the refused demand rechecked the registry over the entry"
-            );
-            assert_eq!(
-                state.demand_leases, 0,
-                "the refused demand recorded a lease against the entry"
-            );
-        }
-        // The refused lease is dropped here rather than at the end, so the
-        // rest of the case reads the entry's count with nothing outstanding.
-        // What its drop withdraws is read below, against a lease the entry
-        // holds: a withdrawal against a count already at zero is invisible,
-        // because the count saturates at its floor.
-        drop(refused);
-        settle();
-        // Read underneath the identity park the case installed: what is pinned
-        // is that the entry never left the state the refusal found it in.
-        assert_eq!(published_label(&host, &name), Some(TrustState::Unattached));
-        assert_eq!(
-            ops.attaches.load(Ordering::SeqCst),
-            0,
-            "the refused mode scheduled work against the entry"
-        );
-
-        {
-            let mut state = entry.gate.lock().unwrap();
-            state.identity_refused = None;
-            state.maintainer_contended = Some(MaintainerIdentity::unknown());
-        }
-        let refused_retry = host
-            .retry(&name, AttachMode::Throwaway)
-            .expect("the mode is refused through the demand vocabulary, not the error channel");
-        assert_eq!(
-            refused_retry.completion(),
-            Demand::UnsupportedMode(AttachMode::Throwaway),
-            "the retry admitted a mode it holds no lifecycle for"
-        );
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
-        assert!(
-            matches!(*lease.outcome(), Demand::MaintainerContended(_)),
-            "the refused retry retired the park it never reached"
-        );
-        // A lease holding nothing withdraws nothing on its way out, and the
-        // durable lease above is what makes that readable: the entry counts
-        // one, the refused lease is dropped against that count, and the count
-        // still stands at one. Against a count of zero the same drop reads the
-        // same whether it withdrew nothing or withdrew below a floor that
-        // saturates.
-        assert_eq!(
-            entry.gate.lock().unwrap().demand_leases,
-            1,
-            "the durable demand recorded no lease to withdraw against"
-        );
-        drop(refused_retry);
-        assert_eq!(
-            entry.gate.lock().unwrap().demand_leases,
-            1,
-            "dropping the refused lease withdrew the lease standing beside it"
-        );
-        drop(lease);
-        assert_eq!(
-            entry.gate.lock().unwrap().demand_leases,
-            0,
-            "the durable lease withdrew nothing on its way out"
-        );
-
-        drop(host);
     }
 
     /// The registry refusal an attach finds before it acquires anything parks
@@ -19376,9 +19211,9 @@ mod tests {
         );
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
 
         refuse_root_identity(&subject_root);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -19416,7 +19251,7 @@ mod tests {
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         refuse_root_identity(&root);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -19475,7 +19310,7 @@ mod tests {
         );
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         std::fs::rename(&root, &previous).unwrap();
         std::fs::create_dir(&root).unwrap();
@@ -19513,14 +19348,14 @@ mod tests {
             Roots::Created(&[(&healthy, &healthy_root), (&refused, &refused_root)]),
             2,
         );
-        let healthy_lease = host.demand(&healthy, AttachMode::Durable).unwrap();
-        let refused_lease = host.demand(&refused, AttachMode::Durable).unwrap();
+        let healthy_lease = host.demand(&healthy).unwrap();
+        let refused_lease = host.demand(&refused).unwrap();
         wait_for_state(&host, &healthy, TrustState::Ready);
         wait_for_state(&host, &refused, TrustState::Ready);
         std::fs::remove_dir(&refused_root).unwrap();
         symlink("refused", &refused_root).unwrap();
 
-        let renewed_healthy = host.demand(&healthy, AttachMode::Durable).unwrap();
+        let renewed_healthy = host.demand(&healthy).unwrap();
         assert_eq!(
             renewed_healthy.completion(),
             Demand::State(TrustState::Ready)
@@ -19559,7 +19394,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _ = host.demand(&name, AttachMode::Durable).unwrap();
+        let _ = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.hold_reconcile.store(true, Ordering::SeqCst);
         ops.emit.store(true, Ordering::SeqCst);
@@ -19613,7 +19448,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         // The reconcile is held open across the reap below, which is the whole
         // point of the pin: idle expiry lands on an entry with work in flight.
@@ -19662,7 +19497,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
@@ -19712,7 +19547,7 @@ mod tests {
         let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         refuse_root_identity(&root);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -19753,7 +19588,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         ops.block_attach.store(true, Ordering::SeqCst);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         // The refusal moves the entry past the epoch the attach carries, so
@@ -19789,7 +19624,7 @@ mod tests {
     fn a_teardown_closes_the_reader_before_the_store_goes_back() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -19820,7 +19655,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -19864,7 +19699,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
@@ -19888,7 +19723,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -19936,7 +19771,7 @@ mod tests {
     fn a_read_in_flight_holds_the_entry_against_an_idle_teardown() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let hold = host
@@ -19977,14 +19812,14 @@ mod tests {
             Roots::Absent(&[&working, &occupied]),
             1,
         );
-        drop(host.demand(&working, AttachMode::Durable).unwrap());
+        drop(host.demand(&working).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
         // The one worker, held inside another vault's attach: the detach the
         // reap below dispatches sits in the channel while this case reads the
         // entry it was scheduled against.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        let occupier = host.demand(&occupied).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         host.reap_idle(Instant::now() + Duration::from_secs(61))
@@ -20037,7 +19872,7 @@ mod tests {
     fn a_read_does_not_withdraw_a_release_already_in_flight() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
@@ -20106,7 +19941,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         // Two reads, with the reap the entry is over its horizon for run
@@ -20151,7 +19986,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(
@@ -20191,7 +20026,7 @@ mod tests {
         ops.reader_mint_fails.store(false, Ordering::SeqCst);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert!(
             host.begin_read(&name).is_ok(),
@@ -20215,7 +20050,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.establish_fails.store(true, Ordering::SeqCst);
 
@@ -20250,7 +20085,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let before = host.read_evidence();
@@ -20304,7 +20139,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -20382,7 +20217,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -20441,7 +20276,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -20503,7 +20338,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -20551,7 +20386,7 @@ mod tests {
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let before = host.read_evidence();
@@ -20578,7 +20413,7 @@ mod tests {
         ops.readers.mint_statements.store(2, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert!(reader_stands(&host, &name));
@@ -20605,7 +20440,7 @@ mod tests {
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert!(!reader_stands(&host, &name));
@@ -20627,7 +20462,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
 
@@ -20675,7 +20510,7 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
 
@@ -20707,7 +20542,7 @@ mod tests {
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.damaged_poll_at, &name);
@@ -20736,7 +20571,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
         poll_watchers(&host.shared);
@@ -20752,7 +20587,7 @@ mod tests {
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
 
         let before = ops.account.read();
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
@@ -20833,7 +20668,7 @@ mod tests {
             ops.reload_schema_changed.store(true, Ordering::SeqCst);
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             ops.readers.mint_statements.store(3, Ordering::SeqCst);
             (row.arm)(&ops, &name);
@@ -20886,7 +20721,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -20973,7 +20808,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -21131,7 +20966,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -21171,7 +21006,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -21314,7 +21149,7 @@ mod tests {
         std::mem::ManuallyDrop<ReadHold<Arc<FakeOps>>>,
         thread::JoinHandle<thread::Result<Result<ReadHold<Arc<FakeOps>>, ReadRefusal>>>,
     ) {
-        drop(host.demand(name, AttachMode::Durable).unwrap());
+        drop(host.demand(name).unwrap());
         wait_for_state(host, name, TrustState::Ready);
         let entry = host
             .shared
@@ -21421,7 +21256,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let first = host
@@ -21460,11 +21295,7 @@ mod tests {
             );
             assert!(surfacing.inspect(&surfacing_name).is_ok());
             assert!(surfacing.authored_drift(&surfacing_name).is_ok());
-            drop(
-                surfacing
-                    .demand(&surfacing_name, AttachMode::Durable)
-                    .unwrap(),
-            );
+            drop(surfacing.demand(&surfacing_name).unwrap());
             surfacing.reap_idle(Instant::now()).unwrap();
         });
         wait_until(
@@ -21520,7 +21351,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let before = host.read_evidence();
@@ -21588,7 +21419,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let first = host
@@ -21674,7 +21505,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_withheld_trust(&host, &name);
 
         for read in 0..5 {
@@ -21704,7 +21535,7 @@ mod tests {
         ops.withholds_trust.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(
             host.begin_read(&name)
@@ -21746,7 +21577,7 @@ mod tests {
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
 
@@ -21776,7 +21607,7 @@ mod tests {
         ops.withholds_trust.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(
             host.begin_read(&name)
@@ -21811,7 +21642,7 @@ mod tests {
     #[test]
     fn a_clients_demand_runs_the_recovery_a_read_holds_back() {
         let (ops, host, name) = withheld_and_refused_to_a_read();
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_one_withheld_recovery(&ops, &host, &name);
         drop(lease);
     }
@@ -21828,7 +21659,7 @@ mod tests {
         let poll = thread::spawn(move || poll_watchers(&polling));
         wait_for_flag("poll_started", &ops.poll_started);
 
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
         *ops.poll_gate.lock().unwrap() = None;
         ops.poll_release.store(true, Ordering::SeqCst);
@@ -21852,7 +21683,7 @@ mod tests {
         ops.withholds_trust.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_until(
             "the entry to publish the withheld trust its attach carried",
             lifecycle_wait_budget(),
@@ -21937,7 +21768,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
 
@@ -22076,7 +21907,7 @@ mod tests {
     fn a_read_issued_mid_increment_answers_the_post_increment_state() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
 
@@ -22129,7 +21960,7 @@ mod tests {
     fn a_change_published_before_a_settling_read_waits_still_wakes_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -22175,7 +22006,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(300);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         arrange_for(&ops.continuous_fact_handoff_for, &name);
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
@@ -22220,7 +22051,7 @@ mod tests {
     fn a_read_answers_once_the_facts_it_met_are_derived_and_not_before() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         // The first turn's drain comes back full, so it hands on to a second
         // turn, which is held.
@@ -22365,7 +22196,7 @@ mod tests {
     fn a_read_meeting_a_later_turn_waits_for_it_and_not_for_the_commit_before() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_the_second_turn(&ops, &host, &name);
 
@@ -22391,7 +22222,7 @@ mod tests {
     fn a_read_meeting_the_second_turn_cannot_use_the_first_commit() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_the_second_turn(&ops, &host, &name);
 
@@ -22414,7 +22245,7 @@ mod tests {
     fn a_fact_taken_in_while_a_turn_runs_is_not_derived_by_its_commit() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.hold_reconciles_from.store(2, Ordering::SeqCst);
         hold_a_change_in_flight(&ops, &host, &name);
@@ -22462,7 +22293,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -22530,7 +22361,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
 
@@ -22569,7 +22400,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
 
@@ -22595,7 +22426,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(300);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
 
@@ -22648,7 +22479,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(300);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let first = host
             .begin_read(&name)
@@ -22709,7 +22540,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(300);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -22777,7 +22608,7 @@ mod tests {
     fn a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let hold = host
             .begin_read(&name)
@@ -22909,7 +22740,7 @@ mod tests {
     fn a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
         let hold = host
@@ -22963,7 +22794,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
         wait_for_state(&host, &name, TrustState::Ready);
@@ -23029,10 +22860,10 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        drop(host.demand(&subject).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         let entry = host
@@ -23388,7 +23219,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(50);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
 
@@ -23443,7 +23274,7 @@ mod tests {
         teardown: impl FnOnce(&Arc<FakeOps>),
     ) -> (ReadRefusal, Duration) {
         let (host, name) = fixture_settling_within(Arc::clone(ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(ops, &host, &name);
 
@@ -23541,7 +23372,7 @@ mod tests {
     fn a_settle_wait_is_counted_where_it_begins() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
 
@@ -23578,7 +23409,7 @@ mod tests {
     fn no_read_waits_under_the_entry_gate() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -23634,7 +23465,7 @@ mod tests {
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
         ops.heal_in_attach.store(true, Ordering::SeqCst);
         ops.block_attach.store(true, Ordering::SeqCst);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_flag("attach_started", &ops.attach_started);
         let healing = TrustState::warming(WarmingPhase::Healing, 1, Some(2));
         assert_eq!(host.state(&name), answered(healing.clone()));
@@ -23654,7 +23485,7 @@ mod tests {
     fn a_read_refuses_at_once_over_an_overflowed_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
@@ -23679,12 +23510,12 @@ mod tests {
     fn a_read_refuses_at_once_over_a_recovering_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         lose_coverage_through_a_driven_poll(&ops, &host, &name, "the watcher went away");
         ops.heal_in_recover.store(true, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        let recovery = host.demand(&name).unwrap();
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         let healing = TrustState::warming(WarmingPhase::Healing, 1, Some(2));
         assert_eq!(host.state(&name), answered(healing.clone()));
@@ -23721,7 +23552,7 @@ mod tests {
     fn a_read_refuses_at_once_over_a_rebuilt_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         // The rebuild's drain is saturated, so the rung ends healing and hands
         // on a reconcile, which is held.
@@ -23769,7 +23600,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
         let before_the_reload = Arc::clone(
@@ -23835,7 +23666,7 @@ mod tests {
     fn a_hold_that_withdraws_trust_and_then_heals_refuses_a_read() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
         {
@@ -23864,7 +23695,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let bound = Duration::from_millis(50);
         let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let first = host.begin_read(&name).expect("the first read");
 
@@ -23917,7 +23748,7 @@ mod tests {
     fn a_read_with_a_zero_bound_refuses_at_once_where_the_connection_is_held() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let first = host.begin_read(&name).expect("the first read");
 
@@ -23950,7 +23781,7 @@ mod tests {
     fn a_read_with_a_zero_bound_refuses_at_once_where_the_entry_settles() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_change_in_flight(&ops, &host, &name);
 
@@ -23988,7 +23819,7 @@ mod tests {
     fn a_read_that_settles_and_then_waits_for_the_connection_keeps_one_bound() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let first = host.begin_read(&name).expect("the first read");
         hold_a_change_in_flight(&ops, &host, &name);
@@ -24042,7 +23873,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let first = host
@@ -24094,7 +23925,7 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(
             host.begin_read(&name)
@@ -24143,7 +23974,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
             .shared
@@ -24194,7 +24025,7 @@ mod tests {
         ops.reload_supported.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         // A recovery gives the coverage back through the parking leg, and the
@@ -24240,7 +24071,7 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let _lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
@@ -24273,7 +24104,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(
             host.inspect(&name)
@@ -24314,7 +24145,7 @@ mod tests {
         let occupied = VaultName::new("occupied").unwrap();
         let host =
             host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &occupied]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert!(matches!(
             host.begin_read(&name),
@@ -24327,7 +24158,7 @@ mod tests {
         );
 
         ops.block_attach.store(true, Ordering::SeqCst);
-        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        let occupier = host.demand(&occupied).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         ops.reader_mint_fails.store(false, Ordering::SeqCst);
@@ -24379,7 +24210,7 @@ mod tests {
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         for _ in 0..3 {
@@ -24415,7 +24246,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let hold = host
@@ -24442,7 +24273,7 @@ mod tests {
     fn quiet_attached_entry_eventually_runs_scheduled_maintenance() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.maintenance_due_at, &name);
@@ -24473,7 +24304,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         wait_for_no_claim(&host, &name);
 
@@ -24527,10 +24358,10 @@ mod tests {
         // One vault attaches at a time: the single queue slot this fixture
         // gives is the one the attaches would otherwise contend for, and a
         // send this fixture refuses waits for a tick a minute away.
-        let lease_a = host.demand(&a, AttachMode::Durable).unwrap();
+        let lease_a = host.demand(&a).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_no_claim(&host, &a);
-        let lease_b = host.demand(&b, AttachMode::Durable).unwrap();
+        let lease_b = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         wait_for_no_claim(&host, &b);
 
@@ -24588,7 +24419,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         wait_for_no_claim(&host, &name);
 
@@ -24619,7 +24450,7 @@ mod tests {
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
 
         drop(lease);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         drop(lease);
@@ -24635,7 +24466,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         wait_for_no_claim(&host, &name);
 
@@ -24667,7 +24498,7 @@ mod tests {
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
 
         drop(lease);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         drop(lease);
@@ -24685,7 +24516,7 @@ mod tests {
         // No lease stands over the release below, so the release publishes
         // Unattached and schedules nothing: what the entry is left holding is
         // the whole of what this test reads.
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         wait_for_no_claim(&host, &name);
 
@@ -24732,13 +24563,13 @@ mod tests {
         let holding = VaultName::new("b").unwrap();
         let host =
             host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject, &holding]), 1);
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
         // The one worker goes to the other vault, so a job sent for the entry
         // under test stays in the channel until this test lets the worker go.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -24818,7 +24649,7 @@ mod tests {
             Roots::Absent(&[&subject, &holding, &attaching]),
             2,
         );
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
         // Both workers go to vaults that are not the one under test: the
@@ -24826,8 +24657,8 @@ mod tests {
         // duplicate would take. Their claims are held by the legs blocking
         // them, so the tick below reaches the entry under test alone.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        let attaching_lease = host.demand(&attaching, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
+        let attaching_lease = host.demand(&attaching).unwrap();
         wait_for_attaches(&ops, 3, "both workers to be inside an attach");
 
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -24900,7 +24731,7 @@ mod tests {
             Roots::Absent(&[&subject, &holding, &attaching]),
             2,
         );
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
         // Both workers go to vaults that are not the one under test: the
@@ -24908,8 +24739,8 @@ mod tests {
         // second send takes. Their claims are held by the legs blocking them,
         // so the tick below reaches the entry under test alone.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        let attaching_lease = host.demand(&attaching, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
+        let attaching_lease = host.demand(&attaching).unwrap();
         wait_for_attaches(&ops, 3, "both workers to be inside an attach");
 
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -24971,16 +24802,16 @@ mod tests {
             Roots::Absent(&[&subject, &working, &waiting]),
             1,
         );
-        let lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
         // The one worker goes to a vault that is not the one under test, and
         // the channel's one place goes to a job no worker is left to take:
         // every send from here is refused.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let working_lease = host.demand(&working).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
-        let waiting_lease = host.demand(&waiting, AttachMode::Durable).unwrap();
+        let waiting_lease = host.demand(&waiting).unwrap();
         let waiting_entry = host.shared.entries.get(&waiting).unwrap();
         assert!(
             waiting_entry
@@ -25074,7 +24905,7 @@ mod tests {
             Roots::Absent(&[&working, &first_slot, &second_slot]),
             2,
         );
-        let lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let lease = host.demand(&working).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
 
         // The leg under test: a maintenance whose own handoff drain saturates,
@@ -25092,10 +24923,10 @@ mod tests {
         // handed-off reconcile therefore stays in the queue while the test
         // drives a tick at the entry it was sent against.
         ops.block_attach.store(true, Ordering::SeqCst);
-        let holding = host.demand(&first_slot, AttachMode::Durable).unwrap();
+        let holding = host.demand(&first_slot).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
         ops.attach_started.store(false, Ordering::SeqCst);
-        let waiting = host.demand(&second_slot, AttachMode::Durable).unwrap();
+        let waiting = host.demand(&second_slot).unwrap();
 
         ops.maintenance_release.store(true, Ordering::SeqCst);
         wait_for_flag("attach_started", &ops.attach_started);
@@ -25133,7 +24964,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         let entry = host.shared.entries.get(&name).unwrap();
@@ -25180,7 +25011,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let entry = host.shared.entries.get(&name).unwrap();
@@ -25239,9 +25070,9 @@ mod tests {
         let holding = VaultName::new("b").unwrap();
         let host =
             host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&working, &holding]), 1);
-        let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let working_lease = host.demand(&working).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
-        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        let holding_lease = host.demand(&holding).unwrap();
         wait_for_state(&host, &holding, TrustState::Ready);
 
         // The one worker, held inside the other vault's job: a job the tick
@@ -25291,7 +25122,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         // `Ready` is published before the attach leg ends, so the case waits
         // for that leg to end before it stands a marker alone on the entry.
@@ -25336,7 +25167,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         let entry = host.shared.entries.get(&name).unwrap();
@@ -25397,7 +25228,7 @@ mod tests {
             2,
         );
         for name in [&first, &second, &working] {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
+            drop(host.demand(name).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
         }
 
@@ -25432,7 +25263,7 @@ mod tests {
 
         // A demand takes the teardown back, superseding the job already in the
         // queue: the entry stops waiting on it here.
-        let lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let lease = host.demand(&working).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_none(),
             "the entry is still waiting on the job the demand superseded"
@@ -25474,7 +25305,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         // The reconcile the poll schedules is blocked, so the state read below
@@ -25509,7 +25340,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
         // The reconcile the poll schedules is blocked, so the state read below
@@ -25621,7 +25452,7 @@ mod tests {
             Roots::Absent(&[&working, &occupied]),
             1,
         );
-        drop(host.demand(&working, AttachMode::Durable).unwrap());
+        drop(host.demand(&working).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
         // The first rescan, held open in the reconcile it schedules: the entry
@@ -25645,7 +25476,7 @@ mod tests {
         // attach is held in it while the demand below runs.
         ops.block_attach.store(true, Ordering::SeqCst);
         ops.attach_started.store(false, Ordering::SeqCst);
-        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        let occupier = host.demand(&occupied).unwrap();
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_flag("attach_started", &ops.attach_started);
         wait_for_a_scheduled_detach(&host, &working);
@@ -25655,7 +25486,7 @@ mod tests {
             "the entry the demand below reads is not holding an overflow"
         );
 
-        let lease = host.demand(&working, AttachMode::Durable).unwrap();
+        let lease = host.demand(&working).unwrap();
         assert_eq!(
             lease.outcome(),
             &Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
@@ -25703,7 +25534,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&name]), 1);
         if coverage {
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
         }
         {
@@ -25739,7 +25570,7 @@ mod tests {
     fn scheduled_by_a_client_demand(coverage: bool, recovery: bool) -> Scheduled {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = entry_awaiting_demand(&ops, coverage, recovery);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         let scheduled = Scheduled {
             work: marked_work(&host, &name),
             published: host.state(&name),
@@ -25840,7 +25671,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciles = ops.reconciles.load(Ordering::SeqCst);
 
@@ -25868,7 +25699,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
@@ -25896,7 +25727,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciles = ops.reconciles.load(Ordering::SeqCst);
 
@@ -25947,7 +25778,7 @@ mod tests {
     fn maintenance_handoff_saturation_stays_warming_until_a_followup_drain() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.block_maintenance_at, &name);
@@ -25974,7 +25805,7 @@ mod tests {
     fn maintenance_handoff_saturation_preserves_untrusted_rescan_state() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         arrange_for(&ops.block_maintenance_at, &name);
@@ -26027,8 +25858,8 @@ mod tests {
             },
         )
         .unwrap();
-        let lease_blocked = host.demand(&blocked, AttachMode::Durable).unwrap();
-        let lease_polled = host.demand(&polled, AttachMode::Durable).unwrap();
+        let lease_blocked = host.demand(&blocked).unwrap();
+        let lease_polled = host.demand(&polled).unwrap();
         wait_for_state(&host, &blocked, TrustState::Ready);
         wait_for_state(&host, &polled, TrustState::Ready);
 
@@ -26096,7 +25927,7 @@ mod tests {
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&served]), 1);
             let joined = VaultName::new("joined").unwrap();
             assert_eq!(
-                host.demand(&joined, AttachMode::Durable).unwrap().outcome(),
+                host.demand(&joined).unwrap().outcome(),
                 &Demand::UnknownVault,
                 "a name the set does not serve was demandable before it joined"
             );
@@ -26110,7 +25941,7 @@ mod tests {
                 .insert(registration(&joined, &root))
                 .expect("the set serves no such name");
 
-            drop(host.demand(&joined, AttachMode::Durable).unwrap());
+            drop(host.demand(&joined).unwrap());
             wait_for_state(&host, &joined, TrustState::Ready);
             assert_eq!(
                 host.state(&served),
@@ -26149,7 +25980,7 @@ mod tests {
             let served = VaultName::new("served").unwrap();
             let alias = VaultName::new("alias").unwrap();
             let host = host_over_roots(Arc::clone(&ops), &[(&served, root.as_path())], 2);
-            let incumbent = host.demand(&served, AttachMode::Durable).unwrap();
+            let incumbent = host.demand(&served).unwrap();
             wait_for_state(&host, &served, TrustState::Ready);
 
             let published = serve(&host.shared, registration(&alias, &root.join(".")))
@@ -26216,10 +26047,7 @@ mod tests {
                 .remove(&name)
                 .expect("the entry holds nothing");
 
-            assert_eq!(
-                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
-                &Demand::UnknownVault
-            );
+            assert_eq!(host.demand(&name).unwrap().outcome(), &Demand::UnknownVault);
             assert_eq!(
                 host.state(&name)
                     .expect_err("a removed vault refuses")
@@ -26273,7 +26101,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             entry.gate.lock().unwrap().service = Service::Withdrawn;
@@ -26316,10 +26144,10 @@ mod tests {
             // The one worker, held inside an attach: the job the demand below
             // dispatches waits in the channel for the whole of the sequence.
             ops.block_attach.store(true, Ordering::SeqCst);
-            let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+            let occupier = host.demand(&occupied).unwrap();
             wait_for_flag("attach_started", &ops.attach_started);
 
-            drop(host.demand(&leaving, AttachMode::Durable).unwrap());
+            drop(host.demand(&leaving).unwrap());
             refuse_identity_error(&host.shared, &leaving, "root unreadable".to_string());
             host.shared
                 .entries
@@ -26336,7 +26164,7 @@ mod tests {
             // having happened and the worker being free to run the job after
             // it. The retry is the dispatcher's duty, driven here because this
             // fixture's tick is a minute away.
-            drop(host.demand(&after, AttachMode::Durable).unwrap());
+            drop(host.demand(&after).unwrap());
             wait_until(
                 "the vault demanded after the arrival to attach",
                 lifecycle_wait_budget(),
@@ -26453,7 +26281,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
 
             assert_eq!(
@@ -26463,7 +26291,7 @@ mod tests {
             );
             assert_eq!(host.state(&name), answered(TrustState::Ready));
             assert_eq!(
-                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                host.demand(&name).unwrap().outcome(),
                 &Demand::State(TrustState::Ready)
             );
         }
@@ -26475,7 +26303,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let edited = entry
@@ -26573,7 +26401,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             wait_for_no_claim(&host, &name);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -26713,7 +26541,7 @@ mod tests {
             ops.contend_attach.store(true, Ordering::SeqCst);
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_until(
                 "the contended attach to park the entry",
                 lifecycle_wait_budget(),
@@ -26753,10 +26581,7 @@ mod tests {
                 Ok(()),
                 "the entry the withdrawn lease was holding stayed in the set"
             );
-            assert_eq!(
-                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
-                &Demand::UnknownVault
-            );
+            assert_eq!(host.demand(&name).unwrap().outcome(), &Demand::UnknownVault);
         }
     }
 
@@ -27017,7 +26842,7 @@ mod tests {
             // The lease stands until `Ready` is seen: a demand that meets a
             // release still in flight is honored by that release only while
             // its lease stands.
-            let lease = host.demand(name, AttachMode::Durable).unwrap();
+            let lease = host.demand(name).unwrap();
             wait_for_state(host, name, TrustState::Ready);
             drop(lease);
             // A reap passes over an entry a leg still stands on.
@@ -27063,7 +26888,7 @@ mod tests {
             );
             assert_eq!(listed(&host), std::slice::from_ref(&joined));
 
-            let lease = host.demand(&joined, AttachMode::Durable).unwrap();
+            let lease = host.demand(&joined).unwrap();
             wait_for_state(&host, &joined, TrustState::Ready);
             assert_eq!(
                 ops.attach_roots.lock().unwrap().get(&joined),
@@ -27113,7 +26938,7 @@ mod tests {
             let root = scratch.root().join("root");
             let served = VaultName::new("served").unwrap();
             let host = host_over_roots(Arc::clone(&ops), &[(&served, root.as_path())], 2);
-            let incumbent = host.demand(&served, AttachMode::Durable).unwrap();
+            let incumbent = host.demand(&served).unwrap();
             wait_for_state(&host, &served, TrustState::Ready);
             let link = scratch.root().join("alias");
             std::os::unix::fs::symlink(&root, &link).unwrap();
@@ -27195,10 +27020,7 @@ mod tests {
 
             assert_eq!(refusal.code(), &ReasonCode::HostRegistryUnwritable);
             assert_eq!(listed(&host), Vec::<VaultName>::new());
-            assert_eq!(
-                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
-                &Demand::UnknownVault
-            );
+            assert_eq!(host.demand(&name).unwrap().outcome(), &Demand::UnknownVault);
         }
 
         /// Two registrations of one root racing each other admit exactly one:
@@ -27331,7 +27153,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
 
             let refusal = unregister(&host, UnregisterParams::new(name.clone()))
@@ -27351,7 +27173,7 @@ mod tests {
             ops.contend_attach.store(true, Ordering::SeqCst);
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_park(
                 &host,
                 &name,
@@ -27393,9 +27215,9 @@ mod tests {
                 2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
-            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            drop(host.demand(&a).unwrap());
             wait_for_park(&host, &a, Demand::DuplicateRoot(conflict.clone()));
-            let standing = host.demand(&b, AttachMode::Durable).unwrap();
+            let standing = host.demand(&b).unwrap();
             wait_for_park(&host, &b, Demand::DuplicateRoot(conflict));
             wait_for_rest(&host, &a);
 
@@ -27427,7 +27249,7 @@ mod tests {
                 2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
-            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            drop(host.demand(&a).unwrap());
             wait_for_park(&host, &a, Demand::DuplicateRoot(conflict.clone()));
             wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
             wait_for_rest(&host, &a);
@@ -27505,7 +27327,7 @@ mod tests {
             assert!(recorded(&ops, &name).is_some(), "the file lost the vault");
             assert_eq!(listed(&host), std::slice::from_ref(&name));
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             drop(lease);
         }
@@ -27586,15 +27408,12 @@ mod tests {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
                 let held = pause.enter();
-                let lease = host.demand(&name, AttachMode::Durable).unwrap();
+                let lease = host.demand(&name).unwrap();
                 let answers = (
                     [
                         lease.outcome().clone(),
                         lease.completion(),
-                        host.retry(&name, AttachMode::Durable)
-                            .unwrap()
-                            .outcome()
-                            .clone(),
+                        host.retry(&name).unwrap().outcome().clone(),
                         host.inspect(&name).map(|_| ()).unwrap_err(),
                         host.authored_drift(&name).map(|_| ()).unwrap_err(),
                     ],
@@ -27736,7 +27555,7 @@ mod tests {
                     1,
                 ));
                 for name in [&queued, &holding] {
-                    drop(host.demand(name, AttachMode::Durable).unwrap());
+                    drop(host.demand(name).unwrap());
                     wait_for_state(&host, name, TrustState::Ready);
                 }
                 ops.block_reload.store(true, Ordering::SeqCst);
@@ -27829,10 +27648,7 @@ mod tests {
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
                 let held = pause.enter();
                 let during = (
-                    host.demand(&name, AttachMode::Durable)
-                        .unwrap()
-                        .outcome()
-                        .clone(),
+                    host.demand(&name).unwrap().outcome().clone(),
                     host.state(&name)
                         .map_err(|refusal| refusal.detail().clone()),
                 );
@@ -27859,7 +27675,7 @@ mod tests {
                 &host.shared.entries.get(&name).expect("the vault is served")
             ));
             assert_eq!(host.state(&name), answered(TrustState::Unattached));
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             drop(lease);
         }
@@ -27901,7 +27717,7 @@ mod tests {
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_park(&host, &name, contended.clone());
             wait_for_rest(&host, &name);
             ops.registry_unwritable.store(true, Ordering::SeqCst);
@@ -27912,11 +27728,7 @@ mod tests {
                 let unregistering =
                     scope.spawn(|| unregister(&host, UnregisterParams::new(name.clone())));
                 let held = pause.enter();
-                let retried = host
-                    .retry(&name, AttachMode::Durable)
-                    .unwrap()
-                    .outcome()
-                    .clone();
+                let retried = host.retry(&name).unwrap().outcome().clone();
                 drop(held);
                 (
                     retried,
@@ -27969,7 +27781,7 @@ mod tests {
                 2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
-            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            drop(host.demand(&a).unwrap());
             wait_for_park(&host, &a, conflict.clone());
             wait_for_park(&host, &b, conflict.clone());
             wait_for_rest(&host, &a);
@@ -28037,10 +27849,10 @@ mod tests {
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
             );
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             ops.block_attach.store(true, Ordering::SeqCst);
-            let busy_lease = host.demand(&busy, AttachMode::Durable).unwrap();
+            let busy_lease = host.demand(&busy).unwrap();
             wait_for_flag("attach_started", &ops.attach_started);
             {
                 let entry = host.shared.entries.get(&name).unwrap();
@@ -28050,7 +27862,7 @@ mod tests {
                     .unwrap()
                     .withdraw_trust_for_damage("the index disagrees with the documents");
             }
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             let stale = wait_for_queued_job(&host, &name);
             drop(lease);
             refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
@@ -28062,7 +27874,7 @@ mod tests {
             while reborn.gate.lock().unwrap().claim.epoch() + 1 < stale {
                 refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
             }
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             let scheduled = reborn.gate.lock().unwrap().claim.epoch();
             ops.block_attach.store(false, Ordering::SeqCst);
             ops.attach_release.store(true, Ordering::SeqCst);
@@ -28094,7 +27906,7 @@ mod tests {
                 Roots::Created(&[(&name, root.as_path())]),
                 2,
             );
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             refuse_root_identity(&root);
             ops.block_detach.store(true, Ordering::SeqCst);
@@ -28148,7 +27960,7 @@ mod tests {
                 wait_for_flag("detach_started", &ops.detach_started);
                 std::fs::remove_file(&root).unwrap();
                 std::fs::create_dir(&root).unwrap();
-                let lease = host.demand(&name, AttachMode::Durable).unwrap();
+                let lease = host.demand(&name).unwrap();
                 settle();
                 let attaches_during = ops.attaches.load(Ordering::SeqCst);
                 ops.detach_release.store(true, Ordering::SeqCst);
@@ -28183,11 +27995,11 @@ mod tests {
                 ));
             }
 
-            let recovering = host.demand(&name, AttachMode::Durable).unwrap();
+            let recovering = host.demand(&name).unwrap();
             wait_for_flag("detach_started", &ops.detach_started);
             std::fs::remove_file(&root).unwrap();
             std::fs::create_dir(&root).unwrap();
-            let during = host.demand(&name, AttachMode::Durable).unwrap();
+            let during = host.demand(&name).unwrap();
             settle();
             let attaches_during = ops.attaches.load(Ordering::SeqCst);
             ops.detach_release.store(true, Ordering::SeqCst);
@@ -28251,7 +28063,7 @@ mod tests {
             ops: &FakeOps,
             name: &VaultName,
         ) -> Registration {
-            let lease = host.demand(name, AttachMode::Durable).unwrap();
+            let lease = host.demand(name).unwrap();
             wait_for_state(host, name, TrustState::Ready);
             drop(lease);
             ops.attach_registrations
@@ -28686,7 +28498,7 @@ mod tests {
             );
             record_startup(&host, &ops, &name);
             let standing = serving(&host, &name);
-            let incumbent = host.demand(&served, AttachMode::Durable).unwrap();
+            let incumbent = host.demand(&served).unwrap();
             wait_for_state(&host, &served, TrustState::Ready);
             let link = scratch.root().join("alias");
             std::os::unix::fs::symlink(&theirs, &link).unwrap();
@@ -28779,7 +28591,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
 
             let refusal = set(
@@ -28806,7 +28618,7 @@ mod tests {
             record_startup(&host, &ops, &name);
             let standing = serving(&host, &name);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_park(&host, &name, contended.clone());
             wait_for_rest(&host, &name);
 
@@ -28836,7 +28648,7 @@ mod tests {
             record_startup(&host, ops, &name);
             let standing = serving(&host, &name);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             wait_for_park(&host, &name, contended);
             wait_for_rest(&host, &name);
             (host, name, standing)
@@ -28894,7 +28706,7 @@ mod tests {
             let name = VaultName::new("notes").unwrap();
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             assert_eq!(serving(&host, &name).poll_backend, None);
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
 
             let refusal = set(
@@ -28963,7 +28775,7 @@ mod tests {
                     )
                 });
                 let held = pause.enter();
-                let lease = host.demand(&name, AttachMode::Durable).unwrap();
+                let lease = host.demand(&name).unwrap();
                 let answers = (
                     [lease.outcome().clone(), lease.completion()],
                     host.begin_read(&name).err(),
@@ -29105,7 +28917,7 @@ mod tests {
                 )
             );
             assert_eq!(recorded_store_reading(&host, &name), None);
-            let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let _lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             assert_eq!(status_of(&host, &name).advisories, [link]);
         }
@@ -29157,10 +28969,10 @@ mod tests {
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
             );
-            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            let lease = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             ops.block_attach.store(true, Ordering::SeqCst);
-            let busy_lease = host.demand(&busy, AttachMode::Durable).unwrap();
+            let busy_lease = host.demand(&busy).unwrap();
             wait_for_flag("attach_started", &ops.attach_started);
             {
                 let entry = host.shared.entries.get(&name).unwrap();
@@ -29170,7 +28982,7 @@ mod tests {
                     .unwrap()
                     .withdraw_trust_for_damage("the index disagrees with the documents");
             }
-            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            drop(host.demand(&name).unwrap());
             let stale = wait_for_queued_job(&host, &name);
             drop(lease);
             refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
@@ -29270,9 +29082,9 @@ mod tests {
                 2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
-            drop(host.demand(&a, AttachMode::Durable).unwrap());
+            drop(host.demand(&a).unwrap());
             wait_for_park(&host, &a, conflict.clone());
-            let standing = host.demand(&b, AttachMode::Durable).unwrap();
+            let standing = host.demand(&b).unwrap();
             wait_for_park(&host, &b, conflict.clone());
             std::fs::remove_file(&link).unwrap();
             std::os::unix::fs::symlink(&elsewhere, &link).unwrap();

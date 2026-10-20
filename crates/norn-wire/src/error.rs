@@ -72,7 +72,6 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::cursor::{CursorOrderChanged, PagedRows};
-use crate::demand::AttachMode;
 use crate::document::DocumentPath;
 use crate::finding_row::{CandidateHead, Hint};
 use crate::name::VaultName;
@@ -324,11 +323,6 @@ pub enum ReasonCode {
     /// name that was asked for.
     #[serde(rename = "host/unknown-vault")]
     HostUnknownVault,
-    /// `host/unsupported-attach-mode` — the demand named a mode the host holds
-    /// no lifecycle for, so nothing was read or written under it. The detail is
-    /// the mode that was named.
-    #[serde(rename = "host/unsupported-attach-mode")]
-    HostUnsupportedAttachMode,
     /// `host/already-served` — the host serves, or the registry file records,
     /// a registration under this name, so nothing was registered over it. The
     /// detail is the name.
@@ -672,16 +666,6 @@ pub enum ErrorDetail {
         /// would have to parse again.
         name: VaultName,
     },
-    /// The detail of `host/unsupported-attach-mode`: the mode the demand
-    /// named.
-    #[serde(rename = "host/unsupported-attach-mode")]
-    #[non_exhaustive]
-    UnsupportedAttachMode {
-        /// The mode the demand asked for, echoed back as the typed mode: a
-        /// client that supports more than one branches on which of them was
-        /// refused.
-        mode: AttachMode,
-    },
     /// The detail of `host/already-served`: the name already in service.
     #[serde(rename = "host/already-served")]
     #[non_exhaustive]
@@ -1017,12 +1001,6 @@ impl ErrorDetail {
         ErrorDetail::UnknownVault { name }
     }
 
-    /// The detail of `host/unsupported-attach-mode`, for the `mode` the demand
-    /// named.
-    pub const fn unsupported_attach_mode(mode: AttachMode) -> Self {
-        ErrorDetail::UnsupportedAttachMode { mode }
-    }
-
     /// The detail of `host/already-served`, for the `name` already in
     /// service.
     pub const fn already_served(name: VaultName) -> Self {
@@ -1260,7 +1238,6 @@ impl ErrorDetail {
             ErrorDetail::EntryUntrusted { .. } => ReasonCode::HostEntryUntrusted,
             ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
             ErrorDetail::UnknownVault { .. } => ReasonCode::HostUnknownVault,
-            ErrorDetail::UnsupportedAttachMode { .. } => ReasonCode::HostUnsupportedAttachMode,
             ErrorDetail::AlreadyServed { .. } => ReasonCode::HostAlreadyServed,
             ErrorDetail::EntryHeld { .. } => ReasonCode::HostEntryHeld,
             ErrorDetail::EntryNotReady { .. } => ReasonCode::HostEntryNotReady,
@@ -1442,7 +1419,6 @@ mod tests {
             ReasonCode::HostEntryUntrusted => "host/entry-untrusted",
             ReasonCode::HostMaintainerContended => "host/maintainer-contended",
             ReasonCode::HostUnknownVault => "host/unknown-vault",
-            ReasonCode::HostUnsupportedAttachMode => "host/unsupported-attach-mode",
             ReasonCode::HostAlreadyServed => "host/already-served",
             ReasonCode::HostEntryHeld => "host/entry-held",
             ReasonCode::HostEntryNotReady => "host/entry-not-ready",
@@ -1490,9 +1466,6 @@ mod tests {
             ),
             ReasonCode::HostUnknownVault => {
                 ErrorDetail::unknown_vault(VaultName::new("notes").expect("a legal vault name"))
-            }
-            ReasonCode::HostUnsupportedAttachMode => {
-                ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
             }
             ReasonCode::HostAlreadyServed => {
                 ErrorDetail::already_served(VaultName::new("notes").expect("a legal vault name"))

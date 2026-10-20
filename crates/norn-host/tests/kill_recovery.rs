@@ -15,9 +15,7 @@ use std::time::Duration;
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
-use norn_host::{
-    AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
-};
+use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead};
 use norn_store::induced_failure::{ARM_HITS, INCREMENT_SEAM};
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
@@ -170,8 +168,7 @@ fn tear_increment() -> ! {
 }
 
 fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
-    host.demand(name, AttachMode::Durable)
-        .expect("request production attachment");
+    host.demand(name).expect("request production attachment");
     wait_until(
         &format!("the entry under `{name}` to serve the vault"),
         attach::state_budget(WAIT_LIMIT),

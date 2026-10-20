@@ -28,7 +28,6 @@ use norn_wire::{
     ReadFailure, Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
 };
 
-use crate::address::registered_name;
 use crate::lifecycle::{EntryOps, HoldReading, Host, ReadHold, ReadSource, SnapshotSource};
 use crate::refusal::{PageRefused, page_refusal};
 use crate::text::TextLayer;
@@ -135,7 +134,7 @@ where
         address: &norn_wire::VaultAddress,
         build: impl FnOnce(&VaultName, &ReadHold<O>) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
-        let name = registered_name(address)?;
+        let name = address.registered_name();
         let hold = self
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;

@@ -74,7 +74,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
-use norn_host::{AttachMode, DemandLease, ProductionEntryOps, ReloadRefusal};
+use norn_host::{DemandLease, ProductionEntryOps, ReloadRefusal};
 use norn_store::{DocumentPath, Provenance};
 use norn_testkit::churn::{self, Act, Applied, Family, Folding, Script, Step};
 use norn_testkit::equivalence::{
@@ -2266,9 +2266,7 @@ fn caught_mid_walk(
     loop {
         attempts += 1;
         let host = vault.host();
-        let demanded = host
-            .demand(vault.name(), AttachMode::Durable)
-            .expect("request attachment");
+        let demanded = host.demand(vault.name()).expect("request attachment");
         loop {
             let observed = host.state(vault.name());
             match &observed {

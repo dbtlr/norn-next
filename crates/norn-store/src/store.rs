@@ -780,8 +780,10 @@ pub enum StoreMode {
     /// process.
     Durable,
     /// Disposable derivation over a store that is torn down when it is closed
-    /// or dropped. This is what an unregistered root gets: derived state with no
-    /// promise of being there next time.
+    /// or dropped: an ephemeral store for tests, whose derived state is not
+    /// there next time. No vault is served over one — every vault operation
+    /// requires a registration (ADR 0033), and a registered vault's derived
+    /// state is durable.
     Throwaway,
 }
 
@@ -832,8 +834,8 @@ impl Store {
     /// Open, or create, a throwaway store at `path`.
     ///
     /// The same open in every respect but one: the file is removed when the
-    /// store is closed or dropped, so an unregistered root's derived state does
-    /// not accumulate on disk.
+    /// store is closed or dropped, so a test's derived state does not
+    /// accumulate on disk.
     ///
     /// Opening one **over a durable store is refused.** The mode is recorded in
     /// the database when it is created, so a throwaway open over a registered

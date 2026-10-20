@@ -54,7 +54,6 @@ use norn_wire::{
     RefusedCheck, ResolvedPlan, VaultAddress, VaultName,
 };
 
-use crate::address::registered_name;
 use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::planner::control::{SchemaPlace, control_path, role_at};
@@ -175,7 +174,7 @@ where
         params: &MigrateParams,
         ladders: &Ladders<'_>,
     ) -> Result<MigrateReport, ErrorEnvelope> {
-        let name = registered_name(&params.vault)?.clone();
+        let name = params.vault.registered_name().clone();
         let (plan, forecast) = match self.plan_migration(&name, &params.vault, ladders)? {
             Planned::Current => return Ok(MigrateReport::already_current()),
             Planned::Previewed(plan, forecast) => (*plan, forecast),

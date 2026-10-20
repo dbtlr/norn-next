@@ -23,13 +23,13 @@ use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
-    AnswerAdvisory, AttachMode, AuthoredValue, BodyText, CollectionPage, CollectionSelector,
-    Column, ComparedBy, CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind,
-    FieldShape, FieldType, FindParams, FindReport, FindingKind, GetParams, GetReport, GroupKey,
-    Hint, KindTally, NotReady, Predicate, ReasonCode, ResolutionTarget, RuleClosedSet, RuleMatch,
-    Rung, RungSelection, RungSet, SchemaRule, SearchParams, Severity, Sort, SortKey, TrustState,
+    AnswerAdvisory, AuthoredValue, BodyText, CollectionPage, CollectionSelector, Column,
+    ComparedBy, CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind, FieldShape,
+    FieldType, FindParams, FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint,
+    KindTally, NotReady, Predicate, ReasonCode, ResolutionTarget, RuleClosedSet, RuleMatch, Rung,
+    RungSelection, RungSet, SchemaRule, SearchParams, Severity, Sort, SortKey, TrustState,
     Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
-    VaultRoot, WarmingPhase,
+    WarmingPhase,
 };
 
 /// The generated profile every case here attaches.
@@ -378,23 +378,6 @@ fn a_count_over_an_unknown_name_is_an_unknown_vault() {
     assert_eq!(refused.detail(), &ErrorDetail::unknown_vault(ledger));
 }
 
-/// A count addressing its vault by root asks for a throwaway attach, which
-/// the host refuses — even over the root of a vault it serves by name.
-#[test]
-fn a_count_by_root_is_an_unsupported_attach() {
-    let (_sandbox, vault) = a_vault("host-reads-count-root");
-    let host = vault.host();
-    let root = VaultRoot::new(vault.path()).expect("an absolute root");
-
-    let refused = host
-        .count(&CountParams::new(VaultAddress::root(root)))
-        .expect_err("a root answered a count");
-    assert_eq!(
-        refused.detail(),
-        &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
-    );
-}
-
 /// A count over `name` grouping by the typed key `created`, which compiles
 /// only against a declaration that types it.
 fn a_count_by_created(name: &VaultName) -> CountParams {
@@ -414,9 +397,7 @@ fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
     let schema = vault.path().join(".norn/schema.yaml");
     std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
     let host = vault.host();
-    let _lease = host
-        .demand(vault.name(), AttachMode::Durable)
-        .expect("request attachment");
+    let _lease = host.demand(vault.name()).expect("request attachment");
     let reason = attach::wait_for_withdrawn_trust(&host, vault.name(), attach::READY_LIMIT);
     assert!(
         matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
@@ -472,10 +453,7 @@ const WATCHER_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// stretch starts again after it.
 fn attach_over_the_unreadable_schema(vault: &attach::Vault) -> attach::ServingHost {
     let host = vault.host();
-    drop(
-        host.demand(vault.name(), AttachMode::Durable)
-            .expect("request attachment"),
-    );
+    drop(host.demand(vault.name()).expect("request attachment"));
     let reason = attach::wait_for_withdrawn_trust(&host, vault.name(), attach::READY_LIMIT);
     assert!(
         matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
@@ -665,7 +643,7 @@ fn a_count_that_meets_damage_is_untrusted_and_the_entry_rebuilds() {
 //
 // Every verb here answers through the seam `count` answers through, so the
 // refusals that seam owns — an entry not serving, a name the registry does not
-// hold, a vault addressed by root — are the count cases above, and these cases
+// hold — are the count cases above, and these cases
 // hold what each verb's own builder answers through the host.
 
 /// The schema the verb cases derive under: `created` is a date, so an order
