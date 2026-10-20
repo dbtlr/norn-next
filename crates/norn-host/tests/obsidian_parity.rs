@@ -484,3 +484,77 @@ fn norn_answers_each_recorded_obsidian_case_as_authored() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn norns_rename_keeps_authored_forms_and_resolves_to_obsidians_target() {
+    use norn_wire::{
+        ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DocumentPath, Operation, OperationKind,
+        PlanDocument,
+    };
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "host-obsidian-write-parity",
+    )
+    .expect("a sandbox");
+    let root = sandbox.work_dir().join("attached");
+    let vault_root = root.join("vault");
+    norn_testkit::obsidian_probe::Probe::workspace()
+        .and_then(|probe| probe.install(&vault_root))
+        .expect("install baseline without the rename delta");
+    std::fs::create_dir_all(vault_root.join(".norn")).expect("schema folder");
+    std::fs::write(vault_root.join(".norn/schema.yaml"), attach::SCHEMA).expect("schema");
+    let vault = attach::Vault::adopt(&root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let address = VaultAddress::name(vault.name().clone());
+    let results = read_json(&fixture().join("observations/ios-1.14.5/results.json"));
+    let rename = &results["rename_operation"];
+    let old = DocumentPath::new(text_of(rename, "old_path")).expect("old path");
+    let new = DocumentPath::new(text_of(rename, "new_path")).expect("new path");
+    let plan = AuthoredPlan::new(
+        address.clone(),
+        vec![Operation::new(OperationKind::move_document(
+            old,
+            new.clone(),
+        ))],
+    );
+    let report = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::operations(plan),
+        ))
+        .expect("move admitted")
+        .wait()
+        .expect("move answered")
+        .report;
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    let observations = observations();
+    for (id, written) in [
+        ("M10", "[M10](../targets/n422-space%20renamed.md)"),
+        ("M11", "[M11](<../targets/n422-space renamed.md>)"),
+        ("W23", "[[n422-space renamed|W23]]"),
+    ] {
+        assert!(
+            rename["results"]
+                .as_array()
+                .expect("rename results")
+                .iter()
+                .any(|result| result["case"] == id)
+        );
+        let source = cases()
+            .into_iter()
+            .find(|case| case.id == id)
+            .expect("recorded case")
+            .source;
+        let text = std::fs::read_to_string(vault_root.join(&source)).expect("source text");
+        assert!(text.contains(written), "{id}: expected {written} in {text}");
+        let links = links_of(&host, &address, &source);
+        let link = links
+            .iter()
+            .find(|link| link.title.as_deref() == Some(id))
+            .expect("written link");
+        let answer = answer_of(link, &source, &BTreeSet::new());
+        assert_eq!(answer, healthy(new.as_str()));
+        compatible(&answer, &observations[id]).unwrap_or_else(|why| panic!("{id}: {why}"));
+    }
+}

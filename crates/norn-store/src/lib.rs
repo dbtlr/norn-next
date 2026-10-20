@@ -198,8 +198,8 @@ pub use json::{
     FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json, frontmatter_of_projection,
 };
 pub use link::{
-    named_paths, query_leaf, relative_spelling, rooted_spelling, spelled_path, spelled_place,
-    suffix_spelling,
+    named_paths, query_leaf, relative_spelling, relative_wikilink_spelling, rooted_spelling,
+    spelled_path, spelled_place, suffix_spelling,
 };
 pub use moved::{MOVED_STATEMENTS, MovedPlan, MovedStatement, MovedTombstone};
 pub use read::{

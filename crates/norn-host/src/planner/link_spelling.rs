@@ -5,10 +5,9 @@
 //! resolution answer reaches uniquely. A suffix-addressed link, in either
 //! family (ADR 0040), keeps its suffix style and extension, a Markdown one
 //! its percent-escaping too; a `vault://` wikilink keeps its root style and
-//! extension; a Markdown path keeps its relative or rooted style and
-//! percent-escaping ([`candidate_spellings`]). A wikilink written as a
-//! relative or rooted path is given no spelling yet, so a change that would
-//! respell one skips it.
+//! extension; either family's path keeps its relative or rooted form
+//! ([`candidate_spellings`]). Markdown path characters are escaped, with
+//! delimiter-dependent encoding completed at each token by the text layer.
 //!
 //! **The callers probe the candidates.** The cascade and repair ask the
 //! link index over the plan's after-state, repair through the applier's
@@ -20,10 +19,10 @@ use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkFamily};
 
 /// Every target spelling `link` could take to name `to` from `holder`,
 /// where the plan leaves it, in the order tried by the shared rule: a
-/// suffix-addressed link's suffixes shortest first, at least two segments
-/// where the link was path-qualified, with the extension exactly where it
+/// suffix-addressed link's suffixes shortest first, keeping at least its
+/// written segment count, or the whole shorter path, with the extension where it
 /// had one, a Markdown destination's in its percent-escaping; a `vault://`
-/// wikilink's root path in that style; or a Markdown link's path from the
+/// wikilink's root path in that style; or either family's path from the
 /// holder's folder, or the root where written rooted or under `vault://`,
 /// in the link's percent-escaping. The first candidate resolving to the
 /// destination alone is written ([`first_resolving_spelling`]).
@@ -35,11 +34,7 @@ pub(crate) fn candidate_spellings(
     let family = wire_family(link.family);
     match LinkAddress::of(family, link.protocol.as_deref(), &link.target) {
         LinkAddress::Suffix(target) => {
-            let least = if target.contains('/') {
-                2.min(to.depth())
-            } else {
-                1
-            };
+            let least = target.split('/').count().min(to.depth());
             let leaf = to.as_str().rsplit('/').next().unwrap_or_default();
             let (with, without): (Vec<String>, Vec<String>) = to
                 .suffix_spellings()
@@ -55,14 +50,28 @@ pub(crate) fn candidate_spellings(
                 spellings
             }
         }
-        LinkAddress::RootedName(target) if family == LinkFamily::Wikilink => {
-            let path = to.as_str().to_string();
+        LinkAddress::Rooted(target) | LinkAddress::RootedName(target)
+            if family == LinkFamily::Wikilink =>
+        {
+            let lead = if link.target.starts_with('/') {
+                "/"
+            } else {
+                ""
+            };
+            let path = format!("{lead}{}", to.as_str());
             let stem = strip_extension(&path).map(str::to_string);
             styled(
                 names_the_extension(&target),
                 vec![path],
                 stem.into_iter().collect(),
             )
+        }
+        LinkAddress::Relative(_) if family == LinkFamily::Wikilink => {
+            vec![norn_store::relative_wikilink_spelling(
+                holder,
+                to.as_str(),
+                &link.target,
+            )]
         }
         LinkAddress::Relative(_) if family == LinkFamily::Markdown => {
             norn_store::relative_spelling(holder, to.as_str(), &link.target)
@@ -81,6 +90,20 @@ pub(crate) fn candidate_spellings(
         | LinkAddress::Unnameable(_)
         | LinkAddress::HoldingDocument => Vec::new(),
     }
+}
+
+/// The actual destinations a rewrite can write in its delimiter forms.
+pub(crate) fn spelling_variants(family: LinkFamily, target: &str) -> Vec<String> {
+    let mut variants = vec![target.to_string()];
+    if family == LinkFamily::Markdown {
+        for angle in [true, false] {
+            let spelling = norn_text::markdown_destination(target, angle);
+            if !variants.contains(&spelling) {
+                variants.push(spelling);
+            }
+        }
+    }
+    variants
 }
 
 /// **The first candidate resolving uniquely to the destination wins.**

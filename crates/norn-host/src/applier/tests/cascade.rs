@@ -1346,17 +1346,19 @@ fn a_key_left_for_several_reasons_is_advised_by_the_first_ranked() {
     }
 }
 
-/// **A moved holder's own relative wikilink that would name another document
-/// is never left silently** (ADR 0040): a wikilink written as a `./` or
-/// `../` path is given no relative spelling yet, so where moving its holder
-/// alone would change the document it names — to a twin beside where the
-/// holder lands, or to none — the link is left as written and advised as
-/// unrepresentable, and the change set records what it names after the plan.
-/// Moved together with its target, it still names that document, and nothing
-/// is said.
+/// A moved holder keeps each relative wikilink naming its original target.
 #[test]
-fn a_moved_holders_relative_wikilink_it_cannot_respell_is_skipped_saying_what_it_names_after() {
-    for (files, from, to, address, after) in [
+fn a_moved_holders_relative_wikilinks_keep_their_targets() {
+    for (files, from, to, expected) in [
+        (
+            vec![
+                ("a/sub/m.md", "[[./x]] [[../sub/x]]\n"),
+                ("a/sub/x.md", "A\n"),
+            ],
+            "a/sub/m.md",
+            "b/m.md",
+            "[[../a/sub/x]] [[../a/sub/x]]\n",
+        ),
         (
             vec![
                 ("a/m.md", "[[./x]]\n"),
@@ -1365,8 +1367,7 @@ fn a_moved_holders_relative_wikilink_it_cannot_respell_is_skipped_saying_what_it
             ],
             "a/m.md",
             "b/m.md",
-            "./x",
-            Resolves::one(path("b/x.md")),
+            "[[../a/x]]\n",
         ),
         (
             vec![
@@ -1376,41 +1377,20 @@ fn a_moved_holders_relative_wikilink_it_cannot_respell_is_skipped_saying_what_it
             ],
             "a/b/m.md",
             "c/d/m.md",
-            "../x",
-            Resolves::one(path("c/x.md")),
+            "[[../../a/x]]\n",
         ),
         (
             vec![("a/m.md", "[[./x]]\n"), ("a/x.md", "A\n")],
             "a/m.md",
             "b/m.md",
-            "./x",
-            Resolves::none(),
+            "[[../a/x]]\n",
         ),
     ] {
         let mut fixture = Fixture::new(&files);
         let resolution = fixture.resolution(vec![moving(from, to)]);
-        let link = key(to, LinkFamily::Wikilink, address);
-        assert!(resolution.plan.operations[0].cascade.is_empty(), "{to}");
-        assert_eq!(
-            resolution.forecast.links,
-            vec![LinkAdvisory::skipped_unrepresentable(link.clone())],
-            "{to}"
-        );
-        assert!(
-            resolution
-                .plan
-                .conditions
-                .contains(&PlanCondition::link_resolution(
-                    link,
-                    Resolves::one(path("a/x.md")),
-                    after,
-                )),
-            "{to}: {:?}",
-            resolution.plan.conditions
-        );
-        let held = files[0].1;
+        assert!(resolution.forecast.links.is_empty());
         applied(fixture.apply(resolution.plan));
-        assert_eq!(fixture.read(to).as_deref(), Some(held));
+        assert_eq!(fixture.read(to).as_deref(), Some(expected));
     }
 
     let fixture = Fixture::new(&[("a/x.md", "X\n"), ("a/m.md", "[[./x]]\n")]);
@@ -1474,4 +1454,124 @@ fn a_link_left_naming_another_document_is_advised_as_retargeted() {
     let resolution = fixture.resolution(vec![moving("a/x.md", "b/x.md")]);
     assert_eq!(resolution.forecast.links, vec![]);
     assert!(resolution.plan.operations[0].cascade.is_empty());
+}
+
+#[test]
+fn wikilink_path_forms_follow_moved_targets_and_holders() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "A\n"),
+        (
+            "notes/h.md",
+            "![[./a#Part|alias]] [[../notes/a.md]] [[/notes/a]]\n",
+        ),
+    ]);
+    fixture.moved(vec![moving("notes/a.md", "archive/new name.md")]);
+    assert_eq!(
+        fixture.read("notes/h.md").as_deref(),
+        Some(
+            "![[../archive/new name#Part|alias]] [[../archive/new name.md]] [[/archive/new name]]\n"
+        )
+    );
+    fixture.moved(vec![moving("notes/h.md", "deep/sub/h.md")]);
+    assert_eq!(
+        fixture.read("deep/sub/h.md").as_deref(),
+        Some(
+            "![[../../archive/new name#Part|alias]] [[../../archive/new name.md]] [[/archive/new name]]\n"
+        )
+    );
+}
+
+#[test]
+fn suffix_backlinks_keep_their_segment_floor_or_the_whole_shorter_path() {
+    let mut fixture = Fixture::new(&[
+        ("a/b/old.md", "A\n"),
+        ("h.md", "[[a/b/old]] [x](a/b/old.md)\n"),
+    ]);
+    fixture.moved(vec![moving("a/b/old.md", "w/x/y/new.md")]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[x/y/new]] [x](x/y/new.md)\n")
+    );
+    fixture.moved(vec![moving("w/x/y/new.md", "z/final.md")]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[z/final]] [x](z/final.md)\n")
+    );
+}
+
+#[test]
+fn a_target_twin_skips_backlinks_and_a_moved_holders_own_relative_links() {
+    let mut fixture = Fixture::new(&[
+        ("a/Note.md", "Target\n"),
+        ("b/note.md", "Twin\n"),
+        ("a/h.md", "[[./Note]] [x](./Note.md)\n"),
+        ("observer.md", "[[a/Note]]\n"),
+    ]);
+    let resolution = fixture.resolution(vec![
+        moving("a/Note.md", "b/Note.md"),
+        moving("a/h.md", "c/h.md"),
+    ]);
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty())
+    );
+    assert_eq!(
+        resolution.forecast.links.len(),
+        3,
+        "{:?}",
+        resolution.forecast.links
+    );
+    assert!(
+        resolution
+            .forecast
+            .links
+            .iter()
+            .all(|advisory| advisory.as_str() == "skipped_target_has_twin"),
+        "{:?}",
+        resolution.forecast.links
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("c/h.md").as_deref(),
+        Some("[[./Note]] [x](./Note.md)\n")
+    );
+}
+
+#[test]
+fn markdown_cascades_encode_destinations_in_each_occurrences_form() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        (
+            "h.md",
+            "[plain](./a.md) [angle](<./a.md>) [escaped](./%61.md)\n",
+        ),
+    ]);
+    let destination = "café (x)<y>&copy;|#?%.md";
+    let expected = "[plain](./café%20%28x%29%3Cy%3E%26copy;%7C%23%3F%25.md) [angle](<./café (x)%3Cy%3E%26copy;%7C%23%3F%25.md>) [escaped](./caf%C3%A9%20%28x%29%3Cy%3E%26copy%3B%7C%23%3F%25.md)\n";
+    let resolution = fixture.resolution(vec![moving("a.md", destination)]);
+    assert!(
+        resolution.forecast.links.is_empty(),
+        "{:?}",
+        resolution.forecast.links
+    );
+    for link in norn_text::Document::parse(expected).links() {
+        assert!(
+            resolution
+                .plan
+                .conditions
+                .contains(&PlanCondition::link_resolution(
+                    key("h.md", LinkFamily::Markdown, &link.target),
+                    Resolves::none(),
+                    Resolves::one(path(destination)),
+                )),
+            "a written destination is probed: {}",
+            link.target
+        );
+    }
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+    assert_eq!(fixture.read("h.md").as_deref(), Some(expected));
 }

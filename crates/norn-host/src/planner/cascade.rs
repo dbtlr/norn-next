@@ -71,7 +71,7 @@
 //! says it is unrepresentable.
 //!
 //! **A moved document's own relative links name what they named.** Each
-//! relative Markdown link a moved document holds is read from where the
+//! relative link a moved document holds is read from where the
 //! document stood, and where its spelling no longer reaches, from where the
 //! document lands, the file the link must name after the plan — the file it
 //! named, wherever the plan carries that file, or the target of a delete
@@ -333,9 +333,13 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     // one reading of a link resolved it: what a moved document's own
     // relative link named ([`Cascade::own_relative_links`]).
     let mut named_before: BTreeMap<EntryKey, String> = BTreeMap::new();
+    let mut ambiguous_before = BTreeSet::new();
     index.changes(&overlay, &probed, &mut |change| {
         if let Resolves::One { path } = &change.before {
             named_before.insert(change_key(&change), path.as_str().to_string());
+        }
+        if matches!(change.before, Resolves::Several {}) {
+            ambiguous_before.insert(change_key(&change));
         }
         if change.written && !cascade.kept.contains(&change_key(&change)) {
             return;
@@ -429,7 +433,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     }
 
     let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> =
-        cascade.own_relative_links(&targets, &named_before);
+        cascade.own_relative_links(&targets, &named_before, &ambiguous_before, &overlay, index)?;
 
     // Every spelling each breaking link could take, probed from its holder
     // in one judgment; a link written twice in one holder is one key, asked
@@ -447,12 +451,16 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         }
         let candidates = cascade.candidates(broken);
         for candidate in &candidates {
-            probes.push(ProbedLink {
-                before_holder: broken.holder.clone(),
-                after_holder: broken.holder.clone(),
-                link: spelled(&broken.link, candidate),
-                written: true,
-            });
+            for spelling in
+                super::link_spelling::spelling_variants(wire_family(broken.link.family), candidate)
+            {
+                probes.push(ProbedLink {
+                    before_holder: broken.holder.clone(),
+                    after_holder: broken.holder.clone(),
+                    link: spelled(&broken.link, &spelling),
+                    written: true,
+                });
+            }
         }
         asked.push((at, candidates));
     }
@@ -472,11 +480,11 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
             continue;
         };
         let reads_back = super::link_spelling::first_resolving_spelling(candidates, |candidate| {
-            matches!(
-                answered.get(&entry(&holder, &spelled(&broken.link, candidate))),
-                Some(Resolves::One { path })
-                    if cascade.identity(path.as_str()).as_ref() == Some(&broken.to)
-            )
+            super::link_spelling::spelling_variants(wire_family(broken.link.family), candidate)
+                .iter().all(|spelling| matches!(
+                    answered.get(&entry(&holder, &spelled(&broken.link, spelling))),
+                    Some(Resolves::One { path }) if cascade.identity(path.as_str()).as_ref() == Some(&broken.to)
+                ))
         });
         let Some(candidate) = reads_back else {
             continue;
@@ -766,7 +774,7 @@ impl<'a> Cascade<'a> {
         self.composition.read_at.get(file)
     }
 
-    /// The respellings of every relative Markdown link a moved document
+    /// The respellings of every relative link a moved document
     /// holds whose spelling no longer reaches, from where the document
     /// lands, the file the link must name after the plan
     /// ([`Self::final_document`]), keyed as the change set keys the link,
@@ -782,16 +790,21 @@ impl<'a> Cascade<'a> {
     /// file's own. A link that named no document — an attachment's, or a
     /// broken one — is followed by the path it spells
     /// ([`norn_store::spelled_path`]).
-    fn own_relative_links(
+    fn own_relative_links<I: LinkIndex + ?Sized>(
         &self,
         targets: &[Target<'_>],
         named_before: &BTreeMap<EntryKey, String>,
-    ) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
+        ambiguous_before: &BTreeSet<EntryKey>,
+        overlay: &norn_store::PathOverlay,
+        index: &I,
+    ) -> Result<BTreeMap<EntryKey, (usize, LinkRewrite)>, I::Error> {
         let held: BTreeMap<&DocumentPath, &[LinkFact]> = targets
             .iter()
             .filter_map(|target| Some((target.path(), target.links()?)))
             .collect();
         let mut rewrites = BTreeMap::new();
+        let mut probes = Vec::new();
+        let mut expected = BTreeMap::new();
         for (file, drawn) in self.lineage.drawing() {
             let (Some(owner), Some(landed), Some(stood)) = (
                 drawn.moves.last(),
@@ -810,7 +823,7 @@ impl<'a> Cascade<'a> {
                     .as_ref()
                     .is_some_and(|file| self.written.holds(file, link))
                     && !self.kept.contains(&entry(landed, link));
-                if authored {
+                if authored || ambiguous_before.contains(&entry(landed, link)) {
                     continue;
                 }
                 let relative = matches!(
@@ -821,10 +834,7 @@ impl<'a> Cascade<'a> {
                     ),
                     LinkAddress::Relative(_)
                 );
-                // A wikilink written as a relative path is given no
-                // spelling yet ([`super::link_spelling`]), so it is left as
-                // written.
-                if !relative || wire_family(link.family) != LinkFamily::Markdown {
+                if !relative {
                     continue;
                 }
                 let named = match named_before.get(&entry(landed, link)) {
@@ -857,22 +867,79 @@ impl<'a> Cascade<'a> {
                 if still.any(|path| reaches(&path)) {
                     continue;
                 }
-                let Some(respelled) = norn_store::relative_spelling(&holder, &named, &link.target)
-                else {
-                    continue;
+                let respelled = if wire_family(link.family) == LinkFamily::Wikilink {
+                    norn_store::relative_wikilink_spelling(&holder, &named, &link.target)
+                } else {
+                    let Some(spelling) =
+                        norn_store::relative_spelling(&holder, &named, &link.target)
+                    else {
+                        continue;
+                    };
+                    spelling
                 };
                 let rewrite = LinkRewrite::new(
                     landed.clone(),
-                    LinkFamily::Markdown,
+                    wire_family(link.family),
                     address(link),
-                    respelled,
+                    respelled.clone(),
                 );
-                rewrites
-                    .entry(entry(landed, link))
-                    .or_insert((*owner, rewrite));
+                let key = entry(landed, link);
+                for spelling in
+                    super::link_spelling::spelling_variants(wire_family(link.family), &respelled)
+                {
+                    let probe = spelled(link, &spelling);
+                    let originals = expected
+                        .entry(entry(landed, &probe))
+                        .or_insert_with(Vec::new);
+                    if originals.is_empty() {
+                        probes.push(ProbedLink {
+                            before_holder: source.clone(),
+                            after_holder: holder.clone(),
+                            link: probe,
+                            written: true,
+                        });
+                    }
+                    originals.push((key.clone(), named.clone(), named_before.contains_key(&key)));
+                }
+                rewrites.entry(key).or_insert((*owner, rewrite));
             }
         }
-        rewrites
+        let mut accepted = BTreeSet::new();
+        let mut refused = BTreeSet::new();
+        if !probes.is_empty() {
+            index.changes(overlay, &probes, &mut |change| {
+                if !change.written {
+                    return;
+                }
+                let Some(holder) = wire_path(&change.holder) else {
+                    return;
+                };
+                let Some(originals) = expected.get(&entry(&holder, &change.link)) else {
+                    return;
+                };
+                for (key, target, document) in originals {
+                    let reaches = match &change.after {
+                        Resolves::One { path } => {
+                            norn_store::comparison_key(path.as_str())
+                                == norn_store::comparison_key(target)
+                        }
+                        Resolves::None {} => {
+                            !document
+                                && norn_store::spelled_path(&change.link, &change.holder).as_deref()
+                                    == Some(target.as_str())
+                        }
+                        Resolves::Several {} => false,
+                    };
+                    if reaches {
+                        accepted.insert(key.clone());
+                    } else {
+                        refused.insert(key.clone());
+                    }
+                }
+            })?;
+        }
+        rewrites.retain(|key, _| accepted.contains(key) && !refused.contains(key));
+        Ok(rewrites)
     }
 
     /// Every spelling the link `broken` could take to name its destination,

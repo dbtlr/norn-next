@@ -187,6 +187,13 @@ pub enum LinkAdvisory {
         /// The link.
         link: LinkKey,
     },
+    /// The target's full vault path names several documents under the
+    /// comparison key, so no spelling can name the target alone.
+    #[non_exhaustive]
+    SkippedTargetHasTwin {
+        /// The link.
+        link: LinkKey,
+    },
     /// The link is written in a frontmatter value that cannot hold the new
     /// address and still read as the same value with only its address
     /// changed, so it is left as written.
@@ -249,6 +256,7 @@ impl LinkAdvisory {
         match self {
             LinkAdvisory::SkippedAmbiguous { .. } => "skipped_ambiguous",
             LinkAdvisory::SkippedUnrepresentable { .. } => "skipped_unrepresentable",
+            LinkAdvisory::SkippedTargetHasTwin { .. } => "skipped_target_has_twin",
             LinkAdvisory::SkippedWouldCorruptFrontmatter { .. } => {
                 "skipped_would_corrupt_frontmatter"
             }
@@ -265,6 +273,7 @@ impl LinkAdvisory {
         match self {
             LinkAdvisory::SkippedAmbiguous { link }
             | LinkAdvisory::SkippedUnrepresentable { link }
+            | LinkAdvisory::SkippedTargetHasTwin { link }
             | LinkAdvisory::SkippedWouldCorruptFrontmatter { link }
             | LinkAdvisory::SkippedNotRewritable { link }
             | LinkAdvisory::SkippedUnplaced { link }
@@ -282,6 +291,11 @@ impl LinkAdvisory {
     /// `link` cannot spell its new address, and is left as written.
     pub const fn skipped_unrepresentable(link: LinkKey) -> Self {
         LinkAdvisory::SkippedUnrepresentable { link }
+    }
+
+    /// A link whose target has a twin under the comparison key.
+    pub const fn skipped_target_has_twin(link: LinkKey) -> Self {
+        LinkAdvisory::SkippedTargetHasTwin { link }
     }
 
     /// `link`'s frontmatter value cannot hold its new address, and it is left

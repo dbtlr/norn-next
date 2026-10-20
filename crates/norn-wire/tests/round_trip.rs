@@ -8847,6 +8847,7 @@ fn link_advisories() -> Vec<LinkAdvisory> {
     vec![
         LinkAdvisory::skipped_ambiguous(a_link_key()),
         LinkAdvisory::skipped_unrepresentable(a_link_key()),
+        LinkAdvisory::skipped_target_has_twin(a_link_key()),
         LinkAdvisory::skipped_would_corrupt_frontmatter(a_link_key()),
         LinkAdvisory::skipped_not_rewritable(a_link_key()),
         LinkAdvisory::skipped_unplaced(a_link_key()),

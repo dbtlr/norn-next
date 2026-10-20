@@ -650,6 +650,33 @@ fn an_authored_link_rewrite_the_text_layer_refuses_is_advised() {
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
 }
 
+/// An authored Markdown rewrite encodes spaces in each occurrence's delimiters.
+#[test]
+fn an_authored_markdown_rewrite_encodes_spaces_in_each_occurrences_delimiters() {
+    let mut fixture = Fixture::new(&[
+        ("old.md", "Old\n"),
+        ("new name.md", "New\n"),
+        ("h.md", "[plain](old.md) [angle](<old.md>)\n"),
+    ]);
+    let resolution = fixture.resolution(vec![relinking(
+        "h.md",
+        LinkFamily::Markdown,
+        "old.md",
+        "new name.md",
+    )]);
+    assert!(
+        resolution.forecast.links.is_empty(),
+        "{:?}",
+        resolution.forecast.links
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[plain](new%20name.md) [angle](<new name.md>)\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **Re-sending an authored link rewrite whose holder already landed
 /// finishes the plan**: the holder holds its after-state, so its rewrite —
 /// which matches nothing there — is not refused for it, and the other

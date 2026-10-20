@@ -68,7 +68,8 @@
 //! vault root and `[[notes/a]]` by suffix — so a link is keyed by its holder,
 //! its syntax and its address: the target text, prefixed with
 //! `<protocol>://` where the link is written with a protocol. A rewrite
-//! changes the target text and never the protocol.
+//! changes the target text; only a `vault://` repair removes the protocol
+//! to write the `/` rooted form.
 //! `rewrite_wikilink` is the vault-wide kind an author writes: every wikilink
 //! naming `old` respelled to name `new`. Its `old` need not name a document
 //! that stands, so a broken link is repaired by the same kind; an `old` naming
@@ -309,8 +310,10 @@ pub enum OperationKind {
         #[schemars(length(min = 1))]
         from: String,
         /// The address it is written with after, protocol prefix included. A
-        /// rewrite never changes a link's protocol, so a `to` whose protocol
-        /// differs from `from`'s is refused.
+        /// rewrite keeps the protocol, except that `vault://` may become `/`
+        /// for its rooted repair. Other protocol changes are refused. Every
+        /// Markdown rewrite is encoded in each occurrence's delimiters.
+        /// Its resolution is advised on, never a reason to refuse the rewrite.
         to: String,
     },
     /// In one document, respell every heading anchor written `from` on a
@@ -902,8 +905,8 @@ pub struct LinkRewrite {
     #[schemars(length(min = 1))]
     pub from: String,
     /// The address it is written with after, protocol prefix included. A
-    /// rewrite never changes a link's protocol, so a `to` whose protocol
-    /// differs from `from`'s is refused.
+    /// rewrite keeps its protocol; `vault://` may become `/` for its repair.
+    /// Every Markdown rewrite is encoded in each occurrence's delimiters.
     pub to: String,
 }
 
@@ -928,14 +931,17 @@ impl LinkRewrite {
 /// Why respelling the address `from` to `to` is no link rewrite, or `None`
 /// where it is one. An empty `from` is an anchor-only link's, which names
 /// its holder wherever the holder goes, so nothing respells it; and a
-/// rewrite changes a link's address and never its protocol, so a `to`
-/// written under another protocol than `from`'s cannot be written into the
-/// link. An empty `to` and a `to` equal to `from` are rewrites.
+/// rewrite keeps its protocol, with the one exception of `vault://` to `/`
+/// for the rooted repair. An empty `to` and a `to` equal to `from` are rewrites.
 fn rewrite_refusal(from: &str, to: &str) -> Option<&'static str> {
     if from.is_empty() {
         return Some("`from` is empty, and an anchor-only link is never respelled");
     }
-    if written_protocol(from) != written_protocol(to) {
+    if written_protocol(from) != written_protocol(to)
+        && !(written_protocol(from) == Some("vault")
+            && written_protocol(to).is_none()
+            && to.starts_with('/'))
+    {
         return Some(
             "`to` is written under another protocol than `from`, and a rewrite keeps a link's protocol",
         );

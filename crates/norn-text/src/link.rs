@@ -710,6 +710,34 @@ pub(crate) fn respelled(link: &Link, to: &str) -> Result<String, RewriteSkip> {
     Ok(out)
 }
 
+/// Encode a Markdown path for its destination delimiters, preserving existing
+/// percent escapes and the authored query.
+/// Both forms protect backslash escapes, entities and the table-cell delimiter.
+/// Plain destinations also protect whitespace and parentheses. Non-ASCII stays raw.
+pub fn markdown_destination(target: &str, angle: bool) -> String {
+    let (path, query) = target
+        .find('?')
+        .map_or((target, ""), |at| target.split_at(at));
+    let mut out = String::with_capacity(target.len());
+    for character in path.chars() {
+        let encode = matches!(character, '<' | '>' | '\\' | '&' | '|')
+            || (!angle
+                && (character.is_whitespace()
+                    || character.is_control()
+                    || matches!(character, '(' | ')')));
+        if encode {
+            let mut buffer = [0; 4];
+            for byte in character.encode_utf8(&mut buffer).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            out.push(character);
+        }
+    }
+    out.push_str(query);
+    out
+}
+
 /// One trailing block-id definition (`… ^block-id`) — the target side of a
 /// `#^` reference.
 #[derive(Debug, Clone, PartialEq, Eq)]

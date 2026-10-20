@@ -367,6 +367,7 @@ fn trial(seed: u64, failures: &mut Vec<String>) -> bool {
         .filter_map(|advisory| match advisory {
             LinkAdvisory::SkippedAmbiguous { link, .. }
             | LinkAdvisory::SkippedUnrepresentable { link, .. }
+            | LinkAdvisory::SkippedTargetHasTwin { link, .. }
             | LinkAdvisory::SkippedWouldCorruptFrontmatter { link, .. }
             | LinkAdvisory::SkippedNotRewritable { link, .. }
             | LinkAdvisory::SkippedUnplaced { link, .. } => Some(entry_key(link)),

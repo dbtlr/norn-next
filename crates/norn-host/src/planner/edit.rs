@@ -373,6 +373,7 @@ pub(crate) fn rewrite_skip(reason: norn_text::RewriteSkip) -> &'static str {
 /// batch respells ([`crate::derivation::parsed_links`]) and handed back
 /// beside the result, so a caller reading them as well — the batch's links
 /// kept at an address it writes (`super::compose`) — parses the holder once.
+/// Every Markdown rewrite is encoded in each occurrence's delimiters.
 pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
     rewrites: impl IntoIterator<Item = &'r LinkRewrite>,

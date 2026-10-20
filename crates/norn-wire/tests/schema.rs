@@ -3141,7 +3141,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
     assert!(
         to["description"]
             .as_str()
-            .is_some_and(|text| text.contains("never changes a link's protocol")),
+            .is_some_and(|text| text.contains("vault://") && text.contains("rooted repair")),
         "a link rewrite's `to` does not state in words what decides its protocol: {to}"
     );
     assert!(
@@ -3661,6 +3661,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
         sorted([
             "skipped_ambiguous",
             "skipped_unrepresentable",
+            "skipped_target_has_twin",
             "skipped_would_corrupt_frontmatter",
             "skipped_not_rewritable",
             "skipped_unplaced",
