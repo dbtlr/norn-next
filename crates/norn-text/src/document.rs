@@ -22,7 +22,10 @@ use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{BlockId, Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
-use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
+use crate::span::{
+    LineCursor, split_lines_inclusive, split_yaml_lines_inclusive, trailing_break,
+    trailing_yaml_break, trim_yaml_line_break,
+};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
 
@@ -558,7 +561,7 @@ impl<'a> Document<'a> {
     /// the parsed one reports none either — a disagreement is refused, never
     /// guessed at.
     ///
-    /// The scan cuts lines on [`crate::span`]'s break rule, so a
+    /// The scan cuts lines on [`crate::span`]'s YAML break rule, so a
     /// `\r`-separated sequence is scanned item by item and agrees with the
     /// parse about how many items it holds, rather than reaching the refusal
     /// above for a sequence that is not ambiguous.
@@ -569,10 +572,16 @@ impl<'a> Document<'a> {
         }
         let mut scanned = Vec::new();
         let mut line_start = field.line_range.start;
-        for line in split_lines_inclusive(&self.source[field.line_range.clone()]) {
-            let trimmed = line.trim_end_matches(['\r', '\n']);
+        // Only a dash at the first item's column opens an item of this
+        // sequence: a deeper one belongs to a block literal or a nested
+        // collection inside an item, and counting it shifts every range after.
+        let mut item_indent = None;
+        for line in split_yaml_lines_inclusive(&self.source[field.line_range.clone()]) {
+            let trimmed = trim_yaml_line_break(line);
             let indent = trimmed.len() - trimmed.trim_start().len();
-            if trimmed.trim_start().starts_with("- ") || trimmed.trim_start() == "-" {
+            let opens_item = trimmed.trim_start().starts_with("- ") || trimmed.trim_start() == "-";
+            if opens_item && item_indent.is_none_or(|column| column == indent) {
+                item_indent = Some(indent);
                 let after_dash = indent + 1;
                 let (range, _, _) = classify_value(line_start, after_dash, &trimmed[after_dash..]);
                 scanned.push(range);
@@ -1201,8 +1210,8 @@ impl<'a> Document<'a> {
             items.push(value.clone());
             return self.rewrite_list(field, items);
         };
-        let terminator =
-            trailing_break(&self.source[last.lines.clone()]).unwrap_or(self.line_ending.as_str());
+        let terminator = trailing_yaml_break(&self.source[last.lines.clone()])
+            .unwrap_or(self.line_ending.as_str());
         let item = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
         let edited = splice(self.source, last.lines.end..last.lines.end, &item);
         refuse_past_bound(&edited)?;
@@ -1708,7 +1717,7 @@ fn refuse_past_bound(edited: &str) -> Result<(), EditError> {
 fn null_line(source: &str, block: Range<usize>) -> Option<Range<usize>> {
     let mut at = block.start;
     let mut spelled = None;
-    for line in split_lines_inclusive(&source[block.clone()]) {
+    for line in split_yaml_lines_inclusive(&source[block.clone()]) {
         let start = at;
         at += line.len();
         let text = line.trim();

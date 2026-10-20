@@ -11,7 +11,10 @@
 //! addresses the bytes the caller handed in. The editing half is one case per
 //! site that used to cut on `\n` alone, each stating what the site now does.
 
-use norn_text::{BodyScan, Document, LineEnding, Mapping, SectionAddress, Value, render_document};
+use norn_text::{
+    AddressRewrite, BodyScan, Document, LineEnding, LinkFamily, Mapping, SectionAddress, Value,
+    render_document,
+};
 
 // ── The offset property ──────────────────────────────────────────────────
 
@@ -304,6 +307,113 @@ fn a_lone_cr_block_sequence_reports_a_range_for_every_item() {
         ranges_of("---\ntags:\r  - one\r  - two\n---\nbody\n"),
         ["one", "two"]
     );
+}
+
+/// YAML also ends a line at U+0085, U+2028 and U+2029, so a `- ` written after
+/// one is an item, and a `- ` inside a block literal or a nested map is not.
+///
+/// A scan cutting on `\n`, `\r` and `\r\n` alone misses the first and counts
+/// the second; the two errors cancel in the item-count check and every range
+/// shifts onto another node's bytes. The `[[A]]` item here has its value on
+/// the line after the dash, which the scan does not place, so the right answer
+/// is no range at all rather than a range on the literal's or the map's bytes.
+#[test]
+fn a_yaml_line_break_in_a_block_sequence_never_shifts_an_item_range() {
+    for source in [
+        "---\na:\n  - |\n    - \"[[A]]\"\n  -\u{85}    \"[[A]]\"\n---\n",
+        "---\na:\n  - k:\n      - \"[[A]]\": v\n  -\u{2028}    \"[[A]]\"\n---\n",
+        "---\na:\n  - k:\n      - \"[[A]]\": v\n  -\u{2029}    \"[[A]]\"\n---\n",
+    ] {
+        let document = Document::parse(source);
+        let placed: Vec<_> = document
+            .field_texts()
+            .into_iter()
+            .filter(|text| text.text == "[[A]]")
+            .map(|text| text.range)
+            .collect();
+        assert_eq!(placed, [None], "{source:?}");
+        let links = document.frontmatter_wikilinks();
+        assert!(
+            links.iter().all(|link| link.span.is_none()),
+            "{source:?}: {links:?}"
+        );
+    }
+}
+
+/// Items written on either side of a U+0085, U+2028 or U+2029 break are each
+/// counted, and each range is its own item's bytes.
+#[test]
+fn items_either_side_of_a_yaml_line_break_each_report_their_own_bytes() {
+    for brk in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("---\na:\n  - \"[[A]]\"{brk}  - \"[[B]]\"\n---\n");
+        let document = Document::parse(&source);
+        let slices: Vec<_> = document
+            .field_texts()
+            .into_iter()
+            .map(|text| source[text.range.expect("placed")].to_string())
+            .collect();
+        assert_eq!(slices, ["\"[[A]]\"", "\"[[B]]\""], "{brk:?}");
+    }
+}
+
+/// A top-level key written after a U+0085, U+2028 or U+2029 break is a field
+/// of its own, with its own value range.
+#[test]
+fn a_top_level_key_after_a_yaml_line_break_is_its_own_field() {
+    for brk in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("---\na: \"[[A]]\"{brk}b: \"[[B]]\"\n---\n");
+        let document = Document::parse(&source);
+        let slices: Vec<_> = document
+            .field_texts()
+            .into_iter()
+            .map(|text| {
+                (
+                    text.field.to_string(),
+                    source[text.range.expect("placed")].to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            slices,
+            [
+                ("a".into(), "\"[[A]]\"".into()),
+                ("b".into(), "\"[[B]]\"".into())
+            ],
+            "{brk:?}"
+        );
+    }
+}
+
+/// A rewrite over such a field lands on the item that holds the link.
+#[test]
+fn a_rewrite_lands_on_the_item_after_a_yaml_line_break() {
+    let source = "---\na:\n  - |\n    - \"[[B]]\"\n  - \"[[A]]\"\u{85}  - \"[[B]]\"\n---\n";
+    let rewrites = [AddressRewrite::new(LinkFamily::Wikilink, "B", "C")];
+    let rewritten = Document::parse(source)
+        .rewrite_links(&rewrites)
+        .expect("proven");
+    assert_eq!(
+        rewritten.text,
+        "---\na:\n  - |\n    - \"[[B]]\"\n  - \"[[A]]\"\u{85}  - \"[[C]]\"\n---\n"
+    );
+}
+
+/// An item pushed onto a list whose items end at a U+0085, U+2028 or U+2029
+/// break ends at that same break, so the list keeps the terminator it was
+/// written with rather than taking the document's.
+#[test]
+fn a_pushed_item_ends_at_the_yaml_line_break_its_list_uses() {
+    for brk in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("---\ntags:{brk}  - a{brk}  - b{brk}c: 1\n---\n");
+        let pushed = Document::parse(&source)
+            .push_to_list("tags", &"z".into())
+            .expect("spliced");
+        assert_eq!(
+            pushed,
+            format!("---\ntags:{brk}  - a{brk}  - b{brk}  - z{brk}c: 1\n---\n"),
+            "{brk:?}"
+        );
+    }
 }
 
 /// A closing `---` fence after a lone `\r` closes the block.
