@@ -2172,7 +2172,7 @@ where
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     let mut checked = 0;
     let mut through = Vec::new();
-    let mut walked_file = None;
+    let mut last_read_spelling = None;
     let mut complete = false;
     loop {
         if limit.as_ref().is_some_and(|limit| {
@@ -2247,14 +2247,16 @@ where
                 norn_fs::WalkFact::File(file) => {
                     let spelling = file.path().as_path().to_str().expect("UTF-8").to_owned();
                     match open_enumerated(&mut files, &mut pending)? {
-                        Some(read) => merge_read(&mut pending, &spelling, read, row)?,
+                        Some(read) => {
+                            merge_read(&mut pending, &spelling, read, row)?;
+                            last_read_spelling = Some(spelling);
+                        }
                         None => {
                             if let Some(row) = row {
                                 rolling_death(&mut pending, row.path.clone());
                             }
                         }
                     }
-                    walked_file = Some(spelling);
                 }
             }
             if equal {
@@ -2265,7 +2267,7 @@ where
         } else if let Some(row) = stored.get(index) {
             // An inventory can span watcher turns. Confirm a stored-only name
             // before pruning it so an earlier watcher update is never undone.
-            if walked_file.as_deref() == Some(row.path.as_str()) {
+            if last_read_spelling.as_deref() == Some(row.path.as_str()) {
                 // A flushed respelling can enter a later page of its own
                 // folded class. This exact spelling was already read; every
                 // other alias still takes its turn through the merge.
@@ -16957,6 +16959,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_folded_heal_prunes_all_aliases_of_a_file_deleted_after_listing() {
+        let f = Fixture::watcherless("heal-folded-listed-deletion");
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("folded.sqlite3"),
+            StoredPathOrder::AsciiCaseInsensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        let declared = Declaration::read(&mut store).unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                norn_store::IncrementProvenance::Derived,
+                ["NOTE.md", "note.md"].map(|path| {
+                    norn_store::Change::Upsert(norn_store::DocumentFacts::new(
+                        DocumentPath::new(path).unwrap(),
+                        "stale",
+                        "body",
+                        4,
+                    ))
+                }),
+                &[],
+                declared.model.content_model(),
+            )
+            .unwrap();
+        let facts = walk(&root, &[])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        fs::remove_file(root.join("note.md")).unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        let mut account = Account::default();
+        let policy = ProductionPolicy::new(1, 1).unwrap();
+        merge_walk(
+            &mut store,
+            &root,
+            &[],
+            facts.into_iter().map(Ok),
+            norn_fs::CaseSensitivity::Insensitive,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, &root, &[], policy, &mut account).unwrap();
+        assert!(stored_paths(&mut store).is_empty());
     }
 
     /// Re-run when changing the rolling budgets. Clocks are evidence, never a
