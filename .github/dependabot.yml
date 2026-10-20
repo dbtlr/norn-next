@@ -1,0 +1,14 @@
+# Action versions drift silently: actions/checkout once fell three majors
+# behind before anyone noticed. Dependabot proposes the bumps once a month as
+# one grouped PR, which runs through the same gates as any other change. Only
+# the workflows' actions are tracked; Cargo dependencies move by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
