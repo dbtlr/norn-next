@@ -93,7 +93,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_fs::{OwnWrites, Published, ShadowHome};
+use norn_fs::{Act, OwnWrites, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
     AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, Forecast, InterruptionCause,
@@ -118,23 +118,22 @@ use stage::Stop;
 #[cfg(test)]
 pub(crate) use stage::kernel_refusing;
 
-/// Where a publication is recorded so the watcher's echo of it is known as
-/// the applier's own.
+/// Where a publication act is recorded so the watcher's echo of it is known
+/// as the applier's own.
 ///
-/// **Only a publication is recorded**, at the moment it lands: never a
-/// landing a re-send merely confirmed, which caused no event (see
-/// [`OwnWrites::published`]).
+/// **Only an act is recorded**, at the moment it lands and ahead of the
+/// folder sync behind it: never a landing a re-send merely confirmed, which
+/// caused no event (see [`OwnWrites::acted`]).
 pub(crate) trait OwnWriteLedger {
-    /// Record that `path`, relative to the vault root, was published as
-    /// `published` says.
-    fn published(&self, path: &Path, published: &Published);
+    /// Record `act`, whose path is relative to the vault root.
+    fn acted(&self, act: &Act<'_>);
 }
 
 impl OwnWriteLedger for OwnWrites {
-    fn published(&self, path: &Path, published: &Published) {
+    fn acted(&self, act: &Act<'_>) {
         // A plan's path is a vault-relative document path, which the ledger
         // always normalizes; a refusal would be a path outside the vault.
-        let recorded = OwnWrites::published(self, path, published);
+        let recorded = OwnWrites::acted(self, act);
         debug_assert!(recorded.is_ok(), "a plan's path is inside its vault");
     }
 }

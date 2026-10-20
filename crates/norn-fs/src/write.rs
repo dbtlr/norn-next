@@ -99,7 +99,10 @@
 //!    filesystem that cannot rename exclusively refuses it as
 //!    [`Refusal::ExclusiveCreateUnsupported`] — there is no fallback, because
 //!    every fallback is a check followed by a rename.
-//! 7. **The folder is synced through the same handle.** A create — published,
+//! 7. **The act is handed to the caller as an [`Act`] the moment it lands**,
+//!    before anything else runs, so a caller recording its own writes holds
+//!    the record before the watcher can report the name.
+//! 8. **The folder is synced through the same handle.** A create — published,
 //!    or found landed — syncs every folder from the root down to its own, so a
 //!    folder a crashed attempt made and never synced is made durable by the
 //!    re-send that finds it. The result is reported as [`Durability`] rather
@@ -500,8 +503,9 @@ impl Durability {
 #[must_use]
 #[derive(Debug)]
 pub enum Publication {
-    /// This call changed the vault. The own-write ledger records this, because
-    /// a filesystem event about the target is coming.
+    /// This call changed the vault. Each act it made was handed to the
+    /// caller as an [`Act`] the moment it landed, which is what the own-write
+    /// ledger records, because a filesystem event about the target is coming.
     Wrote(Published),
     /// The target was already at its after-state — another writer put it
     /// there — so this call wrote nothing, discarded its shadow and synced the
@@ -526,13 +530,34 @@ pub struct Published {
     pub made_folders: Vec<PathBuf>,
 }
 
+/// One publication act this call made, handed to the caller the moment it
+/// lands: the rename that publishes a create or a replace, a respell's rename
+/// under either spelling, or the unlink that publishes a removal.
+///
+/// **It is handed over before the folder sync that follows it**, because the
+/// name is live from the act on and the watcher may report it while the sync
+/// still runs. A caller that recognizes its own writes records it here: one
+/// that waited for the [`Publication`] would record it behind a sync as slow as
+/// the disk, and a watcher that settled its batch first would report the act
+/// as another writer's change. Only the kernel makes one, and only for an act
+/// it made, so a landing it merely found is never one.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Act<'a> {
+    /// Where the act landed, relative to the anchor it was published under. A
+    /// respell's first step lands at its old spelling and its rename at its
+    /// new one.
+    pub path: &'a Path,
+    /// What the path holds now.
+    pub after: AfterState,
+}
+
 /// A respell that published its content under the old spelling and did not
 /// rename it.
 ///
-/// `published` is the first step, and it is what the own-write ledger records:
-/// an event is coming for the old spelling, which on a folding root is the one
-/// key both spellings share. A re-send stages the respell halfway and finishes
-/// the rename.
+/// `published` is the first step, already handed over as an [`Act`] at the
+/// old spelling, which on a folding root is the one key both spellings share.
+/// A re-send stages the respell halfway and finishes the rename.
 #[must_use]
 #[derive(Debug)]
 #[non_exhaustive]
@@ -667,8 +692,16 @@ pub fn publish(
     anchor: &Path,
     staged: Staged,
     shadows: &ShadowHome,
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
-    publish_disturbed(anchor, staged, shadows, Faults::publication(), &mut |_| {})
+    publish_disturbed(
+        anchor,
+        staged,
+        shadows,
+        Faults::publication(),
+        &mut |_| {},
+        acted,
+    )
 }
 
 /// Verify a target staging found already landed, and sync its folders again.
@@ -1415,6 +1448,7 @@ fn publish_disturbed(
     shadows: &ShadowHome,
     faults: Faults,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let faults = Faulted {
         faults,
@@ -1422,7 +1456,15 @@ fn publish_disturbed(
     };
     let root = open_staged_root(anchor, staged.root);
     let publication = match &root {
-        Ok(root) => publish_checked(anchor, root.as_fd(), &staged, shadows, faults, disturb),
+        Ok(root) => publish_checked(
+            anchor,
+            root.as_fd(),
+            &staged,
+            shadows,
+            faults,
+            disturb,
+            acted,
+        ),
         Err(refusal) => Err(refusal.clone()),
     };
     // A create or a replace that wrote consumed its shadow. Everything else —
@@ -1448,6 +1490,7 @@ fn publish_checked(
     shadows: &ShadowHome,
     faults: Faulted<'_>,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let full = anchor.join(&staged.path);
     let target = Target::of(&staged.path, &full)?;
@@ -1457,25 +1500,36 @@ fn publish_checked(
     let at = Place {
         anchor,
         root,
+        path: &staged.path,
         target: &target,
         full: &full,
         shadows,
         faults,
     };
     match &staged.pending {
-        Pending::Create { after, shadow } => publish_create(&at, folder, *after, shadow, disturb),
+        Pending::Create { after, shadow } => {
+            publish_create(&at, folder, *after, shadow, disturb, acted)
+        }
         Pending::Replace {
             before,
             after,
             shadow,
-        } => publish_replace(&at, folder, *before, *after, shadow, disturb),
-        Pending::Remove { before } => publish_remove(&at, folder, *before, disturb),
+        } => publish_replace(&at, folder, *before, *after, shadow, disturb, acted),
+        Pending::Remove { before } => publish_remove(&at, folder, *before, disturb, acted),
         Pending::Respell {
             to,
             before,
             after,
             shadow,
-        } => publish_respell(&at, folder, to, *before, *after, shadow.as_ref(), disturb),
+        } => publish_respell(
+            &at,
+            folder,
+            to,
+            (*before, *after),
+            shadow.as_ref(),
+            disturb,
+            acted,
+        ),
     }
 }
 
@@ -1483,6 +1537,8 @@ fn publish_checked(
 struct Place<'a> {
     anchor: &'a Path,
     root: BorrowedFd<'a>,
+    /// The target, relative to the anchor: where its act lands.
+    path: &'a Path,
     target: &'a Target<'a>,
     full: &'a Path,
     shadows: &'a ShadowHome,
@@ -1527,6 +1583,7 @@ fn publish_create(
     after: ContentHash,
     shadow: &StagedShadow,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let name = at.target.name;
     let made = match folder {
@@ -1571,6 +1628,10 @@ fn publish_create(
         }
         return Err(made.abandon(refusal, at.faults));
     }
+    acted(&Act {
+        path: at.path,
+        after: AfterState::Present(state),
+    });
     let durability = made.sync_all(at.faults);
     Ok(Publication::Wrote(Published {
         after: AfterState::Present(state),
@@ -1588,6 +1649,7 @@ fn publish_replace(
     after: ContentHash,
     shadow: &StagedShadow,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let Folder::Reached(chain) = folder else {
         return Err(drifted(at.full, before, None));
@@ -1608,10 +1670,12 @@ fn publish_replace(
         at.full,
         at.faults,
     )?;
-    Ok(wrote(
-        AfterState::Present(state),
-        sync_folder(folder, at.faults),
-    ))
+    let after = AfterState::Present(state);
+    acted(&Act {
+        path: at.path,
+        after,
+    });
+    Ok(wrote(after, sync_folder(folder, at.faults)))
 }
 
 /// Publish a remove: found where the target is already gone — its folder with
@@ -1622,6 +1686,7 @@ fn publish_remove(
     folder: Folder<'_>,
     before: ContentHash,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let chain = match folder {
         Folder::Reached(chain) => chain,
@@ -1644,7 +1709,13 @@ fn publish_remove(
         .check(Stage::Unlink)
         .map_err(|error| environment("removing", at.full, &error))?;
     match unlinkat(folder, at.target.name, AtFlags::empty()) {
-        Ok(()) => Ok(wrote(AfterState::Absent, sync_folder(folder, at.faults))),
+        Ok(()) => {
+            acted(&Act {
+                path: at.path,
+                after: AfterState::Absent,
+            });
+            Ok(wrote(AfterState::Absent, sync_folder(folder, at.faults)))
+        }
         // Gone between the verification and the unlink: another writer landed
         // it.
         Err(Errno::NOENT) => Ok(found(AfterState::Absent, sync_folder(folder, at.faults))),
@@ -1661,10 +1732,10 @@ fn publish_respell(
     at: &Place<'_>,
     folder: Folder<'_>,
     to: &OsStr,
-    before: ContentHash,
-    after: ContentHash,
+    (before, after): (ContentHash, ContentHash),
     shadow: Option<&StagedShadow>,
     disturb: &mut dyn FnMut(Window),
+    acted: &mut dyn FnMut(&Act<'_>),
 ) -> Result<Publication, Refusal> {
     let Folder::Reached(chain) = folder else {
         return Err(drifted(at.full, before, None));
@@ -1691,6 +1762,10 @@ fn publish_respell(
             let (home, published) = at.confirm(shadow, after)?;
             disturb(Window::Publishing);
             rename_shadow(home.as_fd(), shadow, folder, from, at.full, at.faults)?;
+            acted(&Act {
+                path: at.path,
+                after: AfterState::Present(published),
+            });
             Some(Published {
                 after: AfterState::Present(published),
                 durability: sync_folder(folder, at.faults),
@@ -1713,6 +1788,10 @@ fn publish_respell(
             .map_err(|error| environment("respelling", at.full, &error))?;
         renameat(folder, from, folder, to)
             .map_err(|errno| errno_refusal("respelling", at.full, errno))?;
+        acted(&Act {
+            path: &at.path.with_file_name(to),
+            after: AfterState::Present(state),
+        });
         Ok(Ok(state))
     })();
     match (second, first) {
@@ -2964,7 +3043,14 @@ mod tests {
         faults: Faults,
         disturb: &mut dyn FnMut(Window),
     ) -> Result<Publication, Refusal> {
-        publish_disturbed(&scratch.at(""), staged, scratch.shadows(), faults, disturb)
+        publish_disturbed(
+            &scratch.at(""),
+            staged,
+            scratch.shadows(),
+            faults,
+            disturb,
+            &mut |_| {},
+        )
     }
 
     /// The publication a call made, where it wrote.
@@ -3885,6 +3971,125 @@ mod tests {
         );
     }
 
+    /// The acts a publication handed over, each as its path, its after-state
+    /// and how many folder syncs the publication had made by then.
+    type HandedOver = Vec<(PathBuf, AfterState, usize)>;
+
+    /// Publish `staged` in `scratch`'s vault, and answer with every act it
+    /// handed over.
+    fn acts_of(scratch: &Scratch, staged: Staged) -> (Result<Publication, Refusal>, HandedOver) {
+        let mut acts = Vec::new();
+        let (publication, _) = syncs_of(|| {
+            publish_disturbed(
+                &scratch.at(""),
+                staged,
+                scratch.shadows(),
+                Faults::NONE,
+                &mut |_| {},
+                &mut |act| {
+                    let synced = SYNCED.with(|synced| synced.borrow().as_ref().map_or(0, Vec::len));
+                    acts.push((act.path.to_owned(), act.after, synced));
+                },
+            )
+        });
+        (publication, acts)
+    }
+
+    /// **Every act is handed over the moment it lands, before any folder
+    /// sync**, once, at the path it landed at and holding what the publication
+    /// reports — a create into a folder it makes, a replace and a remove alike —
+    /// and a landing another writer made hands over none. A record of the act
+    /// taken behind its sync is one the watcher's batch can settle ahead of.
+    #[test]
+    fn every_act_is_handed_over_before_its_folder_sync() {
+        let scratch = Scratch::new("write-act-before-sync");
+        scratch.place("note.md", b"old");
+        scratch.place("gone.md", b"gone");
+        let transitions = [
+            (
+                "made/one.md",
+                Transition::Create {
+                    content: Content::Held(b"ours"),
+                },
+            ),
+            ("note.md", replace_old_with_new()),
+            (
+                "gone.md",
+                Transition::Remove {
+                    before: ContentHash::of(b"gone"),
+                },
+            ),
+        ];
+        for (relative, transition) in transitions {
+            let staged = staged_in(&scratch, relative, transition);
+            let (publication, acts) = acts_of(&scratch, staged);
+            let published = written(publication.expect("published"));
+            assert!(published.durability.is_synced(), "{relative}");
+            assert_eq!(
+                acts,
+                vec![(PathBuf::from(relative), published.after, 0)],
+                "{relative}"
+            );
+        }
+
+        let staged = staged_in(
+            &scratch,
+            "theirs.md",
+            Transition::Create {
+                content: Content::Held(b"theirs"),
+            },
+        );
+        scratch.place("theirs.md", b"theirs");
+        let (found, acts) = acts_of(&scratch, staged);
+        assert!(matches!(found, Ok(Publication::Found(_))), "{found:?}");
+        assert!(acts.is_empty(), "a found landing handed over {acts:?}");
+    }
+
+    /// **A respell hands over each of its two acts before the sync behind
+    /// it**: the replace under the old spelling before the first folder sync,
+    /// and the rename at the new spelling after that sync and before the
+    /// second.
+    ///
+    /// Runs where the scratch root folds case; elsewhere a respell refuses
+    /// before either step, so the case skips — and fails on macOS, where the
+    /// scratch root is expected to fold.
+    #[test]
+    fn a_respell_hands_over_each_step_before_its_folder_sync() {
+        let scratch = Scratch::new("write-act-respell");
+        let folding = match crate::PathNormalizer::detect(&scratch.at(""))
+            .expect("the scratch root's case behavior")
+            .case_sensitivity()
+        {
+            crate::CaseSensitivity::Insensitive => Folding::Folded,
+            crate::CaseSensitivity::Sensitive => Folding::Distinct,
+        };
+        if !runs_where_the_volume_folds(
+            folding,
+            "a_respell_hands_over_each_step_before_its_folder_sync",
+        ) {
+            return;
+        }
+        scratch.place("note.md", b"old");
+        let staged = staged_in(
+            &scratch,
+            "note.md",
+            Transition::Respell {
+                to: Path::new("Note.md"),
+                before: ContentHash::of(b"old"),
+                content: Some(b"new"),
+            },
+        );
+        let (publication, acts) = acts_of(&scratch, staged);
+        let published = written(publication.expect("published"));
+        assert_eq!(
+            acts,
+            vec![
+                (PathBuf::from("note.md"), published.after, 0),
+                (PathBuf::from("Note.md"), published.after, 1),
+            ]
+        );
+    }
+
     /// The same bar on a publication: a create into folders that were already
     /// there — made by a crashed attempt, or by anybody — syncs each of them,
     /// and one found landed at the last check does too.
@@ -4265,8 +4470,15 @@ mod tests {
         };
         std::fs::rename(vault.join(".norn"), &moved).expect("moving `.norn` out");
         std::os::unix::fs::symlink(&moved, vault.join(".norn")).expect("a link in its place");
-        let refusal = publish_disturbed(&vault, staged, &home, Faults::NONE, &mut |_| {})
-            .expect_err("a home reached through a link");
+        let refusal = publish_disturbed(
+            &vault,
+            staged,
+            &home,
+            Faults::NONE,
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .expect_err("a home reached through a link");
         assert!(
             matches!(refusal, Refusal::LinkedAncestor { .. }),
             "{refusal}"

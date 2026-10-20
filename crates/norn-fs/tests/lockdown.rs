@@ -238,21 +238,23 @@ fn run_scenario(root: &Path) {
         let line = match staging {
             Err(refusal) => refused(&refusal),
             Ok(Staging::Landed(_)) => "outcome=landed".to_string(),
-            Ok(Staging::Staged(staged)) => match norn_fs::publish(&vault, staged, &shadows) {
-                Ok(Publication::Wrote(published)) => match &published.durability {
-                    Durability::Synced => "outcome=written durability=synced".to_string(),
-                    Durability::NotSynced(error) => format!(
-                        "outcome=written durability=not-synced errno={}",
-                        errno(error.raw_os_error())
+            Ok(Staging::Staged(staged)) => {
+                match norn_fs::publish(&vault, staged, &shadows, &mut |_| {}) {
+                    Ok(Publication::Wrote(published)) => match &published.durability {
+                        Durability::Synced => "outcome=written durability=synced".to_string(),
+                        Durability::NotSynced(error) => format!(
+                            "outcome=written durability=not-synced errno={}",
+                            errno(error.raw_os_error())
+                        ),
+                    },
+                    Ok(Publication::Found(_)) => "outcome=found".to_string(),
+                    Ok(Publication::Interrupted(interrupted)) => format!(
+                        "outcome=interrupted {}",
+                        refused(&interrupted.cause).replacen("outcome=", "cause=", 1)
                     ),
-                },
-                Ok(Publication::Found(_)) => "outcome=found".to_string(),
-                Ok(Publication::Interrupted(interrupted)) => format!(
-                    "outcome=interrupted {}",
-                    refused(&interrupted.cause).replacen("outcome=", "cause=", 1)
-                ),
-                Err(refusal) => refused(&refusal),
-            },
+                    Err(refusal) => refused(&refusal),
+                }
+            }
         };
         record(root, &format!("seam={CHILD_SEAM} target={path} {line}"));
     }

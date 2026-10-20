@@ -366,7 +366,8 @@ fn a_contended_vault_is_fully_workable() {
         else {
             panic!("{path} staged as already landed");
         };
-        let _ = publish(&vault, staged, &shadows).expect("published under a held lock");
+        let _ =
+            publish(&vault, staged, &shadows, &mut |_| {}).expect("published under a held lock");
     };
     apply(
         "fresh.md",

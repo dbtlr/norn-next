@@ -207,6 +207,6 @@ fn a_root_spelled_through_a_link_is_the_boundary() {
         )
         .expect("a root reached through a link"),
     );
-    let _ = norn_fs::publish(&spelled, staged, scratch.shadows()).expect("published");
+    let _ = norn_fs::publish(&spelled, staged, scratch.shadows(), &mut |_| {}).expect("published");
     assert_eq!(bytes_at(&scratch.at("note.md")), b"new");
 }

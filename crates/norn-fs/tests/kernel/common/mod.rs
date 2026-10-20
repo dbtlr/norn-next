@@ -80,7 +80,7 @@ impl Scratch {
     /// Publish what [`Scratch::stage`] staged.
     #[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
     pub fn publish(&self, staged: Staged) -> Result<Publication, Refusal> {
-        norn_fs::publish(&self.vault(), staged, &self.shadows)
+        norn_fs::publish(&self.vault(), staged, &self.shadows, &mut |_| {})
     }
 
     /// Stage `transition` and publish it at once, for a case about what a
