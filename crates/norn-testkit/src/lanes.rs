@@ -620,13 +620,13 @@ mod tests {
     /// neither direction of the pairing has a caller for it.
     #[test]
     fn a_package_no_row_names_is_reported_as_unaccounted() {
-        let adopting = ["norn-host", "norn-store"]
+        let adopting = ["norn-host", "unmapped-package"]
             .into_iter()
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
         assert_eq!(
             packages_outside_the_rows(&adopting),
-            vec!["norn-store".to_string()]
+            vec!["unmapped-package".to_string()]
         );
     }
 
