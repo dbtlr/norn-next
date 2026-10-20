@@ -38,6 +38,14 @@ Rebuildable state computed from vault documents. It is never the source of truth
 **Trust state**:
 The explicit assessment of whether a vault entry's derived state may safely answer requests.
 
+**Rolling heal**:
+A background pass that re-verifies an attached vault against its derived state and repairs changes the watcher did not report.
+_Avoid_: Drift scan
+
+**Watcher miss**:
+A vault change a rolling heal repairs after the watcher has had time to report it.
+_Avoid_: Fidelity defect
+
 **Vault registration**:
 Inclusion of a vault in the host's durable serving set. A vault included in that set is a registered vault.
 

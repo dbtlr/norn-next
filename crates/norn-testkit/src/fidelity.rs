@@ -9,12 +9,11 @@
 //! named. This module is the seam that record goes through — a
 //! [`FidelityReading`] per comparison, written as one JSON line under a run.
 //!
-//! **What it is not.** Nothing reads these lines yet. The seam exists so that
-//! the consumers Layer 2 commits to have somewhere to attach: the drift scans
-//! that ask whether a divergence class is recurring, and the post-lockdown
-//! comparison of one candidate's readings against the run before it. Both want
-//! the same record from every comparison the suites make, and a record invented
-//! per consumer is two vocabularies for one judgment.
+//! **Its consumer is the soak lane when that lane is revived.** Capturing
+//! `NORN_FIDELITY_LOG` beside soak records remains deferred with the lane.
+//! The rolling heal reports watcher misses through vault status and does not
+//! consume these comparison records. The seam remains the one vocabulary for
+//! comparing one candidate's equivalence readings against another's.
 //!
 //! **Why it is off unless asked for.** Writing a line per comparison on every
 //! developer's machine is noise, and a suite that failed because it could not
@@ -31,7 +30,7 @@ use crate::equivalence::{Comparison, Divergence, Population};
 /// the order the cases produced them, and a reader needs no framing to take one.
 pub const SINK: &str = "NORN_FIDELITY_LOG";
 
-/// One comparison, as the record a drift scan reads.
+/// One comparison, in the record a soak trend can read.
 ///
 /// Serializable and named by field rather than by position, because the
 /// consumers arrive later than the producer: a reading written by this build has
