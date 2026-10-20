@@ -619,8 +619,10 @@ its place is what takes it.** Nothing reads a path that left, so no act re-deriv
 and no discard reaches it — and a walk that enumerated a scope cleanly knows something no act at a
 path does: that nothing under that scope stands there at all. So a walk ends by taking, on each
 side, the findings whose subject its own scope holds and that nothing it read concluded — the same
-scope, in the same job-end recording that files what it did read, on the axis the rows are pruned
-on. **What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
+scope, at the same job end that files what it did read — after that filing, so a place the filing
+reached is not taken — on the axis the rows are pruned on. The prune is its own recording, one
+discard per subject and side rather than part of the filing's: a tear before it leaves exactly the
+state a heal that never pruned leaves. **What licenses that is enumeration, or a refusal that stands, rather than absence.** Three things
 withhold it, and each of them leaves the finding standing: a walk that refused ends its job ahead
 of its own prune; a root the walk read nothing at and cannot state a standing refusal for — a name
 that vanished inside one of the walk's own windows — covers the places beneath it, so a finding
@@ -2101,6 +2103,18 @@ ruleset — drifting from the code the moment either moved. See [ADR
 
 ## Part III — Runtime
 
+This part describes the target shape of the serving runtime, as Part II describes the whole
+target shape of the crate map. What runs today is the `norn-host` library: the registry and
+its serving set, lazy attach, the per-vault lifecycle and its jobs, and the read-only reader
+handles and request builders behind them, beside the `norn-config`, `norn-wire`, `norn-store`
+and `norn-fs` they stand on. Target shape, not yet built, because `norn-serve`, `norn-client`,
+`norn-console` and `norn-mcp` do not exist and the `norn` binary does nothing: the host
+*process* with its two lifecycles (a supervised service and an auto-launched TTL instance),
+the loopback HTTP and MCP surfaces and the bearer-auth middleware, the callers in the
+topology diagram, and the request flows as an end-to-end path from a caller's params to a
+wire report. Where a passage below states what the host does inside an entry, it holds
+today; where it states what a caller, the socket or the process does, it is the target.
+
 ### Topology
 
 **One host process serves all registered vaults**, with two lifecycles: a supervised
@@ -2120,7 +2134,7 @@ delivered engine section and no advisories until its own attach publishes them.
 Every vault operation requires a registration ([ADR
 0033](decisions/0033-every-vault-operation-requires-a-registration.md)): only registered
 vaults attach, and a directory no registered vault contains is registered by `vault
-register` today and will be set up by `init`, which registers it. Lazy attach bounds
+register` and set up by `init`, which registers it (neither verb has a surface until `norn-client` exists). Lazy attach bounds
 file-descriptor and watch usage against a measured budget, not an assumed one.
 
 ```mermaid

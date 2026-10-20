@@ -3747,19 +3747,22 @@ fn folded_reaches(root: &str, inner: &str, order: StoredPathOrder) -> bool {
     }
 }
 
-/// Read the roots a job's deaths freed and record what those readings file.
+/// End the job: read the roots its deaths freed, then take the findings its
+/// walks no longer account for.
 ///
 /// This runs after the job's last flush, and **nothing may flush after it**: the
 /// reading's findings are recorded by the drain here, and a flush that followed
 /// would find the queue already empty while its own increment discarded them.
-/// End the job: read the roots its deaths freed, then take the findings its
-/// walks no longer account for.
 ///
-/// **One job-end recording.** The reading files what the deaths of this job
-/// freed, and the prune after it takes what nothing this job read accounts for —
-/// in that order, because a place the reading files at is a place the prune must
-/// not take. Both write through the findings path every producer writes through,
-/// so a finding leaving here is a counted discard rather than a cascade.
+/// **Two recordings, in order.** The reading files what the deaths of this job
+/// freed through the findings path every producer writes through; the prune
+/// after it then takes what nothing this job read accounts for, in that order
+/// because a place the reading files at is a place the prune must not take. The
+/// prune is not part of the reading's recording: [`prune_unaccounted`] opens its
+/// own request and discard per subject and side, so a finding leaving here is a
+/// counted discard rather than a cascade. A tear between the two, or before the
+/// prune, leaves exactly the state a heal that never pruned leaves, which the
+/// next walk whose clean scope covers the place converges.
 fn close_job(
     store: &mut Store,
     root: &Path,
