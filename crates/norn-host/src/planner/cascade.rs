@@ -102,7 +102,6 @@
 //! read from here.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkFact, ProbedLink, TargetNaming};
@@ -697,10 +696,6 @@ struct Destination<'l> {
 }
 
 impl<'a> Cascade<'a> {
-    fn identity(&self, path: &str) -> Option<NormalizedPath> {
-        self.normalizer.normalize(Path::new(path)).ok()
-    }
-
     /// **The one rule a link's final document is read by**: where a link
     /// written as `link`, held at `holder` after the plan, named `named`
     /// before it, the operation that decides what it names after it
@@ -792,12 +787,10 @@ impl<'a> Cascade<'a> {
             let Some(links) = held.get(landed) else {
                 continue;
             };
-            let file = self.identity(landed.as_str());
+            let file = identity_of(self.normalizer, landed);
             for link in links.iter() {
-                let authored = file
-                    .as_ref()
-                    .is_some_and(|file| self.written.holds(file, link))
-                    && !self.kept.contains(&entry(landed, link));
+                let authored =
+                    self.written.holds(&file, link) && !self.kept.contains(&entry(landed, link));
                 if authored || ambiguous_before.contains(&entry(landed, link)) {
                     continue;
                 }
@@ -964,9 +957,8 @@ mod tests {
     use super::{Retarget, RetargetNaming, unretargeted};
 
     /// **A wikilink rewrite with no document to retarget to says why in
-    /// words**: a `new` naming one document at a path no link can be
-    /// respelled toward names that path, and one naming the document `old`
-    /// named, where the plan leaves it, says the two name one document.
+    /// words**: a `new` naming the document `old` named, where the plan
+    /// leaves it, says the two name one document.
     #[test]
     fn a_rewrite_with_no_document_to_retarget_to_says_why() {
         let retarget = Retarget {

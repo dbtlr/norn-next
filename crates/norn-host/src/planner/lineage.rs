@@ -481,13 +481,14 @@ impl Carried {
                     files.remove(&drawn.from);
                 }
             }
-            if let OperationKind::MoveDocument { from, to } = &operation.kind
-                && let (from, to) = (identity(from), identity(to))
-                && from == to
-                && let Some(drawn) = lineage.source(&from)
-                && drawn.from != from
-            {
-                files.remove(&drawn.from);
+            if let OperationKind::MoveDocument { from, to } = &operation.kind {
+                let (from, to) = (identity(from), identity(to));
+                if from == to
+                    && let Some(drawn) = lineage.source(&from)
+                    && drawn.from != from
+                {
+                    files.remove(&drawn.from);
+                }
             }
         }
         Carried { files }
