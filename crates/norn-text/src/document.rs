@@ -24,7 +24,7 @@ use crate::link::{BlockId, Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{
     LineCursor, split_lines_inclusive, split_yaml_lines_inclusive, trailing_break,
-    trim_yaml_line_break,
+    trailing_yaml_break, trim_yaml_line_break,
 };
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
@@ -1210,8 +1210,8 @@ impl<'a> Document<'a> {
             items.push(value.clone());
             return self.rewrite_list(field, items);
         };
-        let terminator =
-            trailing_break(&self.source[last.lines.clone()]).unwrap_or(self.line_ending.as_str());
+        let terminator = trailing_yaml_break(&self.source[last.lines.clone()])
+            .unwrap_or(self.line_ending.as_str());
         let item = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
         let edited = splice(self.source, last.lines.end..last.lines.end, &item);
         refuse_past_bound(&edited)?;

@@ -398,6 +398,24 @@ fn a_rewrite_lands_on_the_item_after_a_yaml_line_break() {
     );
 }
 
+/// An item pushed onto a list whose items end at a U+0085, U+2028 or U+2029
+/// break ends at that same break, so the list keeps the terminator it was
+/// written with rather than taking the document's.
+#[test]
+fn a_pushed_item_ends_at_the_yaml_line_break_its_list_uses() {
+    for brk in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("---\ntags:{brk}  - a{brk}  - b{brk}c: 1\n---\n");
+        let pushed = Document::parse(&source)
+            .push_to_list("tags", &"z".into())
+            .expect("spliced");
+        assert_eq!(
+            pushed,
+            format!("---\ntags:{brk}  - a{brk}  - b{brk}  - z{brk}c: 1\n---\n"),
+            "{brk:?}"
+        );
+    }
+}
+
 /// A closing `---` fence after a lone `\r` closes the block.
 ///
 /// The document here is a mixed one, its opening fence terminated by `\n` and

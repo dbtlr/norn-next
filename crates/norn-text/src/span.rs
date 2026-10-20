@@ -280,6 +280,18 @@ pub(crate) fn trailing_break(text: &str) -> Option<&'static str> {
         .find(|line_break| text.ends_with(line_break))
 }
 
+/// The break `text` ends with on the YAML reader's rule: one of
+/// [`trailing_break`]'s three, or a U+0085, U+2028 or U+2029.
+pub(crate) fn trailing_yaml_break(text: &str) -> Option<&str> {
+    trailing_break(text).or_else(|| {
+        let last = text
+            .chars()
+            .next_back()
+            .filter(|c| YAML_BREAKS.contains(c))?;
+        Some(&text[text.len() - last.len_utf8()..])
+    })
+}
+
 /// The three spellings of a line break, longest first so a `\r\n` pair is
 /// never read as the lone `\r` that opens it.
 const LINE_BREAKS: [&str; 3] = ["\r\n", "\n", "\r"];
