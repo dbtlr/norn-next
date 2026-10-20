@@ -60,6 +60,29 @@ fn applied(answer: ApplyAnswer) -> ApplyReport {
     answer.expect("the apply applied").report
 }
 
+#[test]
+fn an_apply_queued_during_maintenance_prevents_quiet_work() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    arrange_for(&ops.block_maintenance_at, &name);
+    arrange_for(&ops.maintenance_due_at, &name);
+    poll_watchers(&host.shared);
+    wait_for_flag("maintenance_started", &ops.maintenance_started);
+    let entry = host.shared.entries.get(&name).unwrap();
+    let epoch = entry.gate.lock().unwrap().claim.epoch();
+    let progress = reporter(&entry, epoch);
+    assert!(progress.quiet_maintenance_allowed());
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let allowed_with_apply_waiting = progress.quiet_maintenance_allowed();
+    ops.maintenance_release.store(true, Ordering::SeqCst);
+    applied(pending.wait());
+    assert!(
+        !allowed_with_apply_waiting,
+        "quiet work overtook a queued apply"
+    );
+    drop((lease, host));
+}
+
 /// **Case 1: admission over a free claim takes it at admission.** The entry
 /// is `Ready` and nothing holds it, so the apply is sent the moment it is
 /// admitted: the claim is held before `admit_apply` returns, and the apply

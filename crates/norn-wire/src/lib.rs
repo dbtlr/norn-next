@@ -671,7 +671,7 @@ pub use reading::{
 pub use reload::{ControlFile, ControlFileFailure, ReloadFailure, ReloadStage};
 pub use status::{
     Advisory, Attention, Drift, EngineStatus, Fingerprints, Published, Registration, RollUp,
-    VaultStatus,
+    RollingHealPhase, RollingHealProgress, RollingHealStatus, VaultStatus, WatcherMisses,
 };
 pub use tag::fold_tag;
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};

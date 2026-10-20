@@ -1467,9 +1467,7 @@ Two mechanisms carry trust, and both are contract:
   One accepted limit is the exception to that bias: the poll backend, which a registration
   selects explicitly, detects a change by stat alone — size, modification time, change time
   and inode — and reads content only where one of them moved, so an edit that leaves all four
-  unchanged goes unreported by polling. The drift scans below are the mechanism that closes
-  that gap; until they are built, such an edit waits for a later change to the same path or
-  for the next attach or recovery heal.
+  unchanged goes unreported by polling. The rolling heal below closes that gap.
   **The watch covers what the walk reads.** Neither backend follows a link inside the vault,
   so a dangling link costs nothing and a tree a link points at outside the vault is not
   covered; a file a poll lists and then cannot stat is a removal, not a failed backend.
@@ -1498,14 +1496,58 @@ Two mechanisms carry trust, and both are contract:
   registration to polling. [ADR
   0017](decisions/0017-watcher-synchronization-gates-readiness.md) records the protocol and its
   trade-offs.
-- **Background just-in-time drift scans** — idle-time, iterative, progressive
-  re-verification of derived state against the files. This mechanism is not built yet, which
-  makes it no less a contract: an absent mechanism binds here for the same reason an absent
-  crate does.
+- **The rolling heal (formerly drift scans)** — every attached vault re-verifies its
+  files in bounded maintenance slices, on either watcher backend. A pass is due one hour
+  after attachment, then on the same hourly cadence. Slices run back to back until the
+  pass finishes. An overdue pass waits while the entry owes a heal rung, an apply is
+  queued, or watcher facts remain pending. Read traffic does not make an attached vault
+  busy for this purpose. Watcher batches drain between slices. Shadow cleanup and store
+  verification retain their existing fairness under sustained watcher traffic.
 
-Their pairing is what will make fidelity **empirical instead of asserted** rather than
-leaving it a review-held claim: once the scans run, every drift a scan finds that the
-watcher missed is a counted defect, trended in the soak lane.
+  Preparation retains one directory stream per depth and visits at most **64 enumeration
+  acts per slice**, including directory ends and dot entries. Names are ordered in
+  SQLite's disk-backed temporary database, with a **256 KiB page cache**, outside the
+  lane-1 schema. The inventory resumes by key without listing earlier siblings or
+  subtrees again. The attachment retains its proven filesystem root, so resumption does
+  not repeat case-behavior detection. Temporary inventory and findings accounts vanish
+  when their writer connection closes and are retired in bounded pages after a pass.
+
+  The **one heal merge** reads successive path windows, checking at most **64 entries**
+  and hashing up to **1 MiB of content per slice**. A file larger than that budget is
+  read whole. Traversal stat can defer a file to the next slice, but only the bytes read
+  and hashed decide whether it changed. A file growing between stat and read can overrun
+  that slice's byte allowance. Its complete read still counts. These are working-set
+  bounds, not a time guarantee for one file or its derivation.
+
+  An inventory can span watcher turns, so each inventoried name is re-observed before
+  derivation. A stored-only name is confirmed before pruning, preserving a document a
+  watcher turn has added since enumeration. Changed listed spellings are replaced even
+  when their bytes match. A respelling's retirement and derivation share one changeset.
+  The merge also restores schema-stale rows and missing document findings. Findings accounting survives windows on disk. A bounded
+  finishing pass re-files refused spellings after rows have vacated their rendered
+  places, then prunes unaccounted findings by subject. Watcher turns withhold their own
+  roots from that older enumeration's prune. A full recovery supersedes an unfinished
+  inventory and retains its newly covered root for the next scheduled pass.
+
+  Refused spellings that share one rendered place have a narrower convergence limit:
+  a scoped watcher turn can leave missing or stale sibling findings, and a turn during
+  the pass can also duplicate or omit those findings. The next complete pass
+  over the settled names restores their census. Stored documents remain correct across
+  this window; same-pass completeness of these collided-spelling findings is not guaranteed.
+
+  `VaultStatus.rolling_heal` reports current pass progress, last completion, next due,
+  and cumulative **watcher misses**, reset on attachment. Changed and created files count
+  only when their descriptor-time mtime is at least **five seconds** old. Recent writes
+  heal without counting. Deleted known documents count without that delivery grace.
+  A file known by its content quarantine participates in the same classification.
+  Content quarantines retain literal finding-subject identities, so a case-only
+  respelling can count as a create plus a delete while its finding takes the listed spelling.
+  Schema-only repairs and restored findings are not watcher misses. A successful slice
+  changes neither trust nor the refusal vocabulary.
+
+Their pairing makes fidelity observable: watcher misses are reported in vault status.
+Capturing the comparison telemetry in the soak lane remains deferred until that lane is
+revived. The rolling heal does not depend on the soak lane.
 
 **Hash authority.** Only a content hash concludes "unchanged" **about a document** — anywhere
 in the system. A stat fingerprint may prioritize work or raise suspicion; it may never
@@ -1524,8 +1566,9 @@ Fidelity telemetry and hash authority sit in different lanes. Detection-to-conve
 the [churn suite](#2-the-heal-ladder)'s bar — convergence-to-equivalence with a
 from-scratch build, which a watcher that under-reports fails — and that bar binds today:
 the suite runs the warm path per pull request, and a report a watcher never made is a
-census that never converges. Fidelity telemetry —
-scan-caught misses per run — is a **soak-lane trend** and never fails a pull request. Hash
+census that never converges. Watcher-miss counts are status facts. Comparing their trend belongs to the dormant soak
+lane and never fails a pull request. The rolling-heal correctness and work-counter tests
+run per pull request. Hash
 authority itself is **review-held**: no lint or suite yet forbids a stat comparison from
 reaching a conclusion, so the invariant holds by review until one binds it, which is exactly
 the case this part's own rule warns about — a review-held invariant rots quietly.

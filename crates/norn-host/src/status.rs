@@ -199,6 +199,9 @@ impl<O: EntryOps> Host<O> {
             engine.section,
         )
         .with_advisories(advisories);
+        if let Some(rolling) = inspection.rolling_heal {
+            status = status.with_rolling_heal(rolling);
+        }
         if let Some(fingerprints) = inspection.active_fingerprints {
             status = status.with_fingerprints(fingerprints.into());
         }

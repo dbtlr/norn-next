@@ -471,6 +471,40 @@ impl Attention {
     }
 }
 
+/// Repairs a rolling heal found after the watcher had time to report them.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct WatcherMisses {
+    pub changed: u64,
+    pub created: u64,
+    pub deleted: u64,
+}
+
+/// The stage of a background pass, which never changes vault trust.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollingHealPhase {
+    Preparing,
+    Healing,
+    Finishing,
+}
+
+/// Progress of the current pass. Counts include skipped names and dead rows.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct RollingHealProgress {
+    pub phase: RollingHealPhase,
+    pub entries_enumerated: u64,
+    pub entries_checked: u64,
+}
+
+/// Background re-verification and watcher misses for the last attachment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct RollingHealStatus {
+    pub pass: Option<RollingHealProgress>,
+    pub last_completed_unix_seconds: Option<u64>,
+    pub next_due_unix_seconds: u64,
+    pub watcher_misses: WatcherMisses,
+}
+
 /// Where one vault's entry stands and what it is serving from.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -502,6 +536,9 @@ pub struct VaultStatus {
     /// entry's last attachment met it. Empty where there is nothing, and
     /// where the entry has not attached.
     pub advisories: Vec<Advisory>,
+    /// Absent until this entry has established an attachment.
+    #[serde(default)]
+    pub rolling_heal: Option<RollingHealStatus>,
 }
 
 impl VaultStatus {
@@ -517,6 +554,7 @@ impl VaultStatus {
         section: EngineSection,
     ) -> Self {
         VaultStatus {
+            rolling_heal: None,
             registration,
             published,
             fingerprints: None,
@@ -527,6 +565,13 @@ impl VaultStatus {
             section,
             advisories: Vec::new(),
         }
+    }
+
+    /// The status carrying the last attachment's rolling-heal reading.
+    #[must_use]
+    pub fn with_rolling_heal(mut self, reading: RollingHealStatus) -> Self {
+        self.rolling_heal = Some(reading);
+        self
     }
 
     /// The status serving under `fingerprints`.

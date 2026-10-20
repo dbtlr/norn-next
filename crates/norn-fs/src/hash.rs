@@ -50,7 +50,9 @@ pub(crate) fn read_bytes_and_hash(
 ) -> std::io::Result<(Vec<u8>, ContentHash)> {
     crate::reads::count_document_read(path);
     let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
+    let read = reader.read_to_end(&mut bytes);
+    crate::reads::count_document_bytes(bytes.len() as u64);
+    read?;
     let hash = ContentHash::of(&bytes);
     Ok((bytes, hash))
 }
