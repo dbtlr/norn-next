@@ -7992,7 +7992,7 @@ mod tests {
             let answer = loop {
                 drain_entered
                     .recv_timeout(Duration::from_secs(15))
-                    .expect("the drain of the leg that commits beta.md to reach the engine");
+                    .expect("a held drain to report the engine trailing beta.md's work");
                 let (answered, answers) = std::sync::mpsc::channel();
                 let asking = Arc::clone(&host);
                 let asked = name.clone();
