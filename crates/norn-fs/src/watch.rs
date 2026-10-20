@@ -1773,9 +1773,11 @@ impl PathEffect {
 
 fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
     let mut effect = PathEffect::default();
-    if state.registered_links.iter().any(|link| path == link)
-        && (kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))))
-    {
+    // Every kind at a registered link name rechecks, not only a removal or a
+    // rename: the poll backend reports a link replaced by rename as a changed
+    // stat on the name. The recheck compares identities, so an event that
+    // left the target alone ends nothing.
+    if state.registered_links.iter().any(|link| path == link) {
         effect.root_recheck = true;
         return effect;
     }
@@ -2331,18 +2333,35 @@ mod tests {
         }
     }
 
+    /// A native backend reports a link retarget as a rename and the poll
+    /// backend as a changed stat, so every kind at the name rechecks the root.
     #[test]
-    fn an_event_at_a_distinct_registered_name_ends_coverage() {
+    fn an_event_at_a_distinct_registered_name_rechecks_the_root() {
         let state = state();
         state.lock().unwrap().registered_links = vec![PathBuf::from("/registered/current")];
 
-        let effect = classify_path(
-            &state.lock().unwrap(),
+        for kind in [
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
-            Path::new("/registered/current"),
-        );
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        ] {
+            let effect = classify_path(
+                &state.lock().unwrap(),
+                kind,
+                Path::new("/registered/current"),
+            );
 
-        assert!(effect.root_recheck);
+            assert_eq!(
+                effect,
+                PathEffect {
+                    root_recheck: true,
+                    ..PathEffect::default()
+                },
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
