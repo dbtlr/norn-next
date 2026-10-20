@@ -588,22 +588,23 @@ impl ProductionEntryOps {
     }
 
     /// Composes the semantic engines: their config sections dispatch through
-    /// the receiver set, and every leg that commits lane-1 work relays a
-    /// drain to them afterwards.
+    /// the receiver set, and every leg that may commit lane-1 work relays a
+    /// drain to them afterwards, whether or not it committed any.
     pub fn with_semantic(mut self, engines: Arc<crate::semantic::SemanticEngines>) -> Self {
         self.semantic = Some(Arc::clone(&engines));
         self.engine_config_receivers.push(engines);
         self
     }
 
-    /// The post-leg nudge: lane-1 work just committed, so the leg records
-    /// where the store stands through `progress` and the vault's engine then
-    /// pulls the feed on this same worker leg. Engine trouble never fails
-    /// the leg — the engines retain their own diagnostics.
+    /// The post-leg nudge: lane-1 work may just have committed, so the leg
+    /// records where the store stands through `progress` and the vault's
+    /// engine then pulls the feed on this same worker leg. Engine trouble
+    /// never fails the leg — the engines retain their own diagnostics.
     ///
     /// The reading is recorded ahead of the drain, so a status taken while
     /// the drain runs judges the engine against the work this leg committed
-    /// and reports it trailing, as a search would. A host that composes no
+    /// and reports it trailing, as a search would; a leg that committed
+    /// nothing adds nothing to how far the engine trails. A host that composes no
     /// engine judges no engine, records nothing and drains nothing.
     fn drain_semantic(
         &self,
