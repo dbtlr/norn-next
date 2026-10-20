@@ -1280,6 +1280,9 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
 ///
 /// The splits are what keep the longest jobs short; the pairings below keep
 /// them from drifting back, and keep the suites from being dropped in the move.
+/// The Linux counter gates job runs the same two lane suites on a distinct
+/// root, `folding_cost` there being the control the macOS bar is read against,
+/// so it is held to both steps as well.
 /// None of the split jobs, nor any of their steps, may carry `needs:`, `if:` or
 /// `continue-on-error:`: each would serialize the job behind another, skip it,
 /// or let it fail without failing the PR.
@@ -1363,11 +1366,16 @@ fn the_per_pr_lane_splits_induced_failure_recovery_and_the_macos_counter_bars() 
             "the macOS folding-root counter job lacks `{required}`: {folding:?}"
         );
     }
+    let gates = ci_job(&gate, "gates");
     for suite in ["folding_cost", "counter_gate"] {
         let step = format!("lane-suite.sh norn-host {suite} --nocapture --test-threads=1");
         assert!(
             folding.iter().any(|line| line.contains(&step)),
             "the macOS folding-root counter job runs no `{suite}` step: {folding:?}"
+        );
+        assert!(
+            gates.iter().any(|line| line.contains(&step)),
+            "the Linux counter gates job runs no `{suite}` step: {gates:?}"
         );
     }
     assert_eq!(

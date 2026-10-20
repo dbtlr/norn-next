@@ -4095,8 +4095,9 @@ Four contracts inside that flow carry weight:
   staging's and publication's spelling checks are a fixed number of stored-name queries
   per target and read no directory entry, so N replacements cost the same in a folder of
   any width. A root that distinguishes case asks nothing. The `folding_cost` counter suite
-  pins that cost on the per-PR macOS job and its distinct-root control on Linux, crossing
-  32 and 128 targets with 256 and 2048 total siblings, and excludes normalization probes
+  pins that cost on the per-PR macOS folding-root counter job and its distinct-root
+  control on Linux, crossing 32 and 128 targets with 256 and 2048 total siblings, and
+  excludes normalization probes
   and watcher-thread echoes. A folding volume with no stored-name answer reads listings
   instead, which is O(siblings) per confirmation and outside this bar. The bar covers
   fresh replacements, not every operation kind or interrupted-plan reapplication.
