@@ -71,6 +71,7 @@ struct Faults {
     leader_observation: Option<libc::c_int>,
     group_signal: Option<libc::c_int>,
     group_observation: Option<libc::c_int>,
+    group_observation_always: Option<libc::c_int>,
     panic_marker: Option<PathBuf>,
     pretend_signal_presence: usize,
     signal_attempts: Arc<AtomicUsize>,
@@ -286,7 +287,13 @@ impl OwnedProcessGroup {
         };
         drop(child);
 
+        // The leader is reaped, so a live inaccessible member can still make
+        // `killpg(.., 0)` answer EPERM (macOS also does this while zombie members
+        // linger). EPERM is therefore still-present evidence: keep polling until
+        // ESRCH or the cleanup deadline, and report the last EPERM only if it
+        // persists to the deadline.
         let mut poll_wait = poll::FIRST_GAP;
+        let mut eperm_evidence: Option<io::Error>;
         loop {
             match self.observe_owned_group() {
                 Ok(GroupPresence::Absent) => {
@@ -306,7 +313,10 @@ impl OwnedProcessGroup {
                         timed_out,
                     });
                 }
-                Ok(GroupPresence::Present) => {}
+                Ok(GroupPresence::Present) => eperm_evidence = None,
+                Err(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                    eperm_evidence = Some(error);
+                }
                 Err(error) => {
                     return Err(with_signal_errors(
                         io::Error::new(
@@ -323,7 +333,10 @@ impl OwnedProcessGroup {
             let left = cleanup_ends.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(with_signal_errors(
-                    cleanup_timeout(self.pgid, cleanup_deadline, Some(ended.status)),
+                    with_proof_evidence(
+                        cleanup_timeout(self.pgid, cleanup_deadline, Some(ended.status)),
+                        eperm_evidence,
+                    ),
                     signal_errors,
                 ));
             }
@@ -377,6 +390,9 @@ impl OwnedProcessGroup {
             if let Some(errno) = self.faults.group_observation.take() {
                 return Err(io::Error::from_raw_os_error(errno));
             }
+            if let Some(errno) = self.faults.group_observation_always {
+                return Err(io::Error::from_raw_os_error(errno));
+            }
             if self.faults.group_remains_present {
                 return Ok(GroupPresence::Present);
             }
@@ -425,6 +441,11 @@ impl OwnedProcessGroup {
     #[cfg(test)]
     fn fail_next_group_observation(&mut self, errno: libc::c_int) {
         self.faults.group_observation = Some(errno);
+    }
+
+    #[cfg(test)]
+    fn fail_every_group_observation(&mut self, errno: libc::c_int) {
+        self.faults.group_observation_always = Some(errno);
     }
 
     #[cfg(test)]
@@ -525,12 +546,10 @@ fn signal_group(pgid: libc::pid_t, signal: libc::c_int) -> io::Result<GroupPrese
     }
 }
 
+// Probes the group with signal 0. The raw error is returned untouched so callers
+// can still classify its errno (EPERM is still-present evidence, not a failure).
 fn observe_group(pgid: libc::pid_t) -> io::Result<GroupPresence> {
-    signal_group(pgid, 0).map_err(|error| {
-        io::Error::other(format!(
-            "failed to prove that process group {pgid} is empty: {error}"
-        ))
-    })
+    signal_group(pgid, 0)
 }
 
 fn cleanup_timeout(
@@ -547,6 +566,17 @@ fn cleanup_timeout(
             "process group {pgid} still exists after the {deadline:?} cleanup deadline{status}"
         ),
     )
+}
+
+// Appends the last EPERM the empty-group proof saw, when one persisted to the deadline.
+fn with_proof_evidence(error: io::Error, eperm: Option<io::Error>) -> io::Error {
+    match eperm {
+        None => error,
+        Some(eperm) => io::Error::new(
+            error.kind(),
+            format!("{error}. The last empty-group proof attempt reported: {eperm}"),
+        ),
+    }
 }
 
 fn with_signal_errors(error: io::Error, signal_errors: Vec<io::Error>) -> io::Error {
@@ -799,10 +829,40 @@ mod tests {
     }
 
     #[test]
+    fn a_transient_eperm_in_the_final_proof_is_polled_until_the_group_is_absent() {
+        let mut group = completed_group();
+        group.fail_next_group_observation(libc::EPERM);
+
+        let ended = group
+            .wait(Duration::from_secs(5))
+            .expect("a one-shot EPERM is still-present evidence, not a failure");
+
+        assert!(!ended.timed_out);
+    }
+
+    #[test]
+    fn a_persistent_eperm_in_the_final_proof_fails_closed_at_the_cleanup_deadline() {
+        let mut group = completed_group();
+        group.set_cleanup_deadline_for_test(Duration::from_millis(50));
+        group.fail_every_group_observation(libc::EPERM);
+
+        let error = group
+            .wait(Duration::from_secs(5))
+            .expect_err("persistent EPERM never proves the group empty");
+        let message = error.to_string();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(message.contains("50ms"), "{message}");
+        assert!(message.contains("raw status"), "{message}");
+        assert!(message.contains("Operation not permitted"), "{message}");
+    }
+
+    #[test]
     fn final_eperm_and_delivery_errors_are_both_reported_with_leader_status() {
         let mut group = sleeping_group();
+        group.set_cleanup_deadline_for_test(Duration::from_millis(500));
         group.fail_next_group_signal(libc::EIO);
-        group.fail_next_group_observation(libc::EPERM);
+        group.fail_every_group_observation(libc::EPERM);
 
         let error = group
             .wait(Duration::from_millis(1))
