@@ -323,7 +323,17 @@ mod tests {
         let scratch = Scratch::new("inventory-raw-names");
         let expected: &[&[u8]] = &[b"a.md", b"n\x80.md", b"n\xff.md", b"z.md"];
         for name in expected.iter().rev() {
-            fs::write(scratch.at("").join(OsStr::from_bytes(name)), b"raw").unwrap();
+            match fs::write(scratch.at("").join(OsStr::from_bytes(name)), b"raw") {
+                Ok(()) => {}
+                Err(error)
+                    if std::str::from_utf8(name).is_err()
+                        && error.raw_os_error() == Some(libc::EILSEQ) =>
+                {
+                    eprintln!("skipped: scratch filesystem refuses non-UTF-8 names: {error}");
+                    return;
+                }
+                Err(error) => panic!("could not create inventory fixture {name:?}: {error}"),
+            }
         }
         let mut inventory = InventoryWalk::new(&scratch.at(""), &[]).unwrap();
         let mut records = bounded_inventory(&mut inventory, 1, 4);
