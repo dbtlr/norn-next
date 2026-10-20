@@ -308,6 +308,53 @@ fn a_count_answers_under_the_reading_of_its_snapshot() {
     );
 }
 
+/// Retained source provenance stays separate from each request's current trust.
+#[test]
+fn a_retained_count_reports_its_original_source_under_a_current_reading() {
+    let (_sandbox, vault) = a_vault("host-count-retained-reading");
+    for at in 0..8 {
+        std::fs::write(
+            vault.path().join(format!("retained-{at}.md")),
+            format!("---\nretained: {at}\nkind: example\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let params = a_count(vault.name())
+        .with_by([GroupKey::field("retained"), GroupKey::field("kind")])
+        .with_limit(2);
+    let first = host.count(&params).unwrap().answer;
+    let source = first.report.counted_at.clone();
+    let cursor = first.report.next.clone().expect("more groups");
+    // Reload replaces the reader and advances the pinned source schema.
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        b"version: 1\nfields:\n  retained:\n    type: number\n",
+    )
+    .unwrap();
+    wait_until(
+        "reload retained count schema",
+        attach::reload_budget(attach::READY_LIMIT),
+        || match host.reload(vault.name()) {
+            Ok(_) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(standing)) => Observed::pending(format!("{standing:?}")),
+            Err(refused) => panic!("reload refused: {refused:?}"),
+        },
+    )
+    .unwrap();
+    let page = host
+        .count(&params.clone().with_after(cursor))
+        .unwrap()
+        .answer;
+    assert_eq!(page.reading.trust, TrustState::Ready);
+    assert_eq!(page.report.counted_at, source);
+    assert!(page.reading.generation > source.generation);
+    assert!(page.report.moved.is_empty());
+    let fresh = host.count(&params).unwrap().answer;
+    assert!(fresh.report.counted_at.generation > source.generation);
+}
+
 /// **A count over an entry that holds nothing yet is refused with the warming
 /// state of the attach it asked for**, filed under `host/entry-not-ready`
 /// rather than answered as a state.

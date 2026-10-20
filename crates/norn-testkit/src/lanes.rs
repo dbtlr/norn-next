@@ -80,6 +80,7 @@ use crate::workflows::{CiSteps, LANE_FEATURES, LANE_SCRIPT, ci_steps_in};
 pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
     ("norn-fixtures", &["memory-lane case:", "soak-lane case:"]),
     ("norn-fs", &["memory-lane case:"]),
+    ("norn-store", &["memory-lane case:"]),
     (
         "norn-host",
         &["counter-lane case:", "memory-lane case:", "soak-lane case:"],
@@ -619,13 +620,13 @@ mod tests {
     /// neither direction of the pairing has a caller for it.
     #[test]
     fn a_package_no_row_names_is_reported_as_unaccounted() {
-        let adopting = ["norn-host", "norn-store"]
+        let adopting = ["norn-host", "unmapped-package"]
             .into_iter()
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
         assert_eq!(
             packages_outside_the_rows(&adopting),
-            vec!["norn-store".to_string()]
+            vec!["unmapped-package".to_string()]
         );
     }
 

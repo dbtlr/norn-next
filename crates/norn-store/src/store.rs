@@ -147,6 +147,7 @@ use crate::request::Request;
 /// }
 /// ```
 pub struct SnapshotReader {
+    count_results: Arc<crate::count::CountResults>,
     /// The one connection reads answer from, held here between reads and taken
     /// by the read that is answering.
     ///
@@ -269,7 +270,9 @@ impl SnapshotReader {
     /// thread has, in the difference, every statement SQLite began for it in
     /// that stretch. A caller holding a lock across the stretch learns what
     /// ran under its lock from its own two readings, however the statements
-    /// were composed and whoever ran them on that thread.
+    /// were composed and whoever ran them on that thread. Retained-count
+    /// scratch connections count here too; [`Snapshot::counters`] separately
+    /// names source statements only.
     pub fn statements_run_on_this_thread() -> u64 {
         norn_db::statements_begun_on_this_thread()
     }
@@ -508,6 +511,10 @@ impl fmt::Debug for Snapshot {
 }
 
 impl Snapshot {
+    pub(crate) fn count_results(&self) -> &Arc<crate::count::CountResults> {
+        &self.reader.count_results
+    }
+
     /// The store reading this snapshot was established at: which database, and
     /// how far its writes had got.
     pub fn reading(&self) -> &StoreReading {
@@ -587,6 +594,16 @@ impl Snapshot {
         self.counters.set(counters);
     }
 
+    pub(crate) fn explain_run(&self, ran: &Ran) -> Result<EmittedPlan, StoreError> {
+        match &ran.external_plan {
+            Some(plan) => Ok(plan.clone()),
+            None => self
+                .database()
+                .emitted_plan(ran.sql(), params_from_iter(ran.values().iter()))
+                .map_err(StoreError::from),
+        }
+    }
+
     /// Each statement in `record`, in the order it ran, as `plan` makes it of
     /// its name, its filters, and the plan SQLite reports for it: the text it
     /// ran, bound to the values it ran with, explained on this snapshot's
@@ -600,10 +617,7 @@ impl Snapshot {
         record
             .into_iter()
             .map(|ran| {
-                let emitted = self
-                    .database()
-                    .emitted_plan(ran.sql(), params_from_iter(ran.values().iter()))
-                    .map_err(StoreError::from)?;
+                let emitted = self.explain_run(&ran)?;
                 Ok(plan(ran.statement, ran.filters, emitted))
             })
             .collect()
@@ -631,29 +645,56 @@ impl Snapshot {
     /// failed before it was stepped — preparing its text or binding its
     /// values — or while it was stepped.
     ///
-    /// **This and [`Snapshot::run_statements_merged`] are the only functions
-    /// that prepare and step statements on this snapshot's connection.**
-    /// Both count every statement they run, so none can run uncounted.
+    /// Delegates preparation, stepping and counting to [`Snapshot::stream_statement`].
     pub(crate) fn run_statement_staged<T>(
         &self,
         record: &mut Vec<Ran>,
         ran: Ran,
-        read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        mut read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>, StatementFailure> {
+        let mut found = Vec::new();
+        match self.stream_statement(record, ran, |row| read(row).map(|value| found.push(value))) {
+            Ok(()) => Ok(found),
+            Err(crate::read::StreamFailure::Source(problem)) => Err(problem),
+            Err(crate::read::StreamFailure::Consumer(problem)) => {
+                Err(StatementFailure::Stepping(problem))
+            }
+        }
+    }
+
+    /// Stream one counted source statement without retaining its result set.
+    /// Consumer failures remain distinct from source-driver damage. This and
+    /// [`Snapshot::run_statements_merged`] are the counted preparation seams
+    /// on the source connection; disposable results count their own work.
+    pub(crate) fn stream_statement<E>(
+        &self,
+        record: &mut Vec<Ran>,
+        ran: Ran,
+        mut consume: impl FnMut(&Row<'_>) -> Result<(), E>,
+    ) -> Result<(), crate::read::StreamFailure<E>> {
+        use crate::read::StreamFailure;
         self.count_statement();
         record.push(ran);
         let ran = record.last_mut().expect("the statement was just recorded");
         let mut statement = self
             .connection()
             .prepare(ran.sql())
-            .map_err(StatementFailure::Preparing)?;
-        let rows = statement
-            .query_map(params_from_iter(ran.values().iter()), read)
-            .map_err(StatementFailure::Preparing)?
-            .collect::<rusqlite::Result<Vec<T>>>();
+            .map_err(|problem| StreamFailure::Source(StatementFailure::Preparing(problem)))?;
+        let result = (|| {
+            let mut rows = statement
+                .query(params_from_iter(ran.values().iter()))
+                .map_err(|problem| StreamFailure::Source(StatementFailure::Preparing(problem)))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|problem| StreamFailure::Source(StatementFailure::Stepping(problem)))?
+            {
+                consume(row).map_err(StreamFailure::Consumer)?;
+            }
+            Ok(())
+        })();
         ran.stepped = Stepped::of(&statement);
         self.count_steps(ran.stepped);
-        rows.map_err(StatementFailure::Stepping)
+        result
     }
 
     /// Merge path-only streams in answer order, retaining one head per stream.
@@ -807,6 +848,7 @@ impl StoreMode {
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
+    count_results: Arc<crate::count::CountResults>,
     pub(crate) database: Database,
     mode: StoreMode,
     order: StoredPathOrder,
@@ -868,6 +910,7 @@ impl Store {
         let database = Database::adopt(connection, path)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
+            count_results: Arc::new(crate::count::CountResults::default()),
             database,
             mode,
             order,
@@ -875,6 +918,20 @@ impl Store {
             outcome,
             torn_down: false,
         })
+    }
+
+    /// Configure immutable-count retention before minting any snapshot readers.
+    pub fn set_count_retention(
+        &mut self,
+        policy: crate::count::CountRetentionPolicy,
+    ) -> Result<(), StoreError> {
+        let results = Arc::get_mut(&mut self.count_results).ok_or_else(|| StoreError::Sql {
+            operation: "configuring count retention",
+            condition: None,
+            message: "configure retention before minting readers".to_string(),
+        })?;
+        *results = crate::count::CountResults::new(policy);
+        Ok(())
     }
 
     /// The database file this store is holding.
@@ -1024,6 +1081,7 @@ impl Store {
                 Ok(database)
             })
             .map(|database| SnapshotReader {
+                count_results: Arc::clone(&self.count_results),
                 epoch: database.epoch().to_string(),
                 order: self.order,
                 connection: Mutex::new(Some(database)),
@@ -1508,13 +1566,17 @@ impl Store {
     /// behaviour moved is handed the new one, and one rebuilt for damage is
     /// handed the order it already had. It is opened under the derivation
     /// version this store was, because the deriver's version does not move
-    /// while the build that names it runs.
+    /// while the build that names it runs. Retention configuration survives;
+    /// result ownership belongs to the replacement rather than the discarded store.
     pub fn discard_and_reopen(self, order: StoredPathOrder) -> Result<Self, StoreError> {
         let path = self.database.path().to_path_buf();
         let mode = self.mode;
         let derivation = self.derivation;
+        let policy = self.count_results.policy();
         self.discard()?;
-        Self::open_in_mode(&path, mode, order, derivation)
+        let mut replacement = Self::open_in_mode(&path, mode, order, derivation)?;
+        replacement.set_count_retention(policy)?;
+        Ok(replacement)
     }
 }
 
@@ -1821,6 +1883,34 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
 mod tests {
     use super::*;
     use norn_testkit::scratch::Scratch;
+
+    #[test]
+    fn rebuilding_preserves_retention_configuration_without_reusing_result_ownership() {
+        let scratch = Scratch::new("store-rebuild-count-policy");
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let policy = crate::CountRetentionPolicy {
+            lifetime: std::time::Duration::from_secs(7),
+            max_results: 3,
+            max_result_bytes: Some(16384),
+            total_bytes: Some(24576),
+        };
+        store.set_count_retention(policy).unwrap();
+        let previous = Arc::clone(&store.count_results);
+        let rebuilt = store
+            .discard_and_reopen(StoredPathOrder::Sensitive)
+            .unwrap();
+        let actual = rebuilt.count_results.policy();
+        assert_eq!(actual.lifetime, policy.lifetime);
+        assert_eq!(actual.max_results, policy.max_results);
+        assert_eq!(actual.max_result_bytes, policy.max_result_bytes);
+        assert_eq!(actual.total_bytes, policy.total_bytes);
+        assert!(!Arc::ptr_eq(&previous, &rebuilt.count_results));
+    }
 
     /// **A reader cannot write, and it is not the writer's connection.** The
     /// open takes neither the write flag nor create, and SQLite reports the

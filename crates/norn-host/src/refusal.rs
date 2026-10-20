@@ -540,6 +540,23 @@ pub(crate) enum PageRefused {
 pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
     let message = refusal.to_string();
     let detail = match refusal {
+        PageRefusal::CountCursorExpired => {
+            ErrorDetail::read_failed(ReadFailure::count_cursor_expired(), message.clone())
+        }
+        PageRefusal::CountResultCapacity { retry_after_millis } => ErrorDetail::read_failed(
+            ReadFailure::count_result_capacity(retry_after_millis),
+            message.clone(),
+        ),
+        PageRefusal::CountResultTooLarge { max_bytes } => ErrorDetail::read_failed(
+            ReadFailure::count_result_too_large(max_bytes),
+            message.clone(),
+        ),
+        PageRefusal::CountResultBusy => {
+            ErrorDetail::read_failed(ReadFailure::count_result_busy(), message.clone())
+        }
+        PageRefusal::CountResultFailed { .. } | PageRefusal::CountResultStorageFull => {
+            ErrorDetail::read_failed(ReadFailure::count_result(), message.clone())
+        }
         PageRefusal::UnreadableBound { key, value } => ErrorDetail::unreadable_bound(key, value),
         PageRefusal::DeclarationNotPinned {
             declared_under,
@@ -1619,6 +1636,12 @@ mod page_refusal_tests {
         UnknownTarget,
         UnknownRule,
         PartNotTaken,
+        CountCursorExpired,
+        CountResultBusy,
+        CountResultCapacity,
+        CountResultTooLarge,
+        CountResultFailed,
+        CountResultStorageFull,
         StoreDamaged,
         Store,
     }
@@ -1640,7 +1663,13 @@ mod page_refusal_tests {
                 Shape::AmbiguousTarget => Some(Shape::UnknownTarget),
                 Shape::UnknownTarget => Some(Shape::UnknownRule),
                 Shape::UnknownRule => Some(Shape::PartNotTaken),
-                Shape::PartNotTaken => Some(Shape::StoreDamaged),
+                Shape::PartNotTaken => Some(Shape::CountCursorExpired),
+                Shape::CountCursorExpired => Some(Shape::CountResultBusy),
+                Shape::CountResultBusy => Some(Shape::CountResultCapacity),
+                Shape::CountResultCapacity => Some(Shape::CountResultTooLarge),
+                Shape::CountResultTooLarge => Some(Shape::CountResultFailed),
+                Shape::CountResultFailed => Some(Shape::CountResultStorageFull),
+                Shape::CountResultStorageFull => Some(Shape::StoreDamaged),
                 Shape::StoreDamaged => Some(Shape::Store),
                 Shape::Store => None,
             }
@@ -1661,6 +1690,12 @@ mod page_refusal_tests {
     /// or store error variant minted without a shape does not compile.
     fn shape(refusal: &PageRefusal) -> Shape {
         match refusal {
+            PageRefusal::CountCursorExpired => Shape::CountCursorExpired,
+            PageRefusal::CountResultBusy => Shape::CountResultBusy,
+            PageRefusal::CountResultCapacity { .. } => Shape::CountResultCapacity,
+            PageRefusal::CountResultTooLarge { .. } => Shape::CountResultTooLarge,
+            PageRefusal::CountResultFailed { .. } => Shape::CountResultFailed,
+            PageRefusal::CountResultStorageFull => Shape::CountResultStorageFull,
             PageRefusal::UnreadableBound { .. } => Shape::UnreadableBound,
             PageRefusal::DeclarationNotPinned { .. } => Shape::DeclarationNotPinned,
             PageRefusal::OrderChanged(_) => Shape::OrderChanged,
@@ -1700,7 +1735,7 @@ mod page_refusal_tests {
         let changed =
             || CursorOrderChanged::new("fingerprint-a", Some("fingerprint-b".to_string()));
         let head = || CandidateHead::new([], 2).expect("a head of two");
-        vec![
+        let mut cases = vec![
             (
                 PageRefusal::UnreadableBound {
                     key: "due".to_string(),
@@ -1828,7 +1863,41 @@ mod page_refusal_tests {
                     "reading a page failed: disk I/O error",
                 ),
             ),
-        ]
+        ];
+        for (refusal, cause) in [
+            (
+                PageRefusal::CountCursorExpired,
+                ReadFailure::count_cursor_expired(),
+            ),
+            (
+                PageRefusal::CountResultBusy,
+                ReadFailure::count_result_busy(),
+            ),
+            (
+                PageRefusal::CountResultCapacity {
+                    retry_after_millis: Some(100),
+                },
+                ReadFailure::count_result_capacity(Some(100)),
+            ),
+            (
+                PageRefusal::CountResultTooLarge { max_bytes: 8192 },
+                ReadFailure::count_result_too_large(8192),
+            ),
+            (
+                PageRefusal::CountResultStorageFull,
+                ReadFailure::count_result(),
+            ),
+            (
+                PageRefusal::CountResultFailed {
+                    message: "scratch failed".to_string(),
+                },
+                ReadFailure::count_result(),
+            ),
+        ] {
+            let detail = ErrorDetail::read_failed(cause, refusal.to_string());
+            cases.push((refusal, ReasonCode::HostReadFailed, detail));
+        }
+        cases
     }
 
     /// Every store read refusal the store finds its derived data damaged for:

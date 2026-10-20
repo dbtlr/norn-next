@@ -106,6 +106,8 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
+    /// Bounds for immutable multi-key count results shared by the store's readers.
+    pub count_retention: norn_store::CountRetentionPolicy,
     /// Maximum stored rows read at once during an ordered heal merge.
     pub store_page_size: usize,
     /// Target changes per increment. An atomic respelling keeps its two row
@@ -127,6 +129,7 @@ impl ProductionPolicy {
             return Err(ProductionPolicyError::ChangesetSize(changeset_size));
         }
         Ok(Self {
+            count_retention: norn_store::CountRetentionPolicy::default(),
             store_page_size,
             changeset_size,
             #[cfg(test)]
@@ -1503,12 +1506,15 @@ impl EntryOps for ProductionEntryOps {
         // No root identity is recorded in the store. A registry root hand edit
         // keeps its epoch when those rebuild inputs agree. `vault set --root`
         // discards derived state so the next attach mints a new epoch.
-        let store = Store::open(
+        let mut store = Store::open(
             derived.join(STORE_FILE),
             path_order,
             crate::DERIVATION_VERSION,
         )
         .map_err(store_effect)?;
+        store
+            .set_count_retention(self.policy.count_retention)
+            .map_err(store_effect)?;
         subscription
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;

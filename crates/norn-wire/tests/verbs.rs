@@ -45,9 +45,8 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
 /// here, because both are params types that derive a schema and carry no
 /// vault.
 ///
-/// A paged report is an alias for `Page` over the row it carries, so `Page` is
-/// the title it advertises, and `Page` advertises that one title whatever its
-/// row is. Those rows name the row type as well: the title alone would hold
+/// A report aliasing `Page` advertises that title whatever its row is.
+/// Reports with additional provenance, such as `CountReport`, have their own title. Those rows name the row type as well: the title alone would hold
 /// `find` and `count` equal. A search report holds its page beside the ladder
 /// that ranked it, so it is a type of its own rather than a page.
 struct Spelling {
@@ -106,7 +105,7 @@ fn verb_table() -> Vec<Spelling> {
             vault_at: VaultAt::Params,
             verb: Verb::Count,
             params_type: "CountParams",
-            report_type: "Page",
+            report_type: "CountReport",
             report_rows: Some("Tally"),
             params: schema_of::<CountParams>(),
             report: schema_of::<CountReport>(),

@@ -5,10 +5,10 @@
 //! Both are **per-connection** settings in SQLite rather than properties of the
 //! file — foreign keys are off by default in every new connection — and the
 //! cascade a client's wholesale row replacement depends on needs them on. Two
-//! functions open every connection this workspace ever holds — [`connect`] for
-//! the one writer of a database, [`connect_read_only`] for a reader beside it —
-//! so there is no reading of a schema under settings the schema was not
-//! designed for.
+//! functions open durable domain connections — [`connect`] for the writer,
+//! [`connect_read_only`] for a reader beside it — under the same schema settings.
+//! [`crate::TemporaryDatabase`] is the separate, bounded open for disposable
+//! results; it has no durable schema ceremony or epoch.
 //!
 //! The open flags are named rather than defaulted, and the one that is left out
 //! is the point: **URI filenames are off**. With them on, a path is a
@@ -204,51 +204,11 @@ impl Database {
         &'a self,
         prepare: impl FnOnce(&'a Connection) -> Result<T, DbError>,
     ) -> Result<(T, BTreeSet<ColumnRead>), DbError> {
-        let recorded = Arc::new(Mutex::new(BTreeSet::new()));
-        let sink = Arc::clone(&recorded);
-        let seal = self.sealed.then(|| Arc::clone(&self.snapshot_control));
-        self.connection
-            .authorizer(Some(move |context: AuthContext<'_>| {
-                if let AuthAction::Read {
-                    table_name,
-                    column_name,
-                } = context.action
-                {
-                    #[cfg(test)]
-                    RECORDER_INVOCATIONS.with(|count| count.set(count.get() + 1));
-                    sink.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(ColumnRead {
-                            table: table_name.to_string(),
-                            column: column_name.to_string(),
-                        });
-                }
-                match &seal {
-                    Some(control) => sealed_verdict(control, context),
-                    None => Authorization::Allow,
-                }
-            }))
-            .map_err(|error| error::sql("recording the columns a statement reads", error))?;
-        let reinstate_on_unwind = ReinstateOwnAuthorizer::arm(self);
-        let prepared = prepare(&self.connection);
-        let reinstated = reinstate_on_unwind.run();
-        let value = prepared?;
-        reinstated?;
-        let reads = std::mem::take(&mut *recorded.lock().unwrap_or_else(PoisonError::into_inner));
-        Ok((value, reads))
-    }
-
-    /// Put the connection back in the state [`Database::recording_reads`]
-    /// found it in: a sealed connection gets [`arm_the_snapshot_control`]'s
-    /// authorizer back, a writable one gets none.
-    fn reinstate_own_authorizer(&self) -> Result<(), DbError> {
-        if self.sealed {
-            arm_the_snapshot_control(&self.connection, Arc::clone(&self.snapshot_control))
-        } else {
-            self.connection
-                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-                .map_err(|error| error::sql("removing the read recorder", error))
-        }
+        recording_reads(
+            &self.connection,
+            self.sealed.then(|| Arc::clone(&self.snapshot_control)),
+            prepare,
+        )
     }
 
     /// Count every statement SQLite begins on this connection from here on,
@@ -403,7 +363,7 @@ thread_local! {
 /// statement begun, counted on the thread SQLite began it on. Where
 /// `induced-failure` keeps a statement record, its text is recorded too.
 #[cfg_attr(not(feature = "induced-failure"), allow(unused_variables))]
-fn count_one_statement_begun(event: TraceEvent<'_>) {
+pub(crate) fn count_one_statement_begun(event: TraceEvent<'_>) {
     if let TraceEvent::Stmt(_, sql) = event {
         STATEMENTS_BEGUN.with(|begun| begun.set(begun.get().saturating_add(1)));
         #[cfg(feature = "induced-failure")]
@@ -668,46 +628,78 @@ fn arm_the_snapshot_control(
         .map_err(|error| error::sql("binding the snapshot control to its handle", error))
 }
 
-/// Reinstates a connection's own authorizer when dropped, so the temporary
-/// recorder [`Database::recording_reads`] installs never outlives the
-/// `prepare` call it wraps — a panic unwinding through `prepare` included.
-///
-/// [`ReinstateOwnAuthorizer::run`] is the ordinary exit's path: it reinstates
-/// and disarms the guard, so a `prepare` that returns — a value or a
-/// [`DbError`] alike — reinstates exactly once, there. A `prepare` that
-/// panics never reaches `run`; the guard is still armed when the unwind drops
-/// it, and `Drop::drop` is what reinstates instead. Either way the recorder
-/// installed for `prepare`'s length is gone once this guard is, so nothing
-/// past it still pays to record.
+/// Record column reads while preserving the connection's authorization policy.
+/// The original policy is restored on return and unwind.
+pub(crate) fn recording_reads<'a, T>(
+    connection: &'a Connection,
+    seal: Option<Arc<AtomicBool>>,
+    prepare: impl FnOnce(&'a Connection) -> Result<T, DbError>,
+) -> Result<(T, BTreeSet<ColumnRead>), DbError> {
+    let recorded = Arc::new(Mutex::new(BTreeSet::new()));
+    let sink = Arc::clone(&recorded);
+    let policy = seal.clone();
+    connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Read {
+                table_name,
+                column_name,
+            } = context.action
+            {
+                #[cfg(test)]
+                RECORDER_INVOCATIONS.with(|count| count.set(count.get() + 1));
+                sink.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(ColumnRead {
+                        table: table_name.to_string(),
+                        column: column_name.to_string(),
+                    });
+            }
+            match &policy {
+                Some(control) => sealed_verdict(control, context),
+                None => Authorization::Allow,
+            }
+        }))
+        .map_err(|error| error::sql("recording the columns a statement reads", error))?;
+    let restore = ReinstateOwnAuthorizer {
+        connection,
+        seal,
+        armed: true,
+    };
+    let prepared = prepare(connection);
+    let restored = restore.run();
+    let value = prepared?;
+    restored?;
+    let reads = std::mem::take(&mut *recorded.lock().unwrap_or_else(PoisonError::into_inner));
+    Ok((value, reads))
+}
+
 struct ReinstateOwnAuthorizer<'a> {
-    database: &'a Database,
+    connection: &'a Connection,
+    seal: Option<Arc<AtomicBool>>,
     armed: bool,
 }
 
-impl<'a> ReinstateOwnAuthorizer<'a> {
-    /// Arm the guard around `database`, which already carries the recorder
-    /// [`Database::recording_reads`] installed for the `prepare` about to run.
-    fn arm(database: &'a Database) -> Self {
-        ReinstateOwnAuthorizer {
-            database,
-            armed: true,
+impl ReinstateOwnAuthorizer<'_> {
+    fn restore(&self) -> Result<(), DbError> {
+        match &self.seal {
+            Some(control) => arm_the_snapshot_control(self.connection, Arc::clone(control)),
+            None => self
+                .connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .map_err(|error| error::sql("removing the read recorder", error)),
         }
     }
 
-    /// Reinstate the connection's own authorizer and disarm the guard, for
-    /// `prepare`'s ordinary — non-panicking — exit.
     fn run(mut self) -> Result<(), DbError> {
         self.armed = false;
-        self.database.reinstate_own_authorizer()
+        self.restore()
     }
 }
 
 impl Drop for ReinstateOwnAuthorizer<'_> {
     fn drop(&mut self) {
         if self.armed {
-            // A panic already owns the unwind here, so this is a best effort:
-            // an error it hits has nowhere left to report to.
-            let _ = self.database.reinstate_own_authorizer();
+            let _ = self.restore();
         }
     }
 }

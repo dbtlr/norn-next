@@ -62,30 +62,40 @@ impl Database {
     /// The reads are recorded while the explain is prepared, which compiles
     /// `sql` whole, under the verdict of the connection's own authorizer.
     pub fn emitted_plan(&self, sql: &str, parameters: impl Params) -> Result<EmittedPlan, DbError> {
-        let operation = "explaining an emitted statement";
-        let explained = format!("EXPLAIN QUERY PLAN {sql}");
-        let (mut statement, reads) = self.recording_reads(|connection| {
-            connection
-                .prepare(&explained)
-                .map_err(|error| error::sql(operation, error))
-        })?;
-        let rows = statement
-            .query_map(parameters, |row: &Row<'_>| {
-                Ok(PlanStep {
-                    id: row.get(0)?,
-                    parent: row.get(1)?,
-                    detail: row.get(3)?,
-                })
+        explain(sql, parameters, |sql| {
+            self.recording_reads(|connection| {
+                connection
+                    .prepare(sql)
+                    .map_err(|error| error::sql("explaining an emitted statement", error))
             })
-            .map_err(|error| error::sql(operation, error))?;
-        let mut steps = Vec::new();
-        for row in rows {
-            steps.push(row.map_err(|error| error::sql(operation, error))?);
-        }
-        Ok(EmittedPlan {
-            sql: sql.to_string(),
-            steps,
-            reads,
         })
     }
+}
+
+pub(crate) fn explain<'a>(
+    sql: &str,
+    parameters: impl Params,
+    prepare: impl FnOnce(&str) -> Result<(rusqlite::Statement<'a>, BTreeSet<ColumnRead>), DbError>,
+) -> Result<EmittedPlan, DbError> {
+    let operation = "explaining an emitted statement";
+    let explained = format!("EXPLAIN QUERY PLAN {sql}");
+    let (mut statement, reads) = prepare(&explained)?;
+    let rows = statement
+        .query_map(parameters, |row: &Row<'_>| {
+            Ok(PlanStep {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                detail: row.get(3)?,
+            })
+        })
+        .map_err(|error| error::sql(operation, error))?;
+    let mut steps = Vec::new();
+    for row in rows {
+        steps.push(row.map_err(|error| error::sql(operation, error))?);
+    }
+    Ok(EmittedPlan {
+        sql: sql.to_string(),
+        steps,
+        reads,
+    })
 }

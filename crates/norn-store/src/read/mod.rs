@@ -31,6 +31,7 @@ mod glob;
 mod keys;
 mod naming;
 mod page;
+pub(crate) use page::KeysetPage;
 mod reading;
 mod run;
 mod stems;
@@ -68,7 +69,7 @@ pub(crate) use finding::{
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
 pub(crate) use naming::{Naming, SuffixSpellings, wire_path};
-pub(crate) use run::{Lookups, Ran, StatementFailure, Stepped};
+pub(crate) use run::{Lookups, Ran, StatementFailure, Stepped, StreamFailure};
 
 /// How many rows a page holds when a request names no bound.
 ///
@@ -235,6 +236,8 @@ pub enum ReadStatement {
     Find(FindStatement),
     /// A statement [`CountStatement`] names.
     Count(CountStatement),
+    /// A statement on the disposable retained-tally relation.
+    CountResult(crate::count::CountResultStatement),
     /// A statement [`ValidateStatement`] names.
     Validate(ValidateStatement),
     /// A statement [`DescribeStatement`] names.
@@ -317,6 +320,18 @@ pub struct TargetAmbiguity {
 /// Why a read builder answered no page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PageRefusal {
+    /// The retained count result is gone or its absolute lifetime ended.
+    CountCursorExpired,
+    /// Result coordination is occupied; retry the same request.
+    CountResultBusy,
+    /// SQLite cannot distinguish its allocated-page cap from filesystem exhaustion.
+    CountResultStorageFull,
+    /// Retained results cannot admit another population within their bounds.
+    CountResultCapacity { retry_after_millis: Option<u64> },
+    /// An explicit disk quota cannot hold this result even without other results.
+    CountResultTooLarge { max_bytes: u64 },
+    /// Disposable result storage failed; the source store is not damaged.
+    CountResultFailed { message: String },
     /// A value a comparing part names — an equality, an inequality, a
     /// membership or a `before`/`after` bound — on a key declared with a typed
     /// order does not read as that type, so it names no place in the key's
@@ -388,6 +403,12 @@ pub enum PageRefusal {
 impl std::fmt::Display for PageRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PageRefusal::CountResultBusy => formatter.write_str("grouped-count results are busy; retry the request"),
+            PageRefusal::CountCursorExpired => formatter.write_str("the grouped-count cursor expired; restart the count"),
+            PageRefusal::CountResultCapacity { .. } => formatter.write_str("grouped-count result capacity is occupied; retry this continuation after capacity becomes available"),
+            PageRefusal::CountResultTooLarge { max_bytes } => write!(formatter, "grouped-count result exceeds its configured {max_bytes}-byte quota; increase the quota rather than restarting"),
+            PageRefusal::CountResultStorageFull => write!(formatter, "temporary count storage is full; free filesystem space or adjust any configured retention quota, then retry this continuation"),
+            PageRefusal::CountResultFailed { message } => write!(formatter, "the grouped-count result failed: {message}; check temporary storage and process resource availability, then retry this continuation"),
             PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"

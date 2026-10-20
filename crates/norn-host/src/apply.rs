@@ -894,6 +894,12 @@ fn asked_amiss(refusal: PageRefusal) -> Result<String, PageRefusal> {
         | PageRefusal::CursorNotTaken { .. }
         | PageRefusal::SummaryNotPaged
         | PageRefusal::UnknownRule { .. }
+        | PageRefusal::CountCursorExpired
+        | PageRefusal::CountResultBusy
+        | PageRefusal::CountResultCapacity { .. }
+        | PageRefusal::CountResultTooLarge { .. }
+        | PageRefusal::CountResultStorageFull
+        | PageRefusal::CountResultFailed { .. }
         | PageRefusal::Store(_) => Err(refusal),
     }
 }

@@ -34,6 +34,8 @@ publish.workspace = true
 norn-db = { path = "../norn-db" }
 norn-wire = { path = "../norn-wire" }
 sha2 = { workspace = true }
+# A retained continuation binds the canonical typed selection, not debug text.
+serde_json = { workspace = true }
 unicode-normalization = { workspace = true }
 
 # `induced-failure` gates `induced_failure`, the module of out-of-band

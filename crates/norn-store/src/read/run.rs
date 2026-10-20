@@ -25,6 +25,9 @@ pub(crate) struct Ran {
     /// What SQLite counted while the statement was stepped, read once every
     /// row it answers has been read.
     pub(crate) stepped: Stepped,
+    /// A reused prepared statement keeps one record and sums its executions.
+    pub(crate) executions: u64,
+    pub(crate) external_plan: Option<norn_db::EmittedPlan>,
 }
 
 /// What SQLite counts while one statement is stepped, read off the
@@ -74,6 +77,8 @@ impl Ran {
             sql,
             values,
             stepped: Stepped::default(),
+            executions: 1,
+            external_plan: None,
         }
     }
 
@@ -107,6 +112,9 @@ pub(crate) struct Lookups {
     pub(super) fingerprint: Option<Option<String>>,
     pub(super) known: BTreeMap<String, bool>,
     pub(crate) ran: Vec<Ran>,
+    pub(crate) capture_results: bool,
+    #[cfg(feature = "induced-failure")]
+    pub(crate) count_source_only: bool,
 }
 
 /// Where a statement a read ran failed. [`crate::store::Snapshot::run_statement_staged`]
@@ -126,4 +134,10 @@ impl StatementFailure {
             StatementFailure::Preparing(problem) | StatementFailure::Stepping(problem) => problem,
         }
     }
+}
+
+/// The source driver and the row consumer have independent failure domains.
+pub(crate) enum StreamFailure<E> {
+    Source(StatementFailure),
+    Consumer(E),
 }
