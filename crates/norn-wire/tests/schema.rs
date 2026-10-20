@@ -226,6 +226,10 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Advisory>(),
         schema_of::<Attention>(),
         schema_of::<VaultStatus>(),
+        schema_of::<norn_wire::RollingHealStatus>(),
+        schema_of::<norn_wire::RollingHealProgress>(),
+        schema_of::<norn_wire::RollingHealPhase>(),
+        schema_of::<norn_wire::WatcherMisses>(),
         schema_of::<RollUp>(),
         schema_of::<VaultChange<SchemaSource>>(),
         schema_of::<VaultReplace<VaultRoot>>(),
@@ -2760,6 +2764,7 @@ fn a_vault_status_advertises_the_whole_of_what_an_entry_stands_at() {
             "engine",
             "section",
             "advisories",
+            "rolling_heal",
         ]
         .into_iter()
         .collect()
@@ -2768,6 +2773,35 @@ fn a_vault_status_advertises_the_whole_of_what_an_entry_stands_at() {
         schema["properties"]["section"]["$ref"].as_str(),
         Some("#/$defs/EngineSection"),
         "a status advertises no delivered section beside its engine"
+    );
+}
+
+#[test]
+fn rolling_heal_readings_advertise_progress_history_and_miss_counts() {
+    assert_eq!(
+        property_names(&schema_of::<norn_wire::RollingHealStatus>()),
+        [
+            "pass",
+            "last_completed_unix_seconds",
+            "next_due_unix_seconds",
+            "watcher_misses"
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<norn_wire::RollingHealProgress>()),
+        ["phase", "entries_enumerated", "entries_checked"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(&schema_of::<norn_wire::WatcherMisses>()),
+        ["changed", "created", "deleted"].into_iter().collect()
+    );
+    assert_eq!(
+        schema_of::<norn_wire::RollingHealPhase>()["enum"],
+        serde_json::json!(["preparing", "healing", "finishing"])
     );
 }
 
