@@ -174,8 +174,9 @@ impl<O: EntryOps> Host<O> {
     /// Everything but the last two is the observation's one instant. The
     /// drift reads the control files now, outside the gate, and judges them
     /// against the fingerprints taken in that instant; the advisories read
-    /// the `.gitignore` now. Both files are the vault's own, which the host
-    /// does not hold, and the comparison is to the observed instant.
+    /// the fallback's self-ignore and the `.gitignore` now. All of them are
+    /// files in the vault, which the host does not hold, and the comparison
+    /// is to the observed instant.
     fn status_of(&self, observation: Observation) -> VaultStatus {
         let Observation {
             registration,
