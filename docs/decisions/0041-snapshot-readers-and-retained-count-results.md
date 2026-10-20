@@ -341,7 +341,10 @@ under that request, with the existing order and width checks. It cannot read
 the previous request's retained rows. A legacy tuple continuation may admit a
 retained result once. When retention cannot admit a fresh first page, that
 page keeps its existing source-query behavior and returns a tuple-only
-continuation. Retention capacity is never reported as an empty or partial
+continuation. Any scratch failure on a fresh first page follows this fallback,
+including inability to create the result file. A continuation reports the failure
+with guidance to restore temporary storage or process resources and retry.
+Retention capacity is never reported as an empty or partial
 successful count. A continuation unable to establish retained state refuses
 explicitly. Every admission refusal is distinct from expiry and says whether retrying
 the same continuation can succeed. Only expiry calls for a restart. The improved drain guarantee applies to admitted retained results.

@@ -1092,8 +1092,11 @@ same result reports no movement; one newly admitting a tuple continuation report
 movement to its source. Expired or lost results require restart, including after idle
 detach or store replacement. Busy and capacity refusals are retryable, and a quota established by admission
 checks names the quota. SQLite reports allocated-page exhaustion and filesystem exhaustion
-with the same code, so a storage-full refusal conservatively names both remedies. Fresh first pages fall back to source paging on admission refusal, with a
-tuple-only cursor. Changed selections are detected by their digest before result lookup
+with the same code, so a storage-full refusal conservatively names both remedies.
+Fresh first pages fall back to source paging on any retained-result failure, with a
+tuple-only cursor; this includes inability to create scratch storage. Continuations
+report the scratch failure with guidance to restore temporary storage or process resources
+and retry. Changed selections are detected by their digest before result lookup
 and follow normal tuple-position checks even after expiry. Reuse never renews the absolute
 deadline and requires at least half the configured lifetime to remain. ADR 0041 records
 the retained-continuation exception to source freshness and restates the reader contract.

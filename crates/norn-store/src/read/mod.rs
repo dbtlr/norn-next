@@ -408,7 +408,7 @@ impl std::fmt::Display for PageRefusal {
             PageRefusal::CountResultCapacity { .. } => formatter.write_str("grouped-count result capacity is occupied; retry this continuation after capacity becomes available"),
             PageRefusal::CountResultTooLarge { max_bytes } => write!(formatter, "grouped-count result exceeds its configured {max_bytes}-byte quota; increase the quota rather than restarting"),
             PageRefusal::CountResultStorageFull => write!(formatter, "temporary count storage is full; free filesystem space or adjust any configured retention quota, then retry this continuation"),
-            PageRefusal::CountResultFailed { message } => write!(formatter, "the grouped-count result failed: {message}"),
+            PageRefusal::CountResultFailed { message } => write!(formatter, "the grouped-count result failed: {message}; check temporary storage and process resource availability, then retry this continuation"),
             PageRefusal::UnreadableBound { key, value } => write!(
                 formatter,
                 "`{value}` does not read as the type `{key}` is declared with"

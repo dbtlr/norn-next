@@ -983,6 +983,54 @@ mod tests {
     }
 
     #[test]
+    fn an_unavailable_scratch_result_cannot_prevent_a_fresh_source_page() {
+        let scratch = Scratch::new("count-unavailable-first-page");
+        let store = Store::open(
+            scratch.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        let reader = Arc::new(store.open_reader().reader.unwrap());
+        let snapshot = reader.try_take().unwrap().establish().unwrap();
+        let model = ContentModel::none();
+        let base = CountParams::new(VaultAddress::name(VaultName::new("test").unwrap()));
+        let reading = snapshot.count(&base, &model).unwrap().snapshot;
+        let params = base.with_by([GroupKey::field("one"), GroupKey::field("two")]);
+        let owner = snapshot.count_results();
+        let result = owner
+            .reserve(CountTime::new(Instant::now()))
+            .unwrap()
+            .commit(
+                BuiltResult {
+                    database: TemporaryDatabase::open(64, None).unwrap(),
+                    bytes: 0,
+                    id: "unavailable".to_string(),
+                },
+                binding(&params),
+                CountOrigin {
+                    snapshot: reading,
+                    unsatisfied: Vec::new(),
+                    advisories: Vec::new(),
+                },
+                vec![Order::Raw, Order::Raw],
+                None,
+                Instant::now() + Duration::from_secs(600),
+            );
+        // A lost scratch table exercises the same generic failure as CANTOPEN.
+        owner
+            .lock()
+            .unwrap()
+            .entries
+            .insert(result.id.clone(), Arc::clone(&result));
+        let answer = snapshot
+            .count(&params, &model)
+            .expect("a fresh first page falls back to its source");
+        assert!(answer.tallies.is_empty());
+        assert!(!result.healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn a_broken_result_is_discarded_without_damaging_the_source() {
         let scratch = Scratch::new("count-broken-result");
         let store = Store::open(
