@@ -326,6 +326,19 @@ fn vault_reference(params: &Value) -> Option<&str> {
         .find_map(|branch| branch.get("$ref").and_then(Value::as_str))
 }
 
+/// Whether a plan document's `vault` is the vault address advertised closed:
+/// an inline set of branches, each tagged `by` and refusing any other key.
+fn is_closed_vault_address(holder: &Value) -> bool {
+    let Some(branches) = holder["properties"]["vault"]["oneOf"].as_array() else {
+        return false;
+    };
+    !branches.is_empty()
+        && branches.iter().all(|branch| {
+            branch["additionalProperties"] == Value::Bool(false)
+                && branch["properties"]["by"]["const"] == "name"
+        })
+}
+
 /// The schemas a request's vault address is read off: the params themselves,
 /// or each plan document their `plan` field can hold.
 fn vault_holders(spelling: &Spelling) -> Vec<&Value> {
@@ -493,6 +506,19 @@ fn every_verb_that_carries_a_vault_names_it_by_the_one_vault_address() {
             _ => Some("#/$defs/VaultAddress"),
         };
         for holder in vault_holders(&spelling) {
+            // A plan reads the address through a strict mirror and advertises
+            // it inline, closed; every other holder refers to the one type.
+            if expected.is_some()
+                && matches!(spelling.vault_at, VaultAt::Plan)
+                && vault_reference(holder).is_none()
+            {
+                assert!(
+                    is_closed_vault_address(holder),
+                    "{} names its vault by the wrong type",
+                    spelling.verb
+                );
+                continue;
+            }
             assert_eq!(
                 vault_reference(holder),
                 expected,

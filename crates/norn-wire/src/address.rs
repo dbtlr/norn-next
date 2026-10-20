@@ -430,6 +430,42 @@ pub enum VaultAddress {
     },
 }
 
+/// A vault address as a plan writes it: its tag and its
+/// keys and no other.
+#[derive(Deserialize)]
+#[serde(tag = "by", rename_all = "snake_case", deny_unknown_fields)]
+enum PlanVaultAddress {
+    Name { name: VaultName },
+}
+
+/// A vault address read as a plan reads one: an unknown
+/// key is refused, where an answer drops it.
+pub(crate) fn plan_vault_address<'de, D>(deserializer: D) -> Result<VaultAddress, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match PlanVaultAddress::deserialize(deserializer)? {
+        PlanVaultAddress::Name { name } => Ok(VaultAddress::name(name)),
+    }
+}
+
+/// The schema of a vault address a plan carries: the
+/// answer's, with each branch closed. Written inline because a closed `$ref`
+/// target would close the address for the answers too.
+pub(crate) fn plan_vault_address_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema = VaultAddress::json_schema(generator);
+    for key in ["oneOf", "anyOf"] {
+        if let Some(branches) = schema.get_mut(key).and_then(|b| b.as_array_mut()) {
+            for branch in branches {
+                if let Some(object) = branch.as_object_mut() {
+                    object.insert("additionalProperties".to_string(), false.into());
+                }
+            }
+        }
+    }
+    schema
+}
+
 impl VaultAddress {
     /// A vault addressed by its registered `name`.
     pub const fn name(name: VaultName) -> Self {

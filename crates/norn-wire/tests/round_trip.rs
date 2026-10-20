@@ -12407,6 +12407,51 @@ fn a_repair_request_names_its_mode_and_takes_no_force_or_conditions() {
     );
 }
 
+/// **A plan refuses an unknown key under its vault address**, as it does at
+/// every other depth. The address is shared with
+/// answers, which drop one, so a plan reads it through a strict mirror.
+#[test]
+fn a_plan_refuses_an_unknown_key_under_its_vault_address() {
+    let operations = serde_json::to_value(PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(VaultName::new("notes").expect("a name")),
+        Vec::new(),
+    )))
+    .expect("an operations plan as JSON");
+    let resolved = serde_json::to_value(PlanDocument::resolved(a_resolved_plan()))
+        .expect("a resolved plan as JSON");
+    for (what, json) in [("operations", &operations), ("resolved", &resolved)] {
+        let surprised = with_surprise(json, "/vault");
+        assert!(
+            serde_json::from_str::<PlanDocument>(&surprised).is_err(),
+            "{what} plan read with an unknown key under /vault"
+        );
+    }
+    let authored = serde_json::to_value(AuthoredPlan::new(
+        VaultAddress::name(VaultName::new("notes").expect("a name")),
+        Vec::new(),
+    ))
+    .expect("JSON");
+    assert!(serde_json::from_str::<AuthoredPlan>(&with_surprise(&authored, "/vault")).is_err());
+    let resolved_only = serde_json::to_value(a_resolved_plan()).expect("JSON");
+    assert!(
+        serde_json::from_str::<ResolvedPlan>(&with_surprise(&resolved_only, "/vault")).is_err()
+    );
+    // Without the key, the same documents read.
+    assert!(serde_json::from_value::<PlanDocument>(operations).is_ok());
+    assert!(serde_json::from_value::<PlanDocument>(resolved).is_ok());
+}
+
+/// **An answer still drops an unknown key under its vault address.**
+#[test]
+fn an_address_read_alone_still_drops_an_unknown_key() {
+    let address = VaultAddress::name(VaultName::new("notes").expect("a name"));
+    let json = serde_json::to_value(&address).expect("JSON");
+    assert_eq!(
+        serde_json::from_str::<VaultAddress>(&with_surprise(&json, "")).expect("an address"),
+        address
+    );
+}
+
 /// **The answer types a provenance embeds still drop an unknown key in an
 /// answer.** A plan reads a value head, a candidate and a candidate head
 /// strictly; a finding row, which holds the same types, reads them as every
