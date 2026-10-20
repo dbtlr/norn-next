@@ -697,7 +697,7 @@ impl<A: SnapshotSource> ProgressReporter<A> {
             let state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.stands_at(self.epoch)
                 && !state.owes_a_rung()
-                && !state.applies_waiting()
+                && state.applies.is_empty()
                 && state.pending.is_empty()
                 && !state.detach_due
         })

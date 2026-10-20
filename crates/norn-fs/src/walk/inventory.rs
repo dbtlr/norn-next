@@ -274,6 +274,27 @@ mod tests {
     }
 
     #[test]
+    fn replay_preserves_a_standing_special_file_refusal() {
+        let scratch = Scratch::new("inventory-replay-fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(scratch.at("pipe.md"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo failed");
+        let mut inventory = InventoryWalk::new(&scratch.at(""), &[]).unwrap();
+        let records = bounded_inventory(&mut inventory, 1, 1);
+        let window = ReadWindow::open();
+        let fact = inventory.replay(&records[0].value).unwrap();
+        let tally = window.finish();
+        assert!(matches!(fact, WalkFact::Skipped(skip)
+            if skip.path().as_path() == Path::new("pipe.md")
+                && skip.reason() == SkipReason::SpecialFile(crate::FileKind::Fifo)
+                && skip.reason().stands()));
+        assert_eq!(tally.document_opens, 0);
+        assert_eq!(tally.document_bytes, 0);
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the tree being observed.
     fn replay_reobserves_a_file_deleted_after_inventory() {
         let scratch = Scratch::new("inventory-replay-deleted");

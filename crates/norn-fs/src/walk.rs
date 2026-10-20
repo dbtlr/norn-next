@@ -187,11 +187,33 @@ impl Vault {
             }
             Reach::Stands {
                 kind: PathKind::Other,
-                ..
-            } => match open_subtree(self, &path)? {
-                Frontier::Skipped(skip) => return Ok(WalkFact::Skipped(skip)),
-                Frontier::Open(_) => SkipReason::Vanished,
-            },
+                at,
+            } => {
+                // Subtree descent treats nondirectories as absent. A stable
+                // special entry instead owns a standing, typed refusal.
+                if let Descent::Reached { directory, .. } = self.descend(names_above(&at))? {
+                    let name = at.as_path().file_name().expect("a normalized leaf");
+                    crate::reads::count_stat();
+                    let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(metadata) => Some(metadata),
+                        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => None,
+                        Err(source) => return Err(environment_errno("stating", relative, source)),
+                    };
+                    if let Some(metadata) = metadata
+                        && let EntryKind::Special(special) =
+                            classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
+                    {
+                        return Ok(WalkFact::Skipped(SkipFact {
+                            path: at,
+                            reason: SkipReason::SpecialFile(special),
+                        }));
+                    }
+                }
+                match open_subtree(self, &at)? {
+                    Frontier::Skipped(skip) => return Ok(WalkFact::Skipped(skip)),
+                    Frontier::Open(_) => SkipReason::Vanished,
+                }
+            }
             Reach::Stands { .. } => SkipReason::Vanished,
         };
         Ok(WalkFact::Skipped(SkipFact { path, reason }))
