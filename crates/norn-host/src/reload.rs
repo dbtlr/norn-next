@@ -196,6 +196,7 @@ pub enum ReloadRefusal {
 /// re-reading a control file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultInspection {
+    pub rolling_heal: Option<norn_wire::RollingHealStatus>,
     pub trust: TrustState,
     pub active_fingerprints: Option<ActiveFingerprints>,
     pub last_reload_error: Option<ReloadError>,

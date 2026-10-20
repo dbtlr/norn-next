@@ -217,8 +217,8 @@ pub use path::{
     comparison_key, suffix_probe,
 };
 pub use request::{
-    DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,
-    POINT_READS, Request, RuleSetCursor, STATEMENTS, SubjectScope,
+    DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, InventoryEntry,
+    MAX_PAGE, POINT_READS, Request, RuleSetCursor, STATEMENTS, SubjectScope,
 };
 pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use search::{

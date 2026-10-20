@@ -157,7 +157,7 @@ impl Vault {
     /// Observe a single inventoried name through the vault's anchored descent.
     /// A directory is deferred to the next inventory, with no authority over
     /// its descendants. Content is still read only by `FileFact::read_optional`.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam owns these handles.
     pub fn fact(&self, relative: &Path) -> Result<WalkFact, WalkError> {
         let path = self.normalize(relative)?;
         let reason = match self.reach(relative)? {

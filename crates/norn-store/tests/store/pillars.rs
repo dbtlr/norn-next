@@ -2618,7 +2618,7 @@ fn titled_frontmatter() -> Option<norn_store::FrontmatterValue> {
 }
 
 /// **A heal's page is a seek, in every scope and both orders.** The merge that
-/// heals a vault pages the rows through one of these three statements and walks
+/// heals a vault pages the rows through one scoped statement and walks
 /// the files beside them, so a page that reads more of the table than it returns
 /// makes the whole heal cost the vault once per page. The bar is the plan's:
 /// each page reaches its first row through the index that already holds the
@@ -2644,6 +2644,14 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
         norn_store::SubjectScope::Vault,
         norn_store::SubjectScope::Subtree(&root),
         norn_store::SubjectScope::Under(&prefix),
+        norn_store::SubjectScope::Window {
+            after: b"one/",
+            through: Some(b"one0"),
+        },
+        norn_store::SubjectScope::Window {
+            after: b"one/",
+            through: None,
+        },
     ] {
         for order in [
             norn_store::StoredPathOrder::Sensitive,
@@ -2676,7 +2684,11 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
             page.assert_search_constraint(
                 "documents",
                 match scope {
-                    norn_store::SubjectScope::Vault => "(path>?)",
+                    norn_store::SubjectScope::Vault
+                    | norn_store::SubjectScope::Window { through: None, .. } => "(path>?)",
+                    norn_store::SubjectScope::Window {
+                        through: Some(_), ..
+                    } => "(path>? AND path<?)",
                     norn_store::SubjectScope::Subtree(_) | norn_store::SubjectScope::Under(_) => {
                         "(path>? AND path<?)"
                     }

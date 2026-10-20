@@ -301,19 +301,12 @@ fn drained_pages(
     order: StoredPathOrder,
 ) -> Vec<String> {
     drained(|after| {
-        match scope {
-            SubjectScope::Vault => request.stored_documents_after_ordered(after, 1, order),
-            SubjectScope::Subtree(root) => {
-                request.stored_documents_in_subtree_after_ordered(root, after, 1, order)
-            }
-            SubjectScope::Under(prefix) => {
-                request.stored_documents_under_after_ordered(prefix, after, 1, order)
-            }
-        }
-        .expect("a page of one")
-        .into_iter()
-        .map(|row| row.path)
-        .collect()
+        request
+            .stored_documents_in_range_after_ordered(scope, after, 1, order)
+            .expect("a page of one")
+            .into_iter()
+            .map(|row| row.path)
+            .collect()
     })
 }
 

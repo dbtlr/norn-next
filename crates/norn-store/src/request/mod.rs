@@ -92,6 +92,7 @@ use crate::write_path::WriteStatement;
 mod instrument;
 mod inventory;
 pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
+pub use inventory::InventoryEntry;
 
 /// Maximum row count any paged reader accepts.
 ///
@@ -661,8 +662,7 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// One bounded page of the rows a scope's exact path and descendant range
-    /// hold.
+    /// One bounded page of the rows a scope holds.
     ///
     /// Both bounds and cursor are expressed as whole paths, so this never relies
     /// on wildcard matching or admits a textual neighbor such as `ab` while

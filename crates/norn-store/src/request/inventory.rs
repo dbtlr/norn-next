@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// One path-order key and the opaque name observation stored under it.
+pub type InventoryEntry = (Vec<u8>, Vec<u8>);
+
 /// Opaque ordered observations, held in SQLite's disk-backed temporary
 /// database rather than the lane-1 schema. They do not change its generation
 /// or fingerprint and disappear when the writer connection closes.
@@ -40,7 +43,7 @@ impl Request<'_> {
         &self,
         after: Option<&[u8]>,
         limit: usize,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+    ) -> Result<Vec<InventoryEntry>, StoreError> {
         if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "an inventory page",

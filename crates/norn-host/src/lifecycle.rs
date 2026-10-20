@@ -503,6 +503,22 @@ pub trait EntryOps: Send + Sync + 'static {
     fn maintenance_due(&self, _: &VaultName, _: &Self::Attachment) -> bool {
         false
     }
+    /// Run maintenance with the entry's quietness at the claim boundary.
+    /// Ordinary maintenance retains its fairness under watcher traffic.
+    fn maintain_quiet(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        _: bool,
+        _: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        self.maintain(name, attachment)
+    }
+
+    fn rolling_heal(&self, _: &Self::Attachment) -> Option<norn_wire::RollingHealStatus> {
+        None
+    }
+
     /// Run blocking maintenance on the bounded lifecycle worker pool.
     fn maintain(&self, _: &VaultName, _: &mut Self::Attachment) -> Result<(), JobFailure> {
         Ok(())
@@ -673,6 +689,18 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         if state.claim.stands_at(self.epoch) {
             state.store_reading = reading;
         }
+    }
+
+    /// Recheck the claim immediately before starting a quiet-only duty.
+    pub fn quiet_maintenance_allowed(&self) -> bool {
+        self.entry.upgrade().is_some_and(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            state.claim.stands_at(self.epoch)
+                && !state.owes_a_rung()
+                && !state.applies_waiting()
+                && state.pending.is_empty()
+                && !state.detach_due
+        })
     }
 
     /// Answer whether an apply this job runs may begin publishing, and mark
@@ -1002,6 +1030,7 @@ impl<A: SnapshotSource> Entry<A> {
                 control_root: None,
                 last_reload_error: None,
                 advisories: Vec::new(),
+                rolling_heal: None,
                 store_reading: None,
                 delivered_engine: None,
                 plan_ground: None,
@@ -1124,6 +1153,7 @@ struct EntryState<A: SnapshotSource> {
     /// attachment's publication replaces it. An entry that has not attached
     /// since this host started carries none.
     advisories: Vec<AttachmentAdvisory>,
+    rolling_heal: Option<norn_wire::RollingHealStatus>,
     /// Where the lane-1 store of the coverage the entry holds stood when the
     /// last leg over it committed its lane-1 work or failed, as that leg
     /// recorded it
@@ -2053,6 +2083,7 @@ impl<A: SnapshotSource> EntryState<A> {
                 last_reload_error: self.last_reload_error.clone(),
                 reader_unavailable: self.reader_unavailable.clone(),
                 advisories: self.advisories.clone(),
+                rolling_heal: self.rolling_heal.clone(),
             },
             control_root: self.control_root.clone(),
         })
@@ -2706,6 +2737,7 @@ fn record_advisories<O: EntryOps>(
     attachment: &O::Attachment,
 ) {
     state.advisories = ops.advisories(attachment);
+    state.rolling_heal = ops.rolling_heal(attachment);
 }
 
 /// Enter the window in which an entry's resources are going back.
@@ -7400,7 +7432,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         ),
         Job::Apply(name, epoch) => run_apply_job(shared, entry, name, epoch),
         Job::Maintenance(name, epoch) => {
-            let mut attachment = {
+            let (mut attachment, quiet) = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
                     return None;
@@ -7419,9 +7451,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 };
                 state.pin_for_leg(Leg::Job(epoch));
-                attachment
+                let quiet = !state.owes_a_rung() && state.pending.is_empty();
+                (attachment, quiet)
             };
-            let mut result = shared.ops.maintain(&name, &mut attachment);
+            let progress = reporter(entry, epoch);
+            let mut result = shared
+                .ops
+                .maintain_quiet(&name, &mut attachment, quiet, &progress);
             let mut observed = Batch::default();
             let mut handoff_saturated = false;
             if result.is_ok() {
@@ -7433,6 +7469,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     Err(error) => result = Err(error),
                 }
             }
+            let maintenance_due = result.is_ok() && shared.ops.maintenance_due(&name, &attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin_leg(Leg::Job(epoch));
             if !state.claim.stands_at(epoch) {
@@ -7444,8 +7481,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             let mut next = None;
             let mut lost_at = None;
+            state.rolling_heal = shared.ops.rolling_heal(&attachment);
             match result {
                 Ok(()) => {
+                    record_advisories(&mut state, &*shared.ops, &attachment);
                     state.pending.merge(observed);
                     state.coverage.park_by(epoch, attachment);
                     state.claim.release();
@@ -7468,6 +7507,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                             state
                                 .claim
                                 .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+                        );
+                    } else if maintenance_due && !state.owes_a_rung() {
+                        next = Some(
+                            state
+                                .claim
+                                .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
                         );
                     }
                 }
@@ -9126,6 +9171,7 @@ mod tests {
         /// the case arranged for whenever that one is skipped on the tick, its
         /// claim held or its coverage out with a leg.
         maintenance_due_at: Mutex<Option<VaultName>>,
+        quiet_maintenances: Mutex<Vec<bool>>,
         maintenances: AtomicUsize,
         /// The vault whose maintenance waits at the gate until the case sets
         /// `maintenance_release`.
@@ -9834,6 +9880,17 @@ mod tests {
                 answer: ApplyEnding::Answered(Ok((fake_reading(1), report))),
                 heal: healing.then(a_fact),
             })
+        }
+
+        fn maintain_quiet(
+            &self,
+            name: &VaultName,
+            attachment: &mut FakeCoverage,
+            quiet: bool,
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> Result<(), JobFailure> {
+            self.quiet_maintenances.lock().unwrap().push(quiet);
+            self.maintain(name, attachment)
         }
 
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
@@ -25755,6 +25812,174 @@ mod tests {
             "the facts the yielding turn observed were dropped by the maintenance beside them"
         );
         drop(lease);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    fn a_quiet_attached_vault_heals_dropped_events_through_maintenance_and_reports_misses() {
+        use crate::production::{ProductionAttachment, ProductionEntryOps, ProductionPolicy};
+        use std::fs;
+        // The seam drops delivered facts, so the rolling heal must find the
+        // writes independently of either backend's scheduling or fidelity.
+        struct DroppedEvents(ProductionEntryOps);
+        impl EntryOps for DroppedEvents {
+            type Attachment = ProductionAttachment;
+            fn attach(
+                &self,
+                registration: &Registration,
+                progress: &ProgressReporter<ProductionAttachment>,
+            ) -> Result<ProductionAttachment, JobFailure> {
+                self.0.attach(registration, progress)
+            }
+            fn reconcile(
+                &self,
+                name: &VaultName,
+                attachment: &mut ProductionAttachment,
+                work: ReconcileWork,
+                progress: &ProgressReporter<ProductionAttachment>,
+            ) -> Result<(), JobFailure> {
+                self.0.reconcile(name, attachment, work, progress)
+            }
+            fn recover(
+                &self,
+                name: &VaultName,
+                attachment: &mut ProductionAttachment,
+                progress: &ProgressReporter<ProductionAttachment>,
+            ) -> Result<(), JobFailure> {
+                self.0.recover(name, attachment, progress)
+            }
+            fn rebuild(
+                &self,
+                name: &VaultName,
+                attachment: ProductionAttachment,
+                progress: &ProgressReporter<ProductionAttachment>,
+            ) -> Result<ProductionAttachment, JobFailure> {
+                self.0.rebuild(name, attachment, progress)
+            }
+            fn poll(
+                &self,
+                name: &VaultName,
+                attachment: &mut ProductionAttachment,
+            ) -> Result<Option<Batch>, JobFailure> {
+                self.0.poll(name, attachment).map(|_| None)
+            }
+            fn maintenance_due(&self, name: &VaultName, attachment: &ProductionAttachment) -> bool {
+                self.0.maintenance_due(name, attachment)
+            }
+            fn maintain_quiet(
+                &self,
+                name: &VaultName,
+                attachment: &mut ProductionAttachment,
+                quiet: bool,
+                progress: &ProgressReporter<ProductionAttachment>,
+            ) -> Result<(), JobFailure> {
+                self.0.maintain_quiet(name, attachment, quiet, progress)
+            }
+            fn rolling_heal(
+                &self,
+                attachment: &ProductionAttachment,
+            ) -> Option<norn_wire::RollingHealStatus> {
+                self.0.rolling_heal(attachment)
+            }
+            fn detach(&self, name: &VaultName, attachment: ProductionAttachment) {
+                self.0.detach(name, attachment);
+            }
+            fn count_leg_mint(&self, statements: u64) {
+                self.0.count_leg_mint(statements);
+            }
+        }
+        for polling in [false, true] {
+            let scratch = norn_testkit::scratch::Scratch::new(&format!("rolling-host-{polling}"));
+            let root = scratch.join("vault");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("changed.md"), "before").unwrap();
+            fs::write(root.join("deleted.md"), "before").unwrap();
+            let old = std::time::SystemTime::now() - Duration::from_secs(60);
+            fs::File::open(root.join("changed.md"))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+            let name = VaultName::new("notes").unwrap();
+            let mut registration = Registration::new(name.clone(), VaultRoot::new(&root).unwrap());
+            if polling {
+                registration.poll_backend = Some(norn_config::registry::PollBackend::Poll);
+            }
+            let dirs =
+                norn_config::ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap();
+            let mut policy = ProductionPolicy::new(2, 2).unwrap();
+            policy.rolling_period = Duration::from_millis(10);
+            let host = Host::new(
+                RegistryRead::from_entries([registration]),
+                DroppedEvents(ProductionEntryOps::new(dirs, policy)),
+                no_ambient_poll_policy(1),
+            )
+            .unwrap();
+            let lease = host.demand(&name).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            fs::write(root.join("changed.md"), "after!").unwrap();
+            fs::File::open(root.join("changed.md"))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+            fs::write(root.join("created.md"), "created").unwrap();
+            fs::File::open(root.join("created.md"))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+            fs::remove_file(root.join("deleted.md")).unwrap();
+            wait_until(
+                "rolling maintenance completion",
+                lifecycle_wait_budget(),
+                || {
+                    poll_watchers(&host.shared);
+                    assert_eq!(host.state(&name).unwrap(), TrustState::Ready);
+                    let status = status_of(&host, &name)
+                        .rolling_heal
+                        .expect("attached status");
+                    if status.last_completed_unix_seconds.is_some()
+                        && status.watcher_misses.deleted == 1
+                    {
+                        Observed::Met(status)
+                    } else {
+                        Observed::pending(format!("{status:?}"))
+                    }
+                },
+            )
+            .map(|status| {
+                assert_eq!(
+                    status.watcher_misses,
+                    norn_wire::WatcherMisses {
+                        changed: 1,
+                        created: 1,
+                        deleted: 1
+                    }
+                );
+                assert!(status.next_due_unix_seconds > 0);
+            })
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            drop(lease);
+        }
+    }
+
+    #[test]
+    fn maintenance_identifies_quiet_claims_without_delaying_busy_maintenance() {
+        for busy in [false, true] {
+            let ops = Arc::new(FakeOps::default());
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+            let lease = host.demand(&name).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            if busy {
+                ops.off_thread_rescan_poll_batches
+                    .store(1, Ordering::SeqCst);
+            }
+            arrange_for(&ops.maintenance_due_at, &name);
+            poll_watchers(&host.shared);
+            wait_for_maintenance(&ops);
+            wait_for_state(&host, &name, TrustState::Ready);
+            assert_eq!(*ops.quiet_maintenances.lock().unwrap(), [!busy]);
+            drop(lease);
+        }
     }
 
     /// Wait for one maintenance leg to have run.
