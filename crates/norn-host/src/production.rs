@@ -108,7 +108,8 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 pub struct ProductionPolicy {
     /// Maximum stored rows read at once during an ordered heal merge.
     pub store_page_size: usize,
-    /// Maximum changes committed by one increment transaction.
+    /// Target changes per increment. An atomic respelling keeps its two row
+    /// changes together, including when this target is one.
     pub changeset_size: usize,
     #[cfg(test)]
     pub(crate) rolling_period: Duration,
@@ -1823,8 +1824,6 @@ impl EntryOps for ProductionEntryOps {
         rebuilt
     }
 
-    /// One maintenance leg serves independent cleanup, verification and rolling
-    /// clocks. Only the rolling duty requires a quiet claim.
     fn rolling_heal(&self, attachment: &Self::Attachment) -> Option<norn_wire::RollingHealStatus> {
         Some(attachment.rolling.status())
     }
@@ -1837,7 +1836,7 @@ impl EntryOps for ProductionEntryOps {
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
         self.maintain(name, attachment)?;
-        if !quiet || !progress.quiet_maintenance_allowed() || !attachment.rolling.due() {
+        if !quiet || !attachment.rolling.due() {
             return Ok(());
         }
         // A settled batch may have arrived since the claim was taken. Leave
@@ -1849,6 +1848,9 @@ impl EntryOps for ProductionEntryOps {
             attachment.heal_observed.merge(batch);
             return Ok(());
         }
+        if !progress.quiet_maintenance_allowed() {
+            return Ok(());
+        }
         let _job = self.evidence.attributing();
         let ended = rolling::slice(attachment, self.policy);
         if ended.is_ok() {
@@ -1857,6 +1859,8 @@ impl EntryOps for ProductionEntryOps {
         self.leg_ended(attachment, progress, ended)
     }
 
+    /// One maintenance leg serves independent cleanup, verification and rolling
+    /// clocks. Only the rolling duty requires a quiet claim.
     fn maintenance_due(&self, _: &VaultName, attachment: &Self::Attachment) -> bool {
         attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD
             || Instant::now() >= attachment.store_verification_due
@@ -2254,6 +2258,12 @@ where
             if let Some(vault) = vault {
                 match vault.fact(Path::new(row.path.as_str())).map_err(effect)? {
                     norn_fs::WalkFact::File(file) => {
+                        let spelling = file
+                            .path()
+                            .as_path()
+                            .to_str()
+                            .expect("a reached spelling of a stored path is UTF-8")
+                            .to_owned();
                         if let Some(limit) = &limit
                             && pending.account.bytes_read > 0
                             && file.stat().len
@@ -2264,7 +2274,7 @@ where
                         match file.read_optional().map_err(effect)? {
                             Some(read) => {
                                 pending.account.bytes_read += read.bytes().len() as u64;
-                                merge_read(&mut pending, row.path.as_str(), read, Some(row))?;
+                                merge_read(&mut pending, &spelling, read, Some(row))?;
                             }
                             None => rolling_death(&mut pending, row.path.clone()),
                         }
@@ -2335,17 +2345,31 @@ fn merge_read(
             .duration_since(read.stat().mtime)
             .is_ok_and(|age| age >= rolling::DELIVERY_GRACE);
     if let Some(row) = row {
-        let changed = hash != row.content_hash;
+        let changed = hash != row.content_hash || spelling != row.path.as_str();
         if changed
             || !pending.declared.judged(row.generation)
             || stands_without_its_finding(pending.store, row)?
         {
+            let canonical = if spelling != row.path.as_str() {
+                // Retire and derive one respelling atomically. The pair is
+                // irreducible even when the changeset target is one change.
+                if pending.changes.len() + 2 > pending.bound {
+                    pending.flush()?;
+                }
+                pending.push(Change::Death {
+                    path: row.path.clone(),
+                    provenance: Provenance::HealPrune,
+                });
+                Some(DocumentPath::new(spelling).expect("case preserves the document grammar"))
+            } else {
+                None
+            };
             pending.rederive(
                 Path::new(spelling),
                 spelling,
                 read.bytes(),
                 hash,
-                Some(&row.path),
+                Some(canonical.as_ref().unwrap_or(&row.path)),
             );
             if changed && count {
                 pending.misses.changed += 1;
@@ -3029,17 +3053,13 @@ enum OwnedScope {
     Vault,
     Subtree(DocumentPath),
     Prefix(DirectoryPrefix),
-    Window {
-        after: Vec<u8>,
-        through: Option<Vec<u8>>,
-    },
 }
 
 impl OwnedScope {
     /// The vault-relative spelling this scope is rooted at.
     fn root(&self) -> &str {
         match self {
-            OwnedScope::Vault | OwnedScope::Window { .. } => "",
+            OwnedScope::Vault => "",
             OwnedScope::Subtree(root) => root.as_str(),
             OwnedScope::Prefix(prefix) => prefix.as_str(),
         }
@@ -3050,10 +3070,6 @@ impl OwnedScope {
     fn subjects(&self) -> SubjectScope<'_> {
         match self {
             OwnedScope::Vault => SubjectScope::Vault,
-            OwnedScope::Window { after, through } => SubjectScope::Window {
-                after,
-                through: through.as_deref(),
-            },
             OwnedScope::Subtree(root) => SubjectScope::Subtree(root),
             OwnedScope::Prefix(prefix) => SubjectScope::Under(prefix),
         }
@@ -3072,16 +3088,14 @@ impl HealScope<'_> {
         }
     }
 
-    /// This scope, held by value.
-    fn owned(&self) -> OwnedScope {
+    /// Whole-scope prune authority. Windows retain their findings account
+    /// until every source spelling has been read, rather than pruning alone.
+    fn owned(&self) -> Option<OwnedScope> {
         match self {
-            HealScope::Vault => OwnedScope::Vault,
-            HealScope::Window { after, through } => OwnedScope::Window {
-                after: after.to_vec(),
-                through: through.map(<[u8]>::to_vec),
-            },
-            HealScope::Subtree(root) => OwnedScope::Subtree((*root).clone()),
-            HealScope::Prefix(prefix) => OwnedScope::Prefix((*prefix).clone()),
+            HealScope::Vault => Some(OwnedScope::Vault),
+            HealScope::Subtree(root) => Some(OwnedScope::Subtree((*root).clone())),
+            HealScope::Prefix(prefix) => Some(OwnedScope::Prefix((*prefix).clone())),
+            HealScope::Window { .. } => None,
         }
     }
 
@@ -3455,10 +3469,9 @@ impl Account {
     /// the prune never reaches. What the non-registering legs do reach is
     /// [`Filed`], which they add to as they file.
     fn walked(&mut self, scope: HealScope<'_>, order: StoredPathOrder) {
-        self.walked.push(Walked {
-            scope: scope.owned(),
-            order,
-        });
+        if let Some(scope) = scope.owned() {
+            self.walked.push(Walked { scope, order });
+        }
     }
 
     /// Whether a walk of `walked` concluded anything at all about `subject`.
@@ -4084,8 +4097,7 @@ impl<'s> Pending<'s> {
             return Ok(false);
         }
         // A content finding is filed only at a path the document grammar
-        // admits, since a refused spelling is quarantined before its bytes
-        // are read; a spelling it refuses has no content finding to compare.
+        // admits. A refused spelling has no content finding to compare.
         let Ok(subject) = document_path(path) else {
             return Ok(false);
         };
@@ -6265,6 +6277,21 @@ mod tests {
         }
         fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
             self.inner.maintenance_due(name, attachment)
+        }
+        fn maintain_quiet(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            quiet: bool,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.maintain_quiet(name, attachment, quiet, progress)
+        }
+        fn rolling_heal(
+            &self,
+            attachment: &Self::Attachment,
+        ) -> Option<norn_wire::RollingHealStatus> {
+            self.inner.rolling_heal(attachment)
         }
         fn maintain(
             &self,
@@ -16831,6 +16858,49 @@ mod tests {
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, "replacement").unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Unattached);
+    }
+
+    /// The explicit merge order exercises folding semantics on any host.
+    #[test]
+    fn a_heal_merging_under_folded_order_updates_a_case_only_rename() {
+        let f = Fixture::watcherless("heal-folded-respelling");
+        fs::write(f.vault().join("note.md"), "same bytes").unwrap();
+        let root = f.vault();
+        let mut store = Store::open(
+            f.root.join("folded.sqlite3"),
+            StoredPathOrder::AsciiCaseInsensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        for renamed in [false, true] {
+            if renamed {
+                fs::rename(root.join("note.md"), root.join("Note.md")).unwrap();
+            }
+            let mut account = Account::default();
+            merge_walk(
+                &mut store,
+                &root,
+                &[],
+                walk(&root, &[]).unwrap(),
+                norn_fs::CaseSensitivity::Insensitive,
+                HealScope::Vault,
+                ProductionPolicy::new(2, 1).unwrap(),
+                &progress.healing(),
+                &mut account,
+            )
+            .unwrap();
+            close_job(
+                &mut store,
+                &root,
+                &[],
+                ProductionPolicy::new(2, 1).unwrap(),
+                &mut account,
+            )
+            .unwrap();
+        }
+        assert_eq!(stored_paths(&mut store), ["Note.md"]);
     }
 
     /// Re-run when changing the rolling budgets. Clocks are evidence, never a

@@ -509,9 +509,6 @@ pub struct RollingHealStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct VaultStatus {
-    /// Absent until this entry has established an attachment.
-    #[serde(default)]
-    pub rolling_heal: Option<RollingHealStatus>,
     /// The registration this is the standing of. Its `name` is the vault.
     pub registration: Registration,
     /// What the entry publishes: where it stands, or the refusal it is parked
@@ -539,6 +536,9 @@ pub struct VaultStatus {
     /// entry's last attachment met it. Empty where there is nothing, and
     /// where the entry has not attached.
     pub advisories: Vec<Advisory>,
+    /// Absent until this entry has established an attachment.
+    #[serde(default)]
+    pub rolling_heal: Option<RollingHealStatus>,
 }
 
 impl VaultStatus {
@@ -565,6 +565,13 @@ impl VaultStatus {
             section,
             advisories: Vec::new(),
         }
+    }
+
+    /// The status carrying the last attachment's rolling-heal reading.
+    #[must_use]
+    pub fn with_rolling_heal(mut self, reading: RollingHealStatus) -> Self {
+        self.rolling_heal = Some(reading);
+        self
     }
 
     /// The status serving under `fingerprints`.

@@ -257,7 +257,7 @@ pub(super) fn slice(
                             .vault
                             .fact(Path::new(subject.as_str()))
                             .map_err(effect)?,
-                        norn_fs::WalkFact::File(_)
+                        norn_fs::WalkFact::File(file) if file.path().as_path() == Path::new(subject.as_str())
                     )
                 {
                     // A file can arrive after enumeration without a row. An

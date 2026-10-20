@@ -7228,6 +7228,44 @@ fn a_doctor_registry_reading_pins_its_problems_and_its_engines() {
     );
 }
 
+#[test]
+fn rolling_heal_status_pins_each_stage_and_empty_history() {
+    use norn_wire::{RollingHealPhase, RollingHealProgress, RollingHealStatus, WatcherMisses};
+    let idle = RollingHealStatus {
+        pass: None,
+        last_completed_unix_seconds: None,
+        next_due_unix_seconds: 3600,
+        watcher_misses: WatcherMisses::default(),
+    };
+    round_trip(&idle);
+    assert_eq!(
+        wire(&idle),
+        r#"{"pass":null,"last_completed_unix_seconds":null,"next_due_unix_seconds":3600,"watcher_misses":{"changed":0,"created":0,"deleted":0}}"#
+    );
+    for (phase, spelling) in [
+        (RollingHealPhase::Preparing, "preparing"),
+        (RollingHealPhase::Healing, "healing"),
+        (RollingHealPhase::Finishing, "finishing"),
+    ] {
+        let reading = RollingHealStatus {
+            pass: Some(RollingHealProgress {
+                phase,
+                entries_enumerated: 80,
+                entries_checked: 64,
+            }),
+            last_completed_unix_seconds: Some(100),
+            next_due_unix_seconds: 3700,
+            watcher_misses: WatcherMisses {
+                changed: 1,
+                created: 2,
+                deleted: 3,
+            },
+        };
+        round_trip(&reading);
+        assert_eq!(wire(&reading), r#"{"pass":{"phase":"PHASE","entries_enumerated":80,"entries_checked":64},"last_completed_unix_seconds":100,"next_due_unix_seconds":3700,"watcher_misses":{"changed":1,"created":2,"deleted":3}}"#.replace("PHASE", spelling));
+    }
+}
+
 /// A status with every optional part filled in crosses with all of them: a
 /// setter that dropped its assignment does not produce these bytes.
 #[test]
@@ -7239,6 +7277,20 @@ fn a_fully_set_vault_status_pins_every_setter() {
         EngineStatus::off(),
         EngineSection::enabled(),
     )
+    .with_rolling_heal(norn_wire::RollingHealStatus {
+        pass: Some(norn_wire::RollingHealProgress {
+            phase: norn_wire::RollingHealPhase::Healing,
+            entries_enumerated: 80,
+            entries_checked: 64,
+        }),
+        last_completed_unix_seconds: Some(100),
+        next_due_unix_seconds: 3700,
+        watcher_misses: norn_wire::WatcherMisses {
+            changed: 1,
+            created: 2,
+            deleted: 3,
+        },
+    })
     .with_fingerprints(Fingerprints::new("schema-1").with_config("config-1"))
     .with_last_reload_failure(ControlFileFailure::new(
         ControlFile::Config,
@@ -7261,7 +7313,10 @@ fn a_fully_set_vault_status_pins_every_setter() {
             r#""engine":{"state":"off"},"#,
             r#""section":{"state":"enabled"},"#,
             r#""advisories":[{"kind":"symlink_skipped","#,
-            r#""path":"/home/person/notes/elsewhere"}]}"#
+            r#""path":"/home/person/notes/elsewhere"}],"#,
+            r#""rolling_heal":{"pass":{"phase":"healing","entries_enumerated":80,"entries_checked":64},"#,
+            r#""last_completed_unix_seconds":100,"next_due_unix_seconds":3700,"#,
+            r#""watcher_misses":{"changed":1,"created":2,"deleted":3}}}"#
         )
     );
 }

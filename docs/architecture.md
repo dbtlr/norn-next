@@ -1521,8 +1521,9 @@ Two mechanisms carry trust, and both are contract:
 
   An inventory can span watcher turns, so each inventoried name is re-observed before
   derivation. A stored-only name is confirmed before pruning, preserving a document a
-  watcher turn has added since enumeration. The merge also restores schema-stale rows
-  and missing document findings. Findings accounting survives windows on disk. A bounded
+  watcher turn has added since enumeration. Changed listed spellings are replaced even
+  when their bytes match. A respelling's retirement and derivation share one changeset.
+  The merge also restores schema-stale rows and missing document findings. Findings accounting survives windows on disk. A bounded
   finishing pass re-files refused spellings after rows have vacated their rendered
   places, then prunes unaccounted findings by subject. Watcher turns withhold their own
   roots from that older enumeration's prune. A full recovery supersedes an unfinished
