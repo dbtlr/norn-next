@@ -33,13 +33,14 @@ use norn_wire::{
     AuthorCondition, DocumentPath, ExpectedField, FileState, PlanCondition, PlanFault, ResolvedPlan,
 };
 
-use super::observe::{TargetState, identity};
+use super::observe::TargetState;
 use crate::derivation::decodes;
 use crate::planner::compose::{Composition, compose, edits_in_place, touched};
 use crate::planner::edit;
 use crate::planner::lineage::{Carried, Lineage};
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
+use crate::planner::view::identity_of;
 use crate::planner::view::{Body, Entry, VaultView};
 
 /// What running a plan's operations again from its before-states found.
@@ -204,9 +205,8 @@ fn transitions_differ<V>(
         if unchecked::recomposition() {
             continue;
         }
-        let drawn_from_unseen = before.identities[index]
-            .as_ref()
-            .and_then(|file| lineage.source(file))
+        let drawn_from_unseen = lineage
+            .source(&before.identities[index])
             .is_some_and(|source| before.unseen.contains(&source.from));
         if !(states[index].partly_landed() && drawn_from_unseen) {
             differing.push((*path).clone());
@@ -265,7 +265,7 @@ fn conditions_differ<V: VaultView>(
         .iter()
         .filter_map(|condition| match condition {
             PlanCondition::ContentHash { path, hash } => {
-                Some((identity(normalizer, path.as_str())?, hash))
+                Some((identity_of(normalizer, path), hash))
             }
             // A link entry, and an address resolution, say how a link
             // resolves, not what a file holds, so no author condition is
@@ -282,21 +282,21 @@ fn conditions_differ<V: VaultView>(
     for operation in &plan.operations {
         for condition in &operation.conditions {
             let held = match condition {
-                AuthorCondition::ContentHash { path, hash } => identity(normalizer, path.as_str())
-                    .is_some_and(|file| match composition.before(&file) {
+                AuthorCondition::ContentHash { path, hash } => {
+                    let file = identity_of(normalizer, path);
+                    match composition.before(&file) {
                         Some(before) => before.hash() == Some(hash),
                         None => carries(&file, Some(hash)),
-                    }),
+                    }
+                }
                 AuthorCondition::ExpectedValue {
                     path,
                     field,
                     expect,
-                } => match identity(normalizer, path.as_str()) {
-                    None => false,
-                    Some(file) => {
-                        expectation_held(&file, path, field, expect, composition, before, &carries)?
-                    }
-                },
+                } => {
+                    let file = identity_of(normalizer, path);
+                    expectation_held(&file, path, field, expect, composition, before, &carries)?
+                }
             };
             if !held {
                 differing.push(condition_path(condition).clone());
@@ -375,7 +375,7 @@ struct BeforeStates<'a, V> {
     states: &'a [TargetState],
     by_identity: BTreeMap<NormalizedPath, Vec<usize>>,
     /// Each transition's identity, by index.
-    identities: Vec<Option<NormalizedPath>>,
+    identities: Vec<NormalizedPath>,
     /// Every target whose before-state this apply cannot see.
     unseen: BTreeSet<NormalizedPath>,
     /// The files the plan carries byte for byte.
@@ -389,15 +389,14 @@ impl<'a, V: VaultView> BeforeStates<'a, V> {
         lineage: &Lineage,
         view: &'a V,
     ) -> Self {
-        let identities: Vec<Option<NormalizedPath>> = plan
+        let identities: Vec<NormalizedPath> = plan
             .transitions
             .iter()
-            .map(|transition| identity(view.normalizer(), transition.path.as_str()))
+            .map(|transition| identity_of(view.normalizer(), &transition.path))
             .collect();
         let mut by_identity: BTreeMap<NormalizedPath, Vec<usize>> = BTreeMap::new();
         let mut unseen = BTreeSet::new();
         for (index, identity) in identities.iter().enumerate() {
-            let Some(identity) = identity else { continue };
             if states[index].before_unseen(&plan.transitions[index]) {
                 unseen.insert(identity.clone());
             }

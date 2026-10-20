@@ -16,7 +16,7 @@ use super::control::{control_path, unreadable_as_role};
 use super::edit;
 use super::lineage::{Carried, Lineage};
 use super::links::{self, wire_family};
-use super::view::{Body, Entry, VaultView, document_path, wire_hash};
+use super::view::{Body, Entry, VaultView, document_path, identity_of, wire_hash};
 use crate::derivation::{decodes, document_links};
 
 /// What composing a plan's operations came to.
@@ -405,14 +405,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// ([`super::view::Remembered`]) — is carried at that first state too,
     /// so an edit landing on it does not resolve ([`Self::held`]).
     fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
-        let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Ok(Place::NoFile(format!(
-                    "`{path}` names no document in the vault: {error}"
-                )));
-            }
-        };
+        let identity = identity_of(self.view.normalizer(), path);
         if let Some((file, beneath)) = self.control_file_at(&identity) {
             let role = match file {
                 ControlFile::Schema => "schema",
@@ -485,11 +478,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 let at = normalizer.normalize(at).ok()?;
                 [ControlFile::Schema, ControlFile::Config]
                     .into_iter()
-                    .find(|&file| {
-                        normalizer
-                            .normalize(Path::new(control_path(file).as_str()))
-                            .is_ok_and(|control| control == at)
-                    })
+                    .find(|&file| identity_of(normalizer, control_path(file)) == at)
                     .map(|file| (file, depth > 0))
             })
     }
@@ -523,10 +512,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             After::Absent => Err(format!("no document stands at `{spelling}`")),
             After::Carried { from, .. } => {
                 debug_assert!(
-                    self.view
-                        .normalizer()
-                        .normalize(Path::new(from.as_str()))
-                        .is_ok_and(|file| !self.carried.carries(&file)),
+                    !self
+                        .carried
+                        .carries(&identity_of(self.view.normalizer(), from)),
                     "an edit lands on `{from}`, which the plan's rule carries unread"
                 );
                 Err(format!("`{from}` changed while the plan was read"))
@@ -732,14 +720,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             return Ok(Err(detail));
         }
         let path = control_path(file);
-        let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
-            Ok(identity) => identity,
-            Err(error) => {
-                return Ok(Err(format!(
-                    "`{path}` names no place in the vault: {error}"
-                )));
-            }
-        };
+        let identity = identity_of(self.view.normalizer(), path);
         let spelling = match self.spelled.get(&identity) {
             Some(spelling) => spelling.clone(),
             None => {
@@ -815,16 +796,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             Ok(source) => source,
             Err(detail) => return Ok(Err(detail)),
         };
-        let identity = |path: &DocumentPath| {
-            self.view
-                .normalizer()
-                .normalize(Path::new(path.as_str()))
-                .ok()
-        };
+        let identity = |path: &DocumentPath| identity_of(self.view.normalizer(), path);
         let (from_identity, to_identity) = (identity(from), identity(to));
-        let destination = if let Some(to_identity) = to_identity
-            && Some(&to_identity) == from_identity.as_ref()
-        {
+        let destination = if to_identity == from_identity {
             let respelled = spelled_as_asked(&to_identity);
             if respelled == source.as_str() {
                 return Ok(Err(format!("`{from}` would be moved onto itself")));

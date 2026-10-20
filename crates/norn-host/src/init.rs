@@ -54,7 +54,6 @@
 //! nothing.
 
 use std::fmt::Write as _;
-use std::path::Path;
 
 use norn_store::{ContentModel, PageRefusal, Snapshot};
 use norn_wire::{
@@ -67,7 +66,7 @@ use norn_wire::{
 use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::planner::control::control_path;
-use crate::planner::view::{Entry, TreeView, VaultView};
+use crate::planner::view::{Entry, TreeView, VaultView, identity_of};
 use crate::read::{BuildRefused, Built};
 
 /// One frontmatter key the vault's documents carry: how many carry it, and
@@ -393,9 +392,7 @@ fn schema_standing(
     let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
         .map_err(|error| unreadable(name, error))?;
     let schema = control_path(ControlFile::Schema);
-    let Ok(identity) = view.normalizer().normalize(Path::new(schema.as_str())) else {
-        return Ok(None);
-    };
+    let identity = identity_of(view.normalizer(), schema);
     Ok(
         match view
             .control_entry(&identity)

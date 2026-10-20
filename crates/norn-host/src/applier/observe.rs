@@ -2,7 +2,6 @@
 //! after-state, or at neither, read at the exact spelling the plan writes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
 use norn_wire::{ContentHash, DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
@@ -10,7 +9,7 @@ use norn_wire::{ContentHash, DocumentPath, FileState, PlanCondition, ResolvedPla
 use crate::planner::compose::standing;
 use crate::planner::control::role_at;
 use crate::planner::lineage::{Carried, Lineage};
-use crate::planner::view::{Barrier, Body, Entry, VaultView};
+use crate::planner::view::{Barrier, Body, Entry, VaultView, identity_of};
 
 /// One publication the kernel makes: a transition on its own, or the two
 /// transitions of a case-only rename on a root that folds case, which publish
@@ -96,9 +95,10 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
     let mut by_identity: BTreeMap<NormalizedPath, Vec<usize>> = BTreeMap::new();
     if normalizer.case_sensitivity() == CaseSensitivity::Insensitive {
         for (index, transition) in plan.transitions.iter().enumerate() {
-            if let Some(identity) = identity(normalizer, transition.path.as_str()) {
-                by_identity.entry(identity).or_default().push(index);
-            }
+            by_identity
+                .entry(identity_of(normalizer, &transition.path))
+                .or_default()
+                .push(index);
         }
     }
     let mut paired: BTreeMap<usize, Unit> = BTreeMap::new();
@@ -244,11 +244,10 @@ pub(super) fn reads(
     plan.transitions
         .iter()
         .map(|transition| {
-            let Some(file) = identity(normalizer, transition.path.as_str())
-                .filter(|_| role_at(transition.path.as_str()).is_none())
-            else {
+            if role_at(transition.path.as_str()).is_some() {
                 return Read::Whole;
-            };
+            }
+            let file = identity_of(normalizer, &transition.path);
             let before = transition.before != FileState::absent();
             let departs = carried.departs_unread(&file, before);
             let arrives =
@@ -282,8 +281,8 @@ pub(crate) fn copied_sources(
         .iter()
         .filter(|transition| transition.before != FileState::absent())
         .filter(|transition| {
-            identity(normalizer, transition.path.as_str())
-                .is_some_and(|file| carried.carries(&file) && lineage.carried_to(&file).is_some())
+            let file = identity_of(normalizer, &transition.path);
+            carried.carries(&file) && lineage.carried_to(&file).is_some()
         })
         .map(|transition| transition.path.clone())
         .collect()
@@ -298,9 +297,7 @@ fn one<V: VaultView>(
     streamed: bool,
     view: &V,
 ) -> Result<TargetState, V::Error> {
-    let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
-        return Ok(TargetState::Unplaced);
-    };
+    let identity = identity_of(view.normalizer(), &transition.path);
     let entry = if role_at(transition.path.as_str()).is_some() {
         view.control_entry(&identity)?
     } else if streamed {
@@ -363,9 +360,7 @@ fn respell<V: VaultView>(
     streamed: bool,
     view: &V,
 ) -> Result<(TargetState, TargetState), V::Error> {
-    let Some(identity) = identity(view.normalizer(), old.path.as_str()) else {
-        return Ok((TargetState::Unplaced, TargetState::Unplaced));
-    };
+    let identity = identity_of(view.normalizer(), &old.path);
     let entry = if streamed {
         view.streamed_entry(&identity)?
     } else {
@@ -471,9 +466,7 @@ fn drifted_sources(
         {
             continue;
         }
-        let Some(file) = identity(normalizer, transition.path.as_str()) else {
-            continue;
-        };
+        let file = identity_of(normalizer, &transition.path);
         let Some(source) = lineage.source(&file) else {
             continue;
         };
@@ -502,11 +495,11 @@ pub(super) fn transition_index(
 ) -> BTreeMap<NormalizedPath, usize> {
     let mut index = BTreeMap::new();
     for (position, transition) in plan.transitions.iter().enumerate() {
-        if let Some(identity) = identity(normalizer, transition.path.as_str()) {
-            let slot = index.entry(identity).or_insert(position);
-            if is_removal(transition) {
-                *slot = position;
-            }
+        let slot = index
+            .entry(identity_of(normalizer, &transition.path))
+            .or_insert(position);
+        if is_removal(transition) {
+            *slot = position;
         }
     }
     index
@@ -526,9 +519,7 @@ pub(super) fn content_dependencies(
         .iter()
         .enumerate()
         .filter(|(_, transition)| matches!(transition.after, FileState::Present { .. }))
-        .filter_map(|(index, transition)| {
-            identity(normalizer, transition.path.as_str()).map(|file| (file, index))
-        })
+        .map(|(index, transition)| (identity_of(normalizer, &transition.path), index))
         .collect();
     lineage
         .drawing()
@@ -562,13 +553,10 @@ pub(super) fn failed_conditions<V: VaultView>(
     for condition in &plan.conditions {
         let holds = match condition {
             PlanCondition::ContentHash { path, hash } => {
-                match identity(view.normalizer(), path.as_str()) {
-                    Some(identity) => matches!(
-                        view.entry(&identity)?,
-                        Entry::Document { at, hash: held, .. } if at == *path && held == *hash
-                    ),
-                    None => false,
-                }
+                matches!(
+                    view.entry(&identity_of(view.normalizer(), path))?,
+                    Entry::Document { at, hash: held, .. } if at == *path && held == *hash
+                )
             }
             // Neither is judged against the vault as it stands: `stage::check`
             // judges them against the plan's composed results.
@@ -587,11 +575,6 @@ pub(super) fn failed_conditions<V: VaultView>(
 pub(super) fn recorded_lineage(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Lineage {
     let recorded: Vec<usize> = (0..plan.operations.len()).collect();
     Lineage::of(&plan.operations, &recorded, normalizer)
-}
-
-/// `path`'s identity under the vault's one rule, where it names a file.
-pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<NormalizedPath> {
-    normalizer.normalize(Path::new(path)).ok()
 }
 
 /// Whether a transition puts a file where none stood, whether or not its

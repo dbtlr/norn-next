@@ -3,7 +3,6 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use norn_wire::{
     AuthorCondition, AuthoredPlan, ContentHash, DocumentPath, ExpectedField, FileState, Forecast,
@@ -18,7 +17,7 @@ use super::forecast::forecast;
 use super::lineage::Lineage;
 use super::links::{CarriedLinks, LinkIndex, Target, change_set, vouch_for_carried};
 use super::order::dependencies;
-use super::view::{self, Remembered, VaultView};
+use super::view::{self, Remembered, VaultView, identity_of};
 
 /// What planning a plan came to.
 #[derive(Debug)]
@@ -306,18 +305,16 @@ fn read_carried_links<V: VaultView, I: LinkIndex + ?Sized>(
 ) -> Result<bool, PlanningFailure<V::Error, I::Error>> {
     let unvouched =
         vouch_for_carried(composition, carried, links).map_err(PlanningFailure::Links)?;
-    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(view.normalizer(), path);
     let standing = left_out.len();
     for (source, state) in unvouched {
-        let read = match identity(&source) {
-            Some(file) => Some(view.entry(&file).map_err(PlanningFailure::View)?),
-            None => None,
-        };
-        if let Some(view::Entry::Document {
+        if let view::Entry::Document {
             hash,
             body: view::Body::Held(bytes),
             ..
-        }) = read
+        } = view
+            .entry(&identity(&source))
+            .map_err(PlanningFailure::View)?
             && state.hash() == Some(&hash)
         {
             carried.insert(source, crate::derivation::document_links(&bytes));
@@ -327,7 +324,7 @@ fn read_carried_links<V: VaultView, I: LinkIndex + ?Sized>(
             matches!(
                 &operations[position].kind,
                 norn_wire::OperationKind::MoveDocument { from, .. }
-                    if identity(from).is_some() && identity(from) == identity(&source)
+                    if identity(from) == identity(&source)
             )
         });
         if let Some(position) = first {
@@ -431,9 +428,7 @@ fn unmet_condition<V: VaultView>(
     composition: &Composition,
     view: &V,
 ) -> Result<Option<String>, V::Error> {
-    let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
-        return Ok(Some(format!("`{path}` names no document in the vault")));
-    };
+    let identity = identity_of(view.normalizer(), path);
     let holds = match composition.before(&identity) {
         Some(before) => before.hash() == Some(hash),
         None => match view.entry(&identity)? {
@@ -464,9 +459,7 @@ fn unmet_expectation<V: VaultView>(
     composition: &Composition,
     view: &V,
 ) -> Result<Option<String>, V::Error> {
-    let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
-        return Ok(Some(format!("`{path}` names no document in the vault")));
-    };
+    let identity = identity_of(view.normalizer(), path);
     let absent = || {
         Some(format!(
             "no document stands at `{path}`, so its field `{field}` cannot be observed"
@@ -546,7 +539,7 @@ fn leave_out_what_falls_with<V: VaultView>(
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
     view: &V,
 ) {
-    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let identity = |path: &DocumentPath| identity_of(view.normalizer(), path);
     let mut touching: BTreeMap<_, Vec<usize>> = BTreeMap::new();
     let mut requiring: BTreeMap<&OperationId, Vec<usize>> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
@@ -572,11 +565,7 @@ fn leave_out_what_falls_with<V: VaultView>(
                 (requirer, UnresolvedReason::requires_unresolved(id))
             });
         let by_file = touches(&operation.kind).flat_map(|path| {
-            let sharers = match identity(path) {
-                // A name with no identity is no file anybody else touches.
-                None => None,
-                some => touching.get(&some),
-            };
+            let sharers = touching.get(&identity(path));
             sharers.into_iter().flatten().map(move |&sharer| {
                 (
                     sharer,
@@ -617,9 +606,7 @@ fn plan_conditions<V: VaultView>(
                 AuthorCondition::ContentHash { path, hash } => (path, Some(hash)),
                 AuthorCondition::ExpectedValue { path, .. } => (path, None),
             };
-            let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
-                continue;
-            };
+            let identity = identity_of(view.normalizer(), path);
             if composition.before(&identity).is_some() {
                 continue;
             }

@@ -44,8 +44,6 @@
 //! preview of one plan over at most two files; an apply that lands adds the
 //! reload's re-pin where the schema changed.
 
-use std::path::Path;
-
 use norn_config::migration::Ladder;
 use norn_store::Snapshot;
 use norn_wire::{
@@ -57,7 +55,7 @@ use norn_wire::{
 use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::planner::control::{SchemaPlace, control_path, role_at};
-use crate::planner::view::{Entry, TreeView, VaultView, wire_hash};
+use crate::planner::view::{Entry, TreeView, VaultView, identity_of, wire_hash};
 
 /// The ladder each control file is walked up.
 struct Ladders<'a> {
@@ -320,12 +318,7 @@ fn in_vault(
     let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
         .map_err(|error| unreadable(name, error))?;
     let path = control_path(file);
-    let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
-        return Err(refused(
-            file,
-            MigrationRefusal::unreadable(format!("`{path}` names no place in the vault")),
-        ));
-    };
+    let identity = identity_of(view.normalizer(), path);
     match view
         .control_entry(&identity)
         .map_err(|error| unreadable(name, error))?

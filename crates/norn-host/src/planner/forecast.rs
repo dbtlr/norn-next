@@ -9,7 +9,7 @@ use std::path::Path;
 use norn_fs::NormalizedPath;
 use norn_wire::{DocumentPath, FileState, FolderPath, Forecast, Transition};
 
-use super::view::VaultView;
+use super::view::{VaultView, identity_of};
 
 /// The forecast of a plan with `transitions`, over what `view` holds. No
 /// target has drifted from a plan resolved from what the vault holds.
@@ -83,7 +83,7 @@ fn folders_removed<V: VaultView>(
     // folder it empties as that folder is judged.
     let mut gone: BTreeSet<NormalizedPath> = removals
         .iter()
-        .filter_map(|path| identity(Path::new(path.as_str()), view))
+        .map(|path| identity_of(view.normalizer(), path))
         .collect();
     let mut removed = BTreeSet::new();
     for (folder, spelled) in candidates {
@@ -113,9 +113,7 @@ fn identity<V: VaultView>(path: &Path, view: &V) -> Option<NormalizedPath> {
 /// Every folder above `path`, with its identity: none for a document at the
 /// vault root.
 fn folders_above<V: VaultView>(path: &DocumentPath, view: &V) -> Vec<(NormalizedPath, FolderPath)> {
-    let Some(document) = identity(Path::new(path.as_str()), view) else {
-        return Vec::new();
-    };
+    let document = identity_of(view.normalizer(), path);
     document
         .as_path()
         .ancestors()

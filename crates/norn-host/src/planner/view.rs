@@ -223,6 +223,21 @@ pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
     DocumentPath::new(path.to_str()?).ok()
 }
 
+/// The identity of a wire `DocumentPath` under `normalizer`: infallible.
+///
+/// The document-path grammar ([`norn_wire::PathProblem::of_document`]) refuses
+/// every spelling the normalizer refuses: an empty path, a rooted path and a
+/// `..` component are all grammar refusals, and `norn-fs` is Unix-only, so no
+/// `Component::Prefix` spelling exists. A `DocumentPath` is only ever
+/// constructed through that grammar, so it always normalizes. A caller holding
+/// a filesystem spelling or a plain string has no such guarantee and
+/// normalizes it fallibly.
+pub(crate) fn identity_of(normalizer: &PathNormalizer, path: &DocumentPath) -> NormalizedPath {
+    normalizer
+        .normalize(Path::new(path.as_str()))
+        .expect("the document-path grammar refuses every spelling the normalizer refuses")
+}
+
 /// A view that reads each name once — or, for a name first read streamed and
 /// later wanted whole, twice — and answers every later read of it with what
 /// those reads found.
@@ -496,9 +511,7 @@ impl TreeView {
     /// under the root's identity rule.
     fn is_the_default_schema(&self, path: &NormalizedPath) -> bool {
         let schema = super::control::control_path(norn_wire::ControlFile::Schema);
-        self.normalizer()
-            .normalize(Path::new(schema.as_str()))
-            .is_ok_and(|schema| schema == *path)
+        identity_of(self.normalizer(), schema) == *path
     }
 }
 
@@ -1022,6 +1035,76 @@ mod tests {
     use norn_testkit::scratch::Scratch;
 
     use super::*;
+
+    /// The agreement `identity_of` relies on: every spelling the document-path
+    /// grammar admits normalizes, on both a case-sensitive and a folding root.
+    #[test]
+    fn every_spelling_the_grammar_admits_normalizes() {
+        let spellings = [
+            "a.md",
+            "a",
+            "folder/a.md",
+            "a/b/c/d.md",
+            "A.MD",
+            "é/ü.md",
+            "a b/c d.md",
+            "a.b.c",
+            ".hidden",
+            ".norn/schema.yaml",
+            "a...b",
+            "...",
+            "..a",
+            "a..",
+            "a../b",
+            "dir.md/x",
+            "a/",
+            "-",
+            "~",
+            "日本/語.md",
+            "a\u{7f}",
+            "x\u{a0}y.md",
+            "/",
+            "",
+            ".",
+            "..",
+            "./a",
+            "a/./b",
+            "a/../b",
+            "../a",
+            "/a",
+            "a//b",
+            "a\\b",
+            "a\nb",
+            "a/..",
+            "a/.",
+            "..md",
+            ".md",
+            "a/..md/..",
+            "Z:/a",
+            "a:b",
+            "\u{feff}a",
+            "a\u{0}b",
+        ];
+        let case_sensitive = memory::MemoryVault::with(&[]);
+        let folding = memory::MemoryVault::with(&[]).folding_case();
+        let mut admitted = 0;
+        for spelling in spellings {
+            let Ok(path) = DocumentPath::new(spelling) else {
+                continue;
+            };
+            admitted += 1;
+            for view in [&case_sensitive, &folding] {
+                assert!(
+                    view.normalizer()
+                        .normalize(Path::new(path.as_str()))
+                        .is_ok(),
+                    "the grammar admits {spelling:?} but the normalizer refuses it",
+                );
+                identity_of(view.normalizer(), &path);
+            }
+        }
+        assert!(admitted > 10, "the table must exercise admitted spellings");
+    }
 
     /// A tree on disk with a document, a folder, a link and a name beneath
     /// a document.
