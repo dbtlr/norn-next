@@ -36,8 +36,8 @@ use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, SchemaSource, VaultRoot};
 use norn_fixtures::Profile;
 use norn_host::{
-    AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
-    RegistryRead, SemanticEngines,
+    DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
+    SemanticEngines,
 };
 #[cfg(feature = "induced-failure")]
 use norn_host::{EvidenceReading, JobEvidence};
@@ -471,9 +471,7 @@ pub fn attach_and_wait(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
 ) -> DemandLease<ProductionEntryOps> {
-    let lease = host
-        .demand(name, AttachMode::Durable)
-        .expect("request attachment");
+    let lease = host.demand(name).expect("request attachment");
     wait_for_ready(host, name, READY_LIMIT);
     lease
 }

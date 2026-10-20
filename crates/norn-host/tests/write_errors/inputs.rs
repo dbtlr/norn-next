@@ -186,7 +186,7 @@ fn allowed(verb: Verb, error: &ErrorEnvelope) -> bool {
     use ReasonCode::*;
     match error.code() {
         // These are admission refusals caused by an authored vault address.
-        HostUnknownVault | HostUnsupportedAttachMode => true,
+        HostUnknownVault => true,
         RequestPlanInvalid | VaultRootChanged => matches!(verb, Verb::Apply),
         // A where builder's input refusal becomes an unresolved operation,
         // so it too must answer plan-refused rather than a query-only code.

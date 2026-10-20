@@ -113,8 +113,8 @@ use std::time::{Duration, Instant};
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
 use norn_host::{
-    AttachMode, DemandLease, EvidenceReading, Host, JobEvidence, LifecyclePolicy,
-    ProductionEntryOps, ProductionPolicy, RegistryRead, WATCH_SYNCHRONIZATION_DEADLINE,
+    DemandLease, EvidenceReading, Host, JobEvidence, LifecyclePolicy, ProductionEntryOps,
+    ProductionPolicy, RegistryRead, WATCH_SYNCHRONIZATION_DEADLINE,
 };
 use norn_store::induced_failure::{self, ARM_HITS, INCREMENT_SEAM};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
@@ -279,7 +279,7 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
         let _lease = serving
-            .demand(vault.name(), AttachMode::Durable)
+            .demand(vault.name())
             .expect("request the attachment");
         let untrusted = wait_for_untrusted(&serving, vault.name());
         let spent = serving.evidence().since(opening);
@@ -382,7 +382,7 @@ fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
         let _lease = serving
-            .demand(vault.name(), AttachMode::Durable)
+            .demand(vault.name())
             .expect("request the attachment");
         let untrusted = wait_for_untrusted(&serving, vault.name());
         let spent = serving.evidence().since(opening);
@@ -505,7 +505,7 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
         let _lease = serving
-            .demand(vault.name(), AttachMode::Durable)
+            .demand(vault.name())
             .expect("request the attachment");
         let untrusted = wait_for_untrusted(&serving, vault.name());
         let spent = serving.evidence().since(opening);
@@ -1678,7 +1678,7 @@ fn a_refused_registration_acquires_nothing(vault: &Vault) {
     // Held across all of it: a demand withdrawn before the entry settles takes
     // the standing ask out of the entry, and with it what this rules out.
     let lease = serving
-        .demand(vault.name(), AttachMode::Durable)
+        .demand(vault.name())
         .expect("request the attachment");
 
     let untrusted = wait_for_untrusted(&serving, vault.name());
@@ -1768,9 +1768,7 @@ fn a_stream_that_ended_resumes_through_a_recovery(vault: &Vault) {
     );
 
     let lost_at = serving.evidence();
-    let recovery = serving
-        .demand(vault.name(), AttachMode::Durable)
-        .expect("demand the recovery");
+    let recovery = serving.demand(vault.name()).expect("demand the recovery");
     wait_for_ready(&serving, vault.name(), WAIT_LIMIT);
     let spent = serving.evidence().since(lost_at);
     assert_eq!(
@@ -1865,7 +1863,7 @@ fn a_withheld_boundary_expires_and_acquires_nothing(vault: &Vault) {
     // the standing ask out of the entry, and with it what this rules out.
     let demanded_at = Instant::now();
     let lease = serving
-        .demand(vault.name(), AttachMode::Durable)
+        .demand(vault.name())
         .expect("request the attachment");
 
     let untrusted = wait_for_untrusted(&serving, vault.name());
@@ -2116,7 +2114,7 @@ fn a_paging_stat_the_machine_refused_withdraws_the_entry(vault: &Vault) {
     let serving = vault.serving_undrained(ProductionPolicy::new(64, 64).unwrap());
     let opening = serving.evidence();
     let _lease = serving
-        .demand(vault.name(), AttachMode::Durable)
+        .demand(vault.name())
         .expect("request the attachment");
 
     let untrusted = wait_for_untrusted(&serving, vault.name());
@@ -2151,9 +2149,7 @@ fn serve_or_report_the_refusal(
     serving: &Serving,
     name: &VaultName,
 ) -> DemandLease<ProductionEntryOps> {
-    let lease = serving
-        .demand(name, AttachMode::Durable)
-        .expect("request the attachment");
+    let lease = serving.demand(name).expect("request the attachment");
     wait_until(
         &format!("the entry under `{name}` to serve the vault"),
         state_budget(WAIT_LIMIT),
@@ -2245,9 +2241,7 @@ fn attach_and_wait(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
 ) -> DemandLease<ProductionEntryOps> {
-    let lease = host
-        .demand(name, AttachMode::Durable)
-        .expect("request the attachment");
+    let lease = host.demand(name).expect("request the attachment");
     wait_for_ready(host, name, WAIT_LIMIT);
     lease
 }

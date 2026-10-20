@@ -23,8 +23,7 @@
 //! park in its own code, in band, rather than being refused: the park is what
 //! an operator asks a status about. The two answers that are refusals are the
 //! two a status has nothing to report for — a name the host serves nothing
-//! under, and an entry a registration change holds — and a root, which addresses
-//! a throwaway attach no lifecycle stands behind.
+//! under, and an entry a registration change holds.
 //!
 //! The roll-up is computed from the same per-entry statuses, and `doctor`'s
 //! registry half reads the same list, so the three never describe an entry
@@ -38,7 +37,6 @@ use norn_wire::{
     VaultStatus,
 };
 
-use crate::address::registered_name;
 use crate::lifecycle::{Demand, EntryOps, Held, Host, Observation};
 use crate::refusal::control_file_failure;
 use crate::reload::AuthoredDrift;
@@ -131,9 +129,8 @@ impl<O: EntryOps> Host<O> {
     /// or, naming none, the roll-up over every entry this host serves.
     ///
     /// A named vault is refused `host/unknown-vault` where the host serves no
-    /// entry under the name, `host/entry-held` while a registration change —
-    /// an unregistration or a `vault set` — holds the entry, and
-    /// `host/unsupported-attach-mode` where the address names a root.
+    /// entry under the name, and `host/entry-held` while a registration change
+    /// — an unregistration or a `vault set` — holds the entry.
     /// Everything else about an entry — a park, an untrusted state, a
     /// read seam that refuses, a reload that failed — is reported in the
     /// status rather than refused. The roll-up refuses nothing.
@@ -141,7 +138,7 @@ impl<O: EntryOps> Host<O> {
         let Some(address) = &params.vault else {
             return Ok(StatusReport::roll_up(RollUp::of(&self.statuses())));
         };
-        let name = registered_name(address)?;
+        let name = address.registered_name();
         self.observe(name)
             .map(|observation| StatusReport::vault(self.status_of(observation)))
             .map_err(|unserved| unserved.answer(name))

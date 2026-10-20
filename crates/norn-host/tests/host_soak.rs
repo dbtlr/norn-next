@@ -154,7 +154,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_fs::ContentHash;
-use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
+use norn_host::{DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder};
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
@@ -1313,9 +1313,7 @@ impl Recovering {
         baseline_tick: Option<Duration>,
     ) -> Recovering {
         Recovering {
-            lease: host
-                .retry(name, AttachMode::Durable)
-                .expect("re-requesting the attachment"),
+            lease: host.retry(name).expect("re-requesting the attachment"),
             began_at: Instant::now(),
             baseline_tick,
             asked: Instant::now(),
@@ -1375,9 +1373,7 @@ impl Recovering {
         );
         // The fresh demand is taken before the spent one is let go, so the
         // entry's demand count never passes through zero here.
-        self.lease = host
-            .retry(name, AttachMode::Durable)
-            .expect("re-requesting the attachment");
+        self.lease = host.retry(name).expect("re-requesting the attachment");
         self.asked = Instant::now();
         self.attempts += 1;
         Settled::Waiting(self)

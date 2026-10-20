@@ -24,10 +24,10 @@
 //! its kind answers and its [`Severity`]. Maintainer
 //! contention carries the diagnostic [`MaintainerIdentity`] reported by the
 //! lock without changing an entry's trust state. Requests are spelled here
-//! too: the [`VaultAddress`] a request names its vault by — a [`VaultName`] or
-//! a [`VaultRoot`] — the [`AttachMode`] a demand asks for its derived state
-//! under, the [`Verb`] a request asks for with the [`Addressing`] it carries a
-//! vault by and the [`RequestScope`] that addressing is answered from, the
+//! too: the [`VaultAddress`] a request names its vault by — a registered
+//! [`VaultName`] — the [`Verb`] a request asks for with the [`Addressing`] it
+//! carries a vault by and the [`RequestScope`] that addressing is answered
+//! from, the
 //! [`Predicate`] list a read filters by, whose path part is a glob read by the
 //! [`Pattern`] grammar a schema's path and tag sets are written in too, and
 //! whose tag part compares under the one tag fold, [`fold_tag`], and
@@ -284,7 +284,7 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`], [`FindingKind`], [`Severity`], [`AttachMode`],
+//! string, as [`ReasonCode`], [`FindingKind`], [`Severity`],
 //! [`WatcherLossCause`] and [`WarmingPhase`] are; an enum whose variants may
 //! carry a payload is a
 //! tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
@@ -292,11 +292,9 @@
 //! keeps a payload's arrival from changing what the value is. Two of those
 //! flat strings are code registries; [`WatcherLossCause`] and
 //! [`WarmingPhase`] are not codes but nested bare-string values under `cause`
-//! and `phase`, carrying no namespace, and [`AttachMode`] is a request
-//! parameter a demand carries in rather than anything a refusal is filed
-//! under. [`VaultName`] is a flat string of a third kind: not a vocabulary at
-//! all but a grammar, whose read path is its constructor, so a name that
-//! crossed is a name that parsed.
+//! and `phase`, carrying no namespace. [`VaultName`] is a flat string of a
+//! third kind: not a vocabulary at all but a grammar, whose read path is its
+//! constructor, so a name that crossed is a name that parsed.
 //!
 //! **Doc comments on a type, a variant or a field are published.** schemars
 //! lifts them verbatim into the schema `description`s an MCP consumer reads,
@@ -323,7 +321,7 @@
 //! [`UntrustedReason::leg_unwound`],
 //! [`NameSet::new`], [`ErrorDetail::duplicate_root`], [`ErrorDetail::shared_schema`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
-//! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
+//! [`ErrorDetail::unknown_vault`],
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],
 //! [`ErrorDetail::entry_not_ready`], [`ErrorDetail::reader_unavailable`],
 //! [`ErrorDetail::registry_unwritable`],
@@ -337,7 +335,7 @@
 //! [`ErrorDetail::write_failed`], [`ErrorDetail::plan_invalid`],
 //! [`ErrorDetail::unsatisfied`],
 //! [`NotReady::warming`], [`NotReady::unattached`],
-//! [`VaultAddress::name`], [`VaultAddress::root`],
+//! [`VaultAddress::name`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
 //! [`Unsatisfied`], [`AnswerAdvisory`], [`ReloadFailure`] and [`RungReport`] variant,
 //! [`EngineSection::malformed`] and the constructors on each
@@ -572,7 +570,6 @@ mod address;
 mod apply;
 mod base64url;
 mod cursor;
-mod demand;
 mod doctor;
 mod document;
 mod error;
@@ -606,7 +603,6 @@ pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, HitResume, Moved, NonFiniteScore, OrderPair,
     Page, PagedRows, Score, SidecarRevision, Snapshot,
 };
-pub use demand::AttachMode;
 pub use doctor::{
     DoctorRegistryParams, DoctorRegistryReport, EngineHealth, NoProblems, RegistryProblem,
     RegistrySanity,

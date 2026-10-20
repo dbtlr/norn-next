@@ -39,7 +39,7 @@ fn the_plan(name: &VaultName) -> ResolvedPlan {
 fn a_ready_vault(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
     let name = VaultName::new("notes").unwrap();
     let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&name]), 1);
-    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     (host, name, lease)
 }
@@ -305,7 +305,7 @@ fn an_unwound_apply_asked_late_is_answered_with_the_cause_its_unwind_published()
     wait_for_state(&host, &name, unwound(APPLY_PANIC));
     ops.panic_in_apply_before_publishing
         .store(false, Ordering::SeqCst);
-    let again = host.demand(&name, AttachMode::Durable).unwrap();
+    let again = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
 
     let refused = answer_of(pending).expect_err("an unwound apply answered applied");
@@ -424,10 +424,10 @@ fn an_apply_over_a_reconcile_in_the_channel_waits_on_its_slot_and_is_sent_when_i
     let name = VaultName::new("a").unwrap();
     let holding = VaultName::new("b").unwrap();
     let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
-    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     ops.block_attach.store(true, Ordering::SeqCst);
-    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    let holding_lease = host.demand(&holding).unwrap();
     wait_for_flag("attach_started", &ops.attach_started);
 
     ops.facts_on_next_polls.store(1, Ordering::SeqCst);
@@ -601,7 +601,7 @@ fn a_park_answers_every_queued_apply_not_applied_at_once_with_the_park() {
             Roots::Created(&[(&name, root.as_path())]),
             1,
         );
-        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         hold_a_reconcile_turn(&ops, &host);
         let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
@@ -726,7 +726,7 @@ fn a_release_that_re_arms_nothing_answers_every_queued_apply_not_applied() {
     ops.withholds_trust.store(true, Ordering::SeqCst);
     let name = VaultName::new("notes").unwrap();
     let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
-    drop(host.demand(&name, AttachMode::Durable).unwrap());
+    drop(host.demand(&name).unwrap());
     wait_for_state(
         &host,
         &name,
@@ -857,7 +857,7 @@ fn an_apply_queued_during_an_attach_recovery_or_rebuild_runs_once_trust_is_held(
         TrustState::untrusted(watcher_lost(WatchError::Backend("lost".into()))),
     );
     ops.block_recover.store(true, Ordering::SeqCst);
-    let recovering = host.demand(&name, AttachMode::Durable).unwrap();
+    let recovering = host.demand(&name).unwrap();
     wait_for_flag("recover_started", &ops.recover_started);
     let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
     ops.block_reconcile_at.store(2, Ordering::SeqCst);
@@ -950,7 +950,7 @@ fn an_apply_handed_off_into_a_full_queue(ops: &Arc<FakeOps>, maintenance_due: bo
     let b = VaultName::new("b").unwrap();
     let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&a, &b]), 1);
     let leases = [&a, &b].map(|name| {
-        let lease = host.demand(name, AttachMode::Durable).unwrap();
+        let lease = host.demand(name).unwrap();
         wait_for_state(&host, name, TrustState::Ready);
         lease
     });
@@ -1152,7 +1152,7 @@ fn a_ready_vault_on_disk(
         Roots::Created(&[(&name, root.as_path())]),
         1,
     );
-    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     (host, name, root, lease)
 }
@@ -1429,13 +1429,13 @@ fn damage_carried_to_an_apply_claim_before_its_job_runs_is_published_and_answers
     let name = VaultName::new("a").unwrap();
     let holding = VaultName::new("b").unwrap();
     let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
-    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     let hold = host
         .begin_read(&name)
         .expect("a ready entry answers a read");
     ops.block_attach.store(true, Ordering::SeqCst);
-    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    let holding_lease = host.demand(&holding).unwrap();
     wait_for_flag("attach_started", &ops.attach_started);
 
     let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
@@ -1527,10 +1527,10 @@ fn an_apply_over_an_idle_detach_in_the_channel_is_sent_by_the_superseded_detach(
     let name = VaultName::new("a").unwrap();
     let holding = VaultName::new("b").unwrap();
     let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
-    drop(host.demand(&name, AttachMode::Durable).unwrap());
+    drop(host.demand(&name).unwrap());
     wait_for_state(&host, &name, TrustState::Ready);
     ops.block_attach.store(true, Ordering::SeqCst);
-    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    let holding_lease = host.demand(&holding).unwrap();
     wait_for_flag("attach_started", &ops.attach_started);
     dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
     let entry = host.shared.entries.get(&name).unwrap();
@@ -1812,7 +1812,7 @@ fn an_apply_healing_over_a_park_is_healed_by_the_attach_that_serves_again() {
         no_ambient_poll_policy(1),
     )
     .unwrap();
-    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    let lease = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
 
     let open = || norn_store::Store::open(&database, order, crate::DERIVATION_VERSION).unwrap();
@@ -1883,7 +1883,7 @@ fn an_apply_healing_over_a_park_is_healed_by_the_attach_that_serves_again() {
         "something healed the store before an attach served the entry again"
     );
 
-    let again = host.demand(&name, AttachMode::Durable).unwrap();
+    let again = host.demand(&name).unwrap();
     wait_for_state(&host, &name, TrustState::Ready);
     assert_eq!(stored_hash("note.md"), hash_of(b"status final\n"));
     assert_eq!(stored_hash("other.md"), hash_of(b"other\n"));

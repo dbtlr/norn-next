@@ -18,8 +18,7 @@ use std::time::{Duration, Instant};
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
 use norn_host::{
-    AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
-    RegistryRead,
+    DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::scratch::Scratch;
@@ -342,9 +341,7 @@ fn attach_and_wait(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
 ) -> DemandLease<ProductionEntryOps> {
-    let lease = host
-        .demand(name, AttachMode::Durable)
-        .expect("request attachment");
+    let lease = host.demand(name).expect("request attachment");
     wait_for_state(host, name, TrustState::Ready);
     lease
 }

@@ -64,7 +64,6 @@ use norn_wire::{
     VaultName,
 };
 
-use crate::address::registered_name;
 use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::planner::control::control_path;
@@ -259,7 +258,7 @@ where
     /// standing schema cannot be read is untrusted, so init answers the
     /// entry's untrusted refusal, as a read of it does, not `already_set_up`.
     pub fn init(&self, params: &InitParams) -> Result<InitReport, ErrorEnvelope> {
-        let name = registered_name(&params.vault)?.clone();
+        let name = params.vault.registered_name().clone();
         if let Some(source) = self
             .registrations()
             .into_iter()

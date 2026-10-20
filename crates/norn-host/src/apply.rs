@@ -70,7 +70,6 @@ use norn_wire::{
     TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
-use crate::address::registered_name;
 use crate::applier;
 use crate::clock::OneReading;
 use crate::derivation::Declared;
@@ -1026,7 +1025,7 @@ where
     /// the entry stands on a cause, and answered through the handle when the
     /// job that runs it ends.
     pub fn apply(&self, params: ApplyParams) -> Result<PendingApply, ErrorEnvelope> {
-        let name = registered_name(params.plan.vault())?.clone();
+        let name = params.plan.vault().registered_name().clone();
         let name = &name;
         match params.mode {
             ApplyMode::Preview => Ok(PendingApply::answered(self.preview(name, params.plan))),
@@ -1158,7 +1157,7 @@ where
         ),
         ErrorEnvelope,
     > {
-        let name = registered_name(&params.vault)?;
+        let name = params.vault.registered_name();
         self.planning_on_hold(name, params.vault.clone(), |ground, snapshot, refused| {
             let selection = RepairSelection::from(params);
             let batch = snapshot
