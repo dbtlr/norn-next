@@ -329,6 +329,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 /// The closing negative is bounded by a later change, not by a clock: a
 /// backend delivers in order, so once the vault's own later write is reported,
 /// a report of the earlier write behind the link would already have arrived.
+#[cfg(unix)]
 #[test]
 fn a_change_behind_a_linked_folder_outside_the_vault_is_not_reported() {
     let scratch = Scratch::new("linked-folder");
