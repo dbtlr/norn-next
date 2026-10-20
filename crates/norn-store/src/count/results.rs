@@ -531,6 +531,13 @@ impl Snapshot {
         } = source;
         let owner = self.count_results();
         owner.prune(time.now())?;
+        if conjunction.matches_nothing {
+            return Ok(TallyPage {
+                rows: Vec::new(),
+                next: None,
+                result_id: None,
+            });
+        }
         let request = binding(params);
         let schema = declared.schema().map(str::to_string);
         let reused = {
@@ -866,6 +873,72 @@ mod tests {
     use crate::{DerivationVersion, Store, StoredPathOrder};
     use norn_testkit::scratch::Scratch;
     use norn_wire::{GroupKey, VaultAddress, VaultName};
+
+    #[test]
+    fn an_empty_multi_key_selection_reclaims_expired_results() {
+        use crate::{Change, DocumentFacts, DocumentPath, FrontmatterValue, IncrementProvenance};
+        use norn_wire::Predicate;
+        let scratch = Scratch::new("count-empty-expiry");
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        let model = ContentModel::none();
+        let changes = (0..32).map(|at| {
+            Change::Upsert(
+                DocumentFacts::new(
+                    DocumentPath::new(&format!("{at}.md")).unwrap(),
+                    format!("h{at}"),
+                    "body",
+                    4,
+                )
+                .with_frontmatter(
+                    Some(FrontmatterValue::Map(vec![
+                        (
+                            "a".to_string(),
+                            FrontmatterValue::String(format!("{at}-{}", "x".repeat(4096))),
+                        ),
+                        (
+                            "b".to_string(),
+                            FrontmatterValue::String("constant".to_string()),
+                        ),
+                    ])),
+                    &model,
+                ),
+            )
+        });
+        store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, changes, &[], &model)
+            .unwrap();
+        let reader = Arc::new(store.open_reader().reader.unwrap());
+        let snapshot = reader.try_take().unwrap().establish().unwrap();
+        let params = CountParams::new(VaultAddress::name(VaultName::new("test").unwrap()))
+            .with_by([GroupKey::field("a"), GroupKey::field("b")])
+            .with_limit(2);
+        let at = Instant::now();
+        let first = snapshot.count_with_time(&params, &model, at).unwrap();
+        assert!(first.next.is_some());
+        {
+            let state = snapshot.count_results().lock().unwrap();
+            assert_eq!(state.slots, 1);
+            assert!(state.occupied > 0);
+        }
+        let empty = params.with_predicates([Predicate::equal_to("not-present", "absent")]);
+        assert!(
+            snapshot
+                .count_with_time(&empty, &model, at + Duration::from_secs(601))
+                .unwrap()
+                .tallies
+                .is_empty()
+        );
+        let state = snapshot.count_results().lock().unwrap();
+        assert!(state.entries.is_empty());
+        assert_eq!(state.slots, 0);
+        assert_eq!(state.occupied, 0);
+    }
 
     #[test]
     fn a_full_scratch_statement_keeps_the_storage_remedy_in_every_phase() {

@@ -396,7 +396,7 @@ impl Snapshot {
             advisories: advisories.clone(),
         };
         let mut work = CountWork::default();
-        let retain = members.len() > 1 && !conjunction.matches_nothing;
+        let retain = members.len() > 1;
         #[cfg(feature = "induced-failure")]
         let retain = retain && !lookups.count_source_only;
         let retained = if retain {
