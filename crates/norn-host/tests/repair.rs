@@ -3196,7 +3196,7 @@ fn of_two_routes_rewriting_one_hub_only_the_one_respelling_a_judged_link_skips()
     );
     assert_eq!(
         written(&vault, "h.md"),
-        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[tasks/b]]\"\n---\nSee [[tasks/b]] and [b](tasks/b.md).\n"
+        "---\ntype: hub\nup: \"[[zz-repair/loose/a]]\"\ndown: \"[[zz-repair/tasks/b]]\"\n---\nSee [[zz-repair/tasks/b]] and [b](tasks/b.md).\n"
     );
 }
 
@@ -3249,7 +3249,7 @@ fn a_previews_route_plan_lands_through_apply() {
     );
     assert_eq!(
         written(&vault, "h.md"),
-        "---\nsee: \"[[tasks/a]]\"\n---\nUp [[tasks/b]]\n"
+        "---\nsee: \"[[zz-repair/tasks/a]]\"\n---\nUp [[zz-repair/tasks/b]]\n"
     );
     assert!(!stands(&vault, "loose/a.md") && !stands(&vault, "loose/b.md"));
     assert!(findings_beneath(&host, &vault).is_empty());
@@ -5123,7 +5123,7 @@ fn a_missing_anchor_link_whose_target_is_routed_stays_skipped() {
     assert!(stands(&vault, "tasks/zz-twin.md"));
     // The move's cascade respelled the link to name the document where it
     // lands, and its anchor is still missing there.
-    assert!(written(&vault, "h.md").contains("[[tasks/zz-twin#Nope]]"));
+    assert!(written(&vault, "h.md").contains("[[zz-repair/tasks/zz-twin#Nope]]"));
     let after: Vec<FindingKind> = link_findings_of(&host, &vault, "h.md")
         .iter()
         .map(|row| row.kind)
@@ -6260,7 +6260,7 @@ fn a_follow_bringing_its_holder_under_a_rule_reading_a_respelled_link_skips() {
     );
     let holder = written(&vault, "zz-holder.md");
     assert!(holder.contains("up: '[[old]]'"), "{holder}");
-    assert!(holder.contains("[[tasks-all/x]]"), "{holder}");
+    assert!(holder.contains("[[zz-repair/tasks-all/x]]"), "{holder}");
 }
 
 /// **A follow that exceeds its field's length limit skips as the judge refuses.**
@@ -6947,4 +6947,88 @@ fn a_vault_with_every_5c_fix(
     let lease = attach::attach_and_wait(&host, vault.name());
     moved_on_disk(&host, &vault, "old.md", "new.md");
     (sandbox, vault, host, lease)
+}
+
+#[test]
+fn resolving_vault_links_have_a_derived_rooted_fix_in_their_own_family() {
+    let before = "![[vault://zz-repair/space name#Heading|Alias]] [angle](<vault://zz-repair/space name.md#Heading>) [escaped](vault://zz-repair/space%20name#Heading)\n";
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-vault-scheme",
+        "version: 1\n",
+        &[
+            ("space name.md", b"# Heading\n"),
+            ("holder.md", before.as_bytes()),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_kinds([FindingKind::VaultScheme])),
+    );
+    assert_eq!(plan.operations.len(), 3, "{plan:?}");
+    let plan: ResolvedPlan =
+        serde_json::from_value(serde_json::to_value(plan).expect("serialize rooted repair"))
+            .expect("read rooted repair");
+    assert!(
+        provenance(&plan)
+            .citations
+            .iter()
+            .flat_map(|citation| &citation.findings)
+            .all(|finding| finding.confidence == Confidence::Derived)
+    );
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "holder.md"),
+        "![[/zz-repair/space name#Heading|Alias]] [angle](</zz-repair/space name.md#Heading>) [escaped](/zz-repair/space%20name#Heading)\n"
+    );
+    assert!(findings_beneath(&host, &vault).is_empty());
+}
+
+#[test]
+fn markdown_repairs_encode_destinations_in_each_occurrences_form() {
+    let (_sandbox, vault, host) = a_vault_under(
+        "host-repair-destination-encoding",
+        "version: 1\n",
+        &[
+            ("old.md", b"# Followed\n"),
+            ("zz-holder.md", b"[plain](./old.md) [angle](<./old.md>)\n"),
+        ],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let changed = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::operations(norn_wire::AuthoredPlan::new(
+            address(&vault),
+            vec![
+                Operation::new(OperationKind::create_document(
+                    at("new name.md"),
+                    "# Followed\n",
+                )),
+                Operation::new(OperationKind::delete_document_breaking_links(at("old.md"))),
+            ],
+        )),
+    )));
+    assert!(
+        matches!(changed, ApplyReport::Applied { .. }),
+        "{changed:?}"
+    );
+    let plan = previewed(
+        host.repair(repairing(&vault, ApplyMode::Preview).with_kinds([FindingKind::Broken])),
+    );
+    assert_eq!(plan.operations.len(), 1, "{plan:?}");
+    let plan = serde_json::from_value(serde_json::to_value(plan).expect("serialize repair"))
+        .expect("read repair");
+    let report = planned(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert!(matches!(report, ApplyReport::Applied { .. }), "{report:?}");
+    assert_eq!(
+        written(&vault, "zz-holder.md"),
+        "[plain](./new%20name.md) [angle](<./new name.md>)\n"
+    );
+    assert!(findings_beneath(&host, &vault).is_empty());
 }

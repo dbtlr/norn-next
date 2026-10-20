@@ -72,9 +72,17 @@ impl Reckoned<'_> {
             let spelling = crate::planner::link_spelling::first_resolving_spelling(
                 candidates.iter().map(|link| link.address.clone()).collect(),
                 |candidate| {
-                    let link =
-                        LinkKey::new(composed.state.at.clone(), follow.link.syntax, candidate);
-                    resolutions.get(&entry_key(&link)) == Some(&Resolves::one(follow.to.clone()))
+                    crate::planner::link_spelling::spelling_variants(follow.link.syntax, candidate)
+                        .iter()
+                        .all(|address| {
+                            let link = LinkKey::new(
+                                composed.state.at.clone(),
+                                follow.link.syntax,
+                                address,
+                            );
+                            resolutions.get(&entry_key(&link))
+                                == Some(&Resolves::one(follow.to.clone()))
+                        })
                 },
             );
             let Some(to) = spelling else {
@@ -174,7 +182,7 @@ impl Reckoned<'_> {
                         hash.clone(),
                     )])
                 }
-                Evidence::Similar { .. } => operation,
+                Evidence::Similar { .. } | Evidence::VaultScheme => operation,
             };
             if !composing.admits(follow.confidence()) {
                 for (at, answer) in &group {
@@ -187,8 +195,12 @@ impl Reckoned<'_> {
                 }
                 continue;
             }
-            let conditions = [old, new]
-                .into_iter()
+            let conditions = std::iter::once(old)
+                .chain(
+                    crate::planner::link_spelling::spelling_variants(new.syntax, &new.address)
+                        .into_iter()
+                        .map(|address| LinkKey::new(new.holder.clone(), new.syntax, address)),
+                )
                 .map(|link| {
                     let after = resolutions[&entry_key(&link)].clone();
                     PlanCondition::address_resolution(link, after)

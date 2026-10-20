@@ -166,7 +166,7 @@ pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
 pub use link::{
     BlockId, Link, LinkFamily, Resolution, RewriteSkip, decoded as decode_markdown_fragment,
-    parse_wikilinks_in_text,
+    markdown_destination, parse_wikilinks_in_text,
 };
 pub use rewrite::{
     AddressRewrite, AnchorRewrite, REWRITE_PROOF_READS, RewriteUnproven, RewrittenLinks,

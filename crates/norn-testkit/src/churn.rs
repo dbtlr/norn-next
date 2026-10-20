@@ -141,6 +141,30 @@ pub fn runs_where_the_volume_folds(folding: Folding, case: &str) -> bool {
     false
 }
 
+/// Whether `case`, stated only over a volume that tells case apart, runs on a
+/// volume that answers `folding` — the mirror of
+/// [`runs_where_the_volume_folds`].
+///
+/// Two names differing only in case cannot stand side by side on a volume
+/// that folds, so there the case stands down, saying so on standard error —
+/// **except on Linux, where a folding scratch volume is a panic.** The default
+/// Linux volume tells case apart, and the Linux run is the one that asserts
+/// these cases.
+#[track_caller]
+pub fn runs_where_the_volume_tells_case_apart(folding: Folding, case: &str) -> bool {
+    if folding == Folding::Distinct {
+        return true;
+    }
+    if cfg!(target_os = "linux") {
+        panic!(
+            "{case}: the scratch volume folds case, and on Linux a case stated over a \
+             case-sensitive volume fails rather than skips"
+        );
+    }
+    eprintln!("{case}: skipped, the scratch volume folds case");
+    false
+}
+
 /// Exchange what the names `a` and `b` hold, in one call.
 ///
 /// This is the swap a tool that moves a tree into place performs: afterwards

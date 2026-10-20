@@ -24,7 +24,8 @@ pub struct AddressRewrite {
     pub family: LinkFamily,
     /// The address a respelled link is written with, protocol prefix and all.
     pub from: String,
-    /// The address it is written with after, protocol prefix and all.
+    /// The new address, protocol prefix and all. Markdown destinations are
+    /// encoded in each occurrence's delimiters.
     pub to: String,
 }
 
@@ -46,7 +47,7 @@ pub struct RewrittenLinks {
     /// The whole document, rewritten. Byte-identical to the input when nothing
     /// was rewritten.
     pub text: String,
-    /// How many links now read their rewrite's `to` that read its `from`.
+    /// How many links now read their rewrite's encoded `to` that read its `from`.
     pub rewritten: usize,
     /// Every matching link left as written, in document order — frontmatter
     /// first, as the index numbers them — each with why.
@@ -263,6 +264,7 @@ impl Document<'_> {
                 Edit {
                     ordinal,
                     anchor: true,
+                    unvault: false,
                     at,
                     range: at + fragment.start..at + fragment.end,
                     to: to.to_string(),
@@ -513,9 +515,9 @@ impl Document<'_> {
     ///
     /// The target is compared as this crate's one parse reads it — the text
     /// the store's `links.target` column is derived from, never decoded,
-    /// unescaped or normalized on either side — and `to`'s is written as that
-    /// same text: a percent-encoded Markdown destination is matched in its
-    /// encoded spelling and stays encoded only if `to` is spelled so. The
+    /// unescaped or normalized on either side. Every Markdown rewrite is
+    /// encoded in each occurrence's delimiters; existing percent escapes
+    /// in `to` stay as written. The
     /// links matched are the ones the index holds: those
     /// [`Document::frontmatter_wikilinks`] and [`Document::links`] report. The
     /// two families' targets are different texts read by different grammars,
@@ -536,10 +538,10 @@ impl Document<'_> {
     /// with — an embed marker, a title, an anchor, padding, a protocol, a
     /// Markdown destination's angle brackets — survives byte for byte, and so
     /// does every byte outside the links rewritten. A rewrite never changes
-    /// how a link is addressed: a `to` whose protocol is not the matched
-    /// link's is [`RewriteSkip::Unrepresentable`] there. So is a Markdown `to`
-    /// holding `|`, which would end a table cell this crate does not read
-    /// tables to see. Two links of one batch whose stems nest — a wikilink
+    /// how a link is addressed, except that `vault://` may become `/` for
+    /// its rooted repair. Any other protocol change is
+    /// [`RewriteSkip::Unrepresentable`] there. A Markdown `to` holding `|`
+    /// is percent-encoded because it would end a table cell. Two links of one batch whose stems nest — a wikilink
     /// written in a Markdown destination — cannot both be respelled, since
     /// either rewrites the other's bytes, so the inner one is unrepresentable
     /// and the outer one is proven like any other. A frontmatter link with no
@@ -553,7 +555,7 @@ impl Document<'_> {
     ///
     /// The result is proven by reading it back: everything the index derives
     /// from the document reads as it did, where its bytes moved to, with only
-    /// the rewritten targets changed, each to its own rewrite's `to` — the
+    /// the rewritten targets changed, each to its own rewrite's encoded `to` — the
     /// same links in the same order, and the same headings, tags and code. A
     /// heading or a link title whose own
     /// text holds a rewritten wikilink reads exactly as it did with that
@@ -587,10 +589,11 @@ impl Document<'_> {
             let Some(rule) = rules.for_link(&link) else {
                 continue;
             };
-            match rule.and_then(|to| Ok((to.respell(&link)?, to.target.clone()))) {
-                Ok(((at, range, token), to)) => edits.push(Edit {
+            match rule.and_then(|to| Ok((to.respell(&link)?, link.protocol != to.protocol))) {
+                Ok(((at, range, token, to), unvault)) => edits.push(Edit {
                     ordinal,
                     anchor: false,
+                    unvault,
                     at,
                     range,
                     to,
@@ -906,6 +909,7 @@ struct Edit {
     ordinal: usize,
     /// Whether this edit changes the heading fragment rather than the target.
     anchor: bool,
+    unvault: bool,
     /// The source byte the link's token begins at.
     at: usize,
     range: Range<usize>,
@@ -1014,19 +1018,49 @@ impl Address {
     /// stands at, and `link`'s token with this address's target written over
     /// them ([`respelled`]), or why the link cannot carry it. A link with no
     /// place in the source has no bytes to write over, whatever the target. A
-    /// rewrite never changes how a link is addressed, so a protocol other than
-    /// the link's own is unrepresentable there.
-    fn respell(&self, link: &Link) -> Result<(usize, Range<usize>, String), RewriteSkip> {
+    /// rewrite keeps its protocol, except for a `vault://` address rewritten
+    /// to the `/` form by its repair.
+    fn respell(&self, link: &Link) -> Result<(usize, Range<usize>, String, String), RewriteSkip> {
         let at = link.span.ok_or(RewriteSkip::Unplaced)?.byte_offset;
-        let token = respelled(link, &self.target)?;
-        if link.protocol != self.protocol {
+        let unvault = link.protocol.as_deref() == Some("vault")
+            && self.protocol.is_none()
+            && self.target.starts_with('/')
+            && !self.target.starts_with("//");
+        if link.protocol != self.protocol && !unvault {
             return Err(RewriteSkip::Unrepresentable);
         }
-        let stem = link
+        let target = if link.family == LinkFamily::Markdown {
+            let stem = link
+                .stem_range
+                .as_ref()
+                .ok_or(RewriteSkip::LinkNotRewritable)?;
+            let start = stem.start.saturating_sub(
+                link.protocol
+                    .as_ref()
+                    .map_or(0, |protocol| protocol.len() + 3),
+            );
+            let angle = link.raw[..start].ends_with('<');
+            crate::link::markdown_destination(&self.target, angle)
+        } else {
+            self.target.clone()
+        };
+        let token = respelled(link, &target)?;
+        let mut stem = link
             .stem_range
             .clone()
             .expect("a link respelled names its stem");
-        Ok((at, at + stem.start..at + stem.end, token))
+        let token = if unvault {
+            stem.start = stem
+                .start
+                .checked_sub("vault://".len())
+                .ok_or(RewriteSkip::Unrepresentable)?;
+            let mut token = token;
+            token.replace_range(stem.start..stem.start + "vault://".len(), "");
+            token
+        } else {
+            token
+        };
+        Ok((at, at + stem.start..at + stem.end, token, target))
     }
 }
 
@@ -1153,10 +1187,15 @@ impl Reading {
                     Some(title) => Some(respelling.carried(title, at, except)?),
                     None => None,
                 };
+                let target = respelling.target_of(link.family, at.start);
                 Some(LinkReading {
-                    target: respelling
-                        .target_of(link.family, at.start)
-                        .unwrap_or(&link.target)
+                    protocol: if target.is_some_and(|(_, unvault)| unvault) {
+                        None
+                    } else {
+                        link.protocol.clone()
+                    },
+                    target: target
+                        .map_or(link.target.as_str(), |(target, _)| target)
                         .to_string(),
                     anchor: respelling
                         .anchor_of(link.family, at.start)
@@ -1244,6 +1283,7 @@ struct RespelledStem<'t> {
     stem: Range<usize>,
     to: &'t str,
     anchor: bool,
+    unvault: bool,
     read_as: Option<(&'t str, &'t str)>,
 }
 
@@ -1261,6 +1301,7 @@ impl<'t> Respelling<'t> {
                 stem: edit.range.clone(),
                 to: &edit.to,
                 anchor: edit.anchor,
+                unvault: edit.unvault,
                 read_as: Self::read_as(&edit.link, &edit.token, markdown_starts.contains(&edit.at)),
             })
             .collect();
@@ -1312,10 +1353,10 @@ impl<'t> Respelling<'t> {
 
     /// The target the link of `family` whose token begins at `at` is
     /// respelled to, where this respelling rewrites it.
-    fn target_of(&self, family: LinkFamily, at: usize) -> Option<&'t str> {
+    fn target_of(&self, family: LinkFamily, at: usize) -> Option<(&'t str, bool)> {
         let place = *self.named.get(&(family, at))?;
         let stem = self.stems.get(place);
-        (!stem.anchor).then_some(stem.to)
+        (!stem.anchor).then_some((stem.to, stem.unvault))
     }
 
     /// The heading anchor this respelling writes on the named link.
@@ -1731,13 +1772,14 @@ mod tests {
             let Some(Ok(to)) = rules.for_link(&link) else {
                 continue;
             };
-            if let Ok((at, range, token)) = to.respell(&link) {
+            if let Ok((at, range, token, target)) = to.respell(&link) {
                 edits.push(Edit {
                     ordinal,
                     anchor: false,
+                    unvault: false,
                     at,
                     range,
-                    to: to.target.clone(),
+                    to: target,
                     token,
                     link,
                     in_frontmatter,

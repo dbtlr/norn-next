@@ -326,15 +326,37 @@ fn reads_back(from: Vec<String>, read: &str, path: &str) -> bool {
 /// **The style is the written link's.** A destination written with a percent
 /// escape is spelled with every byte outside the unreserved set escaped, so a
 /// link written `my%20note.md` becomes `new%20name.md`; one written without
-/// escapes keeps every byte as itself but the three a destination cannot hold
-/// as themselves — `%`, which would read as an escape, and `?` and `#`, which
-/// would end its path. A query the destination carried, from its first `?`,
-/// is kept as written. Whether the destination's syntax can then carry the
-/// spelling where the link stands — a space outside angle brackets — is the
-/// text layer's to judge.
+/// escapes protects `%`, `?`, `#`, `<` and `>`. The text layer completes
+/// encoding for a plain destination, whose delimiters cannot carry spaces,
+/// parentheses, escapes or entities literally. A query from the first `?`
+/// is kept as written. Only `.md` may be omitted, as the written link did.
 pub fn relative_spelling(holder: &DocumentPath, path: &str, written: &str) -> Option<String> {
     let (written_path, query) = split_query(written);
     let escaped = holds_an_escape(written_path);
+    let from = directory_of(holder);
+    let spelling = relative_path(holder, styled_path(path, written_path))
+        .split(SEPARATOR)
+        .map(|segment| spelled(segment, escaped))
+        .collect::<Vec<_>>()
+        .join("/");
+    let read_back = match LinkAddress::of(LinkFamily::Markdown, None, &spelling) {
+        LinkAddress::Relative(read) => reads_back(from, &read, path),
+        _ => false,
+    };
+    read_back.then(|| format!("{spelling}{query}"))
+}
+
+/// A relative wikilink keeps literal path characters and its `.md` spelling.
+pub fn relative_wikilink_spelling(holder: &DocumentPath, path: &str, written: &str) -> String {
+    let path = if written.to_ascii_lowercase().ends_with(".md") {
+        path
+    } else {
+        without_document_extension(path)
+    };
+    relative_path(holder, path)
+}
+
+fn relative_path(holder: &DocumentPath, path: &str) -> String {
     let from = directory_of(holder);
     let to: Vec<&str> = path.split(SEPARATOR).collect();
     let (folders, _) = to.split_at(to.len() - 1);
@@ -345,17 +367,11 @@ pub fn relative_spelling(holder: &DocumentPath, path: &str, written: &str) -> Op
         .count();
     let climbed = std::iter::repeat_n("..".to_string(), from.len() - shared);
     let here = (from.len() == shared).then(|| ".".to_string());
-    let spelling = here
-        .into_iter()
+    here.into_iter()
         .chain(climbed)
-        .chain(to[shared..].iter().map(|segment| spelled(segment, escaped)))
+        .chain(to[shared..].iter().map(|segment| segment.to_string()))
         .collect::<Vec<_>>()
-        .join("/");
-    let read_back = match LinkAddress::of(LinkFamily::Markdown, None, &spelling) {
-        LinkAddress::Relative(read) => reads_back(from, &read, path),
-        _ => false,
-    };
-    read_back.then(|| format!("{spelling}{query}"))
+        .join("/")
 }
 
 /// `path` spelled as a Markdown destination read from the vault root, in the
@@ -368,7 +384,7 @@ pub fn relative_spelling(holder: &DocumentPath, path: &str, written: &str) -> Op
 pub fn rooted_spelling(path: &str, written: &str) -> Option<String> {
     let (written_path, query) = split_query(written);
     let escaped = holds_an_escape(written_path);
-    let spelling = path
+    let spelling = styled_path(path, written_path)
         .split(SEPARATOR)
         .map(|segment| spelled(segment, escaped))
         .collect::<Vec<_>>()
@@ -401,6 +417,23 @@ pub fn suffix_spelling(spelling: &str, written: &str) -> String {
     format!("{spelling}{query}")
 }
 
+/// Only the Markdown document extension may be omitted.
+fn styled_path<'a>(path: &'a str, written: &str) -> &'a str {
+    let address = LinkAddress::of(LinkFamily::Markdown, None, written);
+    let taken = match &address {
+        LinkAddress::Relative(path)
+        | LinkAddress::Rooted(path)
+        | LinkAddress::RootedName(path)
+        | LinkAddress::Suffix(path) => path.as_ref(),
+        _ => written,
+    };
+    if taken.to_ascii_lowercase().ends_with(".md") {
+        path
+    } else {
+        without_document_extension(path)
+    }
+}
+
 /// `written` cut at its first `?`: the path, and the query from that `?` on,
 /// empty where there is none.
 fn split_query(written: &str) -> (&str, &str) {
@@ -420,14 +453,14 @@ fn holds_an_escape(text: &str) -> bool {
 /// One path segment as a destination spells it: every character outside the
 /// unreserved set escaped, byte by byte of its UTF-8, where the style is
 /// `escaped`, and otherwise only the characters a destination cannot hold as
-/// themselves — `%`, `?` and `#`.
+/// themselves — `%`, `?`, `#`, `<` and `>`.
 fn spelled(segment: &str, escaped: bool) -> String {
     let mut spelling = String::with_capacity(segment.len());
     for character in segment.chars() {
         let keep = if escaped {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '~')
         } else {
-            !matches!(character, '%' | '?' | '#')
+            !matches!(character, '%' | '?' | '#' | '<' | '>')
         };
         if keep {
             spelling.push(character);
@@ -707,6 +740,47 @@ mod tests {
         assert_eq!(
             relative_spelling(&at("top.md"), "x/y.md", "old.md").as_deref(),
             Some("./x/y.md")
+        );
+    }
+
+    #[test]
+    fn markdown_path_spellings_keep_the_optional_document_extension() {
+        let holder = at("a/h.md");
+        assert_eq!(
+            relative_spelling(&holder, "b/new.md", "./old.%6Dd").as_deref(),
+            Some("../b/new.md")
+        );
+        assert_eq!(
+            rooted_spelling("b/new.md", "/old.%6Dd").as_deref(),
+            Some("/b/new.md")
+        );
+        assert_eq!(
+            relative_wikilink_spelling(&holder, "b/new.MD", "./old"),
+            "../b/new"
+        );
+        assert_eq!(
+            relative_spelling(&holder, "b/new.md", "./old").as_deref(),
+            Some("../b/new")
+        );
+        assert_eq!(
+            rooted_spelling("b/new.md", "/old").as_deref(),
+            Some("/b/new")
+        );
+        assert_eq!(
+            relative_spelling(&holder, "b/new.md", "./old.md").as_deref(),
+            Some("../b/new.md")
+        );
+        assert_eq!(
+            rooted_spelling("b/new.md", "/old.md").as_deref(),
+            Some("/b/new.md")
+        );
+        assert_eq!(
+            relative_spelling(&holder, "b/new.png", "./old").as_deref(),
+            Some("../b/new.png")
+        );
+        assert_eq!(
+            rooted_spelling("b/new.png", "/old").as_deref(),
+            Some("/b/new.png")
         );
     }
 

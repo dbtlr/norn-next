@@ -532,6 +532,16 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 
     let kept = left_as_written(skipped, kept);
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
+    let spellings: BTreeMap<_, _> = targets
+        .iter()
+        .filter_map(|target| {
+            normalizer
+                .normalize(Path::new(target.path().as_str()))
+                .ok()
+                .map(|file| (file, target.path()))
+        })
+        .collect();
+    let mut twin_keys: BTreeMap<String, Vec<EntryKey>> = BTreeMap::new();
     // Each delete a link naming its document contradicts.
     let mut named: BTreeSet<usize> = BTreeSet::new();
     // Whether a cascade follows a place an ambiguous link could name, read
@@ -613,9 +623,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // A link the plan leaves naming another document than the one it
         // named, and not that document where a move carries it. Where its
         // holder moved and it is a relative path, the move alone changed what
-        // it names, and the cascade had no spelling to keep it: a wikilink
-        // written as a path is given none yet, and a Markdown one whose
-        // spelling does not read back is left too.
+        // it names, and no candidate uniquely read back or the text layer
+        // could not carry that candidate.
         let names_another = unwritten
             && !fulfilled
             && names_another(&change.before, &change.after, lineage, normalizer);
@@ -637,6 +646,30 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         );
         let relative_left = names_another && holder_moved && relative;
         let left_behind = relative_left || decided.is_some_and(&mut respelled);
+        if unwritten && left_behind {
+            let destination = match decided {
+                Some(Decider::Move { to, .. }) => spellings.get(to).map(|path| stored_path(path)),
+                Some(Decider::Removal(removal)) => rewritten_to
+                    .get(&removal.position)
+                    .and_then(|naming| rewrite_destination(naming, normalizer))
+                    .map(|(_, at)| at),
+                Some(Decider::Retarget(retarget)) => retargeted
+                    .get(&retarget.position)
+                    .and_then(|naming| naming.destination(lineage, normalizer))
+                    .map(|(_, at)| at),
+                _ => match &change.before {
+                    Resolves::One { path } => Some(stored_path(path)),
+                    _ => None,
+                },
+            };
+            if let Some(destination) = destination {
+                let target = format!("/{}", destination.as_str());
+                twin_keys
+                    .entry(target.clone())
+                    .or_default()
+                    .push(entry.clone());
+            }
+        }
         // Links held under one key share its places, so the places are read
         // once per key, however many documents the key names and however
         // the links of several keys interleave.
@@ -653,6 +686,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             members_moved: false,
             named_removed: false,
             left_behind: false,
+            target_has_twin: false,
             ambiguous_among_moved: false,
             names_another: false,
         });
@@ -664,6 +698,28 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         held.ambiguous_among_moved |= ambiguous_among_moved;
         held.names_another |= names_another;
     })?;
+    if !twin_keys.is_empty() {
+        let addresses: Vec<_> = twin_keys.keys().map(String::as_str).collect();
+        let answers = index.targets(&overlay, &addresses, PlanSide::After)?;
+        for (target, answer) in addresses.into_iter().zip(answers) {
+            let wanted = norn_store::comparison_key(target.trim_start_matches('/'));
+            let twins = answer.candidates.as_ref().map_or(0, |head| {
+                head.candidates()
+                    .iter()
+                    .filter(|candidate| {
+                        norn_store::comparison_key(candidate.path.as_str()) == wanted
+                    })
+                    .count()
+            });
+            if twins > 1 {
+                for key in &twin_keys[target] {
+                    if let Some(link) = judged.get_mut(key) {
+                        link.target_has_twin = true;
+                    }
+                }
+            }
+        }
+    }
     // A link a rewrite writes names the document a delete removes where the
     // text it had resolved before the plan to exactly that document, read
     // from where its holder's content stood: a backlink respelled away, or
@@ -1625,6 +1681,7 @@ struct Judged {
     /// not name its `new`; or it is a relative path its holder's move leaves
     /// naming another document: its cascade left it as written.
     left_behind: bool,
+    target_has_twin: bool,
     /// The link was ambiguous before the plan, and one of the documents it
     /// could name is one a move of the plan carries away, a delete removes
     /// rewriting the links naming it, or a wikilink rewrite's `old` names.
@@ -1676,7 +1733,11 @@ impl Judged {
                 return Some(skip_advisory(key, reason));
             }
             if self.left_behind {
-                return Some(LinkAdvisory::skipped_unrepresentable(key));
+                return Some(if self.target_has_twin {
+                    LinkAdvisory::skipped_target_has_twin(key)
+                } else {
+                    LinkAdvisory::skipped_unrepresentable(key)
+                });
             }
             if self.ambiguous_among_moved {
                 return Some(LinkAdvisory::skipped_ambiguous(key));
@@ -1813,10 +1874,17 @@ impl WrittenLinks {
                     normalizer.normalize(Path::new(path.as_str())),
                     family_name(syntax),
                 ) {
-                    rewritten
-                        .entry((file, syntax, to.clone()))
-                        .or_default()
-                        .insert(from.clone());
+                    let destinations = if syntax == "markdown" {
+                        super::link_spelling::spelling_variants(LinkFamily::Markdown, to)
+                    } else {
+                        vec![to.clone()]
+                    };
+                    for destination in destinations {
+                        rewritten
+                            .entry((file.clone(), syntax, destination))
+                            .or_default()
+                            .insert(from.clone());
+                    }
                 }
             }
         }
@@ -1846,24 +1914,21 @@ impl WrittenLinks {
 
     /// `link`, which the plan writes in the document `holder`, as it was
     /// written before each rewrite writing it there respelled it: the link
-    /// with the address that rewrite matched. A rewrite never changes a
-    /// link's protocol, so an address under another protocol than the
-    /// link's is none it was respelled from.
+    /// with the address that rewrite matched, including the `vault://`
+    /// protocol a rooted repair removes.
     fn originals<'w>(
         &'w self,
         holder: &NormalizedPath,
         link: &'w norn_store::LinkFact,
     ) -> impl Iterator<Item = norn_store::LinkFact> + 'w {
+        let path = DocumentPath::new(holder.as_path().to_str().unwrap_or_default()).ok();
         self.rewritten
             .get(&(holder.clone(), link.family.as_str(), address(link)))
             .into_iter()
             .flatten()
             .filter_map(move |from| {
-                let target = match &link.protocol {
-                    Some(protocol) => from.strip_prefix(protocol.as_str())?.strip_prefix("://")?,
-                    None => from.as_str(),
-                };
-                Some(spelled(link, target))
+                let key = LinkKey::new(path.clone()?, wire_family(link.family), from);
+                Some(probe_of(&key)?.link)
             })
     }
 }
@@ -3237,6 +3302,7 @@ mod tests {
                 members_moved: true,
                 named_removed: false,
                 left_behind: false,
+                target_has_twin: false,
                 ambiguous_among_moved: false,
                 names_another: false,
             }
@@ -3272,6 +3338,7 @@ mod tests {
                 members_moved,
                 named_removed: false,
                 left_behind: false,
+                target_has_twin: false,
                 ambiguous_among_moved: false,
                 names_another: false,
             }

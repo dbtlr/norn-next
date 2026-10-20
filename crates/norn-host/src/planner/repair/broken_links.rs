@@ -1,4 +1,4 @@
-//! Move-following: the derived answer to a selected broken link whose
+//! Derived rooted repairs and move-following: the derived answer to a selected broken link whose
 //! removed target's recorded bytes identify one live document.
 //!
 //! **A link's address decides which tombstones it reads.** A suffix-addressed
@@ -70,7 +70,7 @@ pub(super) struct Answer {
     pub(super) before: DocumentPath,
     /// The destination, mapped to where the settled routes land it.
     pub(super) to: DocumentPath,
-    /// A moved hash or a suggestion's score note.
+    /// A moved hash, a resolving vault scheme, or a suggestion's score note.
     pub(super) evidence: Evidence,
 }
 
@@ -170,20 +170,21 @@ fn read_moves<R: Reading>(
 /// The evidence that determines confidence and author conditions of a link answer.
 pub(super) enum Evidence {
     Moved(ContentHash),
+    VaultScheme,
     Similar { note: String },
 }
 
 impl Answer {
     pub(super) fn confidence(&self) -> norn_wire::Confidence {
         match self.evidence {
-            Evidence::Moved(_) => norn_wire::Confidence::Derived,
+            Evidence::Moved(_) | Evidence::VaultScheme => norn_wire::Confidence::Derived,
             Evidence::Similar { .. } => norn_wire::Confidence::Suggested,
         }
     }
 
     pub(super) fn notes(&self) -> Vec<String> {
         match &self.evidence {
-            Evidence::Moved(_) => Vec::new(),
+            Evidence::Moved(_) | Evidence::VaultScheme => Vec::new(),
             Evidence::Similar { note } => vec![note.clone()],
         }
     }
@@ -204,7 +205,8 @@ fn admits_stem(stem: &str) -> bool {
     norn_store::similarity::fold(stem).chars().count() >= 3
 }
 
-/// Read move-following first, then suggest only where no tombstone was found.
+/// Read resolving vault-scheme fixes and move-following, then similarity
+/// only for broken links without a tombstone.
 pub(super) fn read<R: Reading>(
     rows: &[FindingRow],
     links: &BTreeMap<u64, norn_store::FindingLink>,
@@ -213,6 +215,30 @@ pub(super) fn read<R: Reading>(
     use norn_store::StemMatches;
     use norn_wire::SkippedCandidates;
     let mut answers = read_moves(rows, links, vault)?;
+    for row in rows
+        .iter()
+        .filter(|row| row.kind == FindingKind::VaultScheme)
+    {
+        let Some(found) = links.get(&row.id) else {
+            continue;
+        };
+        let [target] = row.head.candidates() else {
+            continue;
+        };
+        answers.insert(
+            row.id,
+            Ok(Answer {
+                link: LinkKey::new(
+                    row.path.clone(),
+                    crate::planner::links::wire_family(found.family),
+                    &found.address,
+                ),
+                before: target.path.clone(),
+                to: target.path.clone(),
+                evidence: Evidence::VaultScheme,
+            }),
+        );
+    }
     let mut queried = BTreeMap::new();
     for row in rows.iter().filter(|row| row.kind == FindingKind::Broken) {
         if answers.contains_key(&row.id) {
@@ -337,7 +363,11 @@ pub(super) fn ask(
     if asked.contains_key(&key) {
         return;
     }
-    let probe = probe_of(&landed).expect("a followed link has a stored syntax");
+    let mut probe = probe_of(&landed).expect("a followed link has a stored syntax");
+    if matches!(follow.evidence, Evidence::VaultScheme) {
+        probe.link.protocol = None;
+        probe.link.target = format!("/{}", probe.link.target.trim_start_matches('/'));
+    }
     let candidates: Vec<_> = crate::planner::link_spelling::candidate_spellings(
         &probe.after_holder,
         &probe.link,
@@ -353,7 +383,13 @@ pub(super) fn ask(
     })
     .collect();
     probes.push(follow.link.clone());
-    probes.extend(candidates.iter().cloned());
+    for candidate in &candidates {
+        probes.extend(
+            crate::planner::link_spelling::spelling_variants(candidate.syntax, &candidate.address)
+                .into_iter()
+                .map(|address| LinkKey::new(candidate.holder.clone(), candidate.syntax, address)),
+        );
+    }
     asked.insert(key, candidates);
 }
 

@@ -917,6 +917,25 @@ fn a_backlink_a_moved_holder_respells_still_refuses_a_plain_delete() {
     }
 }
 
+/// **A moved holder's link to a document a breaking delete removes keeps
+/// naming its path, spelled without `.md` where the link was.** `[[./a]]` and
+/// `[y](./a)` in `v/h.md` become `[[../v/a]]` and `[y](../v/a)` from `w/h.md`,
+/// rather than staying `./a`, which would name `w/a.md`.
+#[test]
+fn a_moved_holders_extensionless_link_to_a_broken_delete_keeps_its_path() {
+    let mut fixture = Fixture::new(&[
+        ("v/a.md", "A\n"),
+        ("v/h.md", "[[./a]] [y](./a)\n"),
+        ("w/a.md", "W\n"),
+    ]);
+    let resolution = fixture.resolution(vec![breaking("v/a.md"), moving("v/h.md", "w/h.md")]);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("w/h.md").as_deref(),
+        Some("[[../v/a]] [y](../v/a)\n")
+    );
+}
+
 /// **A hand-built cascade that respells a backlink away from a forbidding
 /// delete's document leaves it a backlink**: a plan rewriting `a.md`'s links
 /// to `c` beside a move of `m.md`, sent back with its delete forbidding them

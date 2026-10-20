@@ -4824,9 +4824,11 @@ const ROUTE_LINKS: usize = 10;
 ///
 /// **Linear in L, not the vault:** over `realistic`, at L / 2, L and 2L, every
 /// counter's growth from L to 2L is twice its growth from L / 2 to L. The
-/// links add `links_evaluated` (7 each), `rewrites_planned` (1), `document_opens`
+/// links add `links_evaluated` (6 each: the holder's link spells three
+/// segments, so the suffix floor leaves the destination's whole path as its
+/// one candidate), `rewrites_planned` (1), `document_opens`
 /// (2: once to plan the holder and once to judge the plan), `target_reads` (1),
-/// `stats`, the judgment and hold VM steps (245 each in the judgments), and
+/// `stats`, the judgment and hold VM steps (250 each in the judgments), and
 /// leave `judgments`, `keys_resolved`, `head_rows`, the statements run and
 /// every batch counter where they were.
 #[test]
@@ -4859,7 +4861,7 @@ fn a_routes_cascade_costs_the_links_it_touches_and_not_the_vault_through_a_repai
             ("rewrites_planned", links),
             ("document_opens", 2 * links + 2),
             ("target_reads", links + 1),
-            ("links_evaluated", 7 * links),
+            ("links_evaluated", 6 * links),
             ("judgments", 5),
             ("judgment_full_scan_steps", 0),
             ("full_scan_steps", 0),

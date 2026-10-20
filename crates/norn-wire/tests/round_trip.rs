@@ -8056,8 +8056,9 @@ fn a_link_kind_reads_its_ends_through_their_own_grammars() {
 /// as an operation and as a cascade's rewrite alike. An empty `from` is
 /// refused — an anchor-only link names its holder wherever it goes, so no
 /// rewrite respells one — and so is a `to` written under another protocol
-/// than `from`, which no rewrite can write into the link. An empty `to`, a
-/// `to` equal to `from`, and two addresses under one protocol all read.
+/// than `from`, which no rewrite can write into the link, save `vault://`
+/// respelled to the rooted `/` form (never a `//` network path). An empty
+/// `to`, a `to` equal to `from`, and two addresses under one protocol all read.
 #[test]
 fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
     let kind = |from: &str, to: &str| {
@@ -8073,6 +8074,7 @@ fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
         ("vault://a", "b"),
         ("a", "vault://b"),
         ("vault://a", "https://a"),
+        ("vault://a", "//example.com/a"),
     ] {
         assert!(
             serde_json::from_str::<OperationKind>(&kind(from, to)).is_err(),
@@ -8087,6 +8089,7 @@ fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
         ("a", ""),
         ("a", "a"),
         ("vault://notes/a", "vault://archive/a"),
+        ("vault://notes/a", "/notes/a"),
         ("a", "b"),
         // Not a protocol: the sentinel is a lowercase scheme, `://` and a
         // stem, so each end reads as a plain address.
@@ -8847,6 +8850,7 @@ fn link_advisories() -> Vec<LinkAdvisory> {
     vec![
         LinkAdvisory::skipped_ambiguous(a_link_key()),
         LinkAdvisory::skipped_unrepresentable(a_link_key()),
+        LinkAdvisory::skipped_target_has_twin(a_link_key()),
         LinkAdvisory::skipped_would_corrupt_frontmatter(a_link_key()),
         LinkAdvisory::skipped_not_rewritable(a_link_key()),
         LinkAdvisory::skipped_unplaced(a_link_key()),

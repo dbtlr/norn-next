@@ -993,20 +993,29 @@ mod batch {
 
     pub(super) struct Addresses<'r> {
         matched: HashSet<(LinkFamily, &'r str)>,
-        written: HashSet<(LinkFamily, &'r str)>,
+        written: HashSet<(LinkFamily, String)>,
         kept: HashSet<(LinkFamily, String)>,
     }
 
     impl<'r> Addresses<'r> {
-        /// The addresses `rewrites` match and write, each rewrite read once.
+        /// Account for each Markdown occurrence's delimiter form.
         pub(super) fn of(rewrites: &[&'r LinkRewrite]) -> Self {
-            let mut matched = HashSet::with_capacity(rewrites.len());
-            let mut written = HashSet::with_capacity(rewrites.len());
+            let mut matched = HashSet::new();
+            let mut written = HashSet::new();
             for rewrite in rewrites {
                 #[cfg(test)]
                 super::tests::REWRITES_READ.with(|reads| reads.set(reads.get() + 1));
                 matched.insert((rewrite.syntax, rewrite.from.as_str()));
-                written.insert((rewrite.syntax, rewrite.to.as_str()));
+                let destinations = if rewrite.syntax == LinkFamily::Markdown {
+                    crate::planner::link_spelling::spelling_variants(rewrite.syntax, &rewrite.to)
+                } else {
+                    vec![rewrite.to.clone()]
+                };
+                written.extend(
+                    destinations
+                        .into_iter()
+                        .map(|destination| (rewrite.syntax, destination)),
+                );
             }
             Addresses {
                 matched,
@@ -1019,7 +1028,7 @@ mod batch {
         /// under a key it writes — matched by no rewrite, at an address one
         /// writes — and is the first such link asked about at that key.
         pub(super) fn keeps(&mut self, syntax: LinkFamily, address: &str) -> bool {
-            self.written.contains(&(syntax, address))
+            self.written.contains(&(syntax, address.to_string()))
                 && !self.matched.contains(&(syntax, address))
                 && self.kept.insert((syntax, address.to_owned()))
         }

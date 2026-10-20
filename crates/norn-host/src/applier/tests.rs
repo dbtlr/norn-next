@@ -1195,6 +1195,14 @@ pub(super) fn volume_folds(case: &str) -> bool {
     norn_testkit::churn::runs_where_the_volume_folds(folding, case)
 }
 
+/// Whether the scratch volume tells case apart, standing the case down where
+/// it folds (and failing it on Linux, whose volume tells case apart).
+pub(super) fn volume_tells_case_apart(case: &str) -> bool {
+    let scratch = Scratch::new("applier-distinct");
+    let folding = norn_testkit::churn::folding(scratch.root()).expect("the volume answers");
+    norn_testkit::churn::runs_where_the_volume_tells_case_apart(folding, case)
+}
+
 /// On a root that folds case, a case-only rename — with an edit composed
 /// into it — publishes as the kernel's one respell: the document stands at
 /// its new spelling only, each of the respell's two acts is recorded as it

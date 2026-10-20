@@ -453,9 +453,7 @@ fn a_markdown_destination_is_respelled_and_its_fragment_and_title_stay() {
 
 /// The target is the destination as written, encoding and all, and so is the
 /// target written in its place: a percent-encoded destination is matched in
-/// its encoded spelling and stays encoded when `to` is spelled so. A space no
-/// bare destination can hold is skipped rather than encoded behind the
-/// caller's back, because the target that would re-read is not `to`.
+/// its encoded spelling and existing percent escapes in `to` stay as written.
 #[test]
 fn a_percent_encoded_destination_is_matched_and_written_as_spelled() {
     let source = "[t](my%20note.md#Part)\n";
@@ -471,15 +469,10 @@ fn a_percent_encoded_destination_is_matched_and_written_as_spelled() {
     let out = rewrite(source, LinkFamily::Markdown, "my note.md", "x.md");
     assert_eq!(out.text, source, "a decoded from is another target");
     assert_eq!(out.rewritten, 0);
-
-    let out = rewrite(source, LinkFamily::Markdown, "my%20note.md", "your note.md");
-    assert_eq!(out.text, source);
-    assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable]);
 }
 
 /// An angle-bracketed destination stays angle-bracketed, so a space it holds
-/// is written as a space; a `to` that would close the brackets early cannot be
-/// written there and is skipped.
+/// is written as a space; brackets in `to` are percent-encoded.
 #[test]
 fn an_angle_bracketed_destination_stays_bracketed() {
     let source = "[t](<my note.md#Part> \"Tip\")\n";
@@ -487,31 +480,23 @@ fn an_angle_bracketed_destination_stays_bracketed() {
     assert_eq!(out.text, "[t](<your note.md#Part> \"Tip\")\n");
     assert_eq!(out.rewritten, 1);
 
-    for to in ["a>b", "a<b"] {
+    for (to, expected) in [("a>b", "a%3Eb"), ("a<b", "a%3Cb")] {
         let out = rewrite(source, LinkFamily::Markdown, "my note.md", to);
-        assert_eq!(out.text, source, "to {to:?}");
-        assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable], "to {to:?}");
+        assert_eq!(
+            out.text,
+            format!("[t](<{expected}#Part> \"Tip\")\n"),
+            "to {to:?}"
+        );
+        assert_eq!(out.rewritten, 1);
+        assert!(out.skipped.is_empty());
     }
 }
 
-/// A `to` that re-reads as some other destination in a bare one — a space
-/// ending it, a parenthesis closing the link, a hash opening a fragment, an
-/// escape or an entity the parse resolves, a protocol prefix — is skipped, and
-/// the link keeps its bytes.
+/// A fragment, a different protocol or an empty address cannot replace a stem.
 #[test]
 fn a_target_a_bare_destination_cannot_spell_is_skipped() {
     let source = "[t](old.md) and [u](old.md)\n";
-    for to in [
-        "a b",
-        "a)b",
-        "a#b",
-        "a\\_b",
-        "a&amp;b",
-        "<a",
-        "https://x",
-        "",
-        "a\nb",
-    ] {
+    for to in ["a#b", "https://x", ""] {
         let out = rewrite(source, LinkFamily::Markdown, "old.md", to);
         assert_eq!(out.text, source, "to {to:?}");
         assert_eq!(out.rewritten, 0, "to {to:?}");
@@ -523,20 +508,18 @@ fn a_target_a_bare_destination_cannot_spell_is_skipped() {
     }
 }
 
-/// A `|` ends a table cell in the editors that render tables, and this crate
-/// reads no tables, so it cannot see whether a destination stands in one: a
-/// Markdown `to` holding one is skipped wherever the link is.
+/// A `|` is encoded in either destination form so it cannot end a table cell.
 #[test]
-fn a_markdown_target_holding_a_pipe_is_skipped() {
+fn a_markdown_target_holding_a_pipe_is_encoded() {
     for source in [
         "| h | i |\n|---|---|\n| [x](old.md) | y |\n",
         "[t](old.md)\n",
         "[t](<old.md>)\n",
     ] {
         let out = rewrite(source, LinkFamily::Markdown, "old.md", "a|b.md");
-        assert_eq!(out.text, source, "{source:?}");
-        assert_eq!(out.rewritten, 0, "{source:?}");
-        assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable], "{source:?}");
+        assert_eq!(out.text, source.replace("old.md", "a%7Cb.md"), "{source:?}");
+        assert_eq!(out.rewritten, 1, "{source:?}");
+        assert!(out.skipped.is_empty(), "{source:?}");
     }
 }
 
