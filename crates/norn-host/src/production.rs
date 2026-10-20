@@ -588,22 +588,23 @@ impl ProductionEntryOps {
     }
 
     /// Composes the semantic engines: their config sections dispatch through
-    /// the receiver set, and every leg that commits lane-1 work relays a
-    /// drain to them afterwards.
+    /// the receiver set, and every leg that may commit lane-1 work relays a
+    /// drain to them afterwards, whether or not it committed any.
     pub fn with_semantic(mut self, engines: Arc<crate::semantic::SemanticEngines>) -> Self {
         self.semantic = Some(Arc::clone(&engines));
         self.engine_config_receivers.push(engines);
         self
     }
 
-    /// The post-leg nudge: lane-1 work just committed, so the leg records
-    /// where the store stands through `progress` and the vault's engine then
-    /// pulls the feed on this same worker leg. Engine trouble never fails
-    /// the leg — the engines retain their own diagnostics.
+    /// The post-leg nudge: lane-1 work may just have committed, so the leg
+    /// records where the store stands through `progress` and the vault's
+    /// engine then pulls the feed on this same worker leg. Engine trouble
+    /// never fails the leg — the engines retain their own diagnostics.
     ///
     /// The reading is recorded ahead of the drain, so a status taken while
     /// the drain runs judges the engine against the work this leg committed
-    /// and reports it trailing, as a search would. A host that composes no
+    /// and reports it trailing, as a search would; a leg that committed
+    /// nothing adds nothing to how far the engine trails. A host that composes no
     /// engine judges no engine, records nothing and drains nothing.
     fn drain_semantic(
         &self,
@@ -7956,6 +7957,14 @@ mod tests {
         /// waits behind the drain and neither calls the engine caught up with
         /// a store that has moved on. Once the drain lands it trails by
         /// nothing.
+        ///
+        /// The drain held is the one relayed by the leg that commits
+        /// `beta.md`. A leg that commits nothing still drains, and its engine
+        /// truthfully trails by nothing; on macOS fseventsd can deliver a
+        /// change made before the watch was established after the attach
+        /// published, which relays such a leg ahead of `beta.md`'s. A held
+        /// drain that reports the engine caught up is that leg's: the hook is
+        /// armed again before it is released, so the next drain is held too.
         #[test]
         fn a_status_is_answered_during_a_drain_and_reports_the_engine_trailing() {
             let f = Fixture::new("status-engine-draining");
@@ -7965,27 +7974,46 @@ mod tests {
             let (engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
             let host = Arc::new(host);
-            let (entered, drain_entered) = std::sync::mpsc::channel();
-            let (resume, drain_resumes) = std::sync::mpsc::channel::<()>();
-            engines.run_inside_next_drain(move || {
-                entered.send(()).unwrap();
-                let _ = drain_resumes.recv();
-            });
+            // Hold the next drain: it reports through the first receiver once
+            // it has entered, and waits for the second to be sent to.
+            let hold_next_drain = || {
+                let (entered, drain_entered) = std::sync::mpsc::channel();
+                let (resume, drain_resumes) = std::sync::mpsc::channel::<()>();
+                engines.run_inside_next_drain(move || {
+                    entered.send(()).unwrap();
+                    let _ = drain_resumes.recv();
+                });
+                (drain_entered, resume)
+            };
+            let (mut drain_entered, mut resume) = hold_next_drain();
 
             fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
-            drain_entered
-                .recv_timeout(Duration::from_secs(15))
-                .expect("a drain to reach the engine");
-            let (answered, answers) = std::sync::mpsc::channel();
-            let asking = Arc::clone(&host);
-            let asked = name.clone();
-            thread::spawn(move || {
-                let status = engine_reported(&asking, &asked);
-                let doctor = asking.doctor_registry(&norn_wire::DoctorRegistryParams::new());
-                answered.send((status, doctor)).unwrap();
-            });
-            let answer = answers.recv_timeout(Duration::from_secs(15));
-            resume.send(()).unwrap();
+            let answer = loop {
+                drain_entered
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("a held drain to report the engine trailing beta.md's work");
+                let (answered, answers) = std::sync::mpsc::channel();
+                let asking = Arc::clone(&host);
+                let asked = name.clone();
+                thread::spawn(move || {
+                    let status = engine_reported(&asking, &asked);
+                    let doctor = asking.doctor_registry(&norn_wire::DoctorRegistryParams::new());
+                    answered.send((status, doctor)).unwrap();
+                });
+                let answer = answers.recv_timeout(Duration::from_secs(15));
+                let caught_up = matches!(
+                    &answer,
+                    Ok(((_, engine), _))
+                        if *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+                );
+                if !caught_up {
+                    resume.send(()).unwrap();
+                    break answer;
+                }
+                let (next_entered, next_resume) = hold_next_drain();
+                resume.send(()).unwrap();
+                (drain_entered, resume) = (next_entered, next_resume);
+            };
             let ((section, engine), doctor) =
                 answer.expect("a status and a doctor to answer while the drain held the engine");
 
