@@ -131,8 +131,9 @@ pub(crate) trait OwnWriteLedger {
 
 impl OwnWriteLedger for OwnWrites {
     fn acted(&self, act: &Act<'_>) {
-        // A plan's path is a vault-relative document path, which the ledger
-        // always normalizes; a refusal would be a path outside the vault.
+        // The applier records only acts published under the vault root, whose
+        // paths are vault-relative and which the ledger always normalizes; a
+        // refusal would be a path outside the vault.
         let recorded = OwnWrites::acted(self, act);
         debug_assert!(recorded.is_ok(), "a plan's path is inside its vault");
     }

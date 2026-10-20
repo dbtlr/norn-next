@@ -896,9 +896,11 @@ impl OwnWrites {
     /// reported under either is matched, and on one that does not a respell is
     /// never published.
     ///
-    /// The act's path may be vault-relative or absolute beneath the watched
-    /// vault root. An absolute path outside that root is refused as
-    /// [`PathError::Absolute`].
+    /// The act's path is read as vault-relative, or absolute beneath the
+    /// watched vault root, so the act must come from a publication anchored at
+    /// that root: a schema published outside the vault (ADR 0034) lands at a
+    /// name relative to its own folder, and is not this ledger's to record. An
+    /// absolute path outside the root is refused as [`PathError::Absolute`].
     pub fn acted(&self, act: &Act<'_>) -> Result<(), PathError> {
         let path = self.normalize(act.path)?;
         let expected = match act.after {

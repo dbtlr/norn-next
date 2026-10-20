@@ -100,8 +100,9 @@
 //!    [`Refusal::ExclusiveCreateUnsupported`] — there is no fallback, because
 //!    every fallback is a check followed by a rename.
 //! 7. **The act is handed to the caller as an [`Act`] the moment it lands**,
-//!    before anything else runs, so a caller recording its own writes holds
-//!    the record before the watcher can report the name.
+//!    before anything else runs, so a caller recording its own writes takes
+//!    the record within one call of the act rather than behind a sync that
+//!    can outlast the watcher's quiet window.
 //! 8. **The folder is synced through the same handle.** A create — published,
 //!    or found landed — syncs every folder from the root down to its own, so a
 //!    folder a crashed attempt made and never synced is made durable by the
@@ -544,8 +545,10 @@ pub struct Published {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Act<'a> {
-    /// Where the act landed, relative to the anchor it was published under. A
-    /// respell's first step lands at its old spelling and its rename at its
+    /// Where the act landed, relative to the anchor it was published under:
+    /// a vault-relative path where that anchor is the vault root, and a bare
+    /// name where it is the folder of a schema outside the vault (ADR 0034).
+    /// A respell's first step lands at its old spelling and its rename at its
     /// new one.
     pub path: &'a Path,
     /// What the path holds now.
@@ -680,14 +683,13 @@ pub fn judge(
 /// See the [module documentation](self) for what publication asks again, the
 /// residual race and the crash windows. `anchor` and `shadows` are the ones
 /// the target was staged under; the root is held to the one staging recorded,
-/// and a different home holds no such shadow.
+/// and a different home holds no such shadow. `acted` is handed each act the
+/// call makes, the moment it lands and ahead of its folder sync, and nothing
+/// for a landing another writer made.
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which publishes creates, then replaces, then removes, once
-/// every target staged.
-///
-/// Its caller is `norn-host`'s one applier, which the apply job runs holding
-/// an entry's claim.
+/// every target staged, and runs in the apply job holding an entry's claim.
 pub fn publish(
     anchor: &Path,
     staged: Staged,
@@ -3344,7 +3346,9 @@ mod tests {
     ///
     /// The window is one call wide, so the racer is injected into it. The
     /// forbidden shape is a plain rename after an absence check: it replaces
-    /// the racer's document with this create's, and reports a create.
+    /// the racer's document with this create's, and reports a create. Nor is
+    /// any act handed over, or the racer's document would be recorded as an
+    /// own write.
     #[test]
     fn a_name_taken_just_before_the_rename_refuses_the_create() {
         let scratch = Scratch::new("write-create-noreplace");
@@ -3357,15 +3361,16 @@ mod tests {
             },
         );
         let mut raced = false;
-        let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+        let (refusal, acts) = acts_of(&scratch, staged, &mut |window| {
             if window == Window::Publishing {
                 republish(&scratch, &path, b"the racer's document");
                 raced = true;
             }
-        })
-        .expect_err("a create onto a name taken at the last moment");
+        });
+        let refusal = refusal.expect_err("a create onto a name taken at the last moment");
 
         assert!(raced, "the window was never entered");
+        assert!(acts.is_empty(), "a refused create handed over {acts:?}");
         assert_eq!(refusal, Refusal::DestinationExists { path: path.clone() });
         assert_eq!(scratch.read(&path), b"the racer's document");
         assert!(
@@ -3577,7 +3582,8 @@ mod tests {
 
     /// **The bar on a landing that races the exclusive rename.** A name taken
     /// at the last moment by exactly this create's content is found landed,
-    /// not refused, and the file there is the other writer's.
+    /// not refused, and the file there is the other writer's: no act is
+    /// handed over for it.
     #[test]
     fn a_name_taken_with_this_content_just_before_the_rename_is_found() {
         let scratch = Scratch::new("write-create-raced-landed");
@@ -3589,12 +3595,13 @@ mod tests {
                 content: Content::Held(b"ours"),
             },
         );
-        let publication = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+        let (publication, acts) = acts_of(&scratch, staged, &mut |window| {
             if window == Window::Publishing {
                 republish(&scratch, &path, b"ours");
             }
-        })
-        .expect("a landing another writer made at the last moment");
+        });
+        let publication = publication.expect("a landing another writer made at the last moment");
+        assert!(acts.is_empty(), "a found create handed over {acts:?}");
 
         let Publication::Found(found) = publication else {
             panic!("a landing another writer made was reported written");
@@ -3975,9 +3982,13 @@ mod tests {
     /// and how many folder syncs the publication had made by then.
     type HandedOver = Vec<(PathBuf, AfterState, usize)>;
 
-    /// Publish `staged` in `scratch`'s vault, and answer with every act it
-    /// handed over.
-    fn acts_of(scratch: &Scratch, staged: Staged) -> (Result<Publication, Refusal>, HandedOver) {
+    /// Publish `staged` in `scratch`'s vault, with `disturb` standing in the
+    /// windows inside publication, and answer with every act it handed over.
+    fn acts_of(
+        scratch: &Scratch,
+        staged: Staged,
+        disturb: &mut dyn FnMut(Window),
+    ) -> (Result<Publication, Refusal>, HandedOver) {
         let mut acts = Vec::new();
         let (publication, _) = syncs_of(|| {
             publish_disturbed(
@@ -3985,7 +3996,7 @@ mod tests {
                 staged,
                 scratch.shadows(),
                 Faults::NONE,
-                &mut |_| {},
+                disturb,
                 &mut |act| {
                     let synced = SYNCED.with(|synced| synced.borrow().as_ref().map_or(0, Vec::len));
                     acts.push((act.path.to_owned(), act.after, synced));
@@ -4022,7 +4033,7 @@ mod tests {
         ];
         for (relative, transition) in transitions {
             let staged = staged_in(&scratch, relative, transition);
-            let (publication, acts) = acts_of(&scratch, staged);
+            let (publication, acts) = acts_of(&scratch, staged, &mut |_| {});
             let published = written(publication.expect("published"));
             assert!(published.durability.is_synced(), "{relative}");
             assert_eq!(
@@ -4040,7 +4051,7 @@ mod tests {
             },
         );
         scratch.place("theirs.md", b"theirs");
-        let (found, acts) = acts_of(&scratch, staged);
+        let (found, acts) = acts_of(&scratch, staged, &mut |_| {});
         assert!(matches!(found, Ok(Publication::Found(_))), "{found:?}");
         assert!(acts.is_empty(), "a found landing handed over {acts:?}");
     }
@@ -4079,7 +4090,7 @@ mod tests {
                 content: Some(b"new"),
             },
         );
-        let (publication, acts) = acts_of(&scratch, staged);
+        let (publication, acts) = acts_of(&scratch, staged, &mut |_| {});
         let published = written(publication.expect("published"));
         assert_eq!(
             acts,
@@ -4299,7 +4310,8 @@ mod tests {
     }
 
     /// **A removal that finds its target gone at the unlink has been landed by
-    /// another writer**, and says so rather than claiming the removal.
+    /// another writer**, and says so rather than claiming the removal: no act
+    /// is handed over for it.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
     fn a_target_removed_just_before_the_unlink_is_found() {
@@ -4312,12 +4324,13 @@ mod tests {
                 before: ContentHash::of(b"old"),
             },
         );
-        let publication = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+        let (publication, acts) = acts_of(&scratch, staged, &mut |window| {
             if window == Window::Publishing {
                 std::fs::remove_file(&path).expect("a foreign removal");
             }
-        })
-        .expect("a landing another writer made");
+        });
+        let publication = publication.expect("a landing another writer made");
+        assert!(acts.is_empty(), "a found removal handed over {acts:?}");
         let Publication::Found(found) = publication else {
             panic!("a removal another writer made was reported written: {publication:?}");
         };

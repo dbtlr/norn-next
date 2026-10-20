@@ -62,8 +62,9 @@
 //! classes it; the two memberships with the widest one a page merges from its
 //! source; the drive each narrowing's record shows with the one it was
 //! arranged to take; and the statements it plans with every statement the
-//! store began from the first repair until the vault is let go, so a
-//! statement begun outside a repair's own record is planned as well.
+//! store began from the first repair until the record is taken after the
+//! last answered, so a statement begun outside a repair's own record is
+//! planned as well.
 //!
 //! **What the census holds every statement to** is the scan bar the family
 //! bars share (`norn_testkit::explain`): no step reads a relation end to end,
@@ -332,10 +333,12 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     let ran = repairs_over_every_arm(&host, &VaultAddress::name(vault.name().clone()));
     // Whatever the store began after the last repair answered, while the
     // vault stayed attached. No repair's record holds it, and it is judged as
-    // theirs are: an apply's own write the watcher reports back as another
-    // writer's is reconciled again after the apply answers, redundant work
-    // the own-write ledger's bounds admit (ADR 0037), and the statements that
-    // reconcile begins are the repairs' cost all the same.
+    // theirs are: an echo of an apply that the ledger does not match — a
+    // folder the apply made or emptied, or an act whose record a starved
+    // thread took after the watcher's batch settled — is reconciled again
+    // after the apply answers, redundant work and never a wrong answer
+    // (ADR 0037), and the statements that reconcile begins are the repairs'
+    // cost all the same.
     let after = induced_failure::statements_begun();
     drop(lease);
     drop(host);
