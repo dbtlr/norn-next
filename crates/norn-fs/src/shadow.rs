@@ -284,8 +284,8 @@ impl ShadowHome {
     /// and its device is what the decision reads. Where the two devices agree
     /// the answer is `data_tmp`; where they do not, `key`'s directory under
     /// [`FALLBACK`] beneath the vault root is created and returned instead,
-    /// and the fallback root's [self-ignore](SELF_IGNORE) is written where
-    /// nothing stands at its name.
+    /// and the fallback root's self-ignore, a `.gitignore` holding `*`, is
+    /// written where nothing stands at its name.
     ///
     /// **A home's key is the maintainership key.** `data_tmp` sits inside the
     /// derived directory the key names and is keyed by being there; the vault

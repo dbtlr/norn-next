@@ -90,10 +90,10 @@ const ANCHORS: &[&str] = &["", "/", "**/"];
 /// Whether the vault at `vault_root` ignores the fallback home at `home`,
 /// vault-relative, by the rule this module states.
 ///
-/// Norn's own [self-ignore](SELF_IGNORE), standing at its path with exactly
-/// its bytes, answers `true` for every `home` under [`FALLBACK`] before the
-/// vault root's `.gitignore` is read, so a root `.gitignore` that cannot be
-/// read is no refusal beside it. A self-ignore that is missing, altered or
+/// Norn's own self-ignore — a `.gitignore` directly inside [`FALLBACK`],
+/// holding exactly the `*` line norn writes there — answers `true` for every
+/// `home` under [`FALLBACK`] before the vault root's `.gitignore` is read, so
+/// a root `.gitignore` that cannot be read is no refusal beside it. A self-ignore that is missing, altered or
 /// not a file answers nothing itself, and the reading below answers instead.
 ///
 /// A vault root with no `.gitignore` covers nothing, and answers `false`, and
