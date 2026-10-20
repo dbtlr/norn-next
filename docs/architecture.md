@@ -4044,10 +4044,12 @@ Four contracts inside that flow carry weight:
   whose name another writer took after staging, or a foreign edit reaching a target after
   its staging can stop it part-way, and the apply report names every target that landed. A
   foreign write between a target's final verification and its rename is overwritten, the
-  write protocol's stated residual race. A move interrupted between its legs leaves both
-  names holding the document. A folder the removals left empty that cannot be removed is
-  left: the plan is still applied, the report's removed folders omit it — the wire names no
-  failure for it — and a re-send empties it again.
+  write protocol's stated residual race. Each publication act is recorded in the own-write
+  ledger as it lands, ahead of the folder sync behind it, so the watcher's report of the act
+  is known as the applier's own however long the sync takes. A move interrupted between its
+  legs leaves both names holding the document. A folder the removals left empty that cannot
+  be removed is left: the plan is still applied, the report's removed folders omit it — the
+  wire names no failure for it — and a re-send empties it again.
 - **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
   is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
   interrupted completes it with no journal and no rollback. A move's source found absent

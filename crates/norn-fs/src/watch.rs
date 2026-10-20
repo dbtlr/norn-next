@@ -22,7 +22,7 @@ use notify::{Config, Event, PollWatcher, RecursiveMode};
 use crate::exclusion::Exclusions;
 use crate::hash::uncounted_echo_hashed_from;
 use crate::path::{CaseSensitivity, NormalizedPath, PathError, PathNormalizer};
-use crate::write::{AfterState, Published};
+use crate::write::{Act, AfterState};
 use crate::{Identity, PostState, path_identity};
 
 mod faults;
@@ -866,10 +866,10 @@ impl Drop for Subscription {
 ///
 /// Recorder handles do not keep the subscription or platform watcher alive.
 /// A host keeps one beside its attachment, and the one applier (Layer 4
-/// plan-apply, `norn-host`'s `applier`) records every publication through it
-/// the moment it lands, so writes made through Norn can be hash-confirmed and
-/// suppressed when the watcher reports them back. The attachment hands it
-/// to the applier each apply job runs.
+/// plan-apply, `norn-host`'s `applier`) records every publication act through
+/// it the moment it lands, ahead of the folder sync behind it, so writes made
+/// through Norn can be hash-confirmed and suppressed when the watcher reports
+/// them back. The attachment hands it to the applier each apply job runs.
 #[derive(Clone)]
 pub struct OwnWrites {
     ledger: Weak<Mutex<Ledger>>,
@@ -878,24 +878,32 @@ pub struct OwnWrites {
 }
 
 impl OwnWrites {
-    /// Records a publication: a present after-state for a create or a
+    /// Records a publication act: a present after-state for a create or a
     /// replace, and absence for a removal.
     ///
-    /// **Only a [`Published`] is recorded.** A landing a re-send merely
-    /// [confirmed](crate::Confirmed) caused no filesystem event, and an entry
-    /// primed for one would absorb the next foreign change to that path — so
-    /// there is no method that takes one. A move is two publications, a create
-    /// at the destination and a removal at the source, and is recorded as the
-    /// two. A respell is recorded at its new spelling, and an interrupted one
-    /// records its first step at the old: on a root that folds the two
-    /// spellings are one ledger key, so an event reported under either is
-    /// matched, and on one that does not a respell is never published.
+    /// **Only an [`Act`] is recorded**, and the kernel makes one only for an
+    /// act it made. A landing a re-send merely [confirmed](crate::Confirmed)
+    /// caused no filesystem event, and an entry primed for one would absorb
+    /// the next foreign change to that path — so there is no method that takes
+    /// one. **It is recorded as the act lands**, ahead of the folder sync
+    /// behind it: a batch settles once the stream has been quiet for
+    /// [`QUIET_WINDOW`], and a sync can outlast that, so a record taken after
+    /// it would let the act's own report settle unmatched. A move is two
+    /// publications, a create at the destination and a removal at the source,
+    /// and is recorded as the two. A respell is recorded at each of its steps,
+    /// its first under the old spelling and its rename under the new: on a
+    /// root that folds the two spellings are one ledger key, so an event
+    /// reported under either is matched, and on one that does not a respell is
+    /// never published.
     ///
-    /// `path` may be vault-relative or absolute beneath the watched vault root.
-    /// An absolute path outside that root is refused as [`PathError::Absolute`].
-    pub fn published(&self, path: &Path, published: &Published) -> Result<(), PathError> {
-        let path = self.normalize(path)?;
-        let expected = match published.after {
+    /// The act's path is read as vault-relative, or absolute beneath the
+    /// watched vault root, so the act must come from a publication anchored at
+    /// that root: a schema published outside the vault (ADR 0034) lands at a
+    /// name relative to its own folder, and is not this ledger's to record. An
+    /// absolute path outside the root is refused as [`PathError::Absolute`].
+    pub fn acted(&self, act: &Act<'_>) -> Result<(), PathError> {
+        let path = self.normalize(act.path)?;
+        let expected = match act.after {
             AfterState::Present(state) => Expected::Present(state),
             AfterState::Absent => Expected::Absent,
         };
@@ -4576,13 +4584,9 @@ mod tests {
         (scratch, ledger, recorder)
     }
 
-    /// A publication that landed durably at `after`.
-    fn published(after: AfterState) -> Published {
-        Published {
-            after,
-            durability: crate::write::Durability::Synced,
-            made_folders: Vec::new(),
-        }
+    /// A publication act that landed at `path`, holding `after`.
+    fn act(path: &Path, after: AfterState) -> Act<'_> {
+        Act { path, after }
     }
 
     #[allow(clippy::disallowed_methods)] // Test observation of the file arranged by Scratch.
@@ -5772,11 +5776,9 @@ mod tests {
         let path = scratch.place("note.md", b"before removal");
         let state = observed(&path);
         recorder
-            .published(&path, &published(AfterState::Present(state)))
+            .acted(&act(&path, AfterState::Present(state)))
             .unwrap();
-        recorder
-            .published(&path, &published(AfterState::Absent))
-            .unwrap();
+        recorder.acted(&act(&path, AfterState::Absent)).unwrap();
         let normalized = recorder.normalize(&path).unwrap();
         assert!(matches!(
             ledger.lock().unwrap().entries[&normalized].expected,
@@ -5789,7 +5791,7 @@ mod tests {
         let (scratch, ledger, recorder) = own_write_harness("watch-unrelated");
         let path = scratch.place("ours.md", b"ours");
         recorder
-            .published(&path, &published(AfterState::Present(observed(&path))))
+            .acted(&act(&path, AfterState::Present(observed(&path))))
             .unwrap();
         let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["other.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
@@ -5895,7 +5897,7 @@ mod tests {
         recorder.normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
         let path = scratch.place("Note.md", b"respelled");
         recorder
-            .published(&path, &published(AfterState::Present(observed(&path))))
+            .acted(&act(&path, AfterState::Present(observed(&path))))
             .unwrap();
 
         let old = recorder.normalize(Path::new("note.md")).unwrap();
@@ -5913,10 +5915,10 @@ mod tests {
         let destination = scratch.place("to.md", b"moved");
         let state = observed(&destination);
         recorder
-            .published(&destination, &published(AfterState::Present(state)))
+            .acted(&act(&destination, AfterState::Present(state)))
             .unwrap();
         recorder
-            .published(&scratch.at("from.md"), &published(AfterState::Absent))
+            .acted(&act(&scratch.at("from.md"), AfterState::Absent))
             .unwrap();
         let ledger = ledger.lock().unwrap();
         assert!(matches!(

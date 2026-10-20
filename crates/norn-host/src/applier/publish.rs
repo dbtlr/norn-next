@@ -1,6 +1,6 @@
 //! The publishing phase: every staged target published through the kernel in
-//! the contract's order, each verified again, and every publication recorded
-//! as an own write the moment it lands.
+//! the contract's order, each verified again, and every publication act
+//! recorded as an own write the moment it lands, ahead of its folder sync.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -156,7 +156,7 @@ impl Publisher<'_> {
             .landing(staged_path(plan, unit))
             .map_err(Stopped::Io)?;
         // Where the written content lands: a respell stages at its old
-        // spelling and lands at its new one, which the ledger records.
+        // spelling and lands at its new one.
         let written_at = self.ground.landing(written_path).map_err(Stopped::Io)?;
         let stop = |refusal: &norn_fs::Refusal| stopped(refusal, written_path, &landing);
         let staged = match held {
@@ -168,14 +168,22 @@ impl Publisher<'_> {
             }
             Held::Staged(staged) => staged,
         };
-        match norn_fs::publish(landing.anchor, staged, self.shadows)
+        // Each act is recorded as the kernel hands it over, ahead of the
+        // folder sync behind it: the watcher's batch can settle while that
+        // sync runs, and an act recorded after it would be reported back as
+        // another writer's change. A respell hands over both its steps, its
+        // first under the old spelling.
+        let own_writes = self.own_writes;
+        let mut acted = |act: &norn_fs::Act<'_>| {
+            if !written_at.outside {
+                own_writes.acted(act);
+            }
+        };
+        match norn_fs::publish(landing.anchor, staged, self.shadows, &mut acted)
             .map_err(|refusal| stop(&refusal))?
         {
             Publication::Wrote(published) => {
                 progress.published = true;
-                if !written_at.outside {
-                    self.own_writes.published(written_at.relative, &published);
-                }
                 progress
                     .folders_made
                     .extend(published.made_folders.iter().cloned());
@@ -189,17 +197,16 @@ impl Publisher<'_> {
             Publication::Interrupted(interrupted) => {
                 progress.published = true;
                 // The content landed under the old spelling and the rename did
-                // not: the ledger records the first step there, and the
-                // changeset carries it, or the store goes stale. Only the
-                // kernel's respell publishes in two steps, and staging asks
-                // for one only for a respell unit, which the recomposition
-                // proved is a case-only rename its operations make.
+                // not: the ledger recorded the first step there as it landed,
+                // and the changeset carries it, or the store goes stale. Only
+                // the kernel's respell publishes in two steps, and staging
+                // asks for one only for a respell unit, which the
+                // recomposition proved is a case-only rename its operations
+                // make.
                 let Unit::Respell { old, new } = unit else {
                     unreachable!("only a respell publishes in two steps");
                 };
                 let old_path = &plan.transitions[old].path;
-                self.own_writes
-                    .published(Path::new(old_path.as_str()), &interrupted.published);
                 if let FileState::Present { hash, .. } = &plan.transitions[new].after {
                     progress.effects.push(PlanEffect {
                         path: publishing.stored[old].clone(),

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_fs::{AfterState, MaintainershipKey, Published, ShadowHome};
+use norn_fs::{Act, AfterState, MaintainershipKey, ShadowHome};
 use norn_store::{Store, StoredPathOrder};
 use norn_testkit::scratch::Scratch;
 use norn_wire::{
@@ -56,8 +56,8 @@ pub(super) fn breaking(at: &str) -> Operation {
     Operation::new(OperationKind::delete_document_breaking_links(path(at)))
 }
 
-/// Every publication the applier recorded, with whether the file held the
-/// published state at the moment it was recorded.
+/// Every publication act the applier recorded, with whether the file held
+/// the act's state at the moment it was recorded.
 #[derive(Default)]
 pub(super) struct Recorded {
     pub(super) calls: RefCell<Vec<(PathBuf, bool)>>,
@@ -65,13 +65,13 @@ pub(super) struct Recorded {
 }
 
 impl OwnWriteLedger for Recorded {
-    fn published(&self, path: &Path, published: &Published) {
-        let holds = match &published.after {
-            AfterState::Present(state) => std::fs::read(self.anchor.join(path))
+    fn acted(&self, act: &Act<'_>) {
+        let holds = match &act.after {
+            AfterState::Present(state) => std::fs::read(self.anchor.join(act.path))
                 .is_ok_and(|bytes| norn_fs::ContentHash::of(&bytes) == state.content_hash),
-            AfterState::Absent => !self.anchor.join(path).exists(),
+            AfterState::Absent => !self.anchor.join(act.path).exists(),
         };
-        self.calls.borrow_mut().push((path.to_owned(), holds));
+        self.calls.borrow_mut().push((act.path.to_owned(), holds));
     }
 }
 
@@ -1197,8 +1197,9 @@ pub(super) fn volume_folds(case: &str) -> bool {
 
 /// On a root that folds case, a case-only rename — with an edit composed
 /// into it — publishes as the kernel's one respell: the document stands at
-/// its new spelling only, the rename is recorded once, at the new spelling,
-/// and the store holds the document there alone: the old spelling's row dies
+/// its new spelling only, each of the respell's two acts is recorded as it
+/// lands, the edit under the old spelling and the rename at the new, and the
+/// store holds the document there alone: the old spelling's row dies
 /// although the volume resolves that spelling to the renamed file.
 #[test]
 fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
@@ -1222,7 +1223,10 @@ fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
     assert_eq!(fixture.read("note.md").as_deref(), Some("# Note\nfinal\n"));
     assert_eq!(
         *fixture.recorded.calls.borrow(),
-        vec![(PathBuf::from("note.md"), true)]
+        vec![
+            (PathBuf::from("Note.md"), true),
+            (PathBuf::from("note.md"), true)
+        ]
     );
     assert_eq!(fixture.stored_paths(), vec!["note.md".to_string()]);
     fixture.assert_store_is_a_build_from_zero();
@@ -1922,7 +1926,7 @@ pub(super) fn refused_for(outcome: ApplyOutcome) -> Vec<norn_wire::RefusedCheck>
 }
 
 /// A ledger that lets another writer act on one path the moment the applier
-/// publishes there: between the publication and the changeset.
+/// publishes there: between the publication act and the changeset.
 struct Meddling {
     anchor: PathBuf,
     at: PathBuf,
@@ -1931,9 +1935,9 @@ struct Meddling {
 }
 
 impl OwnWriteLedger for Meddling {
-    fn published(&self, path: &Path, _: &Published) {
-        if path == self.at {
-            std::fs::write(self.anchor.join(path), self.leaves).expect("the foreign write");
+    fn acted(&self, act: &Act<'_>) {
+        if act.path == self.at {
+            std::fs::write(self.anchor.join(act.path), self.leaves).expect("the foreign write");
         }
     }
 }

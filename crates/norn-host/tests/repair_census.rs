@@ -62,8 +62,9 @@
 //! classes it; the two memberships with the widest one a page merges from its
 //! source; the drive each narrowing's record shows with the one it was
 //! arranged to take; and the statements it plans with every statement the
-//! store began from the first repair to the last, so a statement begun
-//! outside a repair's own record is found as well.
+//! store began from the first repair until the record is taken after the
+//! last answered, so a statement begun outside a repair's own record is
+//! planned as well.
 //!
 //! **What the census holds every statement to** is the scan bar the family
 //! bars share (`norn_testkit::explain`): no step reads a relation end to end,
@@ -263,7 +264,8 @@ fn arranged_documents() -> Vec<(String, String)> {
 /// applier's judgment make. It fails as well where its narrowings name other
 /// shapes than the store enumerates, where a narrowing's record shows
 /// another drive than it was arranged to take, and where the statements it
-/// plans are not every statement the store began while the repairs ran.
+/// plans are not every statement the store began while the repairs ran and
+/// after the last answered.
 ///
 /// Control: with the index the held-link read and the stored link at a
 /// finding's ordinal seek dropped, the same record fails the census.
@@ -330,7 +332,13 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
 
     let ran = repairs_over_every_arm(&host, &VaultAddress::name(vault.name().clone()));
     // Whatever the store began after the last repair answered, while the
-    // vault stayed attached: no repair's record holds it.
+    // vault stayed attached. No repair's record holds it, and it is judged as
+    // theirs are: an echo of an apply that the ledger does not match — a
+    // folder the apply made or emptied, or an act whose record a starved
+    // thread took after the watcher's batch settled — is reconciled again
+    // after the apply answers, redundant work and never a wrong answer
+    // (ADR 0037), and the statements that reconcile begins are the repairs'
+    // cost all the same.
     let after = induced_failure::statements_begun();
     drop(lease);
     drop(host);
@@ -341,6 +349,7 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
     let gathered: Vec<&String> = attached
         .iter()
         .chain(&ran)
+        .chain(&after)
         .filter(|sql| sql.to_ascii_uppercase().contains("ANALYZE"))
         .collect();
     assert!(
@@ -348,7 +357,11 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         "the store gathered statistics: {gathered:?}"
     );
 
-    let statements: BTreeSet<String> = ran.iter().filter_map(|sql| judged(sql)).collect();
+    let statements: BTreeSet<String> = ran
+        .iter()
+        .chain(&after)
+        .filter_map(|sql| judged(sql))
+        .collect();
     // Nor is one chosen by a pattern bound to a `LIKE` or a `GLOB`, the other
     // way SQLite plans by a bound value.
     let patterned: Vec<&String> = statements
@@ -400,18 +413,12 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         "a health head's count-only seek was admitted without its suffix bounds"
     );
     // The set the census plans is every statement the store began while the
-    // repairs ran, and nothing besides: one begun outside a repair's own
-    // record, or one the record holds and no plan was taken of, is a
-    // statement no bar here judged.
-    let begun: BTreeSet<String> = ran
-        .iter()
-        .chain(&after)
-        .filter_map(|sql| judged(sql))
-        .collect();
+    // repairs ran and after the last answered, and nothing besides: one
+    // begun and no plan taken of is a statement no bar here judged.
     let planned: BTreeSet<String> = plans.iter().map(|plan| plan.sql().to_string()).collect();
     // `judged` drops only the start of a trigger's program. Any other
-    // statement it dropped would leave `begun` and `planned` alike, and the
-    // difference below would not see it.
+    // statement it dropped would leave `statements` and `planned` alike, and
+    // the difference below would not see it.
     let dropped: Vec<&String> = ran
         .iter()
         .chain(&after)
@@ -472,7 +479,9 @@ fn every_statement_a_repair_runs_is_planned_as_an_index_search() {
         );
     }
     assert_eq!(
-        begun.symmetric_difference(&planned).collect::<Vec<_>>(),
+        statements
+            .symmetric_difference(&planned)
+            .collect::<Vec<_>>(),
         Vec::<&String>::new(),
         "the statements the census plans are not the statements the repairs began"
     );
