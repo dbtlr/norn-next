@@ -3563,9 +3563,12 @@ fn a_plan_document_advertises_both_plans_under_its_plan_tag() {
     );
     for branch in [operations, resolved] {
         assert!(refuses_unknown_keys(branch), "{branch} admits any key");
-        assert_eq!(
-            branch["properties"]["vault"]["$ref"].as_str(),
-            Some("#/$defs/VaultAddress")
+        // The address is inline and closed, not a reference to the open one.
+        assert!(
+            branches(&branch["properties"]["vault"])
+                .iter()
+                .all(refuses_unknown_keys),
+            "{branch} admits any key under its vault"
         );
     }
     assert_eq!(
@@ -4456,6 +4459,29 @@ fn a_provenance_advertises_the_heads_it_embeds_as_closed() {
         schema_of::<Candidate>(),
     ] {
         assert!(!refuses_unknown_keys(&open), "{open} is closed");
+    }
+}
+
+/// **A plan advertises its vault address as closed**, where the address read
+/// alone stays open for answers.
+#[test]
+fn a_plan_advertises_its_vault_address_as_closed() {
+    for (what, schema) in [
+        ("an operations plan", schema_of::<AuthoredPlan>()),
+        ("a resolved plan", schema_of::<ResolvedPlan>()),
+    ] {
+        let vault = &schema["properties"]["vault"];
+        let branches = branches(vault);
+        assert!(!branches.is_empty(), "{what}: {vault}");
+        for branch in branches {
+            assert!(
+                refuses_unknown_keys(branch),
+                "{what} admits any key: {vault}"
+            );
+        }
+    }
+    for branch in branches(&schema_of::<VaultAddress>()) {
+        assert!(!refuses_unknown_keys(branch), "{branch} is closed");
     }
 }
 

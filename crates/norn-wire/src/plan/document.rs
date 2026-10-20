@@ -912,6 +912,8 @@ pub struct AuthoredPlan {
     /// Which plan this is: always `operations`.
     pub plan: OperationsTag,
     /// The vault the plan is for.
+    #[serde(deserialize_with = "crate::address::plan_vault_address")]
+    #[schemars(schema_with = "crate::address::plan_vault_address_schema")]
     pub vault: VaultAddress,
     /// The operations, in the order they compose.
     pub operations: Vec<Operation>,
@@ -1030,6 +1032,8 @@ pub struct ResolvedPlan {
     /// Which plan this is: always `resolved`.
     pub plan: ResolvedTag,
     /// The vault the plan is for.
+    #[serde(deserialize_with = "crate::address::plan_vault_address")]
+    #[schemars(schema_with = "crate::address::plan_vault_address_schema")]
     pub vault: VaultAddress,
     /// The identity of the vault's root when the plan was resolved. A vault
     /// whose root identity differs refuses the plan.
@@ -1222,6 +1226,7 @@ enum PlanName {
 #[serde(deny_unknown_fields)]
 struct DocumentFields {
     plan: PlanName,
+    #[serde(deserialize_with = "crate::address::plan_vault_address")]
     vault: VaultAddress,
     operations: Vec<Operation>,
     #[serde(default, deserialize_with = "written")]

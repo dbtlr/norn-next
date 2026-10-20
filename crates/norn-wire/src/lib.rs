@@ -492,6 +492,10 @@
 //! becomes a plan and a field dropped from it would be dropped from the plan. A
 //! [`LinkKey`] inside a forecast's [`LinkAdvisory`] refuses one as well: it is
 //! the key a plan's condition holds a link under, read as the plan reads it.
+//! A [`VaultAddress`], shared with every answer that names a vault, drops an
+//! unknown key; a plan reads it through a strict mirror and advertises it
+//! closed, as it does the heads a provenance embeds. A write request names its
+//! vault by the open address, so an unknown key under its `vault` is dropped.
 //!
 //! # The code grammar, and what is not a code
 //!
