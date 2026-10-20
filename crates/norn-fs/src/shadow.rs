@@ -26,7 +26,11 @@
 //!   different filesystem. [`FALLBACK`] is a single dot-directory outside the
 //!   vault-document boundary, excluded from the walk wholesale, and the key
 //!   beneath it is what keeps two maintainerships over one vault root in two
-//!   homes.
+//!   homes. Making a fallback home writes the fallback root's own
+//!   `.gitignore`, holding `*`, so a vault kept in git passes over the staged
+//!   shadows without norn editing a file of the vault's: the vault's schema
+//!   and config beside it in `.norn` stay committable. No sweep removes that
+//!   file, since it carries no shadow's name.
 //!
 //! The choice is a fact about a vault root and is recorded as one by whoever
 //! resolves it. A rename that reports `EXDEV` later is an
@@ -138,6 +142,17 @@ pub(crate) const SHADOW_PREFIX: &str = "norn-shadow-";
 /// [maintainership](MaintainershipKey), so a vault root reached by two of them
 /// holds two homes and neither sweeps the other's.
 pub const FALLBACK: &str = ".norn/tmp";
+
+/// The name of the fallback root's self-ignore: the `.gitignore` norn keeps
+/// directly inside [`FALLBACK`], so a vault kept in git passes over every
+/// staged shadow without norn editing a file of the vault's own.
+pub(crate) const SELF_IGNORE: &str = ".gitignore";
+
+/// The exact bytes of the fallback root's [self-ignore](SELF_IGNORE): one
+/// pattern matching every name beneath the directory holding it, the file
+/// itself among them. Only these bytes are norn's; anything else standing at
+/// the name is somebody's alteration.
+pub(crate) const SELF_IGNORE_TEXT: &[u8] = b"*\n";
 
 /// How old a shadow must be before an in-life sweep removes it.
 ///
@@ -268,7 +283,9 @@ impl ShadowHome {
     /// `data_tmp` is created if it is not there — it is norn's own directory,
     /// and its device is what the decision reads. Where the two devices agree
     /// the answer is `data_tmp`; where they do not, `key`'s directory under
-    /// [`FALLBACK`] beneath the vault root is created and returned instead.
+    /// [`FALLBACK`] beneath the vault root is created and returned instead,
+    /// and the fallback root's [self-ignore](SELF_IGNORE) is written where
+    /// nothing stands at its name.
     ///
     /// **A home's key is the maintainership key.** `data_tmp` sits inside the
     /// derived directory the key names and is keyed by being there; the vault
@@ -340,6 +357,7 @@ impl ShadowHome {
         let within = Path::new(FALLBACK).join(key.as_path());
         let fallback = vault_root.join(&within);
         make_directory(&fallback)?;
+        write_self_ignore(&vault_root.join(FALLBACK));
         Ok(ShadowHome {
             directory: fallback,
             placement: Placement::VaultFallback,
@@ -859,6 +877,40 @@ fn make_directory(directory: &Path) -> Result<(), Refusal> {
     std::fs::create_dir_all(directory).map_err(|error| environment("creating", directory, &error))
 }
 
+/// Put the [self-ignore](SELF_IGNORE) in the fallback root `fallback`, where
+/// nothing stands at its name.
+///
+/// **Only a name nothing holds is written.** The file is created exclusively,
+/// so a self-ignore somebody altered, and a link or anything else standing at
+/// the name, is left as found: what stands there is what the fallback-ignored
+/// rule reads, and an alteration is reported rather than overwritten. A
+/// self-ignore something deleted is written back the next time a fallback home
+/// is made.
+///
+/// **A failure here is not a refusal of the home.** The home stages shadows
+/// whether or not the vault ignores it, and a self-ignore that is missing or
+/// cut short is what the fallback-ignored rule reports as not ignoring the
+/// fallback, which is the answer that warns. A write that fails after the
+/// create removes what it created, so a cut-short file is left only by a
+/// process that dies between the two.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+fn write_self_ignore(fallback: &Path) {
+    use std::io::Write as _;
+
+    let path = fallback.join(SELF_IGNORE);
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    else {
+        return;
+    };
+    if file.write_all(SELF_IGNORE_TEXT).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// Which device `path` sits on.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
 fn device_of(path: &Path) -> Result<u64, Refusal> {
@@ -1035,6 +1087,97 @@ mod tests {
         assert!(
             scratch.exists(home.directory()),
             "the fallback directory was not created"
+        );
+    }
+
+    /// **Making the fallback home makes the fallback root ignore itself**:
+    /// `.norn/tmp/.gitignore` holds `*`, so git passes over every staged
+    /// shadow without norn editing a file of the vault's own. A home made
+    /// again over a self-ignore something deleted writes it back.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: reading and removing what a case made.
+    fn making_the_fallback_home_writes_the_self_ignore_and_making_it_again_restores_it() {
+        let scratch = Scratch::new("shadow-self-ignore");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("other-data/vaults/notes/tmp");
+        let self_ignore = vault.join(".norn/tmp/.gitignore");
+
+        ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        assert_eq!(std::fs::read(&self_ignore).expect("the self-ignore"), b"*\n");
+        assert!(
+            !scratch.exists(&vault.join(".gitignore")),
+            "the vault's own .gitignore was written"
+        );
+
+        std::fs::remove_file(&self_ignore).unwrap();
+        ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        assert_eq!(std::fs::read(&self_ignore).expect("the self-ignore"), b"*\n");
+    }
+
+    /// **The self-ignore outlives every sweep and discard, and the walk reads
+    /// none of it**: it carries no shadow's name, so the root sweep, the tree
+    /// sweep past the age threshold, a total sweep of the home and the
+    /// home's discard all leave it, and the walk cuts the fallback root as one
+    /// mechanism skip without yielding it as a file.
+    #[test]
+    fn the_self_ignore_survives_every_sweep_and_the_walk_does_not_yield_it() {
+        let scratch = Scratch::new("shadow-self-ignore-kept");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("other-data/vaults/notes/tmp");
+        let self_ignore = vault.join(".norn/tmp/.gitignore");
+        let home =
+            ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        age(&self_ignore);
+
+        sweep_fallback_root(&vault).expect("a root sweep");
+        sweep_fallback_tree(&vault).expect("a tree sweep");
+        home.sweep(Duration::ZERO).expect("a total sweep");
+        discard_homes(&vault, &data_tmp, &key(), &[]).expect("a discard");
+        assert!(scratch.exists(&self_ignore), "a sweep took the self-ignore");
+
+        let facts = crate::walk::walk(&vault, &[])
+            .expect("a walk")
+            .map(|fact| match fact.expect("a walk fact") {
+                crate::walk::WalkFact::File(file) => (file.path().as_path().to_owned(), None),
+                crate::walk::WalkFact::Skipped(skip) => {
+                    (skip.path().as_path().to_owned(), Some(skip.reason()))
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            facts,
+            [(
+                PathBuf::from(FALLBACK),
+                Some(crate::walk::SkipReason::Mechanism)
+            )]
+        );
+    }
+
+    /// **A self-ignore somebody altered is left as found**: resolving the home
+    /// again writes nothing over it, so what stands there is what the
+    /// fallback-ignored rule reads, and the warning it raises is the operator's
+    /// to act on. A link standing at the name is not followed.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting what a case reads.
+    fn an_altered_self_ignore_or_a_link_at_its_name_is_left_as_found() {
+        let scratch = Scratch::new("shadow-self-ignore-altered");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("other-data/vaults/notes/tmp");
+        let self_ignore = vault.join(".norn/tmp/.gitignore");
+        std::fs::create_dir_all(vault.join(".norn/tmp")).unwrap();
+
+        std::fs::write(&self_ignore, b"!*\n").unwrap();
+        ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        assert_eq!(std::fs::read(&self_ignore).unwrap(), b"!*\n");
+
+        std::fs::remove_file(&self_ignore).unwrap();
+        let elsewhere = scratch.path("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, &self_ignore).unwrap();
+        ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        assert!(
+            !scratch.exists(&elsewhere),
+            "the self-ignore was written through a link"
         );
     }
 
