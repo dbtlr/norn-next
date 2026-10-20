@@ -56,6 +56,8 @@ impl InventoryWalk {
 
     /// Spend at most `work` enumeration acts. Directory ends and dot entries
     /// consume an act, keeping a chain of empty folders bounded as well.
+    /// After an error, discard this incomplete inventory and start afresh
+    /// after recovery: resuming its consumed stream would omit the failed page.
     pub fn advance(&mut self, work: usize) -> Result<InventoryPage, WalkError> {
         let mut records = Vec::new();
         let mut visited = 0;
