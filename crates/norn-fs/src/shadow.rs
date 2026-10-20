@@ -893,7 +893,7 @@ fn make_directory(directory: &Path) -> Result<(), Refusal> {
 /// fallback, which is the answer that warns. A write that fails after the
 /// create removes what it created, so a cut-short file is left only by a
 /// process that dies between the two.
-#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow home.
 fn write_self_ignore(fallback: &Path) {
     use std::io::Write as _;
 
