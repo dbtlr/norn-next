@@ -2228,6 +2228,14 @@ where
                         rolling_death(&mut pending, row.path.clone());
                     }
                 }
+                norn_fs::WalkFact::File(file)
+                    if pending.account.rolling && document_path(file.path().as_path()).is_err() =>
+                {
+                    // The rolling revisit files every refused spelling once,
+                    // after all row deaths have freed their rendered places.
+                    // Filing here too would append the same finding twice.
+                    files.next();
+                }
                 norn_fs::WalkFact::File(file) if file.path().as_path().to_str().is_none() => {
                     let path = file.path().as_path().to_owned();
                     files.next();
@@ -17077,6 +17085,69 @@ mod tests {
                 created: 0,
                 deleted: 1
             }
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolling_passes_keep_one_finding_per_refused_spelling() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let f = Fixture::new("rolling-refused-spellings");
+        fs::create_dir(f.vault().join("a")).unwrap();
+        let spellings = [
+            b"raw\xff.md".as_slice(),
+            b"a/raw\xff.md".as_slice(),
+            b"..md".as_slice(),
+            b"bad\\name.md".as_slice(),
+            b"bad\x07name.md".as_slice(),
+        ];
+        for spelling in spellings {
+            if !write_or_report(
+                &f.vault().join(std::ffi::OsStr::from_bytes(spelling)),
+                b"body",
+            ) {
+                return;
+            }
+        }
+        fs::write(f.vault().join("ok.md"), "readable").unwrap();
+        let (ops, name) = f.ops(1);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.subscription.take();
+        assert_eq!(finding_total(&mut attachment.store), 5);
+        let subjects: BTreeSet<_> = spellings
+            .into_iter()
+            .map(|spelling| {
+                DocumentPath::rendered(Path::new(std::ffi::OsStr::from_bytes(spelling)))
+            })
+            .collect();
+        let census = |store: &mut Store| {
+            let mut findings: Vec<_> = subjects
+                .iter()
+                .flat_map(|subject| findings_at(store, subject.as_str()))
+                .map(|finding| (finding.path, finding.kind, finding.detail))
+                .collect();
+            findings.sort();
+            findings
+        };
+        let expected = census(&mut attachment.store);
+        for _ in 0..2 {
+            let previous = attachment.rolling.last_completed;
+            attachment.rolling.due = Instant::now();
+            for _ in 0..1000 {
+                rolling::slice(&mut attachment, ops.policy).unwrap();
+                if attachment.rolling.last_completed != previous {
+                    break;
+                }
+            }
+            assert_ne!(attachment.rolling.last_completed, previous);
+            assert_eq!(census(&mut attachment.store), expected);
+        }
+        assert_eq!(
+            attachment.rolling.misses,
+            norn_wire::WatcherMisses::default()
         );
         ops.detach(&name, attachment);
     }
