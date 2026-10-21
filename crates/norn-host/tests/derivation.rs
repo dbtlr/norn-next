@@ -369,7 +369,7 @@ setext title
 /// marked-up headings, a heading ending in a non-breaking space, both link
 /// families with and without protocol, title, anchor, block reference and
 /// embed, a percent-encoded Markdown target, one climbing out of the vault,
-/// one naming an attachment, a rooted one, one opening with a URI scheme, one
+/// one naming a vault file, a rooted one, one opening with a URI scheme, one
 /// carrying a query and one an encoded separator, a dotted wikilink, a
 /// same-document anchor, a wikilink no suffix address reads, `vault://` links
 /// of both families, a percent-encoded anchor, a heading chain, an ATX-shaped

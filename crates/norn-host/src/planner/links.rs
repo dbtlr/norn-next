@@ -1690,9 +1690,8 @@ impl Judged {
     /// sides is no change the set records; and a healthy link the plan does
     /// not write is retargeted where it names another document after
     /// ([`names_another`]), as a document appearing at or leaving its exact
-    /// path makes it. A side link health does not judge
-    /// — an attachment's address resolving to no document — is never broken,
-    /// so a link going there is recorded and not advised on.
+    /// path makes it. A link addressed elsewhere is never judged, so it is
+    /// never broken and never advised on.
     fn advisory(&self, skip: Option<RewriteSkip>) -> Option<LinkAdvisory> {
         let key = self.key.clone();
         if self.unwritten {
