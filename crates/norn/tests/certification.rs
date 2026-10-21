@@ -175,6 +175,9 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/certification/preflight.rs",
         "crates/norn-testkit/src/regression.rs",
         "crates/norn-testkit/src/regression/compiled.rs",
+        "crates/norn-testkit/src/process.rs",
+        "crates/norn-testkit/src/process/group.rs",
+        "crates/norn-testkit/src/scratch.rs",
         // The instruments a verdict is read off.
         "crates/norn-testkit/src/equivalence.rs",
         "crates/norn-testkit/src/churn.rs",

@@ -164,6 +164,19 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               complete and ignored test names are read from stable executables",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/process.rs",
+        why: "the inventory's executable installation, bounded execution and complete-output \
+              verdict; changing them changes which compiled listings are accepted",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/process/group.rs",
+        why: "the child termination and cleanup verdict behind an accepted test listing",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/scratch.rs",
+        why: "the private directory identity that keeps installed inventory executables isolated",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/equivalence.rs",
         why: "the comparator every convergence verdict and the operational-validity leg are read \
               off",
