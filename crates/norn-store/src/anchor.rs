@@ -461,7 +461,7 @@ mod tests {
                 "INSERT INTO links (
                      document, ordinal, family, embed, target, anchor, anchor_text,
                      anchor_marked, block_ref, address, span_line, span_column, span_offset
-                 ) VALUES (?1, ?2, 'wikilink', 0, 't', ?3, ?4, ?5, ?6, 'document', 1, 1, 0)",
+                 ) VALUES (?1, ?2, 'wikilink', 0, 't', ?3, ?4, ?5, ?6, 'vault', 1, 1, 0)",
                 params![document, ordinal, anchor, text, marked, block_ref],
             )
         };

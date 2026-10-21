@@ -12,6 +12,10 @@ _Avoid_: Collection
 A Markdown file in a vault whose authored frontmatter and body are part of the source truth.
 _Avoid_: Note, file (when the distinction matters)
 
+**Vault file**:
+A file in a vault that is not a vault document and whose name carries an extension, known to Norn by its path and name alone, never by its content.
+_Avoid_: Attachment (which names the vault attachment lifecycle), asset
+
 **Vault schema**:
 A user-authored declaration of the valid structure and values of vault documents: field types and shapes, the tag facet, schema rules, path rules, creation rules and the inbox.
 _Avoid_: Doctrine, schema (unqualified)

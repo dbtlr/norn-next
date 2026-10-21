@@ -393,22 +393,21 @@ pub(crate) fn heads_sql(key: SuffixKey) -> String {
         Some("?3"),
         "json_extract(j.value, '$[2]')",
     );
-    let path = resolve::link_key_path("dp", key, "j.value");
-    resolve::CANDIDATE_TABLES
-        .map(|table| {
-            resolve::candidate_aliases(
-                table,
-                format!(
-                    "SELECT {CLASS_ARM}, j.key, dc.id, dc.path, dc.{rung}
-         FROM json_each(?1) AS j CROSS JOIN {table} AS dc
-         WHERE dc.id IN (SELECT id FROM ({class}))
+    resolve::CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dc = candidates.alias("c");
+            let dp = candidates.alias("p");
+            let path = resolve::link_key_path(&dp, key, "j.value");
+            format!(
+                "SELECT {CLASS_ARM}, j.key, {dc}.id, {dc}.path, {dc}.{rung}
+         FROM json_each(?1) AS j CROSS JOIN {table} AS {dc}
+         WHERE {dc}.id IN (SELECT id FROM ({class}))
          UNION ALL
-         SELECT {PATH_ARM}, j.key, dc.id, dc.path, j.value
-         FROM json_each(?2) AS j CROSS JOIN {table} AS dc
-         WHERE dc.id IN (SELECT dp.id FROM {table} AS dp WHERE {path}
-                         ORDER BY dp.path LIMIT ?3)"
-                ),
-                &["dc", "dp"],
+         SELECT {PATH_ARM}, j.key, {dc}.id, {dc}.path, j.value
+         FROM json_each(?2) AS j CROSS JOIN {table} AS {dc}
+         WHERE {dc}.id IN (SELECT {dp}.id FROM {table} AS {dp} WHERE {path}
+                         ORDER BY {dp}.path LIMIT ?3)"
             )
         })
         .join(" UNION ALL ")
@@ -453,14 +452,12 @@ pub(crate) fn totals_sql(key: SuffixKey) -> String {
         "json_extract(j.value, '$[1]')",
         "json_extract(j.value, '$[2]')",
     );
-    let path = resolve::link_key_path("dp", key, "j.value");
-    let paths = resolve::CANDIDATE_TABLES
-        .map(|table| {
-            resolve::candidate_aliases(
-                table,
-                format!("(SELECT COUNT(*) FROM {table} AS dp WHERE {path})"),
-                &["dp"],
-            )
+    let paths = resolve::CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dp = candidates.alias("p");
+            let path = resolve::link_key_path(&dp, key, "j.value");
+            format!("(SELECT COUNT(*) FROM {table} AS {dp} WHERE {path})")
         })
         .join(" + ");
     format!(

@@ -116,7 +116,7 @@ fn source_links() -> Vec<LinkFact> {
         markdown("../x/z"),
         // 9: a protocol.
         link(LinkFamily::Markdown, Some("https"), "example.com", None),
-        // 10: an attachment.
+        // 10: a vault file.
         wikilink("picture.png"),
         // 11: its own document.
         markdown("./a.md"),
@@ -614,9 +614,9 @@ fn addressed() -> Vec<DocumentFacts> {
             vec![
                 // 0: a non-Markdown extension remains in the document stem.
                 wikilink("v1.2"),
-                // 1: an attachment no document is.
+                // 1: a vault file no document is.
                 wikilink("photo.png"),
-                // 2: an attachment's name a document carries.
+                // 2: a vault file's name a document carries.
                 wikilink("diagram.png"),
                 // 3: a `vault://` wikilink, a path from the vault root.
                 link(

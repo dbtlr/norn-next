@@ -371,8 +371,8 @@ fn row_head(row: &LinkRow) -> Vec<(String, String)> {
 /// link's ordinal and span.
 ///
 /// The kinds are also stated per link, so a rule both readings share cannot
-/// invert without this failing: an attachment resolving to nothing raises
-/// nothing, and a document target resolving to nothing is broken.
+/// invert without this failing: a document or vault-file target resolving
+/// to nothing is broken.
 #[test]
 fn judgment_agrees_with_the_links_column_health() {
     for order in [Sensitive, Folding] {
@@ -531,8 +531,8 @@ fn an_embed_carries_the_same_kinds() {
 
 /// **A Markdown image is judged as the Markdown link beside it is.** An image
 /// naming a document raises what the link naming it raises (broken, ambiguous,
-/// missing its anchor, or nothing), and an image naming a file that is no
-/// document raises nothing, because attachments are not indexed.
+/// missing its anchor, or nothing); an image naming a missing vault file is
+/// broken, as the link naming it is.
 #[test]
 fn a_markdown_image_is_judged_as_a_markdown_link_is() {
     let mut documents = targets();

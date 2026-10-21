@@ -241,12 +241,11 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
 
 /// **A link's stored address kind is the reading its health is judged by.**
 /// Over both families, with and without a protocol, and targets that name a
-/// document, an attachment, a dotted name and a scheme, `links.address` is
+/// document, a vault file, a dotted name and a scheme, `links.address` is
 /// `elsewhere` exactly where [`LinkHealth::of_link`] never judges the link,
-/// `attachment` exactly where it leaves the link unjudged only when it
-/// resolves to nothing, and `document` exactly where a link resolving to
-/// nothing is broken. A document extension in any case is a document's, so
-/// `note.md` and `note.MD` are no attachments.
+/// and `vault` where a link resolving to nothing is broken. A document
+/// extension in any case is a document's, so `note.md` and `note.MD` are
+/// no vault files.
 #[test]
 fn a_links_address_column_agrees_with_link_health_of_link() {
     let targets = [

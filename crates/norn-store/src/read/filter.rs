@@ -693,39 +693,37 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                  WHERE le.link = lk.link AND le.segments IS NOT NULL"
             );
             let files = "NOT EXISTS (SELECT 1 FROM link_keys AS lx WHERE lx.link = lk.link AND lx.key <> lk.key)";
-            let named = resolve::CANDIDATE_TABLES
-                .map(|table| {
-                    resolve::candidate_aliases(
-                        table,
-                        format!(
-                            "EXISTS (SELECT 1 FROM {table} AS dn WHERE dn.id = {document}
-                 AND dn.admitting_segments <= lk.segments AND {first} AND {eligible})",
-                            first =
-                                resolve::exact_first("dn", key, &exact_keys, "lk.segments", files),
-                            eligible = if table == "vault_files" { files } else { "1" },
-                        ),
-                        &["dn"],
+            let named = resolve::CANDIDATES
+                .map(|candidates| {
+                    let table = candidates.table;
+                    let dn = candidates.alias("n");
+                    format!(
+                        "EXISTS (SELECT 1 FROM {table} AS {dn} WHERE {dn}.id = {document}
+                 AND {dn}.admitting_segments <= lk.segments AND {first} AND {eligible})",
+                        first = resolve::exact_first(&dn, key, &exact_keys, "lk.segments", files),
+                        eligible = if table == "vault_files" { files } else { "1" },
                     )
                 })
                 .join(" OR ");
-            let competitors = resolve::CANDIDATE_TABLES
-                .map(|table| {
-                    resolve::candidate_aliases(
-                        table,
-                        format!(
-                            "NOT EXISTS (SELECT 1 FROM link_keys AS lo
-                    CROSS JOIN {counts} AS n CROSS JOIN {table} AS dl
+            let competitors = resolve::CANDIDATES
+                .map(|candidates| {
+                    let table = candidates.table;
+                    let dl = candidates.alias("l");
+                    let dp = candidates.alias("p");
+                    format!(
+                        "NOT EXISTS (SELECT 1 FROM link_keys AS lo
+                    CROSS JOIN {counts} AS n CROSS JOIN {table} AS {dl}
                     WHERE lo.link = lk.link AND lo.segments IS NOT NULL AND {within}
-                      AND {eligible} AND {other_in_class} AND {other_first} AND dl.id <> {document})
-                 AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, {table} AS dp
+                      AND {eligible} AND {other_in_class} AND {other_first} AND {dl}.id <> {document})
+                 AND NOT EXISTS (SELECT 1 FROM link_keys AS lp, {table} AS {dp}
                     WHERE lp.link = lk.link AND lp.segments IS NULL
-                      AND {other_at_path} AND dp.id <> {document})",
+                      AND {other_at_path} AND {dp}.id <> {document})",
                             other_first =
-                                resolve::exact_first("dl", key, &exact_keys, "lo.segments", files),
+                                resolve::exact_first(&dl, key, &exact_keys, "lo.segments", files),
                             eligible = if table == "vault_files" { files } else { "1" },
                             within = resolve::admitting_count_within("n", "lo.segments"),
                             other_in_class = resolve::range_admitted(
-                                "dl",
+                                &dl,
                                 key,
                                 (
                                     &format!("lo.{link_key}"),
@@ -734,9 +732,7 @@ fn rows_of(shape: ReadFilter, values: &[Value], reached: Reached, binder: &mut B
                                 &resolve::admitting_count("n")
                             ),
                             other_at_path =
-                                resolve::link_key_path("dp", key, &format!("lp.{link_key}")),
-                        ),
-                        &["dl", "dp"],
+                                resolve::link_key_path(&dp, key, &format!("lp.{link_key}")),
                     )
                 })
                 .join(" AND ");

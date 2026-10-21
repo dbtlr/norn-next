@@ -1066,16 +1066,14 @@ pub(crate) fn compose_candidate_suffixes(
         "json_array_length(json_extract(j.value, '$[3]')) = 1",
     );
     Ok((
-        resolve::CANDIDATE_TABLES
-            .map(|table| {
-                resolve::candidate_aliases(
-                    table,
-                    format!(
-                        "SELECT j.key, dc.id FROM json_each(?1) AS j
-             CROSS JOIN {table} AS dc
-             WHERE dc.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
-                    ),
-                    &["dc"],
+        resolve::CANDIDATES
+            .map(|candidates| {
+                let table = candidates.table;
+                let dc = candidates.alias("c");
+                format!(
+                    "SELECT j.key, {dc}.id FROM json_each(?1) AS j
+             CROSS JOIN {table} AS {dc}
+             WHERE {dc}.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
                 )
             })
             .join(" UNION ALL "),
@@ -1117,33 +1115,31 @@ pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<V
     );
     let total = resolve::link_key_total(key, "keyed.key", "keyed.segments", "keyed.files");
     let exact = resolve::exact_count(key, "keyed.key", "keyed.segments", "keyed.files");
-    let path = resolve::link_key_path("dp", key, "keyed.key");
-    let rung = format!("dc.{}", key.column());
     let ladder = resolve::ladder("reached.rung", "reached.path");
-    let path_total = resolve::CANDIDATE_TABLES
-        .map(|table| {
-            resolve::candidate_aliases(
-                table,
-                format!("(SELECT COUNT(*) FROM {table} AS dp WHERE {path})"),
-                &["dp"],
-            )
+    let path_total = resolve::CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dp = candidates.alias("p");
+            let path = resolve::link_key_path(&dp, key, "keyed.key");
+            format!("(SELECT COUNT(*) FROM {table} AS {dp} WHERE {path})")
         })
         .join(" + ");
-    let reached = resolve::CANDIDATE_TABLES
-        .map(|table| {
-            resolve::candidate_aliases(
-                table,
-                format!(
-                    "SELECT keyed.key, keyed.files, dc.id, dc.path, {rung}, {rung} = keyed.key
-         FROM keyed CROSS JOIN {table} AS dc
-         WHERE keyed.segments IS NOT NULL AND dc.id IN (SELECT id FROM ({class}))
+    let reached = resolve::CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dc = candidates.alias("c");
+            let dp = candidates.alias("p");
+            let path = resolve::link_key_path(&dp, key, "keyed.key");
+            let rung = format!("{dc}.{}", key.column());
+            format!(
+                "SELECT keyed.key, keyed.files, {dc}.id, {dc}.path, {rung}, {rung} = keyed.key
+         FROM keyed CROSS JOIN {table} AS {dc}
+         WHERE keyed.segments IS NOT NULL AND {dc}.id IN (SELECT id FROM ({class}))
          UNION ALL
-         SELECT keyed.key, keyed.files, dc.id, dc.path, keyed.key, 0
-         FROM keyed CROSS JOIN {table} AS dc
-         WHERE keyed.segments IS NULL AND dc.id IN (
-             SELECT dp.id FROM {table} AS dp WHERE {path} ORDER BY dp.path LIMIT ?2)"
-                ),
-                &["dc", "dp"],
+         SELECT keyed.key, keyed.files, {dc}.id, {dc}.path, keyed.key, 0
+         FROM keyed CROSS JOIN {table} AS {dc}
+         WHERE keyed.segments IS NULL AND {dc}.id IN (
+             SELECT {dp}.id FROM {table} AS {dp} WHERE {path} ORDER BY {dp}.path LIMIT ?2)"
             )
         })
         .join(" UNION ALL ");

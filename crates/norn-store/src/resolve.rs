@@ -72,19 +72,28 @@ pub(crate) const SUCCESSOR_FUNCTION: &str = "norn_key_successor";
 pub(crate) const TARGET_PARAMETERS: usize = 2;
 
 /// The disjoint stores every candidate read seeks before merging bounded heads.
-pub(crate) const CANDIDATE_TABLES: [&str; 2] = ["documents", "vault_files"];
+pub(crate) const CANDIDATES: [Candidates; 2] = [
+    Candidates {
+        table: "documents",
+        alias_prefix: "d",
+    },
+    Candidates {
+        table: "vault_files",
+        alias_prefix: "f",
+    },
+];
 
 /// Each table has its own aliases even in nested union branches, so emitted
 /// plans identify the index seeks of both candidate kinds without collision.
-pub(crate) fn candidate_aliases(table: &str, sql: String, aliases: &[&str]) -> String {
-    if table == "documents" {
-        return sql;
+pub(crate) struct Candidates {
+    pub(crate) table: &'static str,
+    alias_prefix: &'static str,
+}
+
+impl Candidates {
+    pub(crate) fn alias(&self, suffix: &str) -> String {
+        format!("{}{suffix}", self.alias_prefix)
     }
-    aliases.iter().fold(sql, |sql, alias| {
-        let file = alias.replacen('d', "f", 1);
-        sql.replace(&format!("{alias}."), &format!("{file}."))
-            .replace(&format!("AS {alias}"), &format!("AS {file}"))
-    })
 }
 
 /// The separator between segments, in a target and in a path alike.
@@ -350,36 +359,35 @@ pub(crate) fn range_rows(
     files: &str,
 ) -> String {
     let rung = key.column();
-    let rows = CANDIDATE_TABLES
-        .map(|table| {
+    let rows = CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let da = candidates.alias("a");
+            let dl = candidates.alias("l");
             let counts = admitting_counts(bounds.0);
-            let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
+            let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
             let within = admitting_count_within("n", segments);
             let eligible = if table == "vault_files" { files } else { "1" };
             let rows = if let Some(head) = head {
-                let order = ladder(&format!("dl.{rung}"), "dl.path");
+                let order = ladder(&format!("{dl}.{rung}"), &format!("{dl}.path"));
                 format!(
-                    "da.id IN (SELECT dl.id FROM {table} AS dl WHERE {admitted}
+                    "{da}.id IN (SELECT {dl}.id FROM {table} AS {dl} WHERE {admitted}
                              ORDER BY {order} LIMIT {head})"
                 )
             } else {
-                range_admitted("da", key, bounds, &admitting_count("n"))
+                range_admitted(&da, key, bounds, &admitting_count("n"))
             };
             let cut = head
                 .map(|head| {
                     format!(
                         " ORDER BY {} LIMIT {head}",
-                        ladder(&format!("da.{rung}"), "da.path")
+                        ladder(&format!("{da}.{rung}"), &format!("{da}.path"))
                     )
                 })
                 .unwrap_or_default();
-            candidate_aliases(
-                table,
-                format!(
-                    "SELECT * FROM (SELECT da.id, da.path, da.{rung}
-            FROM {counts} AS n CROSS JOIN {table} AS da WHERE {eligible} AND {within} AND {rows}{cut})"
-                ),
-                &["da", "dl"],
+            format!(
+                "SELECT * FROM (SELECT {da}.id, {da}.path, {da}.{rung}
+            FROM {counts} AS n CROSS JOIN {table} AS {da} WHERE {eligible} AND {within} AND {rows}{cut})"
             )
         })
         .join(" UNION ALL ");
@@ -397,16 +405,14 @@ pub(crate) fn range_total(
     files: &str,
 ) -> String {
     let counts = admitting_counts(bounds.0);
-    let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
     let within = admitting_count_within("n", segments);
-    let total = CANDIDATE_TABLES
-        .map(|table| {
+    let total = CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dl = candidates.alias("l");
+            let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
             let eligible = if table == "vault_files" { files } else { "1" };
-            candidate_aliases(
-                table,
-                format!("(SELECT COUNT(*) FROM {table} AS dl WHERE {eligible} AND {admitted})"),
-                &["dl"],
-            )
+            format!("(SELECT COUNT(*) FROM {table} AS {dl} WHERE {eligible} AND {admitted})")
         })
         .join(" + ");
     format!("SELECT COALESCE(SUM({total}), 0) FROM {counts} AS n WHERE {within}")
@@ -498,16 +504,14 @@ pub(crate) fn exact_count(key: SuffixKey, exact_keys: &str, segments: &str, file
 /// The admitted candidates at one of `exact_keys`.
 fn exact_rows(key: SuffixKey, exact_keys: &str, segments: &str, files: &str) -> String {
     let column = key.column();
-    CANDIDATE_TABLES
-        .map(|table| {
+    CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let de = candidates.alias("e");
             let eligible = if table == "vault_files" { files } else { "1" };
-            candidate_aliases(
-                table,
-                format!(
-                    "SELECT 1 FROM {table} AS de WHERE {eligible} AND de.{column} IN ({exact_keys})
-         AND de.admitting_segments <= {segments}"
-                ),
-                &["de"],
+            format!(
+                "SELECT 1 FROM {table} AS {de} WHERE {eligible} AND {de}.{column} IN ({exact_keys})
+         AND {de}.admitting_segments <= {segments}"
             )
         })
         .join(" UNION ALL ")

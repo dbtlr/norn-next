@@ -2234,8 +2234,9 @@ where
                 }
                 norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
                     let path = file.path().as_path().to_owned();
+                    let count = counts_rolling_write(pending.account, file.stat());
                     files.next();
-                    last_read_spelling = merge_file(&mut pending, &path, row);
+                    last_read_spelling = merge_file(&mut pending, &path, row, count);
                 }
                 norn_fs::WalkFact::File(file)
                     if pending.account.rolling && document_path(file.path().as_path()).is_err() =>
@@ -2287,8 +2288,9 @@ where
             } else if let Some(vault) = vault {
                 match vault.fact(Path::new(row.path.as_str())).map_err(effect)? {
                     norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
+                        let count = counts_rolling_write(pending.account, file.stat());
                         last_read_spelling =
-                            merge_file(&mut pending, file.path().as_path(), Some(row));
+                            merge_file(&mut pending, file.path().as_path(), Some(row), count);
                     }
                     norn_fs::WalkFact::File(file) => {
                         let spelling = file
@@ -2378,10 +2380,8 @@ fn merge_file(
     pending: &mut Pending<'_>,
     path: &Path,
     row: Option<&StoredTarget>,
+    count: bool,
 ) -> Option<String> {
-    if path == Path::new(norn_config::IN_VAULT_CONFIG_PATH) {
-        return None;
-    }
     let path = document_path(path)
         .ok()
         .filter(DocumentPath::is_vault_file)?;
@@ -2392,8 +2392,18 @@ fn merge_file(
             });
         }
         pending.push(Change::FileBirth { path: path.clone() });
+        if row.is_none() && count {
+            pending.misses.created += 1;
+        }
     }
     Some(path.as_str().to_string())
+}
+
+fn counts_rolling_write(account: &Account, stat: &norn_fs::FileStat) -> bool {
+    account.rolling
+        && std::time::SystemTime::now()
+            .duration_since(stat.mtime)
+            .is_ok_and(|age| age >= rolling::DELIVERY_GRACE)
 }
 
 fn merge_read(
@@ -2403,10 +2413,7 @@ fn merge_read(
     row: Option<&StoredDocument>,
 ) -> Result<(), JobFailure> {
     let hash = read.content_hash().to_string();
-    let count = pending.account.rolling
-        && std::time::SystemTime::now()
-            .duration_since(read.stat().mtime)
-            .is_ok_and(|age| age >= rolling::DELIVERY_GRACE);
+    let count = counts_rolling_write(pending.account, read.stat());
     if let Some(row) = row {
         let changed = hash != row.content_hash || spelling != row.path.as_str();
         if changed
@@ -2744,7 +2751,7 @@ fn scoped_increment(
                     stored_path_order(sensitivity),
                 )
                 .map_err(store_effect)?;
-            merge_file(&mut pending, path, standing.first());
+            merge_file(&mut pending, path, standing.first(), false);
             continue;
         }
         // Read from the vault root down, so a dirty path reaches the same file
@@ -17548,6 +17555,52 @@ mod tests {
                 .stored_document(&DocumentPath::new("deleted.md").unwrap())
                 .unwrap()
                 .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types)] // Harness scaffolding sets an external writer's mtime.
+    fn a_rolling_pass_counts_only_old_vault_file_births_as_watcher_misses() {
+        let f = Fixture::new("rolling-file-birth-misses");
+        fs::write(f.vault().join("existing.png"), "existing").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.subscription.take();
+        fs::write(f.vault().join("created.png"), "created").unwrap();
+        fs::write(f.vault().join("recent.png"), "recent").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        for path in ["existing.png", "created.png"] {
+            fs::File::open(f.vault().join(path))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        attachment.rolling.due = Instant::now();
+        for _ in 0..100 {
+            rolling::slice(&mut attachment, ops.policy).unwrap();
+            if attachment.rolling.last_completed.is_some() {
+                break;
+            }
+        }
+        assert!(attachment.rolling.last_completed.is_some());
+        assert_eq!(
+            attachment.rolling.misses,
+            norn_wire::WatcherMisses {
+                changed: 0,
+                created: 1,
+                deleted: 0
+            }
+        );
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .vault_file_keys_after(None, 10)
+                .unwrap()
+                .len(),
+            3
         );
         ops.detach(&name, attachment);
     }
