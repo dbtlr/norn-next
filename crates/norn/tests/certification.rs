@@ -1452,7 +1452,6 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
     }
 }
 
-/// Literal commands establish the plain-workspace authority the generic reader excludes.
 /// Semantic step values in the pinned block layout; names and widening conditions
 /// are checked separately. Keeping inputs with their step prevents a harmless
 /// cache step from supplying a setting a required test/action no longer receives.
@@ -1536,6 +1535,7 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
     );
 }
 
+/// Literal commands establish the plain-workspace authority the generic reader excludes.
 fn assert_complete_active_matrix(workflow: &str, full: bool) {
     assert_matrix_mapping_keys(workflow, full);
     assert_eq!(
