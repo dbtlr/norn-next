@@ -17010,6 +17010,60 @@ mod tests {
         }
     }
 
+    /// A heal indexes no file under a dot-led folder, as Obsidian resolves no
+    /// link to one; a file beside them outside such a folder is indexed.
+    #[test]
+    fn a_heal_indexes_no_file_under_a_dot_folder() {
+        let f = Fixture::watcherless("file-heal-dot-folders");
+        let root = f.vault();
+        for (path, bytes) in [
+            (".git/index.lock", "lock"),
+            (".git/objects/pack/pack-1.pack", "pack"),
+            (".obsidian/app.json", "{}"),
+            (".trash/photo.png", "png"),
+            ("assets/photo.png", "png"),
+        ] {
+            fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        let exclusions = [
+            PathBuf::from(IN_VAULT_SCHEMA_PATH),
+            PathBuf::from(norn_config::IN_VAULT_CONFIG_PATH),
+        ];
+        let mut store = Store::open(
+            f.root.join("dot-folders.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            &root,
+            &exclusions,
+            walk(&root, &exclusions).unwrap(),
+            norn_fs::CaseSensitivity::Sensitive,
+            HealScope::Vault,
+            ProductionPolicy::new(1, 1).unwrap(),
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        let files = store
+            .begin_request()
+            .vault_file_keys_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            ["assets/photo.png"]
+        );
+    }
+
     /// The explicit merge order exercises folding semantics on any host.
     #[test]
     fn a_vault_file_case_only_rename_survives_one_row_heal_pages() {

@@ -161,11 +161,15 @@ impl DocumentPath {
         &self.path
     }
 
-    /// Whether the leaf carries a non-Markdown extension. Leading dots name
-    /// dotfiles, and extensionless leaves name no vault-file target.
+    /// Whether the path names a vault file: its leaf carries a non-Markdown
+    /// extension and no segment leads with a dot. Obsidian ignores every
+    /// dot-led file and folder, so a dotfile, or any file under `.git`,
+    /// `.obsidian` or `.trash`, is no link target; an extensionless leaf names
+    /// none either.
     pub fn is_vault_file(&self) -> bool {
-        let leaf = self.path.rsplit('/').next().expect("a path has a leaf");
-        is_vault_file_leaf(leaf)
+        let mut segments = self.path.rsplit('/');
+        let leaf = segments.next().expect("a path has a leaf");
+        is_vault_file_leaf(leaf) && !segments.any(|folder| folder.starts_with('.'))
     }
 
     /// Whether this path carries [`RENDERED_MARKER`] anywhere in it.

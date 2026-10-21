@@ -83,6 +83,29 @@ fn a_leading_dot_is_part_of_the_name() {
     assert_eq!(read.suffix_key(), ".gitignore/docs/");
 }
 
+/// Obsidian ignores every dot-led file and folder, so a file there is no link
+/// target: a `.git` lock or pack, an `.obsidian` setting or a `.trash` copy
+/// would otherwise be named by links Obsidian leaves unresolved, and churn the
+/// index on every git command.
+#[test]
+fn a_file_under_a_dot_folder_is_no_vault_file() {
+    for path in [
+        ".git/index.lock",
+        ".git/objects/pack/pack-1.pack",
+        ".obsidian/app.json",
+        ".trash/photo.png",
+        "notes/.drafts/photo.png",
+        "notes/.photo.png",
+    ] {
+        let read = DocumentPath::new(path).expect("a path");
+        assert!(!read.is_vault_file(), "`{path}` is no vault file");
+    }
+    for path in ["photo.png", "assets/photo.png", "notes/v1.2"] {
+        let read = DocumentPath::new(path).expect("a path");
+        assert!(read.is_vault_file(), "`{path}` is a vault file");
+    }
+}
+
 /// Every spelling the document-path grammar refuses, beside the word its refusal
 /// has to name.
 ///

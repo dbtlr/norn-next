@@ -2546,8 +2546,10 @@ Where contextual lowercasing depends on what follows a name's last character, as
 final capital sigma, a suffix-addressed link spelling the folded character itself may
 not reach a vault file that the file's own spelling reaches.
 Path keys remain the comparison key of the file's own path.
-Extensionless files, dotfiles, excluded and mechanism paths, control files and refused
-spellings contribute no target; refused file spellings produce no finding. No file bytes
+Extensionless files, dotfiles, files under a dot-led folder (`.git`, `.obsidian`, `.trash`),
+which Obsidian ignores, excluded and mechanism paths, control files and refused
+spellings contribute no target, though a document under a dot-led folder is indexed as
+any other; refused file spellings produce no finding. No file bytes
 are read, and a file has neither a hash nor a tombstone. File births and deaths land in
 the document changeset's transaction and re-judge the links under their class and path
 keys. Heal and prune merge bounded pages of documents and files in the walk's order.

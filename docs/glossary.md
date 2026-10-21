@@ -13,7 +13,7 @@ A Markdown file in a vault whose authored frontmatter and body are part of the s
 _Avoid_: Note, file (when the distinction matters)
 
 **Vault file**:
-A file in a vault that is not a vault document and whose name carries an extension, known to Norn by its path and name alone, never by its content.
+A file in a vault that is not a vault document, whose name carries an extension and none of whose path segments leads with a dot, known to Norn by its path and name alone, never by its content.
 _Avoid_: Attachment (which names the vault attachment lifecycle), asset
 
 **Vault schema**:
