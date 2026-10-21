@@ -40,36 +40,37 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - name: Show toolchain
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: |
           rustc --version
           cargo --version
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Format
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo fmt --all --check
       - name: Build
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo build --locked --workspace
       - name: Lint
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Lint the shipped libraries
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
       - name: Lint the induced-failure targets
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
       - name: Document
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo doc --locked --workspace --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
       - name: Test
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
@@ -88,11 +89,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Induced-failure recovery
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
@@ -111,20 +113,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - name: Assert architecture
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Embedding determinism
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-embed --test determinism
       - name: Filesystem contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-fs
       - name: Host filesystem contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
@@ -143,19 +146,20 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - name: Assert architecture
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Folding-root spelling bar
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
       - name: Counter bars on a folding root
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
@@ -176,16 +180,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - name: Workflow lint
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Gate
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-testkit --test architecture
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
@@ -204,16 +209,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Counter bars
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
       - name: Distinct-root spelling control
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
@@ -234,23 +240,24 @@ jobs:
         with:
           persist-credentials: false
       - name: Record candidate identity
+        id: identity
         run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
       - name: Memory bars
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
       - name: Store count memory bars
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
       - name: Store link-health heap bar
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1
       - name: Host memory bars
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
       - name: Upload candidate identity
         if: ${{ !cancelled() }}

@@ -1404,7 +1404,11 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
                         assert!(line.starts_with("      - "));
                     }
                     assert!(
-                        ["name", "if", "run", "env", "uses", "with"].contains(&key),
+                        ["name", "if", "run", "env", "uses", "with"].contains(&key)
+                            || (full
+                                && key == "id"
+                                && step_name == "Record candidate identity"
+                                && value.trim() == "identity"),
                         "unsupported step key: {key}"
                     );
                     if matches!(key, "env" | "with") {
@@ -1496,7 +1500,7 @@ fn matrix_step_values(workflow: &str, job: &str) -> Vec<String> {
 fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: bool) {
     let mut expected = vec!["uses: actions/checkout@v7\npersist-credentials: false".to_string()];
     if full {
-        expected.push("run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"".to_string());
+        expected.push("id: identity\nrun: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"".to_string());
     }
     if job == "build" {
         expected.push("run: |\nrustc --version\ncargo --version".to_string());
@@ -1685,18 +1689,6 @@ fn assert_full_job_collects_evidence(workflow: &str, key: &str) {
         .into_iter()
         .find(|(found, _)| found == key)
         .expect("a full job");
-    for line in body
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-    {
-        let field = line
-            .trim_start()
-            .strip_prefix("- ")
-            .unwrap_or(line.trim_start());
-        if field.starts_with("if:") {
-            assert_eq!(field, "if: ${{ !cancelled() }}");
-        }
-    }
     let lines = ci_job(workflow, key);
     assert_ci_lines(
         &lines,
@@ -1723,14 +1715,27 @@ fn assert_full_job_collects_evidence(workflow: &str, key: &str) {
     assert!(steps[0].starts_with("uses: actions/checkout@v7\n"));
     assert!(steps[1].starts_with("name: Record candidate identity\n"));
     assert!(steps[1].lines().any(|line| line == "        run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\""));
-    for step in steps.iter().skip(2) {
+    assert!(steps[1].lines().any(|line| line == "        id: identity"));
+    for step in steps.iter().take(2) {
+        assert!(
+            !step
+                .lines()
+                .any(|line| line.trim_start().starts_with("if:"))
+        );
+    }
+    for (index, step) in steps.iter().enumerate().skip(2) {
+        let expected = if index == steps.len() - 1 {
+            "if: ${{ !cancelled() }}"
+        } else {
+            "if: ${{ !cancelled() && steps.identity.outcome == 'success' }}"
+        };
         assert!(
             step.lines().any(|line| line
                 .trim_start()
                 .strip_prefix("- ")
                 .unwrap_or(line.trim_start())
-                == "if: ${{ !cancelled() }}"),
-            "{key} stops collecting after an earlier failure: {step}"
+                == expected),
+            "{key} must reject a mismatched checkout, collect later test failures and retain its receipt: {step}"
         );
     }
 }
@@ -1785,6 +1790,12 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
             .expect("reading full regression");
     assert_regression_workflow(&workflow);
     for mutant in [
+        workflow.replace(" && steps.identity.outcome == 'success'", ""),
+        workflow.replace("        id: identity\n", ""),
+        workflow.replace(
+            "      - name: Upload candidate identity\n        if: ${{ !cancelled() }}",
+            "      - name: Upload candidate identity\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}",
+        ),
         workflow.replace(
             "run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace",
             "run: true",
@@ -1793,8 +1804,8 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
             "--no-fail-fast --workspace",
             "--no-fail-fast --workspace --lib",
         ),
-        workflow.replacen("        if: ${{ !cancelled() }}\n", "", 1),
-        workflow.replace("        if: ${{ !cancelled() }}", "        if: success()"),
+        workflow.replacen("        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n", "", 1),
+        workflow.replace("        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}", "        if: success()"),
         workflow.replacen(
             "    name: full build and test",
             "    if: always()\n    name: full build and test",
@@ -1811,7 +1822,7 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
         ),
         workflow.replace(
             "      - name: Test\n",
-            "      - name: Extra compiler setting\n        if: ${{ !cancelled() }}\n        run: echo CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false >> \"$GITHUB_ENV\"\n      - name: Test\n",
+            "      - name: Extra compiler setting\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n        run: echo CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false >> \"$GITHUB_ENV\"\n      - name: Test\n",
         ),
         workflow.replace("          cargo --version\n", "          cargo --version\n          echo RUSTFLAGS=changed >> \"$GITHUB_ENV\"\n"),
         workflow.replace("args: -color", "args: -version"),
@@ -1835,7 +1846,7 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
             "      - continue-on-error: true\n        name: Test\n",
         ),
         workflow.replace(
-            "      - name: Workflow lint\n        if: ${{ !cancelled() }}\n",
+            "      - name: Workflow lint\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n",
             "      - if: false\n        name: Workflow lint\n",
         ),
         workflow.replace(
@@ -1845,11 +1856,11 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
         workflow.replace("\njobs:\n", "\ndefaults:\n  run:\n    shell: true {0}\njobs:\n"),
         workflow.replace("    name: full build and test", "    defaults:\n      run:\n        shell: true {0}\n    name: full build and test"),
         workflow.replace(
-            "      - name: Test\n        if: ${{ !cancelled() }}\n",
-            "      - name: Test\n        env:\n          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'false'\n        if: ${{ !cancelled() }}\n",
+            "      - name: Test\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n",
+            "      - name: Test\n        env:\n          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'false'\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n",
         ),
         workflow.replace(
-            "      - name: Test\n        if: ${{ !cancelled() }}\n",
+            "      - name: Test\n        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n",
             "      - name: Test\n        # regression-identity.py\n",
         ),
     ] {

@@ -34,9 +34,10 @@ retrying or changing verdicts. Ignored targets use `lane-suite.sh`, whose shared
 Whole-workspace invocations may legitimately contain empty binaries and do not use
 that single-target guard.
 
-Full regression uses Cargo's `--no-fail-fast` and widening `!cancelled()` step
-conditions. An earlier failure stays red while later independent suites collect
-evidence. Failed compilation or missing prerequisites can leave obligations
+Full regression uses Cargo's `--no-fail-fast`. After identity succeeds, widening
+`!cancelled()` conditions let later independent suites collect evidence while an
+earlier failure stays red. An identity failure skips the build and test steps;
+its failed receipt is still uploaded. Failed compilation or missing prerequisites can leave obligations
 unexecuted; they supply no passing evidence.
 
 ## Candidate identity and manual runs
