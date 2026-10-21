@@ -2923,6 +2923,23 @@ fn a_carrier() {}
                 "no test executable",
             ),
             (
+                "unfinished build",
+                format!("{library}\n{integration}\n"),
+                "0",
+                "exit 0",
+                "no successful build-finished",
+            ),
+            (
+                "unsuccessful build record",
+                format!(
+                    "{library}\n{integration}\n{}\n",
+                    json!({"reason": "build-finished", "success": false})
+                ),
+                "0",
+                "exit 0",
+                "no successful build-finished",
+            ),
+            (
                 "malformed records",
                 "not-json\n".to_string(),
                 "0",
@@ -2956,6 +2973,27 @@ fn a_carrier() {}
                 "0",
                 "echo 'listing refused' >&2; exit 1",
                 "listing refused",
+            ),
+            (
+                "listing count mismatch",
+                valid.clone(),
+                "0",
+                "printf 'a_reported_test: test\\n\\n2 tests, 0 benchmarks\\n'",
+                "does not match its summary",
+            ),
+            (
+                "unexpected listing output",
+                valid.clone(),
+                "0",
+                "printf 'unexpected line\\na_reported_test: test\\n\\n1 test, 0 benchmarks\\n'",
+                "unexpected line",
+            ),
+            (
+                "ignored names absent from complete listing",
+                valid.clone(),
+                "0",
+                "if [ \"${2:-}\" = --ignored ]; then printf 'another_test: test\\n\\n1 test, 0 benchmarks\\n'; else printf 'a_reported_test: test\\n\\n1 test, 0 benchmarks\\n'; fi",
+                "ignored listing names tests absent",
             ),
             (
                 "truncated listing",

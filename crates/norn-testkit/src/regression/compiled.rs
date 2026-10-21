@@ -71,7 +71,7 @@ fn build(
         .map_err(|e| format!("running Cargo: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "Cargo build ended {}: {}",
+            "Cargo build ended {} for package `{package}`; every selected target is refused: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
