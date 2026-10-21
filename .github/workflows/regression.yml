@@ -1,0 +1,261 @@
+# Complete active regression coverage; separate from the dormant soak campaign.
+# Bootstrap keeps ci.yml's full PR/main gate until this workflow is qualified.
+# Every job tests the captured workflow commit. The optional input asserts its
+# identity rather than choosing a different checkout. See docs/ci.md.
+name: regression
+run-name: Full regression ${{ inputs.candidate || github.sha }}
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Expected full commit SHA; select the workflow branch or tag separately.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# One active full run; GitHub may replace a pending run with a newer request.
+# A cancelled candidate supplies no evidence and must be dispatched again.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  NORN_REGRESSION_SHA: ${{ inputs.candidate || github.sha }}
+  NORN_REGRESSION_EVENT_SHA: ${{ github.sha }}
+  NORN_REGRESSION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+
+jobs:
+  build:
+    name: full build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - name: Show toolchain
+        if: ${{ !cancelled() }}
+        run: |
+          rustc --version
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Format
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: cargo build --locked --workspace
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Lint the shipped libraries
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
+      - name: Lint the induced-failure targets
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
+      - name: Document
+        if: ${{ !cancelled() }}
+        run: cargo doc --locked --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  induced-failure:
+    name: full induced-failure recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Induced-failure recovery
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  platform:
+    name: full determinism and filesystem (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - name: Assert architecture
+        if: ${{ !cancelled() }}
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Embedding determinism
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-embed --test determinism
+      - name: Filesystem contracts
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-fs
+      - name: Host filesystem contracts
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  folding-counters:
+    name: full counter bars on a folding root (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - name: Assert architecture
+        if: ${{ !cancelled() }}
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Folding-root spelling bar
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Counter bars on a folding root
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  architecture:
+    name: full architecture gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - name: Workflow lint
+        if: ${{ !cancelled() }}
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Gate
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-testkit --test architecture
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  gates:
+    name: full counter gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Counter bars
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Distinct-root spelling control
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error
+
+  memory:
+    name: full memory invariant
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record candidate identity
+        run: python3 .github/scripts/regression-identity.py "$RUNNER_TEMP/regression-identity.json"
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() }}
+      - name: Memory bars
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
+      - name: Walker memory bars
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
+      - name: Store count memory bars
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
+      - name: Store link-health heap bar
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1
+      - name: Host memory bars
+        if: ${{ !cancelled() }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
+      - name: Upload candidate identity
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: regression-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/regression-identity.json
+          if-no-files-found: error

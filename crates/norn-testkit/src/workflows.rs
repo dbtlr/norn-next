@@ -563,7 +563,7 @@ fn featured_runs_of(arguments: &[&str]) -> Option<Vec<FeaturedRun>> {
     let mut tokens = arguments.iter().copied();
     while let Some(token) = tokens.next() {
         match token {
-            "--locked" | "--frozen" | "--offline" => {}
+            "--locked" | "--frozen" | "--offline" | "--no-fail-fast" => {}
             "-p" | "--package" => packages.push(tokens.next()?),
             "-F" | "--features" => features.extend(tokens.next()?.split(',')),
             "--lib" => targets.push(Target::Lib),
@@ -755,6 +755,19 @@ mod tests {
                 other => other,
             });
             assert_eq!(read, tested(expected), "`{command}` read otherwise");
+        }
+    }
+
+    /// Collecting failures changes neither the target nor its feature selection.
+    #[test]
+    fn collecting_later_failures_preserves_the_featured_selection() {
+        let command = "cargo test --locked --no-fail-fast -p norn-host --features induced-failure";
+        assert_eq!(
+            invocation(command),
+            tested(vec![run("norn-host", None, "induced-failure")])
+        );
+        for narrowing in ["--no-run", "--release", "-- --ignored", "a_filter"] {
+            assert_eq!(invocation(&format!("{command} {narrowing}")), None);
         }
     }
 

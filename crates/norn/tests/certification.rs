@@ -159,11 +159,12 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
     for required in [
         // The lanes, the toolchain and the resolved graph.
         ".github/workflows/ci.yml",
-        ".github/workflows/macos-main.yml",
+        ".github/workflows/regression.yml",
         ".github/workflows/certify.yml",
         ".github/workflows/soak.yml",
         ".github/scripts/lane-suite.sh",
         ".github/scripts/test-suite.sh",
+        ".github/scripts/regression-identity.py",
         ".github/scripts/certification-suite.sh",
         ".github/scripts/soak-candidate.sh",
         "Cargo.lock",
@@ -1211,13 +1212,13 @@ fn assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane: &str, body:
 /// it. Both are read off the files themselves rather than off a memory of how
 /// they were wired.
 ///
-/// The PR lane and main sweep are the subject. The scheduled tier keeps every suite
+/// The PR gate and full regression are the subject. The dormant soak tier keeps every suite
 /// log and leaves a typed record, so a recurrence there is written down
 /// already; what a rerun erases is a per-PR failure nobody kept.
 #[test]
 fn every_ci_suite_runs_through_the_tripwire_and_every_ledger_entry_can_match() {
     let root = workspace_root();
-    for file in ["ci.yml", "macos-main.yml"] {
+    for file in ["ci.yml", "regression.yml"] {
         let workflow = std::fs::read_to_string(root.join(".github/workflows").join(file))
             .expect("reading a CI workflow");
         let unwrapped: Vec<&str> = workflow
@@ -1279,12 +1280,11 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
     lines.collect()
 }
 
-/// Event routing preserves the complete Linux gate and the named native seams.
-/// The generic inventory reader does not judge workflow triggers.
+/// Bootstrap retains the full existing PR matrix before any cadence cut.
 #[test]
-fn the_pr_lane_keeps_linux_and_focused_native_contracts() {
+fn the_bootstrap_keeps_the_complete_pr_matrix() {
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
-        .expect("reading the per-PR lane");
+        .expect("reading the PR gate");
     assert_triggers(
         &gate,
         &[
@@ -1294,234 +1294,278 @@ fn the_pr_lane_keeps_linux_and_focused_native_contracts() {
             "workflow_dispatch:",
         ],
     );
-    assert_eq!(
-        jobs(&gate)
-            .iter()
-            .map(|(key, _)| key.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "build",
-            "induced-failure",
-            "platform",
-            "architecture",
-            "gates",
-            "memory"
-        ]
-    );
-    for job in [
-        "build",
-        "induced-failure",
-        "architecture",
-        "gates",
-        "memory",
-    ] {
-        let lines = ci_job(&gate, job);
-        assert_job_cannot_skip_or_excuse(&lines);
-        assert_ci_lines(&lines, &["runs-on: ubuntu-latest"]);
-    }
-    assert_ci_lines(
-        &ci_job(&gate, "build"),
-        &[
-            "timeout-minutes: 30",
-            "run: cargo fmt --all --check",
-            "run: cargo build --locked --workspace",
-            "run: cargo clippy --locked --workspace --all-targets -- -D warnings",
-            "run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
-            "run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",
-            "run: cargo doc --locked --workspace --no-deps --document-private-items",
-            "RUSTDOCFLAGS: -D warnings",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace",
-        ],
-    );
-    assert!(
-        !ci_job(&gate, "build")
-            .iter()
-            .any(|line| line.starts_with("run:")
-                && line.contains("cargo test")
-                && line.contains("--features induced-failure")),
-        "the full host recovery suite belongs to its independent job"
-    );
-    assert_ci_lines(
-        &ci_job(&gate, "induced-failure"),
-        &[
-            "name: induced-failure recovery",
-            "timeout-minutes: 30",
-            "- uses: Swatinem/rust-cache@v2",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
-        ],
-    );
-    assert_ci_lines(
-        &ci_job(&gate, "architecture"),
-        &[
-            "name: architecture gate",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture",
-        ],
-    );
-    for suite in ["folding_cost", "counter_gate"] {
-        assert_ci_lines(
-            &ci_job(&gate, "gates"),
-            &[&format!(
-                "run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host {suite} --nocapture --test-threads=1"
-            )],
-        );
-    }
-    for (package, target) in [
-        ("norn-fixtures", "memory"),
-        ("norn-fs", "walk_memory"),
-        ("norn-store", "count_memory"),
-        ("norn-store", "heap"),
-        ("norn-host", "memory"),
-    ] {
-        assert_ci_lines(
-            &ci_job(&gate, "memory"),
-            &[&format!(
-                "run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh {package} {target} --nocapture --test-threads=1"
-            )],
-        );
-    }
-
-    let mut native = ci_job(&gate, "platform");
-    let condition = NATIVE_CONDITION;
-    assert!(
-        native_condition_is_on_the_job(&gate),
-        "the event condition belongs to the job"
-    );
-    assert_eq!(
-        native.iter().filter(|line| line.starts_with("if:")).count(),
-        1
-    );
-    native.retain(|line| line != condition);
-    assert_job_cannot_skip_or_excuse(&native);
-    assert_ci_lines(
-        &native,
-        &[
-            "name: determinism and filesystem (macOS ARM64)",
-            "runs-on: macos-15",
-            "timeout-minutes: 30",
-            "run: test \"$(uname -m)\" = arm64",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity",
-            "run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
-            "LANE_FEATURES: induced-failure",
-        ],
-    );
-    for (target, case) in NATIVE_CASES {
-        assert_ci_lines(
-            &native,
-            &[&format!(
-                "run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test {target} {case} -- --exact"
-            )],
-        );
-    }
-    assert!(!native.iter().any(|line| line.contains("counter_gate")));
-    assert!(!native.iter().any(|line| line == "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure"));
+    assert_complete_active_matrix(&gate, false);
 }
 
-const NATIVE_CASES: &[(&str, &str)] = &[
-    ("churn", "a_case_flip_converges_on_a_build_from_zero"),
-    (
-        "churn",
-        "a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero",
-    ),
-    (
-        "lockdown",
-        "an_unreadable_document_refuses_the_heal_rather_than_quarantining_it",
-    ),
-    (
-        "lockdown",
-        "an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it",
-    ),
+const FULL_JOB_KEYS: &[&str] = &[
+    "build",
+    "induced-failure",
+    "platform",
+    "folding-counters",
+    "architecture",
+    "gates",
+    "memory",
 ];
 
-const NATIVE_CONDITION: &str =
-    "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'";
-
-fn native_condition_is_on_the_job(workflow: &str) -> bool {
-    jobs(workflow).into_iter().any(|(key, body)| {
-        key == "platform"
-            && body
-                .lines()
-                .any(|line| line == format!("    {NATIVE_CONDITION}"))
-    })
-}
-
-#[test]
-fn a_step_condition_cannot_stand_in_for_native_job_routing() {
-    let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
-        .expect("reading the per-PR lane");
-    assert!(native_condition_is_on_the_job(&gate));
-    let moved = gate
-        .replace(&format!("    {NATIVE_CONDITION}\n"), "")
-        .replace(
-            "      - name: Assert architecture\n",
-            &format!("      - name: Assert architecture\n        {NATIVE_CONDITION}\n"),
-        );
-    assert!(!native_condition_is_on_the_job(&moved));
-}
-
-/// Main runs the complete Mac matrix in two independent, unconditional jobs.
-#[test]
-fn the_main_sweep_keeps_the_complete_macos_matrix() {
-    let sweep = std::fs::read_to_string(workspace_root().join(".github/workflows/macos-main.yml"))
-        .expect("reading the main macOS sweep");
-    assert_triggers(&sweep, &["push:", "branches: [main]", "workflow_dispatch:"]);
+/// The literal commands establish plain workspace and trigger authority that
+/// the generic featured/ignored reader deliberately does not claim.
+fn assert_complete_active_matrix(workflow: &str, full: bool) {
     assert_eq!(
-        jobs(&sweep)
+        jobs(workflow)
             .iter()
             .map(|(key, _)| key.as_str())
             .collect::<Vec<_>>(),
-        ["platform", "folding-counters"]
+        FULL_JOB_KEYS
     );
-    assert!(
-        sweep
-            .lines()
-            .any(|line| line == "  cancel-in-progress: false")
-    );
-    for key in ["platform", "folding-counters"] {
-        let lines = ci_job(&sweep, key);
-        assert_job_cannot_skip_or_excuse(&lines);
+    let commands: &[(&str, &str, &[&str])] = &[
+        (
+            "build",
+            "build and test",
+            &[
+                "cargo fmt --all --check",
+                "cargo build --locked --workspace",
+                "cargo clippy --locked --workspace --all-targets -- -D warnings",
+                "cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
+                "cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",
+                "cargo doc --locked --workspace --no-deps --document-private-items",
+                ".github/scripts/flake-tripwire.sh cargo test --locked --workspace",
+            ],
+        ),
+        (
+            "induced-failure",
+            "induced-failure recovery",
+            &[
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
+            ],
+        ),
+        (
+            "platform",
+            "determinism and filesystem (macOS ARM64)",
+            &[
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
+            ],
+        ),
+        (
+            "folding-counters",
+            "counter bars on a folding root (macOS ARM64)",
+            &[
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1",
+            ],
+        ),
+        (
+            "architecture",
+            "architecture gate",
+            &[
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture",
+            ],
+        ),
+        (
+            "gates",
+            "counter gates",
+            &[
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
+            ],
+        ),
+        (
+            "memory",
+            "memory invariant",
+            &[
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1",
+            ],
+        ),
+    ];
+    for (key, name, runs) in commands {
+        let lines = ci_job(workflow, key);
+        let name = if full {
+            format!("full {name}")
+        } else {
+            name.to_string()
+        };
+        assert_ci_lines(&lines, &[&format!("name: {name}")]);
+        let timeout = match *key {
+            "memory" => 20,
+            "architecture" => 10,
+            _ => 30,
+        };
+        assert_ci_lines(&lines, &[&format!("timeout-minutes: {timeout}")]);
+        let mac = matches!(*key, "platform" | "folding-counters");
         assert_ci_lines(
             &lines,
-            &[
-                "runs-on: macos-15",
-                "timeout-minutes: 30",
-                "run: test \"$(uname -m)\" = arm64",
-                "- uses: Swatinem/rust-cache@v2",
-            ],
+            &[if mac {
+                "runs-on: macos-15"
+            } else {
+                "runs-on: ubuntu-latest"
+            }],
         );
+        if mac {
+            assert_ci_lines(&lines, &["run: test \"$(uname -m)\" = arm64"]);
+        }
+        if full {
+            assert_full_job_collects_evidence(workflow, key);
+        } else {
+            assert_job_cannot_skip_or_excuse(&lines);
+        }
+        for command in *runs {
+            let command = if full {
+                command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")
+            } else {
+                command.to_string()
+            };
+            assert_ci_lines(&lines, &[&format!("run: {command}")]);
+        }
     }
-    let platform = ci_job(&sweep, "platform");
+    assert_ci_lines(&ci_job(workflow, "build"), &["RUSTDOCFLAGS: -D warnings"]);
     assert_ci_lines(
-        &platform,
-        &[
-            "name: full determinism and filesystem (macOS ARM64)",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
-            "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
-        ],
+        &ci_job(workflow, "architecture"),
+        &["uses: docker://rhysd/actionlint:1.7.12"],
     );
-    assert!(!platform.iter().any(|line| line.contains("lane-suite.sh")));
-    let folding = ci_job(&sweep, "folding-counters");
-    assert_ci_lines(
-        &folding,
-        &["name: counter bars on a folding root (macOS ARM64)"],
-    );
-    for suite in ["folding_cost", "counter_gate"] {
-        assert_ci_lines(
-            &folding,
-            &[&format!(
-                "run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host {suite} --nocapture --test-threads=1"
-            )],
+    for key in ["folding-counters", "gates"] {
+        assert_eq!(
+            ci_job(workflow, key)
+                .iter()
+                .filter(|line| *line == "LANE_FEATURES: induced-failure")
+                .count(),
+            2
         );
     }
     assert_eq!(
-        folding
+        ci_job(workflow, "memory")
             .iter()
             .filter(|line| *line == "LANE_FEATURES: induced-failure")
             .count(),
-        2
+        0
     );
+}
+
+fn assert_full_job_collects_evidence(workflow: &str, key: &str) {
+    let (_, body) = jobs(workflow)
+        .into_iter()
+        .find(|(found, _)| found == key)
+        .expect("a full job");
+    for line in body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+    {
+        assert!(!line.trim_start().starts_with("continue-on-error:"));
+        assert!(
+            !line.starts_with("    if:")
+                && !line.starts_with("    needs:")
+                && !line.starts_with("    strategy:")
+        );
+        if line.trim_start().starts_with("if:") {
+            assert_eq!(line, "        if: ${{ !cancelled() }}");
+        }
+    }
+    let lines = ci_job(workflow, key);
+    assert_ci_lines(
+        &lines,
+        &[
+            "- uses: actions/checkout@v7",
+            "persist-credentials: false",
+            "run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"",
+            "uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+            "name: regression-${{ github.job }}-${{ github.run_attempt }}",
+            "path: ${{ runner.temp }}/regression-identity.json",
+            "if-no-files-found: error",
+        ],
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("ref:")),
+        "checkout must use the captured workflow ref"
+    );
+    for step in body.split("      - ").skip(1) {
+        if step.contains("run:") && !step.contains("regression-identity.py")
+            || step.contains("actions/upload-artifact@")
+        {
+            assert!(
+                step.lines()
+                    .any(|line| line == "        if: ${{ !cancelled() }}"),
+                "{key} stops collecting after an earlier failure: {step}"
+            );
+        }
+    }
+}
+
+fn assert_regression_workflow(workflow: &str) {
+    assert_triggers(
+        workflow,
+        &[
+            "schedule:",
+            "- cron: '17 2 * * *'",
+            "workflow_dispatch:",
+            "inputs:",
+            "candidate:",
+            "description: Expected full commit SHA; select the workflow branch or tag separately.",
+            "type: string",
+            "required: false",
+            "default: ''",
+        ],
+    );
+    for binding in [
+        "  NORN_REGRESSION_SHA: ${{ inputs.candidate || github.sha }}",
+        "  NORN_REGRESSION_EVENT_SHA: ${{ github.sha }}",
+        "  NORN_REGRESSION_WORKFLOW_SHA: ${{ github.workflow_sha }}",
+    ] {
+        assert!(workflow.lines().any(|line| line == binding));
+        let key = binding.trim().split_once(':').expect("an env key").0;
+        assert_eq!(
+            workflow
+                .lines()
+                .filter(|line| line.trim_start().starts_with(&format!("{key}:")))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        workflow
+            .lines()
+            .any(|line| line == "  group: ${{ github.workflow }}")
+    );
+    assert!(
+        workflow
+            .lines()
+            .any(|line| line == "  cancel-in-progress: false")
+    );
+    assert_complete_active_matrix(workflow, true);
+}
+
+#[test]
+fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
+    let workflow =
+        std::fs::read_to_string(workspace_root().join(".github/workflows/regression.yml"))
+            .expect("reading full regression");
+    assert_regression_workflow(&workflow);
+    for mutant in [
+        workflow.replace(
+            "run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace",
+            "run: true",
+        ),
+        workflow.replace(
+            "--no-fail-fast --workspace",
+            "--no-fail-fast --workspace --lib",
+        ),
+        workflow.replacen("        if: ${{ !cancelled() }}\n", "", 1),
+        workflow.replace("        if: ${{ !cancelled() }}", "        if: success()"),
+        workflow.replacen(
+            "    name: full build and test",
+            "    if: always()\n    name: full build and test",
+            1,
+        ),
+        workflow.replace("LANE_FEATURES: induced-failure", "LANE_FEATURES: missing"),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| assert_regression_workflow(&mutant)).is_err(),
+            "a coverage/failure-routing mutant survived"
+        );
+    }
 }
 
 fn assert_ci_lines(lines: &[String], required: &[&str]) {
