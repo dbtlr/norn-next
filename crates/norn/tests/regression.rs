@@ -46,9 +46,8 @@
 //! absence, and the name is pre-committed rather than guessed at: a dormant case
 //! is the contract the carrier is authored against.
 //!
-//! What is left waits on nothing any subject names — a shell step, a
-//! `compile_fail` doctest, a vocabulary nobody has written, a guard with no
-//! home decided, a surface nothing wires. Those reasons expire only when a
+//! What is left waits on no named subject: a `compile_fail` doctest, a guard
+//! without a settled home, or an unwired surface. Those reasons expire only when a
 //! person re-derives them, so the class is pinned by name in
 //! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is
 //! that the class is a reviewed list rather than a silent majority.
@@ -90,7 +89,7 @@ const CASE_TOTAL: usize = 119;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c605dfed3c92ffc694987d0f62180c1eb657e29076e93cb617bd548c3b56cc8c";
+const CONTRACT_DIGEST: &str = "411100ab1824757c007acca74f565a588bad17f5c593a1eb898a0eb7392d9e26";
 
 /// The cases carried by tests today, by name.
 ///
@@ -104,6 +103,7 @@ const BOUND_CASES: &[&str] = &[
     "a-configured-repair-never-writes-what-the-validator-flags",
     "a-limit-bounds-hydration-through-one-paging-seam",
     "a-measurement-lane-proves-it-measured",
+    "a-measurement-step-asserts-a-nonzero-pass-count",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
     "a-page-continues-at-the-successor-of-its-last-row",
     "a-repair-fixes-a-list-by-its-elements",
@@ -149,6 +149,7 @@ const BOUND_CASES: &[&str] = &[
     "repair-evaluates-only-the-paths-it-is-asked-for",
     "resolved-path-gates-resolved-path-reports",
     "set-valued-answers-are-pushed-down",
+    "steps-report-their-own-outcome",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
     "unsatisfiable-config-is-rejected-at-load",
@@ -163,10 +164,8 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is four classes rather than a bag:
+/// residue no subject reaches, and it is three classes rather than a bag:
 ///
-/// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
-///   `<file>::<fn>` reference and no Rust declaration names.
 /// - **A `compile_fail` doctest.** One clause is held by a type and pinned by a
 ///   doctest that must not compile, and a doctest is not a `#[test]` function a
 ///   reference names. The clauses beside it are carried by a module of an
@@ -192,12 +191,10 @@ const BOUND_CASES: &[&str] = &[
 /// the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
-    "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
-    "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "vault-wide-work-is-a-declared-roster",
 ];

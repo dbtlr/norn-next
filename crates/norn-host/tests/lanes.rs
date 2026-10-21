@@ -1,3 +1,4 @@
+//! The complete PR/main gate and nightly/manual regression both adopt the active lanes.
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
 //! Three CI lanes adopt this crate's ignored cases by asking for them

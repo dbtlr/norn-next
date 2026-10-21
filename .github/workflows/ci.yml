@@ -1,3 +1,5 @@
+# Complete PR/main gate during nightly bootstrap. No coverage is removed here.
+# regression.yml supplies full nightly/manual evidence; docs/ci.md governs the cutover.
 # Per-PR gate lane.
 #
 # CI is two-tier: structure and counters gate here, clocks trend in certify.yml.
@@ -29,7 +31,7 @@
 # that ran no case, so it is a suite step like any other and its output — the
 # suite's, and the script's own error — is what the tripwire scans.
 #
-# The scheduled tier does not wrap its steps the same way. Every one of its
+# The dormant soak tier does not wrap its steps the same way. Every one of its
 # suite logs is kept and its record is a typed artifact, so a recurrence there
 # is already written down; what the wrapper removes is the quiet rerun, which
 # is this lane's hazard.

@@ -34,17 +34,6 @@ package=$1
 target=$2
 shift 2
 
-# The run is streamed to the log as it happens, rather than captured into a
-# variable and printed only on exit: a step a timeout kills mid-run leaves
-# nothing behind if the output is held until the command returns, which is
-# exactly the moment a timeout never lets it reach. `PIPESTATUS[0]` names
-# cargo's own exit status explicitly, rather than leaning on `pipefail` to
-# route it through `$?` correctly — `tee` itself essentially never fails, so
-# reading its index directly is the plain way to say which command's status
-# this is.
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT
-
 # Expanded through the `+` form below, so an empty array is no argument at all
 # rather than the unbound-variable error `set -u` raises for one on the bash 3.2
 # that macOS ships.
@@ -53,20 +42,4 @@ if [ -n "${LANE_FEATURES:-}" ]; then
   features=(--features "$LANE_FEATURES")
 fi
 
-cargo test --locked -p "$package" --test "$target" ${features[@]+"${features[@]}"} -- --ignored "$@" 2>&1 | tee "$log"
-status=${PIPESTATUS[0]}
-
-if [ "$status" -ne 0 ]; then
-  exit "$status"
-fi
-
-# Anchored at the start of the line, and read from the last such line rather
-# than any match: cargo's own summary is exactly one line reading `test
-# result: ok. N passed; ...`, always the final one it prints, and a look-alike
-# a test prints to its own stdout under `--nocapture` is not that line just
-# because it matches the same shape somewhere earlier in the log.
-summary=$(grep -E '^test result: ' "$log" | tail -n1)
-if ! printf '%s\n' "$summary" | grep -qE '^test result: ok\. [1-9][0-9]* passed'; then
-  echo "::error::${package} --test ${target} ran no ignored case, so this step passed having measured nothing."
-  exit 1
-fi
+exec "$(dirname "$0")/test-suite.sh" cargo test --locked -p "$package" --test "$target" ${features[@]+"${features[@]}"} -- --ignored "$@"

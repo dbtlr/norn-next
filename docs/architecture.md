@@ -25,7 +25,10 @@ them, and marks the judgments that are review acts instead. When a gate arrives 
 document's concern; the comments in `.github/workflows/` are the in-repo operational marker.
 
 Where a gate exists, its lane depends on what it measures: **counters and structure gate per
-PR; clocks and trends live in the soak lane and never fail a pull request.** [ADR
+PR; clocks and trends live in the soak lane and never fail a pull request.** During
+regression bootstrap the complete active Linux and macOS matrix remains on PRs and main;
+a full nightly/manual workflow collects the same active evidence. [CI coverage](ci.md)
+defines candidate identity, release verification and failure response. [ADR
 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md) records why evidence
 kind, rather than observed runtime, owns that division. A review-held judgment has no lane
 at all, which is why each section says so where it applies — a review-held invariant rots
@@ -4256,7 +4259,8 @@ Four contracts inside that flow carry weight:
   [`AGENTS.md`](../AGENTS.md); task evidence and current system contracts live elsewhere.
 - [`glossary.md`](glossary.md) — canonical project-specific language, organized by concept
   rather than by the task, ADR, or contract that introduced it.
-- `.github/workflows/` — the CI lanes: counters gate per PR, clocks trend in the scheduled
+- `.github/workflows/` — the CI lanes: the complete PR/main gate in `ci.yml` and full
+  nightly/manual regression in `regression.yml`; clocks trend in the scheduled
   tier, and that tier's two jobs — the Linux measurement lane and the macOS certification
   lane — each run the certification cases and emit the qualification record they leave
   behind. The job comments are the in-repo marker for which gate is filled and which is
