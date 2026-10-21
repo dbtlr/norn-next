@@ -165,10 +165,8 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is four classes rather than a bag:
+/// residue no subject reaches, and it is three classes rather than a bag:
 ///
-/// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
-///   `<file>::<fn>` reference and no Rust declaration names.
 /// - **A `compile_fail` doctest.** One clause is held by a type and pinned by a
 ///   doctest that must not compile, and a doctest is not a `#[test]` function a
 ///   reference names. The clauses beside it are carried by a module of an

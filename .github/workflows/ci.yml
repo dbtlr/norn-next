@@ -253,7 +253,8 @@ jobs:
   # read the account, and the lane table's own test holds this step to every feature
   # the suite puts a case or a helper behind.
   #
-  # The cases live in this job and main's macOS folding-root counter job, `#[ignore]`d
+  # Counter cases run here and in main's macOS folding-root counter job.
+  # The focused Mac PR job also runs folding_cost. All are `#[ignore]`d
   # with a `counter-lane case:` reason so the build job's workspace suite does not attach thousands of
   # documents beside every other test. The script is what makes the wholesale
   # `--ignored` run fail when it ran nothing.

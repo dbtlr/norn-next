@@ -60,4 +60,3 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
-

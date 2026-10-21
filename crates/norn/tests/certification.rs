@@ -1573,6 +1573,8 @@ fn a_suite_runner_rejects_empty_runs_and_preserves_failures() {
 
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "suite-runner")
         .expect("a sandbox for the suite runner");
+    let (_, search) = fixture_cargo(&sandbox);
+    let args = sandbox.work_dir().join("cargo-args");
     for (output, exit, expected) in [
         ("test result: ok. 1 passed; 0 failed; 0 ignored", 0, 0),
         ("test result: ok. 12 passed; 0 failed; 0 ignored", 0, 0),
@@ -1604,6 +1606,40 @@ fn a_suite_runner_rejects_empty_runs_and_preserves_failures() {
             outcome.stderr_text()
         );
         assert!(outcome.stdout_text().contains(output));
+
+        for features in ["", "induced-failure"] {
+            let outcome = Run::new(
+                &sandbox,
+                workspace_root().join(".github/scripts/lane-suite.sh"),
+            )
+            .arg("fixture-package")
+            .arg("fixture-target")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("PATH", &search)
+            .env("LANE_FEATURES", features)
+            .env("NORN_FIXTURE_ARGS", &args)
+            .env("NORN_FIXTURE_OUTPUT", output)
+            .env("NORN_FIXTURE_STATUS", exit.to_string())
+            .wait()
+            .expect("running the ignored-lane entrypoint with fixture cargo");
+            assert_eq!(
+                outcome.status,
+                RunStatus::Exited(expected),
+                "lane output {output:?}: {}{}",
+                outcome.stdout_text(),
+                outcome.stderr_text()
+            );
+            let expected_args = if features.is_empty() {
+                "test\n--locked\n-p\nfixture-package\n--test\nfixture-target\n--\n--ignored\n--nocapture\n--test-threads=1\n"
+            } else {
+                "test\n--locked\n-p\nfixture-package\n--test\nfixture-target\n--features\ninduced-failure\n--\n--ignored\n--nocapture\n--test-threads=1\n"
+            };
+            assert_eq!(
+                std::fs::read_to_string(&args).expect("cargo's received arguments"),
+                expected_args
+            );
+        }
     }
 }
 
@@ -1616,33 +1652,59 @@ fn a_suite_reports_its_own_outcome_after_a_downstream_failure() {
 
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "suite-pipeline")
         .expect("a sandbox for the pipeline");
-    let bin = sandbox.work_dir().join("bin");
-    std::fs::create_dir(&bin).expect("a command directory");
+    let (bin, search) = fixture_cargo(&sandbox);
     let tee = bin.join("tee");
     std::fs::write(&tee, "#!/bin/sh\ncat > \"$1\"\ncat \"$1\"\nexit 1\n")
         .expect("a writer that records everything before failing");
     std::fs::set_permissions(&tee, std::fs::Permissions::from_mode(0o755))
         .expect("an executable writer");
+    for script in ["test-suite.sh", "lane-suite.sh"] {
+        let command = Run::new(
+            &sandbox,
+            workspace_root().join(".github/scripts").join(script),
+        );
+        let command = if script == "lane-suite.sh" {
+            command.arg("fixture-package").arg("fixture-target")
+        } else {
+            command
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg("printf 'test result: ok. 1 passed; 0 failed\\n'")
+        };
+        let outcome = command
+            .env("PATH", &search)
+            .env("NORN_FIXTURE_ARGS", sandbox.work_dir().join("cargo-args"))
+            .env("NORN_FIXTURE_OUTPUT", "test result: ok. 1 passed; 0 failed")
+            .env("NORN_FIXTURE_STATUS", "0")
+            .wait()
+            .expect("running a passing suite beside a failed writer");
+        assert_eq!(
+            outcome.status,
+            RunStatus::Exited(0),
+            "{script}: {}{}",
+            outcome.stdout_text(),
+            outcome.stderr_text()
+        );
+    }
+}
+
+/// The scripts reach a fixture Cargo that records arguments and emits a chosen verdict.
+#[cfg(unix)]
+fn fixture_cargo(sandbox: &Sandbox) -> (PathBuf, std::ffi::OsString) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = sandbox.work_dir().join("bin");
+    std::fs::create_dir(&bin).expect("a command directory");
+    let cargo = bin.join("cargo");
+    std::fs::write(&cargo, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NORN_FIXTURE_ARGS\"\nprintf '%s\\n' \"$NORN_FIXTURE_OUTPUT\"\nexit \"$NORN_FIXTURE_STATUS\"\n")
+        .expect("a Cargo command fixture");
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable Cargo fixture");
     let inherited = std::env::var_os("PATH").expect("a command search path");
-    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
-        .expect("a search path with the fixture writer first");
-    let outcome = Run::new(
-        &sandbox,
-        workspace_root().join(".github/scripts/test-suite.sh"),
-    )
-    .arg("/bin/sh")
-    .arg("-c")
-    .arg("printf 'test result: ok. 1 passed; 0 failed\\n'")
-    .env("PATH", path)
-    .wait()
-    .expect("running a passing suite beside a failed writer");
-    assert_eq!(
-        outcome.status,
-        RunStatus::Exited(0),
-        "{}{}",
-        outcome.stdout_text(),
-        outcome.stderr_text()
-    );
+    let search =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)))
+            .expect("a search path with fixture commands first");
+    (bin, search)
 }
 
 /// Whether a workflow line runs a suite — directly, or through one of the
