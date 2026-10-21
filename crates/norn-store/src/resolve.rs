@@ -71,6 +71,31 @@ pub(crate) const SUCCESSOR_FUNCTION: &str = "norn_key_successor";
 /// so names its exact paths alone.
 pub(crate) const TARGET_PARAMETERS: usize = 2;
 
+/// The disjoint stores every candidate read seeks before merging bounded heads.
+pub(crate) const CANDIDATES: [Candidates; 2] = [
+    Candidates {
+        table: "documents",
+        alias_prefix: "d",
+    },
+    Candidates {
+        table: "vault_files",
+        alias_prefix: "f",
+    },
+];
+
+/// Each table has its own aliases even in nested union branches, so emitted
+/// plans identify the index seeks of both candidate kinds without collision.
+pub(crate) struct Candidates {
+    pub(crate) table: &'static str,
+    alias_prefix: &'static str,
+}
+
+impl Candidates {
+    pub(crate) fn alias(&self, suffix: &str) -> String {
+        format!("{}{suffix}", self.alias_prefix)
+    }
+}
+
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';
 
@@ -324,48 +349,73 @@ pub(crate) fn range_admitted(
 
 /// The admitted rows of one range. A head cuts each run in ladder order before
 /// merging, so neither the merge nor its sort ever reads a whole class.
+/// `files` admits name-only candidates only where the address did not spell
+/// optional `.md`, which belongs to documents alone.
 pub(crate) fn range_rows(
     key: SuffixKey,
     bounds: (&str, &str),
     segments: &str,
     head: Option<&str>,
+    files: &str,
 ) -> String {
-    let counts = admitting_counts(bounds.0);
-    let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
-    let within = admitting_count_within("n", segments);
     let rung = key.column();
-    let rows = if let Some(head) = head {
-        let order = ladder(&format!("dl.{rung}"), "dl.path");
-        format!(
-            "da.id IN (SELECT dl.id FROM documents AS dl WHERE {admitted}
-                           ORDER BY {order} LIMIT {head})"
-        )
-    } else {
-        range_admitted("da", key, bounds, &admitting_count("n"))
-    };
-    let cut = head
-        .map(|head| {
+    let rows = CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let da = candidates.alias("a");
+            let dl = candidates.alias("l");
+            let counts = admitting_counts(bounds.0);
+            let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
+            let within = admitting_count_within("n", segments);
+            let eligible = if table == "vault_files" { files } else { "1" };
+            let rows = if let Some(head) = head {
+                let order = ladder(&format!("{dl}.{rung}"), &format!("{dl}.path"));
+                format!(
+                    "{da}.id IN (SELECT {dl}.id FROM {table} AS {dl} WHERE {admitted}
+                             ORDER BY {order} LIMIT {head})"
+                )
+            } else {
+                range_admitted(&da, key, bounds, &admitting_count("n"))
+            };
+            let cut = head
+                .map(|head| {
+                    format!(
+                        " ORDER BY {} LIMIT {head}",
+                        ladder(&format!("{da}.{rung}"), &format!("{da}.path"))
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                " ORDER BY {} LIMIT {head}",
-                ladder(&format!("da.{rung}"), "da.path")
+                "SELECT * FROM (SELECT {da}.id, {da}.path, {da}.{rung}
+            FROM {counts} AS n CROSS JOIN {table} AS {da} WHERE {eligible} AND {within} AND {rows}{cut})"
             )
         })
+        .join(" UNION ALL ");
+    let cut = head
+        .map(|head| format!(" ORDER BY {rung}, path LIMIT {head}"))
         .unwrap_or_default();
-    format!(
-        "SELECT da.id, da.path, da.{rung} FROM {counts} AS n
-             CROSS JOIN documents AS da WHERE {within} AND {rows}{cut}"
-    )
+    format!("SELECT * FROM ({rows}){cut}")
 }
 
-/// A class range's count is the sum of its disjoint admitted-index run counts.
-pub(crate) fn range_total(key: SuffixKey, bounds: (&str, &str), segments: &str) -> String {
+/// A class range counts each table's disjoint admitted runs by index seek.
+pub(crate) fn range_total(
+    key: SuffixKey,
+    bounds: (&str, &str),
+    segments: &str,
+    files: &str,
+) -> String {
     let counts = admitting_counts(bounds.0);
-    let admitted = range_admitted("dl", key, bounds, &admitting_count("n"));
     let within = admitting_count_within("n", segments);
-    format!(
-        "SELECT COALESCE(SUM((SELECT COUNT(*) FROM documents AS dl WHERE {admitted})), 0)
-             FROM {counts} AS n WHERE {within}"
-    )
+    let total = CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let dl = candidates.alias("l");
+            let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
+            let eligible = if table == "vault_files" { files } else { "1" };
+            format!("(SELECT COUNT(*) FROM {table} AS {dl} WHERE {eligible} AND {admitted})")
+        })
+        .join(" + ");
+    format!("SELECT COALESCE(SUM({total}), 0) FROM {counts} AS n WHERE {within}")
 }
 
 /// Membership tested at one document's row key: its stored count and the
@@ -406,7 +456,13 @@ pub(crate) fn target_exact_first(
     format!(
         "({rooted} = 0 OR {alias}.{column} IN ({keys})) AND {exact}",
         column = key.column(),
-        exact = exact_first(alias, key, &keys, &segments),
+        exact = exact_first(
+            alias,
+            key,
+            &keys,
+            &segments,
+            if ranges == 1 { "1" } else { "0" }
+        ),
     )
 }
 
@@ -421,31 +477,44 @@ pub(crate) fn target_exact_first(
 /// documents standing at the target's exact paths and no others.
 /// [`exact_members`] is the same step over rows read into memory, and the two
 /// must agree.
-pub(crate) fn exact_first(alias: &str, key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+pub(crate) fn exact_first(
+    alias: &str,
+    key: SuffixKey,
+    exact_keys: &str,
+    segments: &str,
+    files: &str,
+) -> String {
     format!(
         "({alias}.{column} IN ({exact_keys}) OR NOT EXISTS ({exact}))",
         column = key.column(),
-        exact = exact_rows(key, exact_keys, segments),
+        exact = exact_rows(key, exact_keys, segments, files),
     )
 }
 
 /// How many documents admitted to a target of `segments` segments stand at
 /// one of its exact keys, `exact_keys`: what [`exact_first`] keeps where any
 /// stands there.
-pub(crate) fn exact_count(key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+pub(crate) fn exact_count(key: SuffixKey, exact_keys: &str, segments: &str, files: &str) -> String {
     format!(
         "SELECT COUNT(*) FROM ({})",
-        exact_rows(key, exact_keys, segments)
+        exact_rows(key, exact_keys, segments, files)
     )
 }
 
-/// The admitted documents at one of `exact_keys`.
-fn exact_rows(key: SuffixKey, exact_keys: &str, segments: &str) -> String {
+/// The admitted candidates at one of `exact_keys`.
+fn exact_rows(key: SuffixKey, exact_keys: &str, segments: &str, files: &str) -> String {
     let column = key.column();
-    format!(
-        "SELECT 1 FROM documents AS de WHERE de.{column} IN ({exact_keys}) \
-         AND de.admitting_segments <= {segments}"
-    )
+    CANDIDATES
+        .map(|candidates| {
+            let table = candidates.table;
+            let de = candidates.alias("e");
+            let eligible = if table == "vault_files" { files } else { "1" };
+            format!(
+                "SELECT 1 FROM {table} AS {de} WHERE {eligible} AND {de}.{column} IN ({exact_keys})
+         AND {de}.admitting_segments <= {segments}"
+            )
+        })
+        .join(" UNION ALL ")
 }
 
 /// The exact-path-first step over the members of one link's class read into
@@ -481,7 +550,13 @@ pub(crate) fn target_rows(
             let upper = format!("?{}", first + range * 2 + 1);
             format!(
                 "SELECT * FROM ({})",
-                range_rows(key, (&lower, &upper), &segments, head)
+                range_rows(
+                    key,
+                    (&lower, &upper),
+                    &segments,
+                    head,
+                    if ranges == 1 { "1" } else { "0" }
+                )
             )
         })
         .collect::<Vec<_>>()
@@ -495,28 +570,29 @@ pub(crate) fn link_key_rows(
     link_key: &str,
     segments: &str,
     head: Option<&str>,
+    files: &str,
 ) -> String {
     range_rows(
         key,
         (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
         segments,
         head,
+        files,
     )
 }
 
 /// The sum of the disjoint admitted-index run counts of a link key.
-pub(crate) fn link_key_total(key: SuffixKey, link_key: &str, segments: &str) -> String {
+pub(crate) fn link_key_total(
+    key: SuffixKey,
+    link_key: &str,
+    segments: &str,
+    files: &str,
+) -> String {
     range_total(
         key,
         (link_key, &format!("{SUCCESSOR_FUNCTION}({link_key})")),
         segments,
-    )
-}
-
-/// Whether the named document's stored count admits it to a link's class.
-pub(crate) fn named_admitted(document: &str, segments: &str) -> String {
-    format!(
-        "(SELECT dn.admitting_segments FROM documents AS dn WHERE dn.id = {document}) <= {segments}"
+        files,
     )
 }
 
@@ -563,14 +639,24 @@ pub(crate) fn class_total(class: &TargetClass) -> String {
     let (key, ranges) = (class.probe().key(), class.probe().range_count());
     let segments = format!("?{}", ranges * 2 + 1);
     let rooted = format!("?{}", ranges * 2 + 2);
-    let exact = exact_count(key, &exact_keys(ranges, 1), &segments);
+    let exact = exact_count(
+        key,
+        &exact_keys(ranges, 1),
+        &segments,
+        if ranges == 1 { "1" } else { "0" },
+    );
     let totals = (0..class.probe().range_count())
         .map(|range| {
             let lower = format!("?{}", range * 2 + 1);
             let upper = format!("?{}", range * 2 + 2);
             format!(
                 "({})",
-                range_total(class.probe().key(), (&lower, &upper), &segments)
+                range_total(
+                    class.probe().key(),
+                    (&lower, &upper),
+                    &segments,
+                    if ranges == 1 { "1" } else { "0" }
+                )
             )
         })
         .collect::<Vec<_>>()

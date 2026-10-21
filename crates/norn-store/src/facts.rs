@@ -925,3 +925,13 @@ pub struct PillarReport {
     /// a store schema change is a rebuild rather than a migration.
     pub migrations_applied: u64,
 }
+
+/// A heal's row: a document with content facts, or a name-only vault file.
+/// The two kinds page together in the root's order, while document readers
+/// retain their own table and never see a file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredTarget {
+    pub path: DocumentPath,
+    pub document: Option<StoredDocument>,
+    pub generation: i64,
+}

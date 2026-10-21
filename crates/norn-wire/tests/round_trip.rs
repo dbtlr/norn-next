@@ -4454,22 +4454,21 @@ fn a_links_family_takes_its_target_and_its_form_chooses_where_it_is_read() {
     }
 }
 
-/// **A `.` or `..` step names a folder, not an attachment.** A target ending
-/// in one carries no extension, so where it names no document it is broken
-/// rather than unjudged.
+/// Folder steps and file names both address the vault, even where neither
+/// names a candidate; an extension no longer exempts an absent target.
 #[test]
-fn a_folder_step_leaf_names_no_attachment() {
+fn a_vault_address_is_judged_whatever_its_leaf_carries() {
     use LinkFamily::{Markdown, Wikilink};
     for (family, target) in [(Wikilink, "../../.."), (Markdown, "./.."), (Wikilink, ".")] {
         assert_eq!(
             LinkAddress::of(family, None, target).kind(),
-            LinkAddressKind::Document,
+            LinkAddressKind::Vault,
             "{family:?} `{target}`"
         );
     }
     assert_eq!(
         LinkAddress::of(Markdown, None, "../photo.png").kind(),
-        LinkAddressKind::Attachment
+        LinkAddressKind::Vault
     );
 }
 
@@ -4477,11 +4476,8 @@ fn a_folder_step_leaf_names_no_attachment() {
 /// written with a protocol other than `vault`, or a Markdown target opening
 /// with a URI scheme — is not judged, and a nonzero head for one is refused
 /// rather than built. Any other link that resolves to documents is judged by
-/// how many, whatever its leaf carries. One that resolves to none is not
-/// judged where its leaf carries an extension other than the document
-/// extension, which names an attachment, and is broken otherwise: a leaf with
-/// no extension, or the document extension in any ASCII case. A dot in a
-/// directory segment or leading a name is no extension.
+/// how many, whatever its leaf carries. One that resolves to none is broken,
+/// including a missing vault file.
 #[test]
 fn a_link_is_judged_by_resolving_it_first() {
     use LinkFamily::{Markdown, Wikilink};
@@ -4522,16 +4518,16 @@ fn a_link_is_judged_by_resolving_it_first() {
         }
     }
     for (family, protocol, target, unresolved) in [
-        (Wikilink, None, "picture.png", LinkHealth::NotJudged),
-        (Markdown, None, "assets/pic.png", LinkHealth::NotJudged),
-        (Markdown, None, "pic.png?size=2", LinkHealth::NotJudged),
-        (Wikilink, None, "archive.tar.gz", LinkHealth::NotJudged),
-        (Wikilink, None, "v1.2", LinkHealth::NotJudged),
+        (Wikilink, None, "picture.png", LinkHealth::Broken),
+        (Markdown, None, "assets/pic.png", LinkHealth::Broken),
+        (Markdown, None, "pic.png?size=2", LinkHealth::Broken),
+        (Wikilink, None, "archive.tar.gz", LinkHealth::Broken),
+        (Wikilink, None, "v1.2", LinkHealth::Broken),
         (
             Wikilink,
             Some("vault"),
             "assets/pic.png",
-            LinkHealth::NotJudged,
+            LinkHealth::Broken,
         ),
         (Wikilink, None, "notes", LinkHealth::Broken),
         (Markdown, None, "notes.md", LinkHealth::Broken),
@@ -4636,6 +4632,9 @@ fn a_links_judgement_is_read_back_off_its_addressing() {
     let read: LinkRow =
         serde_json::from_str(&json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
     assert_eq!(read.health(), LinkHealth::Healthy);
+    let json = addressed_row_json(None, "pic.png", "broken", &[], 0);
+    let read: LinkRow = serde_json::from_str(&json).expect("a missing file is broken");
+    assert_eq!(read.health(), LinkHealth::Broken);
     for json in [
         addressed_row_json(Some("https"), "example.com", "broken", &[], 0),
         addressed_row_json(
@@ -4645,7 +4644,7 @@ fn a_links_judgement_is_read_back_off_its_addressing() {
             &candidate_values(&["example.md"]),
             1,
         ),
-        addressed_row_json(None, "pic.png", "broken", &[], 0),
+        addressed_row_json(None, "pic.png", "not_judged", &[], 0),
         addressed_row_json(None, "notes", "not_judged", &[], 0),
         addressed_row_json(
             None,

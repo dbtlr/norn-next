@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(16),
-    "a4fb7ea7d5747015709d0c405c9c56c709e29fb564c37dd3623c0173292c6281",
+    DerivationVersion::new(17),
+    "6dd2e19b78f4fb329facff200f3dc8b743050f6c0f5865f806ebdb1b90870eed",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -369,7 +369,7 @@ setext title
 /// marked-up headings, a heading ending in a non-breaking space, both link
 /// families with and without protocol, title, anchor, block reference and
 /// embed, a percent-encoded Markdown target, one climbing out of the vault,
-/// one naming an attachment, a rooted one, one opening with a URI scheme, one
+/// one naming a vault file, a rooted one, one opening with a URI scheme, one
 /// carrying a query and one an encoded separator, a dotted wikilink, a
 /// same-document anchor, a wikilink no suffix address reads, `vault://` links
 /// of both families, a percent-encoded anchor, a heading chain, an ATX-shaped
@@ -1020,8 +1020,8 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             Some("vault"),
             "v1.2",
-            &["v1.2.md"],
-            "a rooted non-Markdown leaf names only its complete Markdown stem",
+            &["v1.2", "v1.2.md"],
+            "a rooted non-Markdown leaf names its file and complete Markdown stem",
         ),
         (
             glossary,
@@ -1199,13 +1199,9 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         .collect();
     assert_eq!(
         kinds,
-        [
-            LinkAddressKind::Attachment,
-            LinkAddressKind::Document,
-            LinkAddressKind::Elsewhere
-        ]
-        .map(LinkAddressKind::as_str)
-        .into(),
+        [LinkAddressKind::Vault, LinkAddressKind::Elsewhere]
+            .map(LinkAddressKind::as_str)
+            .into(),
         "the glossary's links do not exercise every address kind"
     );
     assert!(

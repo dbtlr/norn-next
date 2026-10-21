@@ -18,7 +18,7 @@ use norn_fs::{
 use norn_store::{
     Change, ContentModel, DerivedFinding, DirectoryPrefix, DocumentPath, FeedRead, FindingFacts,
     IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
-    StoredDocument, StoredPathOrder, SubjectScope,
+    StoredDocument, StoredPathOrder, StoredTarget, SubjectScope,
 };
 use norn_wire::{
     FindingKind, FindingScope, MaintainerIdentity, PlanDocument, UntrustedReason, VaultName,
@@ -1343,7 +1343,7 @@ fn exclusions_at(
     shadows: &ShadowHome,
     covered_root: &Path,
 ) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    let mut paths = vec![PathBuf::from(norn_config::IN_VAULT_CONFIG_PATH)];
     let root = covered_root;
     if let Some(shadows) = shadow_exclusion(shadows.placement(), shadows.directory(), root) {
         paths.push(shadows);
@@ -2207,6 +2207,7 @@ where
         let equal = fs_key.is_some() && fs_key == db_key;
         if take_file {
             if let Some(Ok((_, norn_fs::WalkFact::File(file)))) = files.peek()
+                && is_markdown(file.path().as_path())
                 && let Some(limit) = &limit
                 && pending.account.bytes_read > 0
                 && file.stat().len > limit.bytes.saturating_sub(pending.account.bytes_read)
@@ -2232,10 +2233,10 @@ where
                     }
                 }
                 norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
+                    let path = file.path().as_path().to_owned();
+                    let count = counts_rolling_write(pending.account, file.stat());
                     files.next();
-                    if let Some(row) = row {
-                        rolling_death(&mut pending, row.path.clone());
-                    }
+                    last_read_spelling = merge_file(&mut pending, &path, row, count);
                 }
                 norn_fs::WalkFact::File(file)
                     if pending.account.rolling && document_path(file.path().as_path()).is_err() =>
@@ -2256,7 +2257,12 @@ where
                     let spelling = file.path().as_path().to_str().expect("UTF-8").to_owned();
                     match open_enumerated(&mut files, &mut pending)? {
                         Some(read) => {
-                            merge_read(&mut pending, &spelling, read, row)?;
+                            merge_read(
+                                &mut pending,
+                                &spelling,
+                                read,
+                                row.and_then(|row| row.document.as_ref()),
+                            )?;
                             last_read_spelling = Some(spelling);
                         }
                         None => {
@@ -2281,6 +2287,11 @@ where
                 // other alias still takes its turn through the merge.
             } else if let Some(vault) = vault {
                 match vault.fact(Path::new(row.path.as_str())).map_err(effect)? {
+                    norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
+                        let count = counts_rolling_write(pending.account, file.stat());
+                        last_read_spelling =
+                            merge_file(&mut pending, file.path().as_path(), Some(row), count);
+                    }
                     norn_fs::WalkFact::File(file) => {
                         let spelling = file
                             .path()
@@ -2298,7 +2309,7 @@ where
                         match file.read_optional().map_err(effect)? {
                             Some(read) => {
                                 pending.account.bytes_read += read.bytes().len() as u64;
-                                merge_read(&mut pending, &spelling, read, Some(row))?;
+                                merge_read(&mut pending, &spelling, read, row.document.as_ref())?;
                             }
                             None => rolling_death(&mut pending, row.path.clone()),
                         }
@@ -2351,10 +2362,48 @@ fn rolling_death(pending: &mut Pending<'_>, path: DocumentPath) {
     if pending.account.rolling {
         pending.misses.deleted += 1;
     }
-    pending.push(Change::Death {
-        path,
-        provenance: Provenance::HealPrune,
-    });
+    pending.push(target_death(path, Provenance::HealPrune));
+}
+
+/// A file dies without a hash or tombstone; both deaths re-judge its keys.
+fn target_death(path: DocumentPath, provenance: Provenance) -> Change {
+    if path.is_vault_file() {
+        Change::FileDeath { path }
+    } else {
+        Change::Death { path, provenance }
+    }
+}
+
+/// A walked regular file contributes its name alone. A pin that changes the
+/// ignore set owes it the same admitting-count refresh a document receives.
+fn merge_file(
+    pending: &mut Pending<'_>,
+    path: &Path,
+    row: Option<&StoredTarget>,
+    count: bool,
+) -> Option<String> {
+    let path = document_path(path)
+        .ok()
+        .filter(DocumentPath::is_vault_file)?;
+    if row.is_none_or(|row| row.path != path || !pending.declared.judged(row.generation)) {
+        if let Some(row) = row.filter(|row| row.path != path) {
+            pending.push(Change::FileDeath {
+                path: row.path.clone(),
+            });
+        }
+        pending.push(Change::FileBirth { path: path.clone() });
+        if row.is_none() && count {
+            pending.misses.created += 1;
+        }
+    }
+    Some(path.as_str().to_string())
+}
+
+fn counts_rolling_write(account: &Account, stat: &norn_fs::FileStat) -> bool {
+    account.rolling
+        && std::time::SystemTime::now()
+            .duration_since(stat.mtime)
+            .is_ok_and(|age| age >= rolling::DELIVERY_GRACE)
 }
 
 fn merge_read(
@@ -2364,10 +2413,7 @@ fn merge_read(
     row: Option<&StoredDocument>,
 ) -> Result<(), JobFailure> {
     let hash = read.content_hash().to_string();
-    let count = pending.account.rolling
-        && std::time::SystemTime::now()
-            .duration_since(read.stat().mtime)
-            .is_ok_and(|age| age >= rolling::DELIVERY_GRACE);
+    let count = counts_rolling_write(pending.account, read.stat());
     if let Some(row) = row {
         let changed = hash != row.content_hash || spelling != row.path.as_str();
         if changed
@@ -2695,6 +2741,17 @@ fn scoped_increment(
                 .walked(HealScope::Prefix(beneath), stored_path_order(sensitivity));
         }
         if !is_markdown(path) {
+            let standing = pending
+                .store
+                .begin_request()
+                .stored_targets_in_range_after_ordered(
+                    SubjectScope::Subtree(&document_path),
+                    None,
+                    1,
+                    stored_path_order(sensitivity),
+                )
+                .map_err(store_effect)?;
+            merge_file(&mut pending, path, standing.first(), false);
             continue;
         }
         // Read from the vault root down, so a dirty path reaches the same file
@@ -3130,38 +3187,17 @@ impl HealScope<'_> {
         after: Option<&DocumentPath>,
         policy: ProductionPolicy,
         order: StoredPathOrder,
-    ) -> Result<Vec<StoredDocument>, JobFailure> {
-        let request = store.begin_request();
-        match self {
-            HealScope::Window {
-                after: lower,
-                through,
-            } => request.stored_documents_in_range_after_ordered(
-                SubjectScope::Window {
-                    after: lower,
-                    through,
-                },
-                after,
-                policy.store_page_size,
-                order,
-            ),
-            HealScope::Vault => {
-                request.stored_documents_after_ordered(after, policy.store_page_size, order)
-            }
-            HealScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
-                root,
-                after,
-                policy.store_page_size,
-                order,
-            ),
-            HealScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
-                prefix,
-                after,
-                policy.store_page_size,
-                order,
-            ),
-        }
-        .map_err(store_effect)
+    ) -> Result<Vec<StoredTarget>, JobFailure> {
+        let scope = match self {
+            HealScope::Window { after, through } => SubjectScope::Window { after, through },
+            HealScope::Vault => SubjectScope::Vault,
+            HealScope::Subtree(root) => SubjectScope::Subtree(root),
+            HealScope::Prefix(prefix) => SubjectScope::Under(prefix),
+        };
+        store
+            .begin_request()
+            .stored_targets_in_range_after_ordered(scope, after, policy.store_page_size, order)
+            .map_err(store_effect)
     }
 }
 
@@ -3268,10 +3304,7 @@ fn prune_subtree_ordered(
         }
         after = page.last().map(|row| row.path.clone());
         for row in page {
-            pending.push(Change::Death {
-                path: row.path,
-                provenance: Provenance::WatcherRemoval,
-            });
+            pending.push(target_death(row.path, Provenance::WatcherRemoval));
             healed += 1;
             if pending.is_full() {
                 pending.flush()?;
@@ -3307,8 +3340,8 @@ fn prune_descendants_and_aliases(
         let page = pending
             .store
             .begin_request()
-            .stored_documents_in_subtree_after_ordered(
-                root,
+            .stored_targets_in_range_after_ordered(
+                SubjectScope::Subtree(root),
                 after.as_ref(),
                 policy.store_page_size,
                 stored_path_order(sensitivity),
@@ -3322,10 +3355,7 @@ fn prune_descendants_and_aliases(
             if &row.path == root {
                 continue;
             }
-            pending.push(Change::Death {
-                path: row.path,
-                provenance: Provenance::WatcherRemoval,
-            });
+            pending.push(target_death(row.path, Provenance::WatcherRemoval));
             pruned += 1;
             if pending.is_full() {
                 pending.flush()?;
@@ -3408,7 +3438,11 @@ impl FreedRoots {
                 Change::Death { path, .. } if path.carries_marker() => {
                     self.roots.insert(path.unrendered_ancestor().to_owned());
                 }
-                Change::Death { .. } | Change::Vacated { .. } | Change::Upsert(_) => {}
+                Change::Death { .. }
+                | Change::Vacated { .. }
+                | Change::Upsert(_)
+                | Change::FileBirth { .. }
+                | Change::FileDeath { .. } => {}
             }
         }
     }
@@ -3938,7 +3972,10 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
         .iter()
         .map(|change| match change {
             Change::Upsert(facts) => (&facts.path, true),
-            Change::Death { path, .. } | Change::Vacated { path } => (path, false),
+            Change::Death { path, .. }
+            | Change::Vacated { path }
+            | Change::FileBirth { path }
+            | Change::FileDeath { path } => (path, false),
         })
         .collect()
 }
@@ -16973,6 +17010,134 @@ mod tests {
         }
     }
 
+    /// A heal indexes no file under a dot-led folder, as Obsidian resolves no
+    /// link to one; a file beside them outside such a folder is indexed.
+    #[test]
+    fn a_heal_indexes_no_file_under_a_dot_folder() {
+        let f = Fixture::watcherless("file-heal-dot-folders");
+        let root = f.vault();
+        for (path, bytes) in [
+            (".git/index.lock", "lock"),
+            (".git/objects/pack/pack-1.pack", "pack"),
+            (".obsidian/app.json", "{}"),
+            (".trash/photo.png", "png"),
+            ("assets/photo.png", "png"),
+        ] {
+            fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        let exclusions = [
+            PathBuf::from(IN_VAULT_SCHEMA_PATH),
+            PathBuf::from(norn_config::IN_VAULT_CONFIG_PATH),
+        ];
+        let mut store = Store::open(
+            f.root.join("dot-folders.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            &root,
+            &exclusions,
+            walk(&root, &exclusions).unwrap(),
+            norn_fs::CaseSensitivity::Sensitive,
+            HealScope::Vault,
+            ProductionPolicy::new(1, 1).unwrap(),
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        let files = store
+            .begin_request()
+            .vault_file_keys_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            ["assets/photo.png"]
+        );
+    }
+
+    /// The explicit merge order exercises folding semantics on any host.
+    #[test]
+    fn a_vault_file_case_only_rename_survives_one_row_heal_pages() {
+        for (from, to) in [
+            ("note.png", "Note.png"),
+            ("Note.png", "note.png"),
+            ("MiXeD.png", "Mixed.png"),
+        ] {
+            let f = Fixture::watcherless("file-heal-folded-respelling");
+            fs::write(f.vault().join(from), "same bytes").unwrap();
+            for neighbor in ["a.md", "z.md"] {
+                fs::write(f.vault().join(neighbor), "neighbor").unwrap();
+            }
+            let root = f.vault();
+            let exclusions = [
+                PathBuf::from(IN_VAULT_SCHEMA_PATH),
+                PathBuf::from(norn_config::IN_VAULT_CONFIG_PATH),
+            ];
+            let mut store = Store::open(
+                f.root.join("folded.sqlite3"),
+                StoredPathOrder::AsciiCaseInsensitive,
+                crate::DERIVATION_VERSION,
+            )
+            .unwrap();
+            ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+            let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+            for renamed in [false, true] {
+                if renamed {
+                    fs::rename(root.join(from), root.join(to)).unwrap();
+                }
+                let mut facts = walk(&root, &exclusions)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                facts.sort_by_key(|fact| {
+                    fact.path().as_path().to_str().unwrap().to_ascii_lowercase()
+                });
+                let mut account = Account::default();
+                merge_walk(
+                    &mut store,
+                    &root,
+                    &exclusions,
+                    facts.into_iter().map(Ok),
+                    norn_fs::CaseSensitivity::Insensitive,
+                    HealScope::Vault,
+                    ProductionPolicy::new(1, 1).unwrap(),
+                    &progress.healing(),
+                    &mut account,
+                )
+                .unwrap();
+                close_job(
+                    &mut store,
+                    &root,
+                    &exclusions,
+                    ProductionPolicy::new(1, 1).unwrap(),
+                    &mut account,
+                )
+                .unwrap();
+                let files = store
+                    .begin_request()
+                    .vault_file_keys_after(None, 10)
+                    .unwrap();
+                assert_eq!(
+                    files
+                        .iter()
+                        .map(|row| row.path.as_str())
+                        .collect::<Vec<_>>(),
+                    [if renamed { to } else { from }],
+                    "{from} -> {to}, renamed={renamed}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_folded_heal_prunes_all_aliases_of_a_file_deleted_after_listing() {
         let f = Fixture::watcherless("heal-folded-listed-deletion");
@@ -17444,6 +17609,52 @@ mod tests {
                 .stored_document(&DocumentPath::new("deleted.md").unwrap())
                 .unwrap()
                 .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types)] // Harness scaffolding sets an external writer's mtime.
+    fn a_rolling_pass_counts_only_old_vault_file_births_as_watcher_misses() {
+        let f = Fixture::new("rolling-file-birth-misses");
+        fs::write(f.vault().join("existing.png"), "existing").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.subscription.take();
+        fs::write(f.vault().join("created.png"), "created").unwrap();
+        fs::write(f.vault().join("recent.png"), "recent").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        for path in ["existing.png", "created.png"] {
+            fs::File::open(f.vault().join(path))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        attachment.rolling.due = Instant::now();
+        for _ in 0..100 {
+            rolling::slice(&mut attachment, ops.policy).unwrap();
+            if attachment.rolling.last_completed.is_some() {
+                break;
+            }
+        }
+        assert!(attachment.rolling.last_completed.is_some());
+        assert_eq!(
+            attachment.rolling.misses,
+            norn_wire::WatcherMisses {
+                changed: 0,
+                created: 1,
+                deleted: 0
+            }
+        );
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .vault_file_keys_after(None, 10)
+                .unwrap()
+                .len(),
+            3
         );
         ops.detach(&name, attachment);
     }

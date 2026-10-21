@@ -6596,3 +6596,60 @@ fn a_similar_target_repair_costs_the_same_at_both_scales() {
     )
     .assert_size_independent();
 }
+
+/// A file birth reads its in-links and their class, independent of unrelated
+/// documents and files. Its bytes never enter a document projection.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_vault_file_births_link_health_work_follows_its_in_links_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("a profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("a profile");
+    let measure = |label, profile: &norn_fixtures::Profile| {
+        let sandbox =
+            Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+        for at in 0..HUB_IN_LINKS {
+            std::fs::write(
+                vault.path().join(format!("file-linker-{at}.md")),
+                "[[file-hub.png]]\n",
+            )
+            .expect("a file backlink");
+        }
+        for at in 0..profile.docs {
+            std::fs::write(vault.path().join(format!("unrelated-{at}.png")), [])
+                .expect("an unrelated file");
+        }
+        {
+            let host = vault.host();
+            attach::attach_and_wait(&host, vault.name());
+        }
+        let mut store = vault.store();
+        let declared = the_pinned_declaration(&mut store);
+        let mut request = store.begin_request();
+        request
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::FileBirth {
+                    path: DocumentPath::new("file-hub.png").expect("a file path"),
+                }],
+                &[],
+                &declared,
+            )
+            .expect("the file birth");
+        let read_steps = request.read_steps();
+        request
+            .finish()
+            .readings()
+            .chain([("read_steps", read_steps)])
+            .collect::<CounterSnapshot>()
+    };
+    let small_counters = measure("file-counter-small", &small);
+    let large_counters = measure("file-counter-large", &large);
+    assert_the_hub_write_redecided_its_in_links(&small, &small_counters, &large, &large_counters);
+    SizeIndependencePair::new(
+        "a vault-file birth with a fixed link neighborhood",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}

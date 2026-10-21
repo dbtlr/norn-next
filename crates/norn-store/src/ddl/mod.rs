@@ -75,9 +75,10 @@ pub(crate) mod meta;
 pub(crate) mod migrations;
 pub(crate) mod stems;
 pub(crate) mod tombstones;
+pub(crate) mod vault_files;
 
 /// The store schema version of the normalized resolution key columns.
-pub const STORE_SCHEMA_VERSION: i64 = 2;
+pub const STORE_SCHEMA_VERSION: i64 = 3;
 
 /// The areas, in execution order. `meta` is first, and it is the substrate's
 /// table rather than this tree's, because it is what an open reads to decide
@@ -92,6 +93,7 @@ pub const STORE_SCHEMA_VERSION: i64 = 2;
 const AREAS: &[fn() -> Vec<String>] = &[
     norn_db::meta::statements,
     documents::statements,
+    vault_files::statements,
     facts::statements,
     fields::statements,
     tombstones::statements,

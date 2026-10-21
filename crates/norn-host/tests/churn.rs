@@ -2440,3 +2440,48 @@ fn kinds_at(projection: &StoreProjection, path: &str) -> Vec<String> {
     kinds.sort();
     kinds
 }
+
+/// Watcher-only file changes move link health without changing any document.
+#[test]
+fn a_vault_files_watcher_birth_and_death_equal_a_build_from_zero() {
+    let sandbox = sandbox("churn-vault-file");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
+    std::fs::write(
+        vault.path().join("file-linker.md"),
+        "[[watcher.png]] ![](./watcher.png#missing)\n",
+    )
+    .expect("a linker");
+    for (present, machine) in [(true, "file-birth"), (false, "file-death")] {
+        {
+            let host = vault.host();
+            let _lease = attach::attach_and_wait(&host, vault.name());
+            assert_eq!(
+                backlink_link_health(&vault, "file-linker.md").len(),
+                if present { 2 } else { 0 }
+            );
+            if present {
+                std::fs::write(vault.path().join("watcher.png"), [0xff, 0x00, 0xfe])
+                    .expect("a file whose bytes are not text");
+            } else {
+                std::fs::remove_file(vault.path().join("watcher.png")).expect("remove the file");
+            }
+            wait_until(
+                "the file event to re-judge its links",
+                SETTLING.budget_for(1),
+                || {
+                    let findings = backlink_link_health(&vault, "file-linker.md");
+                    let expected = if present { 0 } else { 2 };
+                    if host.state(vault.name()) == Ok(TrustState::Ready)
+                        && findings.len() == expected
+                    {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending(format!("file present {present}, findings {findings:?}"))
+                    }
+                },
+            )
+            .expect("watcher convergence");
+        }
+        assert_equals_a_rebuild(&vault, &sandbox, machine, "a name-only file event");
+    }
+}

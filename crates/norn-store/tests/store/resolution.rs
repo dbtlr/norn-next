@@ -900,8 +900,8 @@ fn a_link_under_several_keys_reads_its_keys_places_once_however_many_links_hold_
         );
         assert_eq!(
             lists.len(),
-            2,
-            "one shared list per key that could name a moved document, however many links"
+            3,
+            "one shared list per key and file eligibility, however many links"
         );
         work.targets_read
     };

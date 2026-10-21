@@ -79,7 +79,7 @@ use crate::facts::{
     FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor, LinkFact, LinkFamily,
     PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
     StoredLink, StoredLinkKey, StoredPathOrder, StoredRuleSet, StoredSuffixKeys, StoredTag,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredTarget, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{ContentModel, FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::health::{self, KeySummaries, LinkSelection};
@@ -691,6 +691,61 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// A bounded page of documents and vault files merged in the walk's order.
+    /// Each table seeks and cuts before merging, so a heal retains at most two
+    /// pages and never reads bytes for a file.
+    pub fn stored_targets_in_range_after_ordered(
+        &self,
+        scope: SubjectScope<'_>,
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredTarget>, StoreError> {
+        let mut targets: Vec<_> = self
+            .stored_documents_in_range_after_ordered(scope, after, limit, order)?
+            .into_iter()
+            .map(|document| StoredTarget {
+                path: document.path.clone(),
+                generation: document.generation,
+                document: Some(document),
+            })
+            .collect();
+        let predicate = scope_page_predicate(scope, order, order);
+        let ordering = document_page_ordering(order);
+        let bound = first_parameter_after_scope(scope);
+        let sql = format!(
+            "SELECT path, generation FROM vault_files WHERE {predicate}
+            ORDER BY {ordering} LIMIT ?{bound}"
+        );
+        targets.extend(self.read_all(
+            &sql,
+            params_from_iter(document_page_parameters(scope, after, limit)),
+            |row| {
+                let path: String = row.get(0)?;
+                let generation = row.get(1)?;
+                Ok(DocumentPath::new(&path).map(|path| StoredTarget {
+                    path,
+                    generation,
+                    document: None,
+                }))
+            },
+            "reading the stored vault-file page",
+        )?);
+        targets.sort_by(|a, b| {
+            let a = a.path.as_str();
+            let b = b.path.as_str();
+            match order {
+                StoredPathOrder::Sensitive => a.cmp(b),
+                StoredPathOrder::AsciiCaseInsensitive => a
+                    .to_ascii_lowercase()
+                    .cmp(&b.to_ascii_lowercase())
+                    .then_with(|| a.cmp(b)),
+            }
+        });
+        targets.truncate(limit);
+        Ok(targets)
+    }
+
     /// One document's row, its body, and every fact row derived from it, in
     /// ordinal order.
     ///
@@ -1194,6 +1249,30 @@ impl<'a> Request<'a> {
             params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
             stored_suffix_key,
             "reading the suffix-key page",
+        )
+    }
+
+    /// Stored vault-file comparison keys in bytewise path order. This is a
+    /// name-only inventory for equivalence and derivation checks, with no
+    /// document payload, generation or timestamp folded into those checks.
+    pub fn vault_file_keys_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<StoredSuffixKeys>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a vault-file key page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            "SELECT path, suffix_key, path_key, admitting_segments FROM vault_files
+             WHERE path > COALESCE(?1, '') ORDER BY path LIMIT ?2",
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            stored_suffix_key,
+            "reading the vault-file key page",
         )
     }
 

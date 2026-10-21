@@ -241,12 +241,11 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
 
 /// **A link's stored address kind is the reading its health is judged by.**
 /// Over both families, with and without a protocol, and targets that name a
-/// document, an attachment, a dotted name and a scheme, `links.address` is
+/// document, a vault file, a dotted name and a scheme, `links.address` is
 /// `elsewhere` exactly where [`LinkHealth::of_link`] never judges the link,
-/// `attachment` exactly where it leaves the link unjudged only when it
-/// resolves to nothing, and `document` exactly where a link resolving to
-/// nothing is broken. A document extension in any case is a document's, so
-/// `note.md` and `note.MD` are no attachments.
+/// and `vault` where a link resolving to nothing is broken. A document
+/// extension in any case is a document's, so `note.md` and `note.MD` are
+/// no vault files.
 #[test]
 fn a_links_address_column_agrees_with_link_health_of_link() {
     let targets = [
@@ -305,8 +304,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
         };
         let expected = match (health(0), health(1)) {
             (LinkHealth::NotJudged, LinkHealth::NotJudged) => LinkAddressKind::Elsewhere,
-            (LinkHealth::NotJudged, LinkHealth::Healthy) => LinkAddressKind::Attachment,
-            (LinkHealth::Broken, LinkHealth::Healthy) => LinkAddressKind::Document,
+            (LinkHealth::Broken, LinkHealth::Healthy) => LinkAddressKind::Vault,
             other => panic!("{link:?} is judged {other:?}, which no address kind reads"),
         };
         assert_eq!(stored.address, expected, "{link:?}");
@@ -314,7 +312,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     }
     assert_eq!(
         seen,
-        BTreeSet::from(["attachment", "document", "elsewhere"]),
+        BTreeSet::from(["elsewhere", "vault"]),
         "the links do not exercise every address kind"
     );
     store.verify_integrity().expect("a store just written to");
@@ -375,6 +373,7 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(10, "notes/x.md.md", None),
             key(13, "q.md/", Some(1)),
             key(13, "q/", Some(1)),
+            key(14, "notes/v1.2", None),
             key(14, "notes/v1.2.md", None),
         ]
     );

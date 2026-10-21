@@ -1581,3 +1581,25 @@ fn markdown_cascades_encode_destinations_in_each_occurrences_form() {
     fixture.assert_store_is_a_build_from_zero();
     assert_eq!(fixture.read("h.md").as_deref(), Some(expected));
 }
+
+/// A suffix shared with a vault file cannot be written as a unique backlink.
+#[test]
+fn a_backlink_ambiguous_with_a_vault_file_takes_a_longer_suffix() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("y/photo.png", "file bytes"),
+        ("h.md", "[[a]] [[a.md]]\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("a.md", "x/photo.png.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            wikilink("h.md", "a", "x/photo.png"),
+            wikilink("h.md", "a.md", "photo.png.md")
+        ]]
+    );
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[x/photo.png]] [[photo.png.md]]\n")
+    );
+}

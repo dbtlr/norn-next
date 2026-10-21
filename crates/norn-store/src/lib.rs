@@ -167,7 +167,7 @@ pub use facts::{
     FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor,
     LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
     StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredRuleSet, StoredSuffixKeys,
-    StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredTag, StoredTarget, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
