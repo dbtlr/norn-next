@@ -1,10 +1,9 @@
-# Complete PR/main gate during nightly bootstrap. No coverage is removed here.
-# regression.yml supplies full nightly/manual evidence; docs/ci.md governs the cutover.
-# Per-PR gate lane.
+# PR/main functional gate lane.
 #
-# CI is two-tier: structure and counters gate here, clocks trend in certify.yml.
+# CI is two-tier: structure and counters gate correctness, clocks trend in
+# certify.yml.
 # No wall-clock pass/fail ever runs in this lane — see docs/architecture.md.
-# "Counters" names the measurement gates this lane is being built toward; a
+# "Counters" names the measurement gates in the correctness tier; a
 # gate that asserts structure rather than a number belongs here too, on the
 # same terms.
 #
@@ -42,6 +41,12 @@
 # one exists, and otherwise the layer that brings the missing subject.
 # The suffix drops when the real gate lands, so a green check on a job
 # without one is a gate that actually ran.
+#
+# Dedicated full fault suites, compiled audits, counter matrices and memory
+# bars run only in regression.yml among the active workflows. This gate keeps
+# ordinary functional coverage and focused macOS filesystem evidence, including
+# the folding-root spelling bar. docs/ci.md governs cadence and the separate
+# required-context transition.
 name: ci
 
 on:
@@ -61,10 +66,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # A real gate, not a placeholder: the workspace compiles clean, is
-  # formatted, and its tests pass. The corpus suite is dormant — no command is
-  # activated — so this job runs in seconds; what it asserts is that the
-  # workspace holds together and that the corpus data is structurally sound.
+  # The workspace compiles clean, is formatted, and its ordinary tests and
+  # doctests pass. The corpus suite is dormant — no command is activated —
+  # while its data and the registry's structure remain checked here.
+  # Compiled registry carriers and inventory reconciliation run in full
+  # regression: keeping that build/listing work there avoids rebuilding and
+  # listing every cited test target inside this job's workspace test step.
   build:
     name: build and test
     runs-on: ubuntu-latest
@@ -115,18 +122,25 @@ jobs:
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace
 
-  # Four crates declare an `induced-failure` feature, and the workspace test in
-  # the build job reaches three of them. norn-fs and norn-store each turn their
-  # own on through a self dev-dependency, and norn-store forwards it to norn-db,
-  # so those crates' lockdown and environment suites run there already.
-  # norn-host's is a feature a caller asks for, and nothing there asks: its
-  # crash-convergence proof (kill_recovery.rs), its lockdown suite and its soak
-  # load (host_soak.rs, whose case the scheduled lane runs) are whole files
-  # behind it and compile to zero tests without it. This job is scoped to that
-  # crate for that reason, and runs beside the build job rather than after its
-  # steps so the per-PR critical path is the longer of the two.
-  induced-failure:
-    name: induced-failure recovery
+  # Four crates declare an `induced-failure` feature, and the workspace test
+  # in the build job reaches three of them. norn-fs and norn-store each turn
+  # their own on through a self dev-dependency, and norn-store forwards it to
+  # norn-db, so their lockdown and environment suites already run there.
+  # norn-host needs an explicit feature selection: it compiles the fault-seam
+  # targets and exposes the accounts ordinary churn and rolling-heal cases
+  # assert over. Without it, those files or assertions would be absent.
+  #
+  # Select the whole package so every current and future ordinary host target
+  # and case joins PR coverage automatically. A list of targets or a --skip
+  # would silently leave newly added functional coverage behind. Only lockdown
+  # and kill_recovery move out of this ordinary suite into the fault lane:
+  # their dedicated fault/recovery targets are adopted wholesale in full
+  # regression. Existing ignored counter, memory and soak cases keep their
+  # own lanes; ordinary feature-enabled cases elsewhere still run here.
+  # This job runs beside build rather than after it, so the PR critical path
+  # is the longer of the two rather than their sum.
+  host-functional:
+    name: host functional (induced-failure)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -134,27 +148,30 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
-      - name: Induced-failure recovery
+      - name: Host functional suite
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
   # A targeted second-architecture gate. The default build already runs the
-  # full workspace on Linux x86_64; this job holds the contracts whose
-  # answers can otherwise drift with architecture or filesystem behavior
-  # without paying to duplicate that entire suite: embedding determinism,
-  # norn-fs's filesystem contracts, and norn-host's case-insensitive-rename
-  # convergence, which only exercises on a case-insensitive filesystem —
-  # APFS's default here, and no other CI platform. Pin the image rather than
-  # following macos-latest, and assert the machine architecture so a future
+  # full workspace on Linux x86_64; this job holds contracts whose answers can
+  # drift with architecture or filesystem behavior without duplicating the
+  # complete host suite: embedding determinism, norn-fs contracts, Obsidian
+  # parity, exact rename/refusal cases, and the folding-root spelling bar.
+  # Case-insensitive rename convergence needs a case-insensitive filesystem —
+  # APFS's default here, and no other active CI platform. Pin the image rather
+  # than following macos-latest, and assert the machine architecture so a future
   # runner-label migration refuses instead of silently weakening the gate.
   #
-  # The host step names `induced-failure` because the suite behind that feature
-  # is filesystem behavior too: a revoked directory mode answering `EACCES`, and
-  # a database left the way an aborted process leaves it. Without the feature
-  # those files compile to zero tests, and the second filesystem this job exists
-  # for would never see them.
+  # The host steps name `induced-failure` because lockdown's revoked-mode
+  # refusals are filesystem behavior too, and that target compiles to zero
+  # tests without it. Churn also reads work accounts exposed by the feature;
+  # a featureless run would omit those assertions. Exact native cases include
+  # ignored tests so the fault-lane move cannot skip the two refusal cases.
+  # test-suite.sh rejects an exact selection that executes nothing.
   #
-  # The folding-root counter bars run in a job of their own beside this one,
-  # so the longest macOS job stays well inside its guard.
+  # Full macOS host coverage and the complete folding-root counter matrix run
+  # in regression.yml. The spelling bar stays here as focused PR evidence for
+  # stored-name queries on a real folding root, with its account enabled by
+  # LANE_FEATURES. Its suite refuses a distinct macOS scratch volume.
   platform:
     name: determinism and filesystem (macOS ARM64)
     runs-on: macos-15
@@ -170,34 +187,19 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
-      - name: Host filesystem contracts
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
-
-  # The counter bars on a folding root. Each needs APFS's case-insensitive
-  # default, so it runs on the same pinned image and architecture as the
-  # platform job, and names `induced-failure` for the same reason the counter
-  # gates job does: the host's account of its jobs is read only behind it.
-  folding-counters:
-    name: counter bars on a folding root (macOS ARM64)
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Assert architecture
-        run: test "$(uname -m)" = arm64
-      - uses: Swatinem/rust-cache@v2
-      # Spelling confirmation's per-target cost needs a real folding root.
-      # The suite refuses a distinct macOS scratch volume rather than skipping.
+      - name: Obsidian parity
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity
+      # --exact alone succeeds on a typo. test-suite.sh rejects zero matches.
+      - name: Case-only rename convergence
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact --include-ignored
+      - name: Parent rename over a save
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored
+      - name: Unreadable document refusal
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_refuses_the_heal_rather_than_quarantining_it -- --exact --include-ignored
+      - name: Unreadable subtree refusal
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it -- --exact --include-ignored
       - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
-        env:
-          LANE_FEATURES: induced-failure
-      # The counter bars on a folding root, where each spelling is confirmed
-      # by a stored-name query rather than the distinct root's exact stat.
-      - name: Counter bars on a folding root
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
 
@@ -230,145 +232,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Gate
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture
-
-  # The counter half is a real gate, over the path a request really takes: a
-  # generated vault tree on disk, a production attachment that walked it, and
-  # the derived store that attachment left behind. Four bars run at profiles
-  # the per-PR lane owns. A warm request over the ~2k-document realistic
-  # profile finishes with every derivation counter at zero, over a detached
-  # store and again under a live attachment. The store's read paths derive
-  # nothing by construction today, so that bar is a canary rather than a number
-  # the current code strains against: it binds the day a read path starts
-  # deriving, and fails that as a correctness break rather than reporting it as
-  # a slowdown. A find run through a live read hold reads nothing through
-  # norn-fs on its own thread, lands nothing in the host's account of its jobs,
-  # and runs a pinned number of statements a page. So does every other query
-  # shape, each asked through its host verb at a pinned number of statements:
-  # count-by-field, suffix / stem resolve, links-to, findings-for-path and
-  # full-text match, and a get's page of a document's links and a describe.
-  # And one bounded write, one bounded find, and each of those shapes in the
-  # bounded form its verb's contract makes flat, cost the same at 300 documents
-  # as at 2000 — the sharper bar, because a ceiling passes anything under it
-  # and a pair fails the moment two scales stop moving together. A shape's cost
-  # counts the steps of every statement run on its snapshot; those statement
-  # counters do not see work a virtual table does inside a statement, so a
-  # full-text match's posting-list walk is not among them. Each read pair runs
-  # beside a control that grows with the vault and must read more at the
-  # larger scale. And under the overlapping-reads-on-one-entry workload, eight
-  # reads start while a ninth holds the entry's one connection, and the hold is
-  # let go once the host's reader-wait reading names all eight as waiting:
-  # each read runs exactly its snapshot's establishment under the entry gate,
-  # the deferred BEGIN and the one statement that establishes the snapshot, as
-  # the gate holder reads SQLite's own count of what it began on the holding
-  # thread on both sides of its hold, and the gate's own take count reads no
-  # retake inside that hold; the reader-wait reading is eight; and each contended
-  # read took exactly one round of the entry gate after its first, none past
-  # a ceiling authored in norn-host's baselines. Its control runs the same
-  # reads one after another and must fail on contention alone. Rule judgment
-  # runs in the host and reads no database, so its work is the judge's own
-  # logical counts, folded into the host's account: one document judged under
-  # a live attachment costs the same at 300 documents as at 2000, and each
-  # parameter the schema declares, varied alone, moves its counts in
-  # proportion and no other. All of these are counts: a counter says the same
-  # thing on a loaded runner, which a clock does not.
-  #
-  # The plan bars live in the store's own suites, beside the read builders that
-  # emit the SQL they judge. An `EXPLAIN` assertion is worth something only
-  # against the statement a builder emitted; a gate against hand-written SQL
-  # tests a string nobody executes.
-  #
-  # The host's account of its jobs is read only behind `induced-failure`, so
-  # this step names the feature. A build without it refuses the two cases that
-  # read the account, and the lane table's own test holds this step to every feature
-  # the suite puts a case or a helper behind.
-  #
-  # The cases live in this job and the macOS folding-root counter job, `#[ignore]`d
-  # with a `counter-lane case:` reason so the build job's workspace suite does not attach thousands of
-  # documents beside every other test. The script is what makes the wholesale
-  # `--ignored` run fail when it ran nothing.
-  gates:
-    name: counter gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-      - name: Counter bars
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
-        env:
-          LANE_FEATURES: induced-failure
-      - name: Distinct-root spelling control
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
-        env:
-          LANE_FEATURES: induced-failure
-
-  # A real gate. Resident-set subjects run as children under the testkit's
-  # process harness, which reads the peak the kernel accounted to each child.
-  # A peak read off the test process would include cargo's runner and every
-  # case beside it. The fixture, walker and host subjects face a checked-in
-  # ceiling at the ~2k-document realistic profile and a ratio, at profiles under
-  # 5k documents. A subject whose cost could grow with the vault is paired
-  # across the 300-document and ~2k-document profiles; a read is paired with the
-  # attach-only peak at the same profile, which cancels the attach and leaves
-  # the read. The ratio is the sharp instrument — a ceiling passes anything
-  # that fits under it, and a ratio fails the moment its two readings stop
-  # moving together. Their readings are in each crate's tests/baselines/mod.rs.
-  # The store's retained-count RSS case instead pairs 512 and 4096 documents
-  # with a ceiling and an absolute growth bound, defined beside the case.
-  # Every bar is authored and moves only by a reviewed edit.
-  #
-  # The cases live in this job alone. They are `#[ignore]`d with a
-  # `memory-lane case:` reason so the build job's workspace suite does not run
-  # them: a measurement running beside every other test measures those tests
-  # too, and "build and test" stays free of measurement. The step asks the
-  # target for its ignored cases wholesale, which is why the >=5k cases are a
-  # separate target (`memory_soak`) rather than a second reason in this one —
-  # otherwise this lane would run certify.yml's wall-clock assertion. The script
-  # is what makes that wholesale run fail when it ran nothing.
-  #
-  # The subjects include the fixture generator, the norn-fs streaming walk,
-  # the store's retained counts and link-health heap, and a host attaching a
-  # generated vault — the first subject that measures a
-  # whole vault's worth of work, where the generator and the walk each measure
-  # one pass over a tree — and a host running the read mix over the vault it
-  # attached. The read mix is one child that runs eight shapes through the
-  # host's read verbs, each under its own live hold: a find under a predicate,
-  # sorted and paged, a count by field, a get with suffix resolve, links-to,
-  # backlinks, a validate narrowed by a path part, lexical search and
-  # describe. The kernel reports one peak per child, so the read's resident-set
-  # bars hold the highest peak any shape reached, over the attach beneath
-  # them. The store's link-health heap bar instead compares five hub-link shapes
-  # at 5k and 50k links in its own allocator-isolated binary. The read's heap bar
-  # is the child's own count: the test binary's
-  # global allocator counts the live heap, the child marks it once the attach
-  # is ready, and a child at each per-PR profile reports the most the shapes
-  # raised it. The bar bounds in bytes how far the ~2k reading may exceed the
-  # 300-document one, so an eight-byte id kept for every document fails it,
-  # where a whole-process peak absorbs whole rows. The reading is a
-  # high-water, so a retention built after the find's pages are gone shows
-  # only once it climbs past them. A child that attaches adopts a tree its
-  # parent generated, so what the kernel accounts to it is the attachment and
-  # not the generation.
-  # The >=5k scale and the recorded peak-memory readings stay in certify.yml,
-  # where a clock is legal to read.
-  memory:
-    name: memory invariant
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: Swatinem/rust-cache@v2
-      - name: Memory bars
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
-      - name: Walker memory bars
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
-      - name: Store count memory bars
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
-      - name: Store link-health heap bar
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1
-      - name: Host memory bars
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

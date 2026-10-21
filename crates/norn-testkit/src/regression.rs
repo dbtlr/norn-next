@@ -149,8 +149,13 @@ pub const NAMED_SOURCES: &[&str] = &[
 /// Which file may use which prefix is decided by [`crate::lanes`], against the
 /// table the file's own crate holds; this asks only that a bound carrier's
 /// ignore reason names a lane.
-pub const LANE_IGNORE_PREFIXES: &[&str] =
-    &["counter-lane case:", "memory-lane case:", "soak-lane case:"];
+pub const LANE_IGNORE_PREFIXES: &[&str] = &[
+    "counter-lane case:",
+    "memory-lane case:",
+    "soak-lane case:",
+    "fault-lane case:",
+    "audit-lane case:",
+];
 
 /// The one cargo feature a carrier may be compiled behind.
 ///
@@ -1068,12 +1073,37 @@ impl Registry {
     /// `workspace_root` is where a test reference's path resolves from, and
     /// `tests` is what cargo says each cited target compiled.
     pub fn audit(&self, workspace_root: &Path, tests: &TestIndex) -> Vec<String> {
+        let mut problems = self.audit_structure(workspace_root);
+        problems.extend(self.audit_compiled(workspace_root, tests));
+        problems
+    }
+
+    /// Registry shape, mandatory membership and binding/dormancy metadata,
+    /// including stale grounds against the tree. No compiled index is needed.
+    pub fn audit_structure(&self, workspace_root: &Path) -> Vec<String> {
         let mut problems = Vec::new();
         self.audit_venues(&mut problems);
         self.audit_cases(&mut problems);
         self.audit_properties(&mut problems);
         self.audit_mandatory(&mut problems);
-        self.audit_bindings(workspace_root, tests, &mut problems);
+        self.audit_binding_records(workspace_root, &mut problems);
+        problems
+    }
+
+    /// Bound references against compiled test listings and their CI adopters.
+    pub fn audit_compiled(&self, workspace_root: &Path, tests: &TestIndex) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut sources = BTreeMap::new();
+        let mut steps = None;
+        for case in self.bound_cases() {
+            for reference in &case.binding.tests {
+                for problem in
+                    self.audit_carrier(workspace_root, tests, &mut sources, &mut steps, reference)
+                {
+                    problems.push(format!("`{}` {problem}", case.name));
+                }
+            }
+        }
         problems
     }
 
@@ -1185,12 +1215,7 @@ impl Registry {
         }
     }
 
-    fn audit_bindings(&self, workspace_root: &Path, tests: &TestIndex, problems: &mut Vec<String>) {
-        // One read per file, however many cases name it, and one read of the
-        // CI steps, the first time an ignored carrier or a carrier behind the
-        // feature asks for them.
-        let mut sources: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
-        let mut steps: Option<Steps> = None;
+    fn audit_binding_records(&self, workspace_root: &Path, problems: &mut Vec<String>) {
         for case in &self.cases {
             let name = case.name.as_str();
             match case.binding.status {
@@ -1205,17 +1230,6 @@ impl Registry {
                     }
                     if !case.binding.grounds.is_empty() {
                         problems.push(format!("`{name}` is bound and states grounds for dormancy"));
-                    }
-                    for reference in &case.binding.tests {
-                        for problem in self.audit_carrier(
-                            workspace_root,
-                            tests,
-                            &mut sources,
-                            &mut steps,
-                            reference.as_str(),
-                        ) {
-                            problems.push(format!("`{name}` {problem}"));
-                        }
                     }
                 }
                 BindingStatus::Dormant => {
@@ -2137,7 +2151,7 @@ fn is_identifier(source: &str) -> bool {
 /// The attribute block is read the way [`declares_test`] reads it, so an
 /// `#[ignore]` separated from its function by a doc comment or another
 /// attribute is still that function's.
-fn ignore_reason<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn ignore_reason<'a>(source: &'a str, name: &str) -> Option<&'a str> {
     let lines: Vec<&str> = source.lines().collect();
     for (index, line) in lines.iter().enumerate() {
         if !opens_fn(line.trim(), name) {
@@ -3347,6 +3361,34 @@ fn a_carrier() {}
         refused(
             |registry| registry.venues[2].name = "the lockdown".to_string(),
             "is not the one the harness pins",
+        );
+    }
+
+    #[test]
+    fn structural_auditing_keeps_mandatory_and_dormancy_checks() {
+        let root = scratch();
+        let mut registry = sound();
+        assert!(registry.audit_structure(root.root()).is_empty());
+        assert!(
+            !registry
+                .audit(root.root(), &TestIndex::default())
+                .is_empty()
+        );
+        find(&mut registry, MANDATORY_CASES[0]).mandatory = false;
+        assert!(
+            registry
+                .audit_structure(root.root())
+                .iter()
+                .any(|p| p.contains("does not carry"))
+        );
+        let dormant = find(&mut registry, "a-dormant-layer-zero-case");
+        dormant.binding.reason = Some("crates/demo/tests/suite.rs is absent".to_string());
+        dormant.binding.grounds = vec![Ground::Absent("crates/demo/tests/suite.rs".to_string())];
+        assert!(
+            registry
+                .audit_structure(root.root())
+                .iter()
+                .any(|p| p.contains("reason is stale"))
         );
     }
 

@@ -24,10 +24,10 @@ These invariants bind the whole system. Each section below names its own gates w
 them, and marks the judgments that are review acts instead. When a gate arrives is not this
 document's concern; the comments in `.github/workflows/` are the in-repo operational marker.
 
-Where a gate exists, its lane depends on what it measures: **counters and structure gate per
-PR; clocks and trends live in the soak lane and never fail a pull request.** During
-regression bootstrap the complete active Linux and macOS matrix remains on PRs and main;
-a full nightly/manual workflow collects the same active evidence. [CI coverage](ci.md)
+Ordinary functional coverage and cheap structure checks gate per PR, alongside focused
+macOS native contracts and the folding-root spelling bar. Dedicated counter, memory,
+fault and compiled-audit lanes run in full nightly/manual regression. **Clocks and trends
+live in the soak lane and never fail a pull request.** [CI coverage](ci.md)
 defines candidate identity, release verification and failure response. [ADR
 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md) records why evidence
 kind, rather than observed runtime, owns that division. A review-held judgment has no lane
@@ -42,7 +42,7 @@ Nothing streams a whole vault through RAM — not a walk, not a query, not a mut
 
 The invariant is *measured*, not asserted:
 
-- Per-PR CI asserts peak memory at a realistic ~2k-document profile, alongside
+- Full nightly/manual regression asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks.
 - The scheduled soak lane records three peak-memory readings each run, and they
   are separate gates with separate ceilings. One is what generating the ≥5k
@@ -50,7 +50,7 @@ The invariant is *measured*, not asserted:
   own: the highest resident set the load's process reaches while working that
   tree, sampled from the moment the attachment is ready, so it is the peak the
   hour sustains and not the attach's. **The third covers the attach and the
-  heal**, which are ahead of that first sample and which the per-PR attach
+  heal**, which are ahead of that first sample and which the full-regression attach
   ceiling bars only at 2k: the kernel's high-water mark for the whole run, read
   once when the load ends, so it answers for the run from its first instruction
   rather than for the ticks a sampler happened to take — the first attach, its
@@ -396,7 +396,8 @@ the bar, and re-authoring the value is part of that change. Un-authoring a ceili
 types every run taken under an unauthored one non-qualifying so a calibration window never
 counts toward lockdown's five.
 
-Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
+Rungs 2 and 3 are the **induced-failure suite**'s, whose fault lane runs in full
+nightly/manual regression. The table below
 is its contract — each row an injection and the outcome required of it — and **every row of
 it is reached**. Each condition is met by the production path it is stated over rather than
 described to it: a **full disk** is the derived store's connection held to the page count
@@ -1399,8 +1400,8 @@ and growing with the target's backlinks; a payload bar holds that
 no statement a link's resolution or a links-to part runs reads a document's body or its
 frontmatter.
 
-The warm-zero counter bar gates per PR, and the find shape carries four bars of its own. In
-the counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
+The warm-zero counter bar gates full nightly/manual regression, and the find shape carries
+four bars of its own. In the counter lane, a find through a live read hold reads nothing through `norn-fs` on its own
 thread and lands nothing in the host's account of its jobs, at a pinned number of statements
 a page; and an unfiltered find, paged newest first, counts the same work at 300 documents as
 at 2000. Count-by-field, suffix / stem resolve, links-to, findings-for-path and full-text
@@ -1416,7 +1417,7 @@ apply reads each file it touches the per-target read budget for what its plan do
 file and no other file, commits one changeset, and mints at most one reader; a `set --where`'s
 selector costs the same at 300 documents as at 2000; and a mass delete through the host holds
 the Layer 3 per-key limit the store's own bar holds. In the memory lane, three `read-` bars
-hold one process that attached a per-PR profile and ran the read mix through the host's
+hold one process that attached a bounded memory profile and ran the read mix through the host's
 read verbs: a find under a predicate, sorted and paged; a count by field; a get with suffix
 resolve; links-to and backlinks; a validate narrowed by a path part, which is
 findings-for-path; lexical search; and describe. Two bars hold the ~2k-document profile's
@@ -1618,7 +1619,7 @@ from-scratch build, which a watcher that under-reports fails — and that bar bi
 the suite runs the warm path per pull request, and a report a watcher never made is a
 census that never converges. Watcher-miss counts are status facts. Comparing their trend belongs to the dormant soak
 lane and never fails a pull request. The rolling-heal correctness and work-counter tests
-run per pull request. Hash
+run per pull request through the whole-package feature-enabled host job. Hash
 authority itself is **review-held**: no lint or suite yet forbids a stat comparison from
 reaching a conclusion, so the invariant holds by review until one binds it, which is exactly
 the case this part's own rule warns about — a review-held invariant rots quietly.
@@ -1853,8 +1854,8 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
 
 ### Enforcement — the graph is a gated contract, not a convention
 
-The edge set above is asserted by an **architecture gate in `norn-testkit`**: a per-PR test
-that reads `cargo metadata` and asserts the workspace **normal-dependency** graph is
+The edge set above is asserted by an **architecture gate in `norn-testkit`**: a PR and
+full-regression test that reads `cargo metadata` and asserts the workspace **normal-dependency** graph is
 *exactly equal* to the allowlist above, restricted to crates currently present and evaluated
 under pinned default and all-features selections. When a workspace crate first declares a
 target-specific dependency, the matrix also gains a pinned `--filter-platform` selection
@@ -2482,7 +2483,8 @@ back, the wait where the wait begins, and the rounds of the gate where the acqui
 on every way out.
 
 **The read-concurrency bar holds these readings under contention, over a production
-attachment.** The per-PR counter lane runs the overlapping-reads-on-one-entry workload:
+attachment.** The full-regression counter lane runs the overlapping-reads-on-one-entry
+workload:
 several reads start while one more holds the entry's one connection, and the hold is let go
 only once the reader-wait reading names every one of them as waiting. Each read served runs
 exactly its establishment's two statements under the gate by the holder's own reading, with
@@ -4230,8 +4232,9 @@ Four contracts inside that flow carry weight:
   staging's and publication's spelling checks are a fixed number of stored-name queries
   per target and read no directory entry, so N replacements cost the same in a folder of
   any width. A root that distinguishes case asks nothing. The `folding_cost` counter suite
-  pins that cost on the per-PR macOS folding-root counter job and its distinct-root
-  control on Linux, crossing 32 and 128 targets with 256 and 2048 total siblings, and
+  pins that cost on the focused PR macOS job and the full-regression macOS folding-root
+  counter job, with its distinct-root control in full regression on Linux, crossing 32 and
+  128 targets with 256 and 2048 total siblings, and
   excludes normalization probes
   and watcher-thread echoes. A folding volume with no stored-name answer reads listings
   instead, which is O(siblings) per confirmation and outside this bar. The bar covers
@@ -4259,12 +4262,13 @@ Four contracts inside that flow carry weight:
   [`AGENTS.md`](../AGENTS.md); task evidence and current system contracts live elsewhere.
 - [`glossary.md`](glossary.md) — canonical project-specific language, organized by concept
   rather than by the task, ADR, or contract that introduced it.
-- `.github/workflows/` — the CI lanes: the complete PR/main gate in `ci.yml` and full
-  nightly/manual regression in `regression.yml`; clocks trend in the scheduled
+- `.github/workflows/` — the CI lanes: ordinary functional PR/main coverage and focused
+  native contracts in `ci.yml`, and full nightly/manual regression in `regression.yml`;
+  clocks trend in the scheduled
   tier, and that tier's two jobs — the Linux measurement lane and the macOS certification
   lane — each run the certification cases and emit the qualification record they leave
-  behind. The job comments are the in-repo marker for which gate is filled and which is
-  still a placeholder. Every per-PR suite step runs through
+  behind. Lane tables and workflow guards hold ignored fault, audit, counter and memory
+  cases to their adopters. Every PR and full-regression suite step runs through
   `.github/scripts/flake-tripwire.sh`, which matches a failing run's output against the
   ruled-on entries in `.github/flake-ledger` and writes each match into the run as an
   annotation and a job-summary block. It changes no verdict and retries nothing: what it

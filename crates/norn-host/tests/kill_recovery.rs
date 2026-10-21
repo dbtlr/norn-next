@@ -32,6 +32,7 @@ const VAULT_ENV: &str = "NORN_HOST_TORN_INCREMENT_VAULT";
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn next_attach_converges_after_process_death_mid_increment() {
     if std::env::var_os(CHILD_ENV).is_some() {
         tear_increment();
@@ -62,6 +63,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
             "--exact",
             "next_attach_converges_after_process_death_mid_increment",
             "--nocapture",
+            "--include-ignored",
         ])
         .env(CHILD_ENV, "1")
         .env(DATABASE_ENV, &fixture.database)
@@ -84,6 +86,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
         &[(SEAM, INCREMENT_SEAM), ("boundary", "entries")],
     );
     torn.assert_count("a process ended between two entries of a changeset", 1);
+    eprintln!("torn-increment child reached {INCREMENT_SEAM} exactly once before process death");
 
     // No prefix of the false changeset and no generation belonging to it is at
     // rest. This is checked before healing so convergence cannot hide a tear.

@@ -5,28 +5,40 @@ feature-enabled host cases. Stable counts and structure are correctness evidence
 Clocks and trends belong to the dormant soak tier under
 [ADR 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md).
 
-## Bootstrap coverage
+## PR and full-regression coverage
 
-`ci.yml` retains the complete seven-job gate on PRs, main pushes and manual runs.
-No PR coverage or required context is removed in this bootstrap.
-`regression.yml` runs the same complete active matrix at 02:17 UTC daily and by
-manual dispatch. The temporary overlap qualifies its replacement coverage before
-a separate change reduces the PR gate.
+`ci.yml` runs four jobs on PRs, main pushes and manual runs. Ordinary default
+workspace tests and doctests stay in `build and test`. The whole feature-enabled
+`norn-host` package runs in `host functional (induced-failure)`, so current and
+future ordinary targets and cases join PR coverage automatically.
 
-| Job | Active evidence |
+| PR job | Evidence |
 |---|---|
-| Build and test | Format, workspace build, all-target clippy, shipped-library clippy, induced-feature clippy, denied-warning rustdoc, complete default workspace tests and doctests |
-| Induced-failure recovery | Complete feature-enabled host suite, including ordinary functional and fault cases |
-| macOS platform | Embedding determinism, all filesystem contracts and complete feature-enabled host suite |
-| macOS folding counters | `folding_cost` and `counter_gate` on a real folding root |
+| Build and test | Format, workspace build, three clippy contexts, denied-warning rustdoc, ordinary default workspace tests and doctests, cheap registry structure and dormancy checks |
+| Host functional (induced-failure) | Complete ordinary feature-enabled host suite, including churn and rolling-heal correctness and work counters |
+| macOS platform | Embedding determinism, filesystem contracts, Obsidian parity, exact case-rename and unreadable-document/subtree cases, folding-root spelling bar |
 | Architecture | Actionlint and the architecture gate |
-| Linux counters | Complete counter suite and distinct-root spelling control |
-| Linux memory | Fixture, walker, store count, store heap and host memory bars |
 
-The jobs retain their existing build profiles, features, authored assertions and
-runaway guards. macOS uses `macos-15` and asserts ARM64. Host counter invocations
-retain `LANE_FEATURES: induced-failure`; the memory subjects retain their existing
-feature selections and 20-minute job guard.
+`regression.yml` runs the complete seven-job matrix at 02:17 UTC daily and by
+manual dispatch. Its `full ` job names retain the build, induced-failure,
+platform, folding-counter, architecture, Linux counter and Linux memory jobs.
+Compiled registry-carrier and inventory audits run only in its Linux build job.
+The complete lockdown and process-death recovery targets run in its Linux
+induced-failure and macOS platform jobs. Counter and memory lanes run in full
+regression; the focused PR macOS spelling bar also runs `folding_cost`.
+
+Fault and compiled-audit cases use `fault-lane case:` and `audit-lane case:`
+ignore reasons. Lane tables and the workflow reader require wholesale adoption
+through `lane-suite.sh`, with the features each target needs. The cheap registry
+check still validates structural and mandatory sets and stale dormancy without
+building a compiled index. The dormant certification runner includes ignored fault
+carriers; reconciliation still rejects other ignored certification cases. Exact macOS native cases use `test-suite.sh` with
+`--exact --include-ignored`, so moving a fault case cannot silently skip it.
+
+Full jobs keep their profiles, features, authored assertions and runaway guards.
+macOS uses `macos-15` and asserts ARM64. Host fault and counter lane steps name
+`LANE_FEATURES: induced-failure`. The full Linux memory job keeps its 20-minute
+guard and existing feature selections.
 
 Every suite runs through the flake tripwire, which records ledger matches without
 retrying or changing verdicts. Ignored targets use `lane-suite.sh`, whose shared
@@ -84,7 +96,7 @@ gh run download <run-id> --pattern 'regression-*-<attempt>' --dir <evidence-dire
 Verify all of the following before accepting release evidence:
 
 - The same run attempt completed successfully with all seven expected full jobs.
-  Their names are the PR job names prefixed with `full `.
+  Their names are the complete matrix names prefixed with `full `.
 - Every required job and step executed its obligations successfully. Missing,
   skipped or cancelled required evidence does not qualify.
 - All seven receipts identify their expected job and the same run ID and attempt.
@@ -110,23 +122,14 @@ stop merges; triage records that classification and what clears it. Diagnose red
 runs before rerunning. A runner failure or missed nightly supplies no positive
 regression evidence. Repairs may dispatch a full run immediately.
 
-Pre-merge qualification covers source guards, failure and identity probes,
-independent review and the unchanged PR gate. After adoption, qualify a real full
-run on the default branch. If it fails, retain the current PR coverage, record and
-fix the failure, then rerun deliberately. The later coverage reduction waits for
-that qualification and its own reviewed, truthful required-context transition.
-
-The live PR requirements stay unchanged:
+The planned required-context set is:
 
 - `build and test`
-- `architecture gate`
-- `induced-failure recovery`
-- `counter gates`
-- `memory invariant`
+- `host functional (induced-failure)`
 - `determinism and filesystem (macOS ARM64)`
-- `counter bars on a folding root (macOS ARM64)`
+- `architecture gate`
 - `CodeRabbit`
 
-Full-run names are distinct so a manual regression run cannot alias a PR-required
-context. There are no skipped or no-op replacements and no live protection edit
-in this delivery.
+Retiring the old required contexts and adopting this set is a separate live
+transition. This change does not edit branch protection. Full-run names stay
+distinct so a manual regression run cannot alias a PR-required context.

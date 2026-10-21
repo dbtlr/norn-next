@@ -1,6 +1,6 @@
-//! The per-PR memory bars for attachment and for a read: what attaching a
+//! The full-regression memory bars for attachment and for a read: what attaching a
 //! vault costs, and what reading it through a live hold adds, measured rather
-//! than asserted, at the profiles the per-PR lane owns.
+//! than asserted, at the bounded memory profiles.
 //!
 //! Peak memory is a function of the working set, not of vault size. Attachment
 //! is the first subject in this workspace that statement can be measured

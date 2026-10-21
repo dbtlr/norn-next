@@ -1,5 +1,5 @@
 # Complete active regression coverage; separate from the dormant soak campaign.
-# Bootstrap keeps ci.yml's full PR/main gate until this workflow is qualified.
+# Dedicated deep lanes run here beside complete ordinary functional coverage.
 # Every job tests the captured workflow commit. The optional input asserts its
 # identity rather than choosing a different checkout. See docs/ci.md.
 name: regression
@@ -72,6 +72,15 @@ jobs:
       - name: Test
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace
+      # These audits ask Cargo to build and list compiled carriers. Their
+      # ignored audit-lane cases keep ordinary PR tests cheap; lane-suite.sh
+      # adopts each target wholesale and rejects an empty successful run.
+      - name: Compiled registry audit
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn regression
+      - name: Certification inventory reconciliation
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -80,6 +89,18 @@ jobs:
           path: ${{ runner.temp }}/regression-identity.json
           if-no-files-found: error
 
+  # Four crates declare an `induced-failure` feature, and the workspace test in
+  # the full build job reaches three of them. norn-fs and norn-store each turn their
+  # own on through a self dev-dependency, and norn-store forwards it to norn-db,
+  # so those crates' lockdown and environment suites run there already.
+  # norn-host's is a feature a caller asks for, and nothing there asks: its
+  # crash-convergence proof (kill_recovery.rs), its lockdown suite and its soak
+  # load (host_soak.rs, whose case the scheduled lane runs) are whole files
+  # behind it and compile to zero tests without it. This job is scoped to that
+  # crate for that reason. Its ordinary package run is followed by explicit
+  # fault-lane runs, since lockdown and kill_recovery are now ignored by a
+  # plain package run. Keeping this job independent of the full build job
+  # preserves its evidence even when another job fails.
   induced-failure:
     name: full induced-failure recovery
     runs-on: ubuntu-latest
@@ -96,6 +117,19 @@ jobs:
       - name: Induced-failure recovery
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
+      # A plain feature-enabled package run skips these dedicated fault cases.
+      # Adopt both targets' ignored cases with their required feature so full
+      # regression retains the recovery evidence on this platform.
+      - name: Lockdown fault suite
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Kill-recovery fault suite
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host kill_recovery
+        env:
+          LANE_FEATURES: induced-failure
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -129,6 +163,19 @@ jobs:
       - name: Host filesystem contracts
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast -p norn-host --features induced-failure
+      # A plain feature-enabled package run skips these dedicated fault cases.
+      # Adopt both targets' ignored cases with their required feature so full
+      # regression retains the recovery evidence on this platform.
+      - name: Lockdown fault suite
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Kill-recovery fault suite
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host kill_recovery
+        env:
+          LANE_FEATURES: induced-failure
       - name: Upload candidate identity
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -137,6 +184,10 @@ jobs:
           path: ${{ runner.temp }}/regression-identity.json
           if-no-files-found: error
 
+  # The counter bars on a folding root. Each needs APFS's case-insensitive
+  # default, so it runs on the same pinned image and architecture as the
+  # platform job, and names `induced-failure` for the same reason the counter
+  # gates job does: the host's account of its jobs is read only behind it.
   folding-counters:
     name: full counter bars on a folding root (macOS ARM64)
     runs-on: macos-15
@@ -153,11 +204,15 @@ jobs:
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+      # Spelling confirmation's per-target cost needs a real folding root.
+      # The suite refuses a distinct macOS scratch volume rather than skipping.
       - name: Folding-root spelling bar
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
+      # A folding root confirms spelling by stored-name queries, rather than
+      # the distinct root's exact stat; this keeps that path under the same bars.
       - name: Counter bars on a folding root
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
@@ -200,6 +255,62 @@ jobs:
           path: ${{ runner.temp }}/regression-identity.json
           if-no-files-found: error
 
+  # The counter half is a real gate, over the path a request really takes: a
+  # generated vault tree on disk, a production attachment that walked it, and
+  # the derived store that attachment left behind. The bars run at bounded
+  # profiles in full regression. A warm request over the ~2k-document realistic
+  # profile finishes with every derivation counter at zero, over a detached
+  # store and again under a live attachment. The store's read paths derive
+  # nothing by construction today, so that bar is a canary rather than a number
+  # the current code strains against: it binds the day a read path starts
+  # deriving, and fails that as a correctness break rather than reporting it as
+  # a slowdown. A find run through a live read hold reads nothing through
+  # norn-fs on its own thread, lands nothing in the host's account of its jobs,
+  # and runs a pinned number of statements a page. So does every other query
+  # shape, each asked through its host verb at a pinned number of statements:
+  # count-by-field, suffix / stem resolve, links-to, findings-for-path and
+  # full-text match, and a get's page of a document's links and a describe.
+  # And one bounded write, one bounded find, and each of those shapes in the
+  # bounded form its verb's contract makes flat, cost the same at 300 documents
+  # as at 2000 — the sharper bar, because a ceiling passes anything under it
+  # and a pair fails the moment two scales stop moving together. A shape's cost
+  # counts the steps of every statement run on its snapshot; those statement
+  # counters do not see work a virtual table does inside a statement, so a
+  # full-text match's posting-list walk is not among them. Each read pair runs
+  # beside a control that grows with the vault and must read more at the
+  # larger scale. And under the overlapping-reads-on-one-entry workload, eight
+  # reads start while a ninth holds the entry's one connection, and the hold is
+  # let go once the host's reader-wait reading names all eight as waiting:
+  # each read runs exactly its snapshot's establishment under the entry gate,
+  # the deferred BEGIN and the one statement that establishes the snapshot, as
+  # the gate holder reads SQLite's own count of what it began on the holding
+  # thread on both sides of its hold, and the gate's own take count reads no
+  # retake inside that hold; the reader-wait reading is eight; and each contended
+  # read took exactly one round of the entry gate after its first, none past
+  # a ceiling authored in norn-host's baselines. Its control runs the same
+  # reads one after another and must fail on contention alone. Rule judgment
+  # runs in the host and reads no database, so its work is the judge's own
+  # logical counts, folded into the host's account: one document judged under
+  # a live attachment costs the same at 300 documents as at 2000, and each
+  # parameter the schema declares, varied alone, moves its counts in
+  # proportion and no other. All of these are counts: a counter says the same
+  # thing on a loaded runner, which a clock does not.
+  #
+  # The plan bars live in the store's own suites, beside the read builders that
+  # emit the SQL they judge. An `EXPLAIN` assertion is worth something only
+  # against the statement a builder emitted; a gate against hand-written SQL
+  # tests a string nobody executes.
+  #
+  # The host's account of its jobs is read only behind `induced-failure`, so
+  # this step names the feature. A build without it refuses the cases that
+  # read the account, and the lane table's own test holds this step to every feature
+  # the suite puts a case or a helper behind.
+  #
+  # The counter_gate cases live in this full job and the full macOS
+  # folding-root counter job, `#[ignore]`d with a `counter-lane case:` reason
+  # so the ordinary workspace suite does not attach thousands of documents
+  # beside every other test. The script is what makes the wholesale
+  # `--ignored` run fail when it ran nothing.
   gates:
     name: full counter gates
     runs-on: ubuntu-latest
@@ -231,6 +342,55 @@ jobs:
           path: ${{ runner.temp }}/regression-identity.json
           if-no-files-found: error
 
+  # A real gate. Resident-set subjects run as children under the testkit's
+  # process harness, which reads the peak the kernel accounted to each child.
+  # A peak read off the test process would include cargo's runner and every
+  # case beside it. The fixture, walker and host subjects face a checked-in
+  # ceiling at the ~2k-document realistic profile and a ratio, at profiles under
+  # 5k documents. A subject whose cost could grow with the vault is paired
+  # across the 300-document and ~2k-document profiles; a read is paired with the
+  # attach-only peak at the same profile, which cancels the attach and leaves
+  # the read. The ratio is the sharp instrument — a ceiling passes anything
+  # that fits under it, and a ratio fails the moment its two readings stop
+  # moving together. Their readings are in each crate's tests/baselines/mod.rs.
+  # The store's retained-count RSS case instead pairs 512 and 4096 documents
+  # with a ceiling and an absolute growth bound, defined beside the case.
+  # Every bar is authored and moves only by a reviewed edit.
+  #
+  # These cases live in this full-regression job alone. They are `#[ignore]`d
+  # with a `memory-lane case:` reason so the build job's workspace suite does not run
+  # them: a measurement running beside every other test measures those tests
+  # too, and "build and test" stays free of measurement. The step asks the
+  # target for its ignored cases wholesale, which is why the >=5k cases are a
+  # separate target (`memory_soak`) rather than a second reason in this one —
+  # otherwise this lane would run certify.yml's wall-clock assertion. The script
+  # is what makes that wholesale run fail when it ran nothing.
+  #
+  # The subjects include the fixture generator, the norn-fs streaming walk,
+  # the store's retained counts and link-health heap, and a host attaching a
+  # generated vault — the first subject that measures a
+  # whole vault's worth of work, where the generator and the walk each measure
+  # one pass over a tree — and a host running the read mix over the vault it
+  # attached. The read mix is one child that runs eight shapes through the
+  # host's read verbs, each under its own live hold: a find under a predicate,
+  # sorted and paged, a count by field, a get with suffix resolve, links-to,
+  # backlinks, a validate narrowed by a path part, lexical search and
+  # describe. The kernel reports one peak per child, so the read's resident-set
+  # bars hold the highest peak any shape reached, over the attach beneath
+  # them. The store's link-health heap bar instead compares five hub-link shapes
+  # at 5k and 50k links in its own allocator-isolated binary. The read's heap bar
+  # is the child's own count: the test binary's
+  # global allocator counts the live heap, the child marks it once the attach
+  # is ready, and a child at each bounded memory profile reports the most the shapes
+  # raised it. The bar bounds in bytes how far the ~2k reading may exceed the
+  # 300-document one, so an eight-byte id kept for every document fails it,
+  # where a whole-process peak absorbs whole rows. The reading is a
+  # high-water, so a retention built after the find's pages are gone shows
+  # only once it climbs past them. A child that attaches adopts a tree its
+  # parent generated, so what the kernel accounts to it is the attachment and
+  # not the generation.
+  # The >=5k scale and the recorded peak-memory readings stay in certify.yml,
+  # where a clock is legal to read.
   memory:
     name: full memory invariant
     runs-on: ubuntu-latest

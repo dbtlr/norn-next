@@ -1,4 +1,4 @@
-//! Per-PR evidence that walking a larger vault does not retain the vault.
+//! Full-regression evidence that walking a larger vault does not retain the vault.
 //!
 //! Generation happens in the harness process. Each measurement then installs
 //! this test binary as an isolated child, which drains the walk without

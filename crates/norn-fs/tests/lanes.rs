@@ -1,7 +1,7 @@
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
 //! One CI lane adopts this crate's ignored cases by asking for them wholesale:
-//! the per-PR memory job runs this crate's `walk_memory` target with
+//! the full-regression memory job runs this crate's `walk_memory` target with
 //! `--ignored` and asserts that a non-zero number of cases passed. That is what
 //! makes a name filter unnecessary, and it is also what makes a stray
 //! `#[ignore]` dangerous — an `#[ignore = "flaky"]` added for a local reason
@@ -17,8 +17,8 @@
 /// Which lane prefix a file's `#[ignore]` reasons must open with, keyed by
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
-/// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
-///   step.
+/// - `memory-lane case:` — the full-regression `memory invariant` job's
+///   `--ignored` step.
 ///
 /// An ignored case in a new test file means adding that file's stem here, in
 /// the same diff: a stem this table does not name is an error, not a case with

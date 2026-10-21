@@ -81,8 +81,8 @@
 //! That lane's record therefore carries a watcher-backend answer and no
 //! reading, and nothing in it should be read as a measurement of the candidate.
 //!
-//! Five integration binaries compile this module: `memory.rs` for the per-PR
-//! memory lane, `counter_gate.rs` for the per-PR counter lane, `fd_budget.rs`
+//! Five integration binaries compile this module: `memory.rs` for the full-regression
+//! memory lane, `counter_gate.rs` for the full-regression counter lane, `fd_budget.rs`
 //! for the per-PR workspace suite, `host_soak.rs` for the scheduled lane and
 //! `settle.rs` for the scheduled lane's churn clock. Each asserts against
 //! the values its lane owns, so the remainder being unused in any one of them
@@ -139,7 +139,7 @@ use std::time::Duration;
 /// rather than to look. What a vault-shaped cost would read here is multiples
 /// of the band, not the 2 MiB of spread between platforms.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; the
 /// macos-arm64 band above is what a developer running the same case sees, and
 /// no scheduled lane evaluates it on that platform.
@@ -153,8 +153,8 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// How much of the `ambiguous` profile's attach peak the `realistic` profile's
 /// attach peak may reach, per mille.
 ///
-/// **The flatness invariant in the per-PR lane.** Both scales are under 5k
-/// documents, so both are per-PR work under ADR 0004's by-kind split, and the
+/// **The flatness invariant in full regression.** Both scales are under 5k
+/// documents; the
 /// pair is what a ceiling cannot be: a ceiling passes anything that fits under
 /// it, and a ratio fails the moment the two scales stop moving together.
 ///
@@ -232,7 +232,7 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// that held them without is refused only by [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`];
 /// both pass under this ceiling.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
 pub const READ_PEAK_RSS_CEILING_BYTES: u64 = 48 * 1024 * 1024;
 
@@ -399,7 +399,7 @@ pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// some bytes for every one of the 1,700 extra documents fails it from
 /// **2.5 bytes a document** (4,096 / 1,700) at the observed difference.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; no
 /// hosted reading stands beside the local ones yet.
 pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
@@ -468,7 +468,7 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
 /// [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`].
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
 pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 
@@ -550,7 +550,7 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 /// the same mutant at a difference of 13,600 bytes and passed, as its
 /// allowance says it does.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates, and
 /// its readings above stand beside the local ones; no negative control has
 /// been read there.
@@ -657,7 +657,7 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 ///   and 182,518 at `realistic` in two runs, a difference of **13,600
 ///   bytes**, which passes, as the arithmetic above says it does.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates, and
 /// its readings above stand beside the local ones; neither caught the
 /// excursion, and no negative control has been read there.
@@ -723,7 +723,7 @@ pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
 /// high-water. The apply's cost is
 /// [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`]'s.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
 /// readings above are of the shared child, and no negative control has been
 /// read there.
@@ -769,7 +769,7 @@ pub const PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 64 * 1024;
 /// moved documents times the projection's size in rule work, which the
 /// logical rule counters count. No negative control has been read.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; no
 /// hosted reading stands beside the local ones yet.
 pub const PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 384 * 1024;
@@ -872,7 +872,7 @@ pub const PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 384 * 10
 /// has been handled; an echo that came to overlap the commit would raise the
 /// apply by about a body and fail the bar.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
 /// readings above are of the shared child, and no negative control has been
 /// read there.
@@ -945,7 +945,7 @@ pub const PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES: u64 = 64 * 1024;
 /// reading is a high-water; and a derivation inside the attach heal, which
 /// derives beside the whole vault under one peak.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
 /// readings above are of the shared child, and no negative control has been
 /// read there.
@@ -1020,7 +1020,7 @@ pub const DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 4 * 1024 * 1024
 /// before the splice, since the reading is a high-water; and the apply of
 /// such a move.
 ///
-/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// **Platform scope: the Linux measurement lane.** The full-regression `memory
 /// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
 /// readings above are of the shared child, and no negative control has been
 /// read there.
@@ -1609,8 +1609,8 @@ pub const SOAK_RECOVERY_DOSE: u32 = 1;
 /// took fewer.
 ///
 /// **Platform scope: every platform.** A count is not a machine's reading, so
-/// under ADR 0004 it may gate a pull request. The per-PR `counter gates` job on
-/// `ubuntu-latest` x86_64-glibc is where it gates.
+/// under ADR 0004 it may gate a pull request. The full-regression `counter gates` job on
+/// `ubuntu-latest` x86_64-glibc is one place it gates; macOS counter steps also run it.
 pub const READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION: u64 = 1;
 
 /// **The write-through read budgets: how many times an apply reads each file
@@ -1650,8 +1650,8 @@ pub const READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION: u64 = 1;
 /// ceiling.
 ///
 /// **Platform scope: every platform.** A count is not a machine's reading, so
-/// under ADR 0004 it may gate a pull request. The per-PR `counter gates` job on
-/// `ubuntu-latest` x86_64-glibc is where it gates.
+/// under ADR 0004 it may gate a pull request. The full-regression `counter gates` job on
+/// `ubuntu-latest` x86_64-glibc is one place it gates; macOS counter steps also run it.
 ///
 /// A replaced document's document reads: three — **planning** reads the file
 /// for its before-state, **the applier's recomposition** reads it again to

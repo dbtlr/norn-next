@@ -17,9 +17,10 @@
 //!
 //! Forward: every id resolves to exactly one test cargo compiled into the target
 //! its reference names, under the feature the entry declares, and that test is
-//! one a plain run of the target executes. A case deleted, renamed, left behind
-//! a feature the lane does not turn on, or `#[ignore]`d fails here — each of
-//! those leaves a passing run that certified less than it claimed.
+//! one the certification runner executes, including adopted fault-lane cases.
+//! Every ignored carrier must name that lane and have a vouching adopter with
+//! its required feature. Other ignores, deleted or renamed cases, and features
+//! the lane does not turn on fail rather than silently certify less.
 //!
 //! Backward: every test compiled into a **claimed** target is named by some
 //! entry, matched on the entry's whole `file::fn` reference rather than on the
@@ -73,7 +74,8 @@ use std::path::Path;
 
 use norn_fixtures::digest::{Sha256, hex};
 
-use crate::regression::{self, TargetRef, TestIndex, TestRef};
+use crate::regression::{self, Target, TargetRef, TestIndex, TestRef};
+use crate::workflows::ci_steps_in;
 
 /// Which of the layer's suites a case belongs to.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1225,11 +1227,16 @@ fn index_by_feature(workspace_root: &Path) -> BTreeMap<Option<&'static str>, Tes
 /// in, because that is what a listed name is resolved against: a test one
 /// module further down is a different file's, and an entry bound to it would
 /// count a case no run of the named carrier executes.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads carrier sources and the workspace's own workflows.
 fn audit_carriers(
     workspace_root: &Path,
     indices: &BTreeMap<Option<&'static str>, TestIndex>,
     problems: &mut Vec<String>,
 ) {
+    let steps = ci_steps_in(&workspace_root.join(".github/workflows"));
+    if let Err(problem) = &steps {
+        problems.push(problem.clone());
+    }
     for case in REQUIRED_CASES {
         let Ok(test) = TestRef::parse(case.carrier) else {
             continue; // Already reported by the shape audit.
@@ -1257,14 +1264,24 @@ fn audit_carriers(
             )),
             Ok(ignored) => {
                 if ignored {
-                    problems.push(format!(
-                        "`{}` names `{test}`, which cargo compiled as ignored. A plain run of the \
-                         suite skips it, so the case is one the inventory counts and no \
-                         certification run executes. A certification carrier is never `#[ignore]`d: \
-                         the lanes that adopt ignored cases wholesale are the counter, memory and \
-                         soak measurement lanes, and none of them certifies this layer.",
-                        case.id
-                    ));
+                    let source = std::fs::read_to_string(workspace_root.join(&test.file))
+                        .unwrap_or_default();
+                    let adopted = match (&steps, &target.target) {
+                        (Ok(steps), Target::Integration(stem)) => {
+                            steps.adopted(&target.package, stem)
+                        }
+                        _ => None,
+                    };
+                    if !adopted_fault_carrier(
+                        &target,
+                        regression::ignore_reason(&source, &test.function),
+                        case.feature,
+                        adopted.as_ref(),
+                    ) {
+                        problems.push(format!(
+                            "`{}` names `{test}`, which cargo compiled as ignored without a fault-lane reason and a vouching adopter with its required feature. Certification includes adopted fault carriers; other ignored carriers supply no certification evidence.", case.id
+                        ));
+                    }
                 }
                 if let Ok(listing) = index.compiled(&target) {
                     let matched = listing
@@ -1291,6 +1308,21 @@ fn audit_carriers(
             }
         }
     }
+}
+
+/// Certification's ignored-inclusive runner preserves dedicated fault coverage.
+/// Other lane kinds remain separate measurement obligations.
+fn adopted_fault_carrier(
+    target: &TargetRef,
+    reason: Option<&str>,
+    feature: Option<&str>,
+    adopted: Option<&BTreeSet<String>>,
+) -> bool {
+    target.package == "norn-host"
+        && matches!(&target.target, Target::Integration(stem) if matches!(stem.as_str(), "lockdown" | "kill_recovery"))
+        && feature == Some(INDUCED_FAILURE)
+        && reason.is_some_and(|reason| reason.starts_with("fault-lane case:"))
+        && adopted.is_some_and(|features| feature.is_none_or(|feature| features.contains(feature)))
 }
 
 /// Backward: every test in a claimed target is named by an entry.
@@ -1383,6 +1415,62 @@ mod tests {
         contract_digest, is_kebab_case,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn only_adopted_fault_carriers_may_be_ignored() {
+        let features = BTreeSet::from(["induced-failure".to_string()]);
+        let empty = BTreeSet::new();
+        for (reason, feature, adopted, expected) in [
+            (
+                Some("fault-lane case: recovery"),
+                Some("induced-failure"),
+                Some(&features),
+                true,
+            ),
+            (
+                Some("fault-lane case: recovery"),
+                Some("induced-failure"),
+                None,
+                false,
+            ),
+            (
+                Some("fault-lane case: recovery"),
+                Some("induced-failure"),
+                Some(&empty),
+                false,
+            ),
+            (
+                Some("counter-lane case: work"),
+                Some("induced-failure"),
+                Some(&features),
+                false,
+            ),
+            (Some("flaky"), None, Some(&features), false),
+            (None, None, Some(&features), false),
+        ] {
+            for (stem, carries_faults) in [
+                ("lockdown", true),
+                ("kill_recovery", true),
+                ("lib", false),
+                ("churn", false),
+            ] {
+                let target = crate::regression::TargetRef {
+                    package: "norn-host".to_string(),
+                    target: if stem == "lib" {
+                        crate::regression::Target::Lib
+                    } else {
+                        crate::regression::Target::Integration(stem.to_string())
+                    },
+                    module_prefix: String::new(),
+                };
+                let expected = expected && carries_faults;
+                assert_eq!(
+                    super::adopted_fault_carrier(&target, reason, feature, adopted),
+                    expected
+                );
+            }
+        }
+    }
 
     /// The shape audit finds nothing wrong with the inventory as authored. What
     /// the suites actually compiled is the reconciliation suite's question, and

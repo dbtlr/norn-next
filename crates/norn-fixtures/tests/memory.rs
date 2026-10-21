@@ -1,5 +1,5 @@
-//! The per-PR memory bars: what generating a tree costs, measured rather than
-//! asserted, at the profiles the per-PR lane owns.
+//! The full-regression memory bars: what generating a tree costs, measured
+//! rather than asserted, at the bounded memory profiles.
 //!
 //! Two instruments, both counts and neither a clock. A **ceiling** holds the
 //! ~2k-document `realistic` profile's peak resident set under a checked-in

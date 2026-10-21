@@ -94,7 +94,7 @@
 //!   wait that runs on while it observes progress is a wait with no deadline
 //!   at all — the shape [`crate::wait`] refuses to offer.
 //!
-//! The wall is written against the walls the lanes themselves run under, which
+//! The wall fits inside the full-regression memory job guard, which
 //! is the constraint a depth-derived bound cannot meet: [`QUEUED_HOLDERS`]
 //! holders at a fifteen-second hold window is hours, and a bound past the job's
 //! own wall never fires. Under it a stuck holder ends the run as a job timeout
@@ -162,7 +162,7 @@ pub const QUEUED_HOLDERS: u32 = 160 * 4;
 /// It is sized for the longest window a case honestly holds the lease: a whole
 /// case rather than a single wait, since a case attaches a vault, runs a
 /// sequence of waits over it, and detaches. Five minutes is far past any case
-/// in the workspace suite and far inside [`PER_PR_JOB_WALL`].
+/// in the workspace suite and far inside [`MEMORY_JOB_WALL`].
 ///
 /// One holder is outside that sizing by design — the soak lane's child holds
 /// the lease for its whole hour-long load — and it is not a false diagnosis
@@ -200,18 +200,18 @@ impl Patience {
     }
 }
 
-/// The wall the per-PR job runs under, which every bound here has to fire
+/// The full-regression memory job's wall, which every bound here must fire
 /// inside of.
 ///
 /// A bound past this is a bound that never fires: the job ends first, and it
 /// ends naming a timeout rather than a holder.
-pub const PER_PR_JOB_WALL: Duration = Duration::from_secs(20 * 60);
+pub const MEMORY_JOB_WALL: Duration = Duration::from_secs(20 * 60);
 
 /// The ceiling on one acquisition, whatever the queue depth derives.
 ///
-/// Three quarters of [`PER_PR_JOB_WALL`], so the wait fails inside the job and
+/// Three quarters of [`MEMORY_JOB_WALL`], so the wait fails inside the job and
 /// leaves the rest of it for the case to report the failure and the runner to
-/// collect it. The scheduled soak lane's wall is six times the per-PR one, so a
+/// collect it. The scheduled soak lane's wall is six times the memory job's, so a
 /// ceiling that fits inside the shorter fits inside both.
 pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 
@@ -1037,8 +1037,8 @@ mod tests {
             acquisition.work()
         );
         assert!(
-            ACQUISITION_WALL < PER_PR_JOB_WALL,
-            "the acquisition ceiling is at or past the {PER_PR_JOB_WALL:?} job wall it has to \
+            ACQUISITION_WALL < MEMORY_JOB_WALL,
+            "the acquisition ceiling is at or past the {MEMORY_JOB_WALL:?} job wall it has to \
              fail inside of"
         );
         assert!(

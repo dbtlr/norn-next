@@ -23,8 +23,10 @@
 //! run.** A step or job carrying `continue-on-error:`, whatever the value, may
 //! fail without failing the run, and one carrying an `if:` may be skipped —
 //! unless the condition is `always()` or `!cancelled()`, which only widen when
-//! a step runs. Any other condition vouches for nothing, which is the strict
-//! side: a condition that would have held is refused with one that would not.
+//! a step runs, or exactly `!cancelled() && steps.identity.outcome == 'success'`.
+//! That conjunction withholds full-regression evidence after failed candidate
+//! identity; the file-specific certification guard pins the identity prerequisite.
+//! Every other condition vouches for nothing.
 //! Nor does any step of a workflow holding a YAML merge key, `<<`, anywhere:
 //! the parser does not apply it, so what it merges in would go unseen. Nor
 //! does a step whose environment — its own, its job's and its workflow's —
@@ -441,12 +443,13 @@ fn holds_only(node: &Value, keys: &[&str]) -> bool {
 
 /// Whether a job or step carries a key that lets it be skipped or fail
 /// without failing the run: any `continue-on-error:`, and any `if:` other
-/// than one of [`WIDENING_CONDITIONS`].
+/// than one of [`WIDENING_CONDITIONS`] or the exact [`IDENTITY_CONDITION`].
 fn is_conditional(node: &Value) -> bool {
     let narrows = node.get("if").is_some_and(|condition| {
-        !condition
-            .as_str()
-            .is_some_and(|condition| WIDENING_CONDITIONS.contains(&unwrapped(condition)))
+        !condition.as_str().is_some_and(|condition| {
+            WIDENING_CONDITIONS.contains(&unwrapped(condition))
+                || unwrapped(condition) == IDENTITY_CONDITION
+        })
     });
     narrows || node.get("continue-on-error").is_some()
 }
@@ -455,6 +458,10 @@ fn is_conditional(node: &Value) -> bool {
 /// every case the default `success()` does, and in more. Any other condition
 /// may skip a step the run needed, so it fails closed.
 const WIDENING_CONDITIONS: &[&str] = &["always()", "!cancelled()"];
+
+// Full regression withholds evidence after failed candidate identity. Its pinned
+// workflow guard requires this prerequisite and rejects a skipped obligation.
+const IDENTITY_CONDITION: &str = "!cancelled() && steps.identity.outcome == 'success'";
 
 /// A condition with its optional `${{ }}` wrapper and surrounding whitespace
 /// taken off.
@@ -945,6 +952,26 @@ mod tests {
                 (false, false),
                 "`if: {condition}` was read as narrowing when the step runs"
             );
+        }
+    }
+
+    #[test]
+    fn only_the_exact_identity_conjunction_vouches() {
+        for condition in [
+            "${{ !cancelled() && steps.identity.outcome == 'success' }}",
+            "\"!cancelled() && steps.identity.outcome == 'success'\"",
+        ] {
+            assert_eq!(conditional_under(condition), (false, false));
+        }
+        for condition in [
+            "${{ !cancelled() || steps.identity.outcome == 'success' }}",
+            "${{ !cancelled() && steps.identity.outcome == 'failure' }}",
+            "${{ !cancelled() && steps.other.outcome == 'success' }}",
+            "${{ !cancelled() && steps.identity.conclusion == 'success' }}",
+            "${{ !cancelled() && steps.identity.outcome == 'success' && false }}",
+            "${{ always() && steps.identity.outcome == 'success' }}",
+        ] {
+            assert_eq!(conditional_under(condition), (true, true));
         }
     }
 

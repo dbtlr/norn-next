@@ -1,7 +1,7 @@
-//! The per-PR counter gate: what a request costs over a vault a real host
+//! The full-regression counter gate: what a request costs over a vault a real host
 //! attached, counted rather than timed.
 //!
-//! Counters are the per-PR lane's currency. Unlike a clock they say the same
+//! Counters measure stable work. Unlike a clock they say the same
 //! thing on a loaded machine, and unlike a store-level unit test they say it
 //! about the path a request really takes: a `norn-fixtures` tree on disk, a
 //! production attachment that walked it, and the derived store that attachment
@@ -105,13 +105,13 @@
 //! evidence behind it, and the write's non-zero reading beside them is what says
 //! the instrument moves at all.
 //!
-//! **Every case here is `#[ignore]`d into the `counter-lane` lane**, and the CI
-//! `counter gates` job is the only thing that runs them. Attaching thousands of
+//! **Every case here is `#[ignore]`d into the `counter-lane` lane**, and
+//! dedicated Linux and macOS counter steps adopt them wholesale. Attaching thousands of
 //! documents beside every other test would put a vault walk in "build and
 //! test", which is a suite that stays free of measurement.
 //!
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness,
-//! and the lane that runs these cases is a Linux one.
+//! and the counter steps run on Linux and macOS.
 //!
 //! **The read-through-a-hold bars read the host's account**, which a build
 //! reads only behind `induced-failure`, so the lane step names the feature. A
@@ -160,7 +160,7 @@ const PROBE_PATH: &str = "counter-gate/probe.md";
 /// attach wrote — so the reading is of readers that found something rather than
 /// of lookups that missed.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
     let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
     let (_sandbox, vault) = attached("counter-gate-warm", profile.name);
@@ -216,7 +216,7 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
 /// derived, the files opened, the changesets and the upserts; removing it
 /// again moves the deletes and the tombstones.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn warm_requests_under_a_live_attachment_finish_at_zero() {
     the_hosts_account_is_readable();
     let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -592,7 +592,7 @@ fn record_the_counters(heading: &str, snapshot: &CounterSnapshot) {
 /// and `realistic` 2000, so a write whose cost were the store's contents would
 /// count differently across the pair.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_bounded_write_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -655,7 +655,7 @@ scratch: x
 /// constraints judged, glob characters matched, the placement walk and its
 /// weight, and the findings minted.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn rule_judgment_of_one_document_costs_the_same_at_both_scales() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -765,7 +765,7 @@ const CARRIED_MOVED: u64 = 3;
 /// costs the same rule work, documents derived and every other logical rule
 /// count at `ambiguous` (300 documents) as at `realistic` (2000).
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_carried_moves_rejudgment_follows_the_documents_it_moves_at_both_scales() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -991,7 +991,7 @@ fn follows_the_parameter(
 ///
 /// Every other rule count stays where the parameter's first value left it.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn the_logical_rule_counters_follow_each_declared_parameter() {
     the_hosts_account_is_readable();
     let rule_count: Vec<(u64, String)> = [2u64, 4, 8]
@@ -1213,7 +1213,7 @@ fn created_under(label: &str, rules: &str, at: &str, content: &str) -> CounterSn
 /// derivation of the created document stay where the parameter's first value
 /// left them.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn the_defaults_fixpoint_counters_follow_each_declared_parameter() {
     the_hosts_account_is_readable();
     let defaulted: Vec<(u64, String, String)> = [2u64, 4, 8]
@@ -1460,7 +1460,7 @@ fn assert_the_hub_stem_is_the_neighborhoods_alone(store: &mut Store) {
 /// broken findings the in-links held, and files none in their place, at
 /// `ambiguous` (300 documents) exactly as at `realistic` (2000).
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_writes_link_health_work_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -1487,7 +1487,7 @@ fn a_hub_writes_link_health_work_follows_its_in_links_at_both_scales() {
 /// seeks the members the class admits and never steps past the ones it keeps
 /// out.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_writes_link_health_work_follows_its_in_links_beside_an_ignored_subtree() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -1628,7 +1628,7 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile, ignored: usize) 
 /// steps no table or index end to end, at `ambiguous` (300 documents)
 /// exactly as at `realistic` (2000).
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -1655,7 +1655,7 @@ fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
 /// head seeks the members the class admits and never steps past the ones it
 /// keeps out.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_deletes_resolution_change_set_follows_its_in_links_beside_an_ignored_subtree() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -1864,7 +1864,7 @@ fn moved_hub_path() -> String {
 /// index stepped end to end, at `ambiguous` (300 documents) exactly as at
 /// `realistic` (2000).
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -2016,7 +2016,7 @@ const LONELY_STEM: &str = "hub-gate-lonely";
 /// there. The backlink pass seeks the admitted members without reading those
 /// namesakes.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -2063,7 +2063,7 @@ fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
 /// holder keeps a Markdown backlink beside the rewritten wikilink, so the
 /// change set and the applier's recheck both decide an unwritten link.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn rewrite_selection_through_a_preview_grows_with_operations_and_links() {
     #[derive(Clone, Copy, Debug)]
     enum Rewrites {
@@ -2316,7 +2316,7 @@ const RETARGET_STEM: &str = "hub-gate-retarget";
 /// ends and reading the cascade's backlinks seek the admitted members without
 /// reading those namesakes.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -2479,7 +2479,7 @@ fn moved_in_place_hub_path() -> String {
 /// snapshot, steps no table or index end to end on it, and costs the same
 /// in every count at `ambiguous` (300 documents) as at `realistic` (2000).
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -2703,7 +2703,7 @@ const WHERE_FOLDER: &str = "apply-gate";
 /// selector matched among them — in one changeset upserting the matches
 /// alone.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_where_apply_costs_the_same_at_both_scales() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -2847,7 +2847,7 @@ const MASS_DELETE_STEM: &str = "mass-gate";
 /// [`baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET`]) per document it
 /// removes and none of any other file.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -3518,7 +3518,7 @@ fn one_apply(
 /// And the same order ascending reads the key's missing section first, which
 /// walks every document carrying the key to reach the few that do not.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_bounded_find_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -3699,7 +3699,7 @@ fn find_shapes(label: &str, profile: &norn_fixtures::Profile) -> FindShapes {
 /// Every failure names its shape and its scale, and every failure is
 /// reported at once.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn every_read_shape_costs_the_same_at_both_scales_and_reads_no_vault_document() {
     the_hosts_account_is_readable();
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -3807,7 +3807,7 @@ const REPAIR_HOLDS: u64 = 1;
 /// crowd's broken documents stand under, so it must read more at the larger
 /// scale on the batch's steps and the snapshot's.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_narrowed_repair_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -4242,7 +4242,7 @@ fn first_and_continuation(gated: &Gated, narrowing: Option<&str>, limit: u32) ->
 /// steps whatever the selection holds, and the gate rule's the same at both
 /// vault sizes.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_repair_first_batchs_count_grows_with_the_selected_set_within_its_bound_and_a_continuation_pays_none_of_it()
  {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
@@ -4660,7 +4660,7 @@ fn read_the_continuations(
 /// `a_continuation_a_document_part_drives_costs_its_batch_not_the_matched_set`
 /// in the store suite hold the same narrowings over both.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_repair_continuation_costs_the_same_at_both_scales_for_every_rule_narrowing() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -4832,7 +4832,7 @@ const ROUTE_LINKS: usize = 10;
 /// leave `judgments`, `keys_resolved`, `head_rows`, the statements run and
 /// every batch counter where they were.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_routes_cascade_costs_the_links_it_touches_and_not_the_vault_through_a_repair() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -5856,7 +5856,7 @@ fn record_the_concurrency_readings(heading: &str, readings: &ConcurrencyReadings
 /// attest nothing about sharing the connection, and a control that failed on
 /// another term would say nothing about this one.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_gate() {
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
@@ -5893,7 +5893,7 @@ fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_ga
 
 /// A similarity prefix reads only the same planted stems at both profile sizes.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_similar_stems_read_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -5992,7 +5992,7 @@ fn planted_stem_read(profile: &norn_fixtures::Profile) -> (CounterSnapshot, u64)
 
 /// The move-following reads cost the same with more matching deaths and hash holders.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn moved_lookups_cost_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -6201,21 +6201,21 @@ fn suggestions_follow_parameter(parameter: usize) {
 
 /// Closed-set comparisons follow set size and are independent of vault size.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn suggestion_members_follow_set_size_and_are_independent_of_vault_size() {
     suggestions_follow_parameter(0);
 }
 
 /// Literal-tag comparisons follow D and are independent of vault size.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn suggestion_tags_follow_declared_count_and_are_independent_of_vault_size() {
     suggestions_follow_parameter(1);
 }
 
 /// The heading seek returns H rows regardless of the surrounding vault size.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn suggestion_headings_follow_heading_count_and_are_independent_of_vault_size() {
     suggestions_follow_parameter(2);
 }
@@ -6277,7 +6277,7 @@ fn name_batch_reading(count: usize, tags: bool) -> norn_host::RepairSuggestionsC
 
 /// More missing anchors on one target spend one holder composition and one H seek.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn missing_anchor_batches_keep_holder_compositions_and_heading_reads_flat() {
     for count in [2, 4, 8] {
         let work = name_batch_reading(count, false);
@@ -6290,7 +6290,7 @@ fn missing_anchor_batches_keep_holder_compositions_and_heading_reads_flat() {
 /// beside the read gate's: at most D per finding, stopping at the first finding with
 /// a fix. Here that is one, since the only declared tag is one edit from the first.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn undeclared_tag_batches_keep_holder_compositions_flat() {
     for count in [2, 4, 8] {
         let work = name_batch_reading(count, true);
@@ -6301,7 +6301,7 @@ fn undeclared_tag_batches_keep_holder_compositions_flat() {
 
 /// Each advisory parameter moves its own logical work, including the spelling merge.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn repair_advisory_cost_varies_each_declared_parameter_alone() {
     for parameter in [
         "rules",
@@ -6515,7 +6515,7 @@ fn read_advisory_parameter(parameter: &str, size: u64) -> (norn_host::RepairAdvi
 
 /// **A repair of one planted broken link reads the same similarity work at both vault scales.**
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_similar_target_repair_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
@@ -6600,7 +6600,7 @@ fn a_similar_target_repair_costs_the_same_at_both_scales() {
 /// A file birth reads its in-links and their class, independent of unrelated
 /// documents and files. Its bytes never enter a document projection.
 #[test]
-#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+#[ignore = "counter-lane case: runs in dedicated full-regression counter steps"]
 fn a_vault_file_births_link_health_work_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("a profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("a profile");

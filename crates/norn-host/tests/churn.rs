@@ -108,8 +108,8 @@ use tree::{
 /// widest of them well under it.
 ///
 /// The profile is also small enough that the two attachments each case makes
-/// cost a fraction of a second, which is what keeps this suite in the per-PR
-/// lane.
+/// cost a fraction of a second. Ordinary feature-enabled churn stays in the
+/// per-PR host-functional package suite.
 const PROFILE: &str = "small";
 
 /// The runaway bound on settling, derived from the changed set.

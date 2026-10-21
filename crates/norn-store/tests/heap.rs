@@ -11,7 +11,7 @@
 //! taken from `malloc` directly and is not in it; that is the store's, bounded
 //! by its cache size, and the same at any vault size.
 //!
-//! The per-PR memory job runs this case alone through `lane-suite.sh`, which
+//! The full-regression memory job runs this case alone through `lane-suite.sh`, which
 //! rejects an empty run. The workspace suite leaves the measurement to that lane.
 
 use norn_store::{
