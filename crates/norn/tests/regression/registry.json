@@ -30,10 +30,9 @@
       "property": "A step that selects its cases by kind rather than by name asserts a non-zero pass count, so a filter that matches nothing fails the step instead of reporting green having run nothing. A lane whose only evidence is that its runner exited zero has measured nothing and says so.",
       "sources": ["NORN-13", "NRN-a59", "NRN-472"],
       "binding": {
-        "status": "dormant",
-        "reason": "the subject exists and this file cannot name it: .github/scripts/lane-suite.sh runs a suite's ignored cases and fails the step when none of them ran, which is the property, and a reference here is a workspace-relative source file and a `#[test]` function in it — a grammar that names no shell script and no CI step. The residue is the shell-step carrier: the script's path is claimed present above, and the step inside it is not a subject a workspace path or a Rust declaration can name.",
-        "grounds": [
-          { "present": ".github/scripts/lane-suite.sh" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/certification.rs::a_suite_runner_rejects_empty_runs_and_preserves_failures"
         ]
       }
     },
@@ -304,10 +303,9 @@
       "property": "A step's verdict is its work's verdict: a downstream reader closing a pipe does not fail a step whose work already succeeded.",
       "sources": ["NRN-366"],
       "binding": {
-        "status": "dormant",
-        "reason": "the shape this forbids has a subject now and this file cannot name it: .github/scripts/lane-suite.sh streams a run through `tee` and reads cargo's own status out of `PIPESTATUS[0]` rather than through the pipeline's, which is the property. A reference here is a workspace-relative source file and a `#[test]` function in it, and neither names a shell script. The residue is the shell-step carrier: the script's path is claimed present above, and the step inside it is not a subject a workspace path or a Rust declaration can name.",
-        "grounds": [
-          { "present": ".github/scripts/lane-suite.sh" }
+        "status": "bound",
+        "tests": [
+          "crates/norn/tests/certification.rs::a_suite_reports_its_own_outcome_after_a_downstream_failure"
         ]
       }
     },

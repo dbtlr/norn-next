@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 119;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c605dfed3c92ffc694987d0f62180c1eb657e29076e93cb617bd548c3b56cc8c";
+const CONTRACT_DIGEST: &str = "411100ab1824757c007acca74f565a588bad17f5c593a1eb898a0eb7392d9e26";
 
 /// The cases carried by tests today, by name.
 ///
@@ -104,6 +104,7 @@ const BOUND_CASES: &[&str] = &[
     "a-configured-repair-never-writes-what-the-validator-flags",
     "a-limit-bounds-hydration-through-one-paging-seam",
     "a-measurement-lane-proves-it-measured",
+    "a-measurement-step-asserts-a-nonzero-pass-count",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
     "a-page-continues-at-the-successor-of-its-last-row",
     "a-repair-fixes-a-list-by-its-elements",
@@ -149,6 +150,7 @@ const BOUND_CASES: &[&str] = &[
     "repair-evaluates-only-the-paths-it-is-asked-for",
     "resolved-path-gates-resolved-path-reports",
     "set-valued-answers-are-pushed-down",
+    "steps-report-their-own-outcome",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
     "unsatisfiable-config-is-rejected-at-load",
@@ -192,12 +194,10 @@ const BOUND_CASES: &[&str] = &[
 /// the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
-    "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
-    "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "vault-wide-work-is-a-declared-roster",
 ];

@@ -13,15 +13,12 @@ fi
 log=$(mktemp) || exit 1
 trap 'rm -f "$log"' EXIT
 
-# Stream output so a timeout retains evidence. Keep the command's verdict even
-# when its output contains a passing summary, and reject a failed log writer.
+# Stream output so a timeout retains evidence. The command owns its verdict;
+# a downstream failure cannot overturn complete evidence of successful work.
 "$@" 2>&1 | tee "$log"
-statuses=("${PIPESTATUS[@]}")
-if [ "${statuses[0]}" -ne 0 ]; then
-  exit "${statuses[0]}"
-fi
-if [ "${statuses[1]}" -ne 0 ]; then
-  exit "${statuses[1]}"
+status=${PIPESTATUS[0]}
+if [ "$status" -ne 0 ]; then
+  exit "$status"
 fi
 
 summary=$(grep -E '^test result: ' "$log" | tail -n1)

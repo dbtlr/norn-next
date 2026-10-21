@@ -1333,11 +1333,20 @@ fn the_pr_lane_keeps_linux_and_focused_native_contracts() {
             "run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace",
         ],
     );
+    assert!(
+        !ci_job(&gate, "build")
+            .iter()
+            .any(|line| line.starts_with("run:")
+                && line.contains("cargo test")
+                && line.contains("--features induced-failure")),
+        "the full host recovery suite belongs to its independent job"
+    );
     assert_ci_lines(
         &ci_job(&gate, "induced-failure"),
         &[
             "name: induced-failure recovery",
             "timeout-minutes: 30",
+            "- uses: Swatinem/rust-cache@v2",
             "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
         ],
     );
@@ -1372,10 +1381,9 @@ fn the_pr_lane_keeps_linux_and_focused_native_contracts() {
     }
 
     let mut native = ci_job(&gate, "platform");
-    let condition =
-        "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'";
+    let condition = NATIVE_CONDITION;
     assert!(
-        gate.contains(&format!("    {condition}\n")),
+        native_condition_is_on_the_job(&gate),
         "the event condition belongs to the job"
     );
     assert_eq!(
@@ -1426,6 +1434,32 @@ const NATIVE_CASES: &[(&str, &str)] = &[
     ),
 ];
 
+const NATIVE_CONDITION: &str =
+    "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'";
+
+fn native_condition_is_on_the_job(workflow: &str) -> bool {
+    jobs(workflow).into_iter().any(|(key, body)| {
+        key == "platform"
+            && body
+                .lines()
+                .any(|line| line == format!("    {NATIVE_CONDITION}"))
+    })
+}
+
+#[test]
+fn a_step_condition_cannot_stand_in_for_native_job_routing() {
+    let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
+        .expect("reading the per-PR lane");
+    assert!(native_condition_is_on_the_job(&gate));
+    let moved = gate
+        .replace(&format!("    {NATIVE_CONDITION}\n"), "")
+        .replace(
+            "      - name: Assert architecture\n",
+            &format!("      - name: Assert architecture\n        {NATIVE_CONDITION}\n"),
+        );
+    assert!(!native_condition_is_on_the_job(&moved));
+}
+
 /// Main runs the complete Mac matrix in two independent, unconditional jobs.
 #[test]
 fn the_main_sweep_keeps_the_complete_macos_matrix() {
@@ -1461,6 +1495,7 @@ fn the_main_sweep_keeps_the_complete_macos_matrix() {
     assert_ci_lines(
         &platform,
         &[
+            "name: full determinism and filesystem (macOS ARM64)",
             "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
             "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
             "run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure",
@@ -1468,6 +1503,10 @@ fn the_main_sweep_keeps_the_complete_macos_matrix() {
     );
     assert!(!platform.iter().any(|line| line.contains("lane-suite.sh")));
     let folding = ci_job(&sweep, "folding-counters");
+    assert_ci_lines(
+        &folding,
+        &["name: counter bars on a folding root (macOS ARM64)"],
+    );
     for suite in ["folding_cost", "counter_gate"] {
         assert_ci_lines(
             &folding,
@@ -1566,6 +1605,44 @@ fn a_suite_runner_rejects_empty_runs_and_preserves_failures() {
         );
         assert!(outcome.stdout_text().contains(output));
     }
+}
+
+/// A complete passing log remains evidence when its downstream writer fails.
+#[test]
+#[cfg(unix)]
+fn a_suite_reports_its_own_outcome_after_a_downstream_failure() {
+    use norn_testkit::process::{Run, RunStatus};
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "suite-pipeline")
+        .expect("a sandbox for the pipeline");
+    let bin = sandbox.work_dir().join("bin");
+    std::fs::create_dir(&bin).expect("a command directory");
+    let tee = bin.join("tee");
+    std::fs::write(&tee, "#!/bin/sh\ncat > \"$1\"\ncat \"$1\"\nexit 1\n")
+        .expect("a writer that records everything before failing");
+    std::fs::set_permissions(&tee, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable writer");
+    let inherited = std::env::var_os("PATH").expect("a command search path");
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a search path with the fixture writer first");
+    let outcome = Run::new(
+        &sandbox,
+        workspace_root().join(".github/scripts/test-suite.sh"),
+    )
+    .arg("/bin/sh")
+    .arg("-c")
+    .arg("printf 'test result: ok. 1 passed; 0 failed\\n'")
+    .env("PATH", path)
+    .wait()
+    .expect("running a passing suite beside a failed writer");
+    assert_eq!(
+        outcome.status,
+        RunStatus::Exited(0),
+        "{}{}",
+        outcome.stdout_text(),
+        outcome.stderr_text()
+    );
 }
 
 /// Whether a workflow line runs a suite — directly, or through one of the

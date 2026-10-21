@@ -33,6 +33,8 @@ Every correctness suite runs through the flake tripwire, which records ledger ma
 job runs only on pull requests or manual dispatch. Linux jobs run on all three events.
 `macos-main.yml` runs on main pushes or manual dispatch, with two independent jobs:
 complete platform contracts and complete folding counters. No third Mac job runs on main pushes.
+The full platform check is named `full determinism and filesystem (macOS ARM64)`;
+the focused PR check keeps its separate name below.
 
 APFS and FSEvents failures outside the focused cases can first appear after merge.
 A failed main sweep pauses feature merges. Repair PRs remain eligible after their required checks pass.
