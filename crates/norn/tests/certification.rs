@@ -1295,6 +1295,18 @@ fn the_bootstrap_keeps_the_complete_pr_matrix() {
         ],
     );
     assert_complete_active_matrix(&gate, false);
+    for mutant in [
+        gate.replace(
+            "      - name: Test\n",
+            "      - name: Duplicate host recovery\n        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure\n      - name: Test\n",
+        ),
+        gate.replace(
+            "      - name: Host filesystem contracts\n",
+            "      - name: Duplicate folding target\n        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1\n        env:\n          LANE_FEATURES: induced-failure\n      - name: Host filesystem contracts\n",
+        ),
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_complete_active_matrix(&mutant, false)).is_err());
+    }
 }
 
 const FULL_JOB_KEYS: &[&str] = &[
@@ -1307,9 +1319,128 @@ const FULL_JOB_KEYS: &[&str] = &[
     "memory",
 ];
 
-/// The literal commands establish plain workspace and trigger authority that
-/// the generic featured/ignored reader deliberately does not claim.
+/// Pin the block-mapping form this file-specific command guard understands.
+/// Unknown execution settings must fail rather than leave a literal command
+/// present while changing the shell, compiler environment or working directory.
+fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
+    let mut root_key = "";
+    for line in workflow
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+    {
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            let (key, _) = line.split_once(':').expect("a top-level workflow key");
+            assert!(
+                [
+                    "name",
+                    "run-name",
+                    "on",
+                    "permissions",
+                    "concurrency",
+                    "jobs"
+                ]
+                .contains(&key)
+                    || full && key == "env",
+                "unsupported workflow key: {key}"
+            );
+            root_key = key;
+        } else if root_key == "env" {
+            let (key, _) = line
+                .trim_start()
+                .split_once(':')
+                .expect("an identity env binding");
+            assert_eq!(indent, 2);
+            assert!(
+                [
+                    "NORN_REGRESSION_SHA",
+                    "NORN_REGRESSION_EVENT_SHA",
+                    "NORN_REGRESSION_WORKFLOW_SHA"
+                ]
+                .contains(&key),
+                "unsupported workflow environment: {key}"
+            );
+        }
+    }
+    for (_, body) in jobs(workflow) {
+        let mut nested = "";
+        let mut step_name = "";
+        for line in body
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        {
+            let indent = line.len() - line.trim_start().len();
+            if indent == 10 && nested == "run" {
+                continue; // The toolchain report is the one literal run block.
+            }
+            let field = line
+                .trim_start()
+                .strip_prefix("- ")
+                .unwrap_or(line.trim_start());
+            let (key, value) = field.split_once(':').expect("a block mapping field");
+            match indent {
+                4 => {
+                    assert!(
+                        ["name", "runs-on", "timeout-minutes", "steps"].contains(&key),
+                        "unsupported job key: {key}"
+                    );
+                    nested = "";
+                }
+                6 | 8 => {
+                    if indent == 6 {
+                        assert!(line.starts_with("      - "));
+                    }
+                    assert!(
+                        ["name", "if", "run", "env", "uses", "with"].contains(&key),
+                        "unsupported step key: {key}"
+                    );
+                    if matches!(key, "env" | "with") {
+                        assert!(
+                            value.trim().is_empty(),
+                            "nested settings use block mappings"
+                        );
+                    }
+                    if key != "run" {
+                        assert!(
+                            !value.trim_start().starts_with(['|', '>']),
+                            "only a run may be a literal block"
+                        );
+                    }
+                    if indent == 6 {
+                        step_name = "";
+                    }
+                    if key == "name" {
+                        step_name = value.trim();
+                    }
+                    nested = key;
+                }
+                10 if nested == "env" => assert!(
+                    (key == "RUSTDOCFLAGS"
+                        && value.trim() == "-D warnings"
+                        && step_name == "Document")
+                        || (key == "LANE_FEATURES" && value.trim() == "induced-failure"),
+                    "unsupported compiler/runtime environment: {key}"
+                ),
+                10 if nested == "with" => assert!(
+                    [
+                        "persist-credentials",
+                        "args",
+                        "name",
+                        "path",
+                        "if-no-files-found"
+                    ]
+                    .contains(&key),
+                    "unsupported action input: {key}"
+                ),
+                _ => panic!("unsupported workflow mapping layout: {line}"),
+            }
+        }
+    }
+}
+
+/// Literal commands establish the plain-workspace authority the generic reader excludes.
 fn assert_complete_active_matrix(workflow: &str, full: bool) {
+    assert_matrix_mapping_keys(workflow, full);
     assert_eq!(
         jobs(workflow)
             .iter()
@@ -1420,8 +1551,31 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 command.to_string()
             };
             assert_ci_lines(&lines, &[&format!("run: {command}")]);
+            let (_, body) = jobs(workflow)
+                .into_iter()
+                .find(|(found, _)| found == key)
+                .expect("the command's job");
+            assert!(
+                body.lines()
+                    .any(|line| line == format!("        run: {command}")),
+                "a required command must be an actual run key"
+            );
         }
     }
+    assert!(
+        !ci_job(workflow, "build")
+            .iter()
+            .any(|line| line.starts_with("run:")
+                && line.contains("cargo test")
+                && line.contains("--features induced-failure")),
+        "host recovery stays in its independent job"
+    );
+    assert!(
+        !ci_job(workflow, "platform")
+            .iter()
+            .any(|line| line.starts_with("run:") && line.contains("lane-suite.sh")),
+        "folding counters stay in their independent job"
+    );
     assert_ci_lines(&ci_job(workflow, "build"), &["RUSTDOCFLAGS: -D warnings"]);
     assert_ci_lines(
         &ci_job(workflow, "architecture"),
@@ -1454,14 +1608,12 @@ fn assert_full_job_collects_evidence(workflow: &str, key: &str) {
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
     {
-        assert!(!line.trim_start().starts_with("continue-on-error:"));
-        assert!(
-            !line.starts_with("    if:")
-                && !line.starts_with("    needs:")
-                && !line.starts_with("    strategy:")
-        );
-        if line.trim_start().starts_with("if:") {
-            assert_eq!(line, "        if: ${{ !cancelled() }}");
+        let field = line
+            .trim_start()
+            .strip_prefix("- ")
+            .unwrap_or(line.trim_start());
+        if field.starts_with("if:") {
+            assert_eq!(field, "if: ${{ !cancelled() }}");
         }
     }
     let lines = ci_job(workflow, key);
@@ -1481,16 +1633,24 @@ fn assert_full_job_collects_evidence(workflow: &str, key: &str) {
         !lines.iter().any(|line| line.starts_with("ref:")),
         "checkout must use the captured workflow ref"
     );
-    for step in body.split("      - ").skip(1) {
-        if step.contains("run:") && !step.contains("regression-identity.py")
-            || step.contains("actions/upload-artifact@")
-        {
-            assert!(
-                step.lines()
-                    .any(|line| line == "        if: ${{ !cancelled() }}"),
-                "{key} stops collecting after an earlier failure: {step}"
-            );
-        }
+    let executable = body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let steps: Vec<_> = executable.split("      - ").skip(1).collect();
+    assert!(steps[0].starts_with("uses: actions/checkout@v7\n"));
+    assert!(steps[1].starts_with("name: Record candidate identity\n"));
+    assert!(steps[1].lines().any(|line| line == "        run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\""));
+    for step in steps.iter().skip(2) {
+        assert!(
+            step.lines().any(|line| line
+                .trim_start()
+                .strip_prefix("- ")
+                .unwrap_or(line.trim_start())
+                == "if: ${{ !cancelled() }}"),
+            "{key} stops collecting after an earlier failure: {step}"
+        );
     }
 }
 
@@ -1560,6 +1720,39 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
             1,
         ),
         workflow.replace("LANE_FEATURES: induced-failure", "LANE_FEATURES: missing"),
+        workflow.replace(
+            "  NORN_REGRESSION_SHA:",
+            "  CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'false'\n  NORN_REGRESSION_SHA:",
+        ),
+        workflow.replace(
+            "        run: cargo doc --locked --workspace --no-deps --document-private-items\n        env:\n          RUSTDOCFLAGS: -D warnings\n",
+            "        run: cargo doc --locked --workspace --no-deps --document-private-items\n",
+        ).replace(
+            "      - name: Test\n",
+            "      - name: Test\n        env:\n          RUSTDOCFLAGS: -D warnings\n",
+        ),
+        workflow.replace(
+            "      - name: Test\n",
+            "      - continue-on-error: true\n        name: Test\n",
+        ),
+        workflow.replace(
+            "      - name: Workflow lint\n        if: ${{ !cancelled() }}\n",
+            "      - if: false\n        name: Workflow lint\n",
+        ),
+        workflow.replace(
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace",
+            "        shell: true {0}\n        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace",
+        ),
+        workflow.replace("\njobs:\n", "\ndefaults:\n  run:\n    shell: true {0}\njobs:\n"),
+        workflow.replace("    name: full build and test", "    defaults:\n      run:\n        shell: true {0}\n    name: full build and test"),
+        workflow.replace(
+            "      - name: Test\n        if: ${{ !cancelled() }}\n",
+            "      - name: Test\n        env:\n          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'false'\n        if: ${{ !cancelled() }}\n",
+        ),
+        workflow.replace(
+            "      - name: Test\n        if: ${{ !cancelled() }}\n",
+            "      - name: Test\n        # regression-identity.py\n",
+        ),
     ] {
         assert!(
             std::panic::catch_unwind(|| assert_regression_workflow(&mutant)).is_err(),
@@ -1606,7 +1799,7 @@ fn assert_triggers(workflow: &str, expected: &[&str]) {
     assert_eq!(lines, expected, "workflow trigger scope changed");
 }
 
-/// The wrapper every per-PR suite step is run through.
+/// The wrapper every correctness-suite step is run through.
 const TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
 
 /// Exact filters and ignored lanes must execute cases, and keep failures red.

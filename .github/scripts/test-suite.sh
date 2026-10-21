@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run one libtest target, rejecting a successful command that ran no case.
-# Used by exact native checks and the ignored-lane runner. The final summary
+# Shared by the ignored-lane runner and explicit single-target invocations. The final summary
 # is authoritative: an earlier look-alike printed by a case proves nothing.
 
 set -uo pipefail
