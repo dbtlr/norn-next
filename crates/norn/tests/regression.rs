@@ -226,9 +226,10 @@ fn registry() -> Registry {
 /// harness pins.
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
-/// runs rather than about the text of a file: one `--list` pair per cited
-/// target, and a second pair with the carrier feature on for a target a cited
-/// test is missing from without it.
+/// runs rather than about the text of a file. On Unix, each package builds its selected
+/// targets once per feature selection; private copies of the reported test
+/// executables supply the complete and ignored lists. A target missing a cited
+/// test without the carrier feature is listed again with it on.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();

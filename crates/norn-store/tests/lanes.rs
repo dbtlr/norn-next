@@ -1,7 +1,7 @@
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
 //! One CI lane adopts this crate's ignored cases by asking for them wholesale:
-//! the per-PR memory job runs this crate's `count_memory` target with
+//! the per-PR memory job runs this crate's `count_memory` and `heap` targets with
 //! `--ignored` and asserts that a non-zero number of cases passed. That is what
 //! makes a name filter unnecessary, and it is also what makes a stray
 //! `#[ignore]` dangerous — an `#[ignore = "flaky"]` added for a local reason
@@ -25,7 +25,10 @@
 /// no lane to check against. The pairing runs the other way too — a stem here
 /// that no CI step runs is a lane measuring nothing — and both directions are
 /// checked below against the workflows themselves.
-const LANE_BY_FILE_STEM: &[(&str, &str)] = &[("count_memory", "memory-lane case:")];
+const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
+    ("count_memory", "memory-lane case:"),
+    ("heap", "memory-lane case:"),
+];
 
 #[test]
 fn every_ignored_case_names_the_lane_that_adopts_it() {

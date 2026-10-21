@@ -302,18 +302,20 @@ jobs:
         env:
           LANE_FEATURES: induced-failure
 
-  # A real gate. Each subject runs as a child under the testkit's process
-  # harness, and what is read is the peak resident set the kernel accounted to
-  # that child; a peak read off the test process would include cargo's runner
-  # and every case beside it. Every subject faces a checked-in ceiling at the
-  # ~2k-document realistic profile and a ratio, at profiles under 5k documents.
-  # A subject whose cost could grow with the vault is paired across the
-  # 300-document and ~2k-document profiles; a read is paired with the
+  # A real gate. Resident-set subjects run as children under the testkit's
+  # process harness, which reads the peak the kernel accounted to each child.
+  # A peak read off the test process would include cargo's runner and every
+  # case beside it. The fixture, walker and host subjects face a checked-in
+  # ceiling at the ~2k-document realistic profile and a ratio, at profiles under
+  # 5k documents. A subject whose cost could grow with the vault is paired
+  # across the 300-document and ~2k-document profiles; a read is paired with the
   # attach-only peak at the same profile, which cancels the attach and leaves
   # the read. The ratio is the sharp instrument — a ceiling passes anything
   # that fits under it, and a ratio fails the moment its two readings stop
-  # moving together. Every bar is authored and moves only by a reviewed edit;
-  # the readings behind them are in each crate's own tests/baselines/mod.rs.
+  # moving together. Their readings are in each crate's tests/baselines/mod.rs.
+  # The store's retained-count RSS case instead pairs 512 and 4096 documents
+  # with a ceiling and an absolute growth bound, defined beside the case.
+  # Every bar is authored and moves only by a reviewed edit.
   #
   # The cases live in this job alone. They are `#[ignore]`d with a
   # `memory-lane case:` reason so the build job's workspace suite does not run
@@ -324,8 +326,9 @@ jobs:
   # otherwise this lane would run certify.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
-  # Four subjects run here: the fixture generator, the norn-fs streaming walk,
-  # a host attaching a generated vault — the first subject that measures a
+  # The subjects include the fixture generator, the norn-fs streaming walk,
+  # the store's retained counts and link-health heap, and a host attaching a
+  # generated vault — the first subject that measures a
   # whole vault's worth of work, where the generator and the walk each measure
   # one pass over a tree — and a host running the read mix over the vault it
   # attached. The read mix is one child that runs eight shapes through the
@@ -334,7 +337,9 @@ jobs:
   # backlinks, a validate narrowed by a path part, lexical search and
   # describe. The kernel reports one peak per child, so the read's resident-set
   # bars hold the highest peak any shape reached, over the attach beneath
-  # them. The read's heap bar is the child's own count: the test binary's
+  # them. The store's link-health heap bar instead compares five hub-link shapes
+  # at 5k and 50k links in its own allocator-isolated binary. The read's heap bar
+  # is the child's own count: the test binary's
   # global allocator counts the live heap, the child marks it once the attach
   # is ready, and a child at each per-PR profile reports the most the shapes
   # raised it. The bar bounds in bytes how far the ~2k reading may exceed the
@@ -361,5 +366,7 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
       - name: Store count memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
+      - name: Store link-health heap bar
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1
       - name: Host memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
