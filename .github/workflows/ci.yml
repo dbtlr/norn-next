@@ -1,4 +1,6 @@
-# Per-PR gate lane.
+# Linux gates on PRs and main, with focused native macOS checks on PRs.
+# The full macOS matrix runs in macos-main.yml. See docs/ci.md for coverage,
+# required contexts and the response to a failed main sweep.
 #
 # CI is two-tier: structure and counters gate here, clocks trend in certify.yml.
 # No wall-clock pass/fail ever runs in this lane — see docs/architecture.md.
@@ -61,8 +63,8 @@ concurrency:
 jobs:
   # A real gate, not a placeholder: the workspace compiles clean, is
   # formatted, and its tests pass. The corpus suite is dormant — no command is
-  # activated — so this job runs in seconds; what it asserts is that the
-  # workspace holds together and that the corpus data is structurally sound.
+  # activated — so its gate checks that the corpus data is structurally sound
+  # beside the workspace build and tests.
   build:
     name: build and test
     runs-on: ubuntu-latest
@@ -135,26 +137,12 @@ jobs:
       - name: Induced-failure recovery
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
-  # A targeted second-architecture gate. The default build already runs the
-  # full workspace on Linux x86_64; this job holds the contracts whose
-  # answers can otherwise drift with architecture or filesystem behavior
-  # without paying to duplicate that entire suite: embedding determinism,
-  # norn-fs's filesystem contracts, and norn-host's case-insensitive-rename
-  # convergence, which only exercises on a case-insensitive filesystem —
-  # APFS's default here, and no other CI platform. Pin the image rather than
-  # following macos-latest, and assert the machine architecture so a future
-  # runner-label migration refuses instead of silently weakening the gate.
-  #
-  # The host step names `induced-failure` because the suite behind that feature
-  # is filesystem behavior too: a revoked directory mode answering `EACCES`, and
-  # a database left the way an aborted process leaves it. Without the feature
-  # those files compile to zero tests, and the second filesystem this job exists
-  # for would never see them.
-  #
-  # The folding-root counter bars run in a job of their own beside this one,
-  # so the longest macOS job stays well inside its guard.
+  # Focused native evidence before merge. The complete host and folding
+  # counter matrix runs in macos-main.yml. Keep the pinned image, ARM64 check
+  # and real folding-volume assertion inside folding_cost.
   platform:
     name: determinism and filesystem (macOS ARM64)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -168,34 +156,19 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
-      - name: Host filesystem contracts
-        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
-
-  # The counter bars on a folding root. Each needs APFS's case-insensitive
-  # default, so it runs on the same pinned image and architecture as the
-  # platform job, and names `induced-failure` for the same reason the counter
-  # gates job does: the host's account of its jobs is read only behind it.
-  folding-counters:
-    name: counter bars on a folding root (macOS ARM64)
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Assert architecture
-        run: test "$(uname -m)" = arm64
-      - uses: Swatinem/rust-cache@v2
-      # Spelling confirmation's per-target cost needs a real folding root.
-      # The suite refuses a distinct macOS scratch volume rather than skipping.
+      - name: Obsidian parity
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity
+      # --exact alone succeeds on a typo. test-suite.sh rejects zero matches.
+      - name: Case-only rename convergence
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact
+      - name: Parent rename over a save
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact
+      - name: Unreadable document refusal
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_refuses_the_heal_rather_than_quarantining_it -- --exact
+      - name: Unreadable subtree refusal
+        run: .github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it -- --exact
       - name: Folding-root spelling bar
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
-        env:
-          LANE_FEATURES: induced-failure
-      # The counter bars on a folding root, where each spelling is confirmed
-      # by a stored-name query rather than the distinct root's exact stat.
-      - name: Counter bars on a folding root
-        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
 
@@ -280,7 +253,7 @@ jobs:
   # read the account, and the lane table's own test holds this step to every feature
   # the suite puts a case or a helper behind.
   #
-  # The cases live in this job and the macOS folding-root counter job, `#[ignore]`d
+  # The cases live in this job and main's macOS folding-root counter job, `#[ignore]`d
   # with a `counter-lane case:` reason so the build job's workspace suite does not attach thousands of
   # documents beside every other test. The script is what makes the wholesale
   # `--ignored` run fail when it ran nothing.

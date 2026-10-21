@@ -1,8 +1,8 @@
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
-//! Three CI lanes adopt this crate's ignored cases by asking for them
-//! wholesale: the per-PR counter gates job, the per-PR memory job, and the
-//! nightly soak lane each run a suite's ignored cases and assert that a
+//! CI adopts this crate's ignored cases by asking for them wholesale: the
+//! Linux counter and memory jobs, focused Mac PR job, full Mac main sweep,
+//! and dormant soak lane run a suite's ignored cases and assert that a
 //! non-zero number of them passed. That is what makes a name filter
 //! unnecessary, and it is also what makes a stray `#[ignore]` dangerous — an
 //! `#[ignore = "flaky"]` added for a local reason would be silently adopted by
@@ -18,8 +18,8 @@
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
 /// - `counter-lane case:` — the per-PR `counter gates` job's `--ignored` step,
-///   and the macOS folding-root counter job's `folding_cost` and
-///   `counter_gate` steps.
+///   the focused Mac PR job's `folding_cost`, and the main macOS folding-root
+///   counter job's `folding_cost` and `counter_gate` steps.
 /// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
 ///   step.
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.

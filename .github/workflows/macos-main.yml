@@ -1,0 +1,63 @@
+# Complete macOS correctness and counter coverage after merge.
+# A failed current-main sweep pauses feature merges; repair PRs remain eligible.
+# Running work is retained, but GitHub may replace pending runs: coverage is of
+# the eventual current tip, not every intermediate SHA. See docs/ci.md.
+name: macos-main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Literal, unconditional commands preserve the compiled-inventory authority.
+  platform:
+    name: determinism and filesystem (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Assert architecture
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
+      - name: Embedding determinism
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
+      - name: Filesystem contracts
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
+      - name: Host filesystem contracts
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
+
+  # Kept separate so the full matrix stays inside both runaway guards.
+  folding-counters:
+    name: counter bars on a folding root (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Assert architecture
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
+      # Spelling confirmation's per-target cost needs a real folding root.
+      # The suite refuses a distinct macOS scratch volume rather than skipping.
+      - name: Folding-root spelling bar
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      # The counter bars on a folding root, where each spelling is confirmed
+      # by a stored-name query rather than the distinct root's exact stat.
+      - name: Counter bars on a folding root
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+
