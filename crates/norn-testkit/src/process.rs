@@ -1109,14 +1109,14 @@ mod tests {
             idle.peak_rss_bytes
         );
 
-        // The child holds twenty megabytes in a shell variable, which the
-        // idle run does not, so the measurement has to separate them.
+        // Hold enough memory to separate the runs even when the idle child's
+        // peak is elevated under parallel workspace test load.
         let hungry = shell(
             &sandbox,
-            "big=$(head -c 20000000 /dev/zero | tr '\\0' 'a'); echo ${#big}",
+            "big=$(head -c 64000000 /dev/zero | tr '\\0' 'a'); echo ${#big}",
         );
         hungry.assert_success();
-        assert_eq!(hungry.stdout_text().trim(), "20000000");
+        assert_eq!(hungry.stdout_text().trim(), "64000000");
         assert!(
             hungry.peak_rss_bytes > idle.peak_rss_bytes + 8 * 1024 * 1024,
             "an idle run reported {} bytes and a hungry one {}",

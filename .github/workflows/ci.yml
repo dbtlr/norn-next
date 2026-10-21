@@ -302,10 +302,10 @@ jobs:
         env:
           LANE_FEATURES: induced-failure
 
-  # A real gate. Each subject runs as a child under the testkit's process
+  # A real gate. Each resident-set subject runs as a child under the testkit's process
   # harness, and what is read is the peak resident set the kernel accounted to
   # that child; a peak read off the test process would include cargo's runner
-  # and every case beside it. Every subject faces a checked-in ceiling at the
+  # and every case beside it. Each such subject faces a checked-in ceiling at the
   # ~2k-document realistic profile and a ratio, at profiles under 5k documents.
   # A subject whose cost could grow with the vault is paired across the
   # 300-document and ~2k-document profiles; a read is paired with the
@@ -335,7 +335,9 @@ jobs:
   # backlinks, a validate narrowed by a path part, lexical search and
   # describe. The kernel reports one peak per child, so the read's resident-set
   # bars hold the highest peak any shape reached, over the attach beneath
-  # them. The read's heap bar is the child's own count: the test binary's
+  # them. The store's link-health heap bar instead compares five hub-link shapes
+  # at 5k and 50k links in its own allocator-isolated binary. The read's heap bar
+  # is the child's own count: the test binary's
   # global allocator counts the live heap, the child marks it once the attach
   # is ready, and a child at each per-PR profile reports the most the shapes
   # raised it. The bar bounds in bytes how far the ~2k reading may exceed the
