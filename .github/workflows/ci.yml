@@ -324,8 +324,9 @@ jobs:
   # otherwise this lane would run certify.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
-  # Four subjects run here: the fixture generator, the norn-fs streaming walk,
-  # a host attaching a generated vault — the first subject that measures a
+  # The subjects include the fixture generator, the norn-fs streaming walk,
+  # the store's retained counts and link-health heap, and a host attaching a
+  # generated vault — the first subject that measures a
   # whole vault's worth of work, where the generator and the walk each measure
   # one pass over a tree — and a host running the read mix over the vault it
   # attached. The read mix is one child that runs eight shapes through the
@@ -361,5 +362,7 @@ jobs:
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
       - name: Store count memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store count_memory --nocapture --test-threads=1
+      - name: Store link-health heap bar
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-store heap --nocapture --test-threads=1
       - name: Host memory bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

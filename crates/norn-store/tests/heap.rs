@@ -10,6 +10,9 @@
 //! links a chunk holds, the findings it files. SQLite's own page cache is
 //! taken from `malloc` directly and is not in it; that is the store's, bounded
 //! by its cache size, and the same at any vault size.
+//!
+//! The per-PR memory job runs this case alone through `lane-suite.sh`, which
+//! rejects an empty run. The workspace suite leaves the measurement to that lane.
 
 use norn_store::{
     Change, ContentModel, DerivationVersion, DocumentFacts, DocumentPath, IncrementProvenance,
@@ -177,6 +180,7 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
 /// distinct key names would grow it by the forty-five thousand links between
 /// them.
 #[test]
+#[ignore = "memory-lane case: isolated link-health heap measurement"]
 fn a_hub_write_holds_heap_within_a_chunk() {
     let shapes = [
         Shape {

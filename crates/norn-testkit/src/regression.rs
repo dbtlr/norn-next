@@ -65,12 +65,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(unix))]
 use std::process::Command;
 
 use norn_fixtures::digest::{Sha256, hex};
 use serde::Deserialize;
 
 use crate::json::{JsonError, read_json};
+
+#[cfg(unix)]
+mod compiled;
 
 /// The cases that must be present, by name.
 ///
@@ -613,16 +617,11 @@ impl TestIndex {
 
     /// Ask cargo what compiled into each target, from `workspace_root`.
     ///
-    /// One pair of invocations per target: `--list` is everything the target
-    /// compiled, and `--list --ignored` is the subset a plain run skips. The
-    /// two are asked separately because `--list` alone does not say which is
-    /// which, and the difference is what decides whether a bound carrier
-    /// actually runs.
-    ///
-    /// Cargo's status lines go to standard error and the test binary's list to
-    /// standard output, so the two cannot be read as one interleaved stream —
-    /// which is why the target is selected on the command line rather than
-    /// parsed out of the output.
+    /// On Unix, each package builds its selected targets once. Cargo's artifact
+    /// records identify their executables, and a private copy of each answers
+    /// both `--list` and `--list --ignored`. The two lists distinguish a
+    /// compiled carrier from one a plain run actually runs. Platforms without
+    /// the process harness keep Cargo's runner for each listing.
     pub fn from_cargo(workspace_root: &Path, targets: impl IntoIterator<Item = TargetRef>) -> Self {
         Self::from_cargo_with_features(workspace_root, targets, &[])
     }
@@ -644,7 +643,11 @@ impl TestIndex {
     ) -> Self {
         let wanted: BTreeSet<(String, Target)> =
             targets.into_iter().map(|target| target.key()).collect();
+        #[cfg(unix)]
+        let listings = compiled::collect(workspace_root, wanted, features);
+        #[cfg(not(unix))]
         let mut listings = BTreeMap::new();
+        #[cfg(not(unix))]
         for (package, target) in wanted {
             let listing =
                 list(workspace_root, &package, &target, features, false).and_then(|all| {
@@ -820,6 +823,7 @@ pub fn inline_modules_at(workspace_root: &Path, relative: &Path) -> BTreeSet<Str
 }
 
 /// One `cargo test … -- --list` run, as the set of test names it printed.
+#[cfg(not(unix))]
 fn list(
     workspace_root: &Path,
     package: &str,
@@ -2467,8 +2471,8 @@ fn read(path: &Path) -> Result<String, RegistryError> {
 mod tests {
     use super::{
         Binding, BindingStatus, CARRIER_FEATURE, Case, Ground, Kind, LANE_IGNORE_PREFIXES,
-        LAYER_LANDING, Listing, MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES,
-        Venue, declares_module_inside, declares_symbol, declares_test, ignore_reason,
+        LAYER_LANDING, Listing, MANDATORY_CASES, Registry, Target, TargetRef, TestIndex, TestRef,
+        VENUE_NAMES, Venue, declares_module_inside, declares_symbol, declares_test, ignore_reason,
         inline_modules, is_identifier, is_kebab_case, matches_function, opens_fn,
     };
     use crate::scratch::Scratch;
@@ -2693,6 +2697,289 @@ fn a_carrier() {}
         )
         .expect("a flat target pulling in the shared tree");
         root
+    }
+
+    /// Count Cargo at its process boundary while the listings still come from
+    /// real compiled targets. Feature selections run in separate children so
+    /// the test never changes another test's environment.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The synthetic workspace and its counted Cargo launcher.
+    fn collecting_a_packages_test_inventory_builds_it_once_per_feature_selection() {
+        use crate::process::{Run, Sandbox};
+        use std::os::unix::fs::PermissionsExt;
+
+        const ROOT: &str = "NORN_REGRESSION_BATCH_ROOT";
+        const FEATURE: &str = "NORN_REGRESSION_BATCH_FEATURE";
+        const REAL_CARGO: &str = "NORN_REGRESSION_REAL_CARGO";
+        const BUILD_LOG: &str = "NORN_REGRESSION_BUILD_LOG";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let featured = std::env::var_os(FEATURE).is_some();
+            let features = if featured {
+                vec!["induced-failure"]
+            } else {
+                vec![]
+            };
+            let targets = [
+                Target::Lib,
+                Target::Integration("suite".to_string()),
+                Target::Integration("flat".to_string()),
+                Target::Integration("empty".to_string()),
+                Target::Integration("suite".to_string()),
+            ]
+            .map(|target| TargetRef {
+                package: "demo".to_string(),
+                target,
+                module_prefix: String::new(),
+            });
+            let listed =
+                TestIndex::from_cargo_with_features(Path::new(&root), targets.clone(), &features);
+            let library = listed.compiled(&targets[0]).expect("the library listing");
+            let mut expected = BTreeSet::from([
+                "a_library_carrier".to_string(),
+                "an_ignored_library_carrier".to_string(),
+            ]);
+            if featured {
+                expected.insert("a_featured_library_carrier".to_string());
+            }
+            assert_eq!(library.all, expected);
+            assert_eq!(
+                library.ignored,
+                BTreeSet::from(["an_ignored_library_carrier".to_string()])
+            );
+            assert_eq!(
+                listed
+                    .compiled(&targets[2])
+                    .expect("the flat target listing")
+                    .all,
+                BTreeSet::from([
+                    "a_flat_test".to_string(),
+                    "shared::inner::a_carrier".to_string()
+                ]),
+            );
+            let empty = listed
+                .compiled(&targets[3])
+                .expect("an empty target still has a listing");
+            assert!(empty.all.is_empty() && empty.ignored.is_empty());
+            let suite = listed
+                .compiled(&targets[1])
+                .expect("the directory target listing");
+            assert!(suite.all.contains("inner::a_carrier"));
+            assert!(suite.ignored.contains("inner::an_adopted_carrier"));
+            assert_eq!(suite.all.contains("inner::a_featured_carrier"), featured);
+            return;
+        }
+
+        let root = cargo_workspace();
+        std::fs::write(root.join("crates/demo/src/lib.rs"), "#[test]\nfn a_library_carrier() {}\n#[test]\n#[ignore]\nfn an_ignored_library_carrier() {}\n#[test]\n#[cfg(feature = \"induced-failure\")]\nfn a_featured_library_carrier() {}\n").unwrap();
+        std::fs::write(root.join("crates/demo/tests/empty.rs"), "").unwrap();
+        let launcher = root.join("counted-cargo");
+        std::fs::write(&launcher, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$NORN_REGRESSION_BUILD_LOG\"\nexec \"$NORN_REGRESSION_REAL_CARGO\" \"$@\"\n").unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = root.join("cargo-invocations");
+        let sandbox = Sandbox::new(root.root(), "inventory-collector").unwrap();
+        let executable = sandbox
+            .install_binary(&std::env::current_exe().unwrap())
+            .unwrap();
+        let cargo = std::env::var_os("CARGO").expect("Cargo identifies its executable");
+        let compiler = std::env::var_os("RUSTC")
+            .unwrap_or_else(|| Path::new(&cargo).with_file_name("rustc").into_os_string());
+        for featured in [false, true] {
+            let mut child = Run::new(&sandbox, &executable)
+                .args(["--exact", "regression::tests::collecting_a_packages_test_inventory_builds_it_once_per_feature_selection", "--nocapture"])
+                .env(ROOT, root.root())
+                .env("CARGO", &launcher)
+                .env(REAL_CARGO, &cargo)
+                .env(BUILD_LOG, &log)
+                .env("RUSTC", &compiler);
+            if featured {
+                child = child.env(FEATURE, "1");
+            }
+            child.wait().unwrap().assert_success();
+        }
+        let commands = std::fs::read_to_string(log).unwrap();
+        assert_eq!(
+            commands.lines().count(),
+            2,
+            "one Cargo build per feature selection, not per target or listing:\n{commands}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Two real packages whose combined feature graph differs.
+    fn collecting_packages_keeps_their_feature_graphs_separate() {
+        let root = cargo_workspace();
+        std::fs::create_dir_all(root.join("crates/consumer/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\", \"crates/consumer\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("Cargo.lock"), "version = 4\n\n[[package]]\nname = \"consumer\"\nversion = \"0.0.0\"\ndependencies = [\"demo\"]\n\n[[package]]\nname = \"demo\"\nversion = \"0.0.0\"\n").unwrap();
+        std::fs::write(root.join("crates/consumer/Cargo.toml"), "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[dependencies]\ndemo = { path = \"../demo\", features = [\"induced-failure\"] }\n").unwrap();
+        std::fs::write(
+            root.join("crates/consumer/src/lib.rs"),
+            "#[test]\nfn a_consumer_test() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/demo/src/lib.rs"), "#[test]\nfn a_plain_test() {}\n#[test]\n#[cfg(feature = \"induced-failure\")]\nfn a_feature_test() {}\n").unwrap();
+        let target = |package: &str| TargetRef {
+            package: package.to_string(),
+            target: Target::Lib,
+            module_prefix: String::new(),
+        };
+        let demo = target("demo");
+        let consumer = target("consumer");
+        let listed = TestIndex::from_cargo(root.root(), [demo.clone(), consumer.clone()]);
+        assert_eq!(
+            listed.compiled(&demo).unwrap().all,
+            BTreeSet::from(["a_plain_test".to_string()])
+        );
+        assert_eq!(
+            listed.compiled(&consumer).unwrap().all,
+            BTreeSet::from(["a_consumer_test".to_string()])
+        );
+    }
+
+    /// The Cargo process is the protocol boundary: a successful exit alone
+    /// proves neither an artifact nor a complete libtest listing.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Protocol fixtures and executable boundary stand-ins.
+    fn only_complete_successful_compiler_and_test_listings_establish_an_inventory() {
+        use crate::process::{Run, Sandbox};
+        use serde_json::json;
+        use std::os::unix::fs::PermissionsExt;
+
+        const ROOT: &str = "NORN_REGRESSION_PROTOCOL_ROOT";
+        const RECORDS: &str = "NORN_REGRESSION_RECORDS";
+        const EXIT: &str = "NORN_REGRESSION_CARGO_EXIT";
+        const ERROR: &str = "NORN_REGRESSION_EXPECT_ERROR";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let targets =
+                [Target::Lib, Target::Integration("suite".to_string())].map(|target| TargetRef {
+                    package: "demo".to_string(),
+                    target,
+                    module_prefix: String::new(),
+                });
+            let listed = TestIndex::from_cargo(Path::new(&root), targets.clone());
+            for target in targets {
+                match std::env::var(ERROR).ok().filter(|error| !error.is_empty()) {
+                    Some(error) => assert!(
+                        listed.compiled(&target).unwrap_err().contains(&error),
+                        "{listed:?}"
+                    ),
+                    None => {
+                        let listing = listed.compiled(&target).unwrap();
+                        assert_eq!(listing.all, BTreeSet::from(["a_reported_test".to_string()]));
+                        assert_eq!(listing.ignored, listing.all);
+                    }
+                }
+            }
+            return;
+        }
+
+        let root = cargo_workspace();
+        let launcher = root.join("reported-cargo");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\ncat \"$NORN_REGRESSION_RECORDS\"\nexit \"$NORN_REGRESSION_CARGO_EXIT\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = root.join("reported-tests");
+        let artifact = |kind: &str, test: bool, executable: &Path| {
+            json!({
+                "reason": "compiler-artifact", "fresh": true,
+                "target": {"kind": [kind], "name": "suite"},
+                "profile": {"test": test}, "executable": executable,
+            })
+        };
+        let finished = json!({"reason": "build-finished", "success": true});
+        let library = artifact("lib", true, &executable);
+        let integration = artifact("test", true, &executable);
+        let valid = format!("{library}\n{integration}\n{finished}\n");
+        let records = root.join("records.jsonl");
+        let sandbox = Sandbox::new(root.root(), "inventory-protocol").unwrap();
+        let child = sandbox
+            .install_binary(&std::env::current_exe().unwrap())
+            .unwrap();
+        for (description, stream, exit, body, error) in [
+            (
+                "fresh artifacts",
+                format!(
+                    "{}\n{valid}",
+                    artifact("lib", false, &root.join("not-a-test"))
+                ),
+                "0",
+                "printf 'a_reported_test: test\\n\\n1 test, 0 benchmarks\\n'",
+                "",
+            ),
+            (
+                "missing artifact",
+                format!("{finished}\n"),
+                "0",
+                "exit 0",
+                "no test executable",
+            ),
+            (
+                "malformed records",
+                "not-json\n".to_string(),
+                "0",
+                "exit 0",
+                "reading Cargo artifact output",
+            ),
+            (
+                "duplicate artifact",
+                format!("{library}\n{valid}"),
+                "0",
+                "exit 0",
+                "multiple test executables",
+            ),
+            (
+                "failed build with artifacts",
+                valid.clone(),
+                "1",
+                "exit 0",
+                "Cargo build ended",
+            ),
+            (
+                "incomplete listing",
+                valid.clone(),
+                "0",
+                "printf 'a_reported_test: test\\n'",
+                "invalid summary",
+            ),
+            (
+                "failed listing",
+                valid.clone(),
+                "0",
+                "echo 'listing refused' >&2; exit 1",
+                "listing refused",
+            ),
+            (
+                "truncated listing",
+                valid.clone(),
+                "0",
+                "head -c 8388609 /dev/zero",
+                "truncated",
+            ),
+        ] {
+            std::fs::write(&records, stream).unwrap();
+            std::fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let outcome = Run::new(&sandbox, &child)
+                .args(["--exact", "regression::tests::only_complete_successful_compiler_and_test_listings_establish_an_inventory", "--nocapture"])
+                .env(ROOT, root.root()).env("CARGO", &launcher)
+                .env(RECORDS, &records).env(EXIT, exit).env(ERROR, error)
+                .wait().unwrap();
+            assert_eq!(
+                outcome.status,
+                crate::process::RunStatus::Exited(0),
+                "{description}: {}",
+                outcome.stdout_text()
+            );
+        }
     }
 
     /// What the audit says about one carrier reference over the real cargo
