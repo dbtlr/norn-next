@@ -302,18 +302,20 @@ jobs:
         env:
           LANE_FEATURES: induced-failure
 
-  # A real gate. Each resident-set subject runs as a child under the testkit's process
-  # harness, and what is read is the peak resident set the kernel accounted to
-  # that child; a peak read off the test process would include cargo's runner
-  # and every case beside it. Each such subject faces a checked-in ceiling at the
-  # ~2k-document realistic profile and a ratio, at profiles under 5k documents.
-  # A subject whose cost could grow with the vault is paired across the
-  # 300-document and ~2k-document profiles; a read is paired with the
+  # A real gate. Resident-set subjects run as children under the testkit's
+  # process harness, which reads the peak the kernel accounted to each child.
+  # A peak read off the test process would include cargo's runner and every
+  # case beside it. The fixture, walker and host subjects face a checked-in
+  # ceiling at the ~2k-document realistic profile and a ratio, at profiles under
+  # 5k documents. A subject whose cost could grow with the vault is paired
+  # across the 300-document and ~2k-document profiles; a read is paired with the
   # attach-only peak at the same profile, which cancels the attach and leaves
   # the read. The ratio is the sharp instrument — a ceiling passes anything
   # that fits under it, and a ratio fails the moment its two readings stop
-  # moving together. Every bar is authored and moves only by a reviewed edit;
-  # the readings behind them are in each crate's own tests/baselines/mod.rs.
+  # moving together. Their readings are in each crate's tests/baselines/mod.rs.
+  # The store's retained-count RSS case instead pairs 512 and 4096 documents
+  # with a ceiling and an absolute growth bound, defined beside the case.
+  # Every bar is authored and moves only by a reviewed edit.
   #
   # The cases live in this job alone. They are `#[ignore]`d with a
   # `memory-lane case:` reason so the build job's workspace suite does not run
