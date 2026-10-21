@@ -1783,7 +1783,7 @@ pub fn fits<T: PartialOrd>(reading: T, ceiling: T) -> bool {
 /// left to a reader to recompute off the checkout:
 ///
 /// - The `ATTACH_*` bands are read **feature-off**. `memory.rs` compiles under
-///   the plain workspace build and the per-PR lane's attach step names no
+///   the plain workspace build and the full-regression attach step names no
 ///   feature.
 /// - The `SOAK_*` bands are read **with `induced-failure` on**. `host_soak.rs`
 ///   is a whole file behind that feature — the load arms `norn-fs`'s watcher

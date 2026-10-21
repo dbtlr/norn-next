@@ -1078,8 +1078,9 @@ impl Registry {
         problems
     }
 
-    /// Registry shape, mandatory membership and binding/dormancy metadata,
-    /// including stale grounds against the tree. No compiled index is needed.
+    /// Registry shape, mandatory membership, binding/dormancy metadata and
+    /// source-level carrier contracts, including exact paths, reachable modules
+    /// and test declarations. No compiled index is needed.
     pub fn audit_structure(&self, workspace_root: &Path) -> Vec<String> {
         let mut problems = Vec::new();
         self.audit_venues(&mut problems);
@@ -1087,20 +1088,39 @@ impl Registry {
         self.audit_properties(&mut problems);
         self.audit_mandatory(&mut problems);
         self.audit_binding_records(workspace_root, &mut problems);
+        let mut sources = BTreeMap::new();
+        for case in self.bound_cases() {
+            for reference in &case.binding.tests {
+                if let Err(problem) = self.source_carrier(workspace_root, &mut sources, reference) {
+                    problems.push(format!("`{}` {problem}", case.name));
+                }
+            }
+        }
         problems
     }
 
     /// Bound references against compiled test listings and their CI adopters.
+    /// Source-invalid references are reported by `audit_structure` alone, so
+    /// composing both halves never duplicates their diagnostics.
     pub fn audit_compiled(&self, workspace_root: &Path, tests: &TestIndex) -> Vec<String> {
         let mut problems = Vec::new();
         let mut sources = BTreeMap::new();
         let mut steps = None;
         for case in self.bound_cases() {
             for reference in &case.binding.tests {
-                for problem in
-                    self.audit_carrier(workspace_root, tests, &mut sources, &mut steps, reference)
+                if let Ok((test, target, text)) =
+                    self.source_carrier(workspace_root, &mut sources, reference)
                 {
-                    problems.push(format!("`{}` {problem}", case.name));
+                    for problem in self.audit_compiled_carrier(
+                        workspace_root,
+                        tests,
+                        &mut steps,
+                        &test,
+                        &target,
+                        text,
+                    ) {
+                        problems.push(format!("`{}` {problem}", case.name));
+                    }
                 }
             }
         }
@@ -1351,20 +1371,61 @@ impl Registry {
         }
     }
 
-    /// What is wrong with one carrier reference, or nothing.
+    /// The source-level carrier contract, independent of any compiled listing.
     ///
-    /// Five things have to hold for a binding to be a claim about the built
-    /// suite. The reference has to resolve to a cargo target this grammar
-    /// names. Its path has to exist spelled exactly as written, checked
-    /// against the directory's own entries rather than by asking whether a
-    /// file is there — a case-insensitive filesystem answers yes to a spelling
-    /// that fails on a case-sensitive one. The module tree has to reach the
-    /// file, because a file no `mod` declaration names is compiled by nothing,
-    /// however plausibly a listing elsewhere spells its name. The file has to
-    /// declare the function with `#[test]`, which is what pins the reference to
-    /// the file it names rather than to the target as a whole. And cargo has to
-    /// have compiled it: a name that appears only in a string literal, or
-    /// behind a `cfg` nothing turns on, is in the source and not in the list.
+    /// A reference must name a supported target, resolve under its exact
+    /// spelling, be reachable through the module tree, and declare the named
+    /// test. A plain ignore attribute must also name a sanctioned lane. These
+    /// are facts about the tree and must fail ordinary PR checks even when no
+    /// Cargo listing is collected. The cache reads each carrier file once.
+    fn source_carrier<'a>(
+        &self,
+        workspace_root: &Path,
+        sources: &'a mut BTreeMap<PathBuf, Option<String>>,
+        reference: &str,
+    ) -> Result<(TestRef, TargetRef, &'a str), String> {
+        let test = TestRef::parse(reference)?;
+        let target = test
+            .target()
+            .map_err(|problem| format!("names `{test}`, whose {problem}"))?;
+        if !resolves_case_exactly(workspace_root, &test.file, LastComponent::File) {
+            return Err(format!(
+                "names `{test}`, whose file is not in the workspace under that exact spelling"
+            ));
+        }
+        if let Some(problem) = unreachable_module(workspace_root, &test.file, sources) {
+            return Err(format!("names `{test}`, and {problem}"));
+        }
+        let text = sources
+            .entry(workspace_root.join(&test.file))
+            .or_insert_with_key(|path| read(path).ok())
+            .as_deref()
+            .ok_or_else(|| format!("names `{test}`, whose file could not be read"))?;
+        if !declares_test(text, &test.function) {
+            return Err(format!(
+                "names `{test}`, and that file declares no `#[test] fn {}`",
+                test.function
+            ));
+        }
+        if ignore_attribute(text, &test.function).is_some() {
+            let reason = ignore_reason(text, &test.function);
+            if !reason.is_some_and(|reason| {
+                LANE_IGNORE_PREFIXES
+                    .iter()
+                    .any(|prefix| reason.starts_with(prefix))
+            }) {
+                return Err(format!(
+                    "names `{test}`, whose ignore reason is {}. An ignored carrier runs only where a lane adopts it, so its reason opens with one of {LANE_IGNORE_PREFIXES:?}",
+                    reason.map_or("none".to_string(), |reason| format!("{reason:?}"))
+                ));
+            }
+        }
+        Ok((test, target, text))
+    }
+
+    /// Cargo must have compiled the source carrier into the target it names.
+    /// A declaration behind a disabled cfg is source-valid but still needs
+    /// the compiled listing to prove it runs.
     ///
     /// An ignored carrier passes only when a lane adopts it, because a lane
     /// running a suite's ignored cases wholesale is the only thing that makes
@@ -1381,51 +1442,23 @@ impl Registry {
     /// feature named; an ignored one is run by its lane step alone, so that
     /// step's `LANE_FEATURES` has to name the feature. A test compiled under
     /// neither build is refused as one nothing compiled.
-    fn audit_carrier(
+    fn audit_compiled_carrier(
         &self,
         workspace_root: &Path,
         tests: &TestIndex,
-        sources: &mut BTreeMap<PathBuf, Option<String>>,
         steps: &mut Option<Steps>,
-        reference: &str,
+        test: &TestRef,
+        target: &TargetRef,
+        text: &str,
     ) -> Vec<String> {
-        let test = match TestRef::parse(reference) {
-            Ok(test) => test,
-            Err(problem) => return vec![problem],
-        };
-        let target = match test.target() {
-            Ok(target) => target,
-            Err(problem) => return vec![format!("names `{test}`, whose {problem}")],
-        };
-
         let mut problems = Vec::new();
-        if !resolves_case_exactly(workspace_root, &test.file, LastComponent::File) {
-            return vec![format!(
-                "names `{test}`, whose file is not in the workspace under that exact spelling"
-            )];
-        }
-        if let Some(problem) = unreachable_module(workspace_root, &test.file, sources) {
-            return vec![format!("names `{test}`, and {problem}")];
-        }
-        let source = sources
-            .entry(workspace_root.join(&test.file))
-            .or_insert_with_key(|path| read(path).ok());
-        let Some(text) = source else {
-            return vec![format!("names `{test}`, whose file could not be read")];
-        };
-        if !declares_test(text, &test.function) {
-            problems.push(format!(
-                "names `{test}`, and that file declares no `#[test] fn {}`",
-                test.function
-            ));
-        }
         let inline = inline_modules(text);
 
         // Whether cargo compiled it ignored, and whether only the feature
         // build holds it.
-        let (ignored, featured) = match tests.resolve(&target, &test.function, &inline) {
+        let (ignored, featured) = match tests.resolve(target, &test.function, &inline) {
             Ok(ignored) => (ignored, false),
-            Err(problem) => match tests.resolve_featured(&target, &test.function, &inline) {
+            Err(problem) => match tests.resolve_featured(target, &test.function, &inline) {
                 Some(Ok(ignored)) => (ignored, true),
                 Some(Err(featured_problem)) => {
                     problems.push(format!(
@@ -1444,6 +1477,8 @@ impl Registry {
             return problems;
         }
 
+        // A conditional ignore may take effect only in a compiled build.
+        // Plain ignore reasons have already passed source validation.
         if ignored {
             let reason = ignore_reason(text, &test.function);
             let adopted = reason
@@ -2152,6 +2187,14 @@ fn is_identifier(source: &str) -> bool {
 /// `#[ignore]` separated from its function by a doc comment or another
 /// attribute is still that function's.
 pub(crate) fn ignore_reason<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let attribute = ignore_attribute(source, name)?;
+    let (_, quoted) = attribute.split_once('"')?;
+    let (reason, _) = quoted.split_once('"')?;
+    Some(reason)
+}
+
+/// A plain ignore attribute, including a bare one with no lane reason.
+fn ignore_attribute<'a>(source: &'a str, name: &str) -> Option<&'a str> {
     let lines: Vec<&str> = source.lines().collect();
     for (index, line) in lines.iter().enumerate() {
         if !opens_fn(line.trim(), name) {
@@ -2159,10 +2202,8 @@ pub(crate) fn ignore_reason<'a>(source: &'a str, name: &str) -> Option<&'a str> 
         }
         for above in lines[..index].iter().rev() {
             let above = above.trim();
-            if let Some(rest) = above.strip_prefix("#[ignore") {
-                let (_, quoted) = rest.split_once('"')?;
-                let (reason, _) = quoted.split_once('"')?;
-                return Some(reason);
+            if above.starts_with("#[ignore") {
+                return Some(above);
             }
             if above.is_empty() || above.starts_with("#[") || above.starts_with("//") {
                 continue;
@@ -3364,6 +3405,96 @@ fn a_carrier() {}
         );
     }
 
+    fn assert_structural_carrier_problem(root: &Scratch, reference: &str, needle: &str) {
+        let mut registry = sound();
+        registry
+            .cases
+            .retain(|case| case.name != "a-dormant-layer-zero-case");
+        find(&mut registry, "a-bound-case").binding.tests = vec![reference.to_string()];
+        let found = registry.audit_structure(root.root());
+        assert_eq!(found.len(), 1, "{reference}: {found:#?}");
+        assert!(found[0].contains(needle), "{found:#?}");
+        assert_eq!(
+            registry.audit(root.root(), &index()),
+            found,
+            "source faults must not be reported twice"
+        );
+        assert!(registry.audit_compiled(root.root(), &index()).is_empty());
+    }
+
+    #[test]
+    fn structural_audit_rejects_garbage_and_unsupported_targets() {
+        let root = scratch();
+        for (reference, needle) in [
+            ("garbage", "is not a `<file>::<test fn>` reference"),
+            (
+                "crates/demo/benches/suite.rs::a_carrier",
+                "sits under `benches/`",
+            ),
+        ] {
+            assert_structural_carrier_problem(&root, reference, needle);
+        }
+    }
+
+    #[test]
+    fn structural_audit_rejects_missing_or_misspelled_files() {
+        let root = scratch();
+        for reference in [
+            "crates/demo/tests/absent.rs::a_carrier",
+            "crates/demo/tests/Suite.rs::a_carrier",
+        ] {
+            assert_structural_carrier_problem(
+                &root,
+                reference,
+                "not in the workspace under that exact spelling",
+            );
+        }
+    }
+
+    #[test]
+    fn structural_audit_rejects_unreachable_modules() {
+        let root = cargo_workspace();
+        assert_structural_carrier_problem(
+            &root,
+            "crates/demo/tests/suite/ghost.rs::a_carrier",
+            "declares `mod ghost;`",
+        );
+    }
+
+    #[test]
+    fn structural_audit_rejects_missing_test_declarations() {
+        let root = scratch();
+        for name in [
+            "renamed_carrier",
+            "a_name_in_prose",
+            "a_carrier_in_a_string_literal",
+        ] {
+            assert_structural_carrier_problem(
+                &root,
+                &format!("crates/demo/tests/suite.rs::{name}"),
+                "declares no `#[test] fn",
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranges a carrier with an unreadable lane reason.
+    fn structural_audit_rejects_ignore_reasons_without_a_lane() {
+        let root = scratch();
+        for attribute in ["#[ignore]", "#[ignore = \"flaky\"]"] {
+            std::fs::write(
+                root.join("crates/demo/tests/suite.rs"),
+                format!("#[test]\n{attribute}\nfn a_carrier() {{}}\n"),
+            )
+            .unwrap();
+            assert_structural_carrier_problem(
+                &root,
+                "crates/demo/tests/suite.rs::a_carrier",
+                "An ignored carrier runs only where a lane adopts it",
+            );
+        }
+    }
+
     #[test]
     fn structural_auditing_keeps_mandatory_and_dormancy_checks() {
         let root = scratch();
@@ -4148,20 +4279,21 @@ fn a_carrier() {}
 
     #[test]
     fn a_reference_cargo_never_compiled_is_caught() {
-        // The `cfg(any())` function and the one spelled inside a string
-        // literal are both in the source and in neither test binary.
-        for function in [
-            "a_carrier_nothing_compiles",
-            "a_carrier_in_a_string_literal",
-        ] {
-            refused(
-                |registry| {
-                    find(registry, "a-bound-case").binding.tests =
-                        vec![format!("crates/demo/tests/suite.rs::{function}")];
-                },
-                "cargo compiled no test",
-            );
-        }
+        let root = scratch();
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests =
+            vec!["crates/demo/tests/suite.rs::a_carrier_nothing_compiles".to_string()];
+        // A disabled declaration passes the source contract; only a compiled
+        // listing can tell whether its cfg actually admitted the test.
+        assert!(registry.audit_structure(root.root()).is_empty());
+        let found = registry.audit_compiled(root.root(), &index());
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("cargo compiled no test")),
+            "{found:#?}"
+        );
+        assert_eq!(registry.audit(root.root(), &index()), found);
     }
 
     #[test]

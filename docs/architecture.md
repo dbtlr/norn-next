@@ -397,9 +397,10 @@ types every run taken under an unauthored one non-qualifying so a calibration wi
 counts toward lockdown's five.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose fault lane runs in full
-nightly/manual regression. The table below
-is its contract — each row an injection and the outcome required of it — and **every row of
-it is reached**. Each condition is met by the production path it is stated over rather than
+nightly/manual regression. The unreadable-document and unreadable-subtree lockdown
+cases also run per PR in the focused macOS job. The table below is its contract —
+each row an injection and the outcome required of it — and **every row of it is
+reached**. Each condition is met by the production path it is stated over rather than
 described to it: a **full disk** is the derived store's connection held to the page count
 its database already has, so the heal's own increment meets `SQLITE_FULL` from the engine; a
 **revoked permission** is a real mode taken away between two attaches, in the two shapes the
