@@ -1297,6 +1297,10 @@ fn the_bootstrap_keeps_the_complete_pr_matrix() {
     assert_complete_active_matrix(&gate, false);
     for mutant in [
         gate.replace(
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace\n",
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace\n          || true\n",
+        ),
+        gate.replace(
             "      - name: Test\n",
             "      - name: Duplicate host recovery\n        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure\n      - name: Test\n",
         ),
@@ -1365,13 +1369,22 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
     for (_, body) in jobs(workflow) {
         let mut nested = "";
         let mut step_name = "";
+        let mut literal_run = false;
         for line in body
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
         {
             let indent = line.len() - line.trim_start().len();
             if indent == 10 && nested == "run" {
-                continue; // The toolchain report is the one literal run block.
+                assert!(
+                    literal_run && step_name == "Show toolchain",
+                    "plain command continuations are unsupported"
+                );
+                assert!(
+                    ["rustc --version", "cargo --version"].contains(&line.trim()),
+                    "the toolchain report carries only version reads"
+                );
+                continue;
             }
             let field = line
                 .trim_start()
@@ -1412,6 +1425,7 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
                     if key == "name" {
                         step_name = value.trim();
                     }
+                    literal_run = key == "run" && value.trim() == "|";
                     nested = key;
                 }
                 10 if nested == "env" => assert!(
@@ -1439,6 +1453,89 @@ fn assert_matrix_mapping_keys(workflow: &str, full: bool) {
 }
 
 /// Literal commands establish the plain-workspace authority the generic reader excludes.
+/// Semantic step values in the pinned block layout; names and widening conditions
+/// are checked separately. Keeping inputs with their step prevents a harmless
+/// cache step from supplying a setting a required test/action no longer receives.
+fn matrix_step_values(workflow: &str, job: &str) -> Vec<String> {
+    let (_, body) = jobs(workflow)
+        .into_iter()
+        .find(|(key, _)| key == job)
+        .expect("a matrix job");
+    let mut reached_steps = false;
+    let mut steps: Vec<Vec<String>> = Vec::new();
+    for line in body
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+    {
+        if line == "    steps:" {
+            reached_steps = true;
+            continue;
+        }
+        if !reached_steps {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if line.starts_with("      - ") {
+            steps.push(Vec::new());
+        }
+        let field = line
+            .trim_start()
+            .strip_prefix("- ")
+            .unwrap_or(line.trim_start());
+        let key = field.split_once(':').map(|(key, _)| key);
+        if indent <= 8 && matches!(key, Some("name" | "if" | "env" | "with")) {
+            continue;
+        }
+        steps
+            .last_mut()
+            .expect("a step field")
+            .push(field.to_string());
+    }
+    steps.into_iter().map(|fields| fields.join("\n")).collect()
+}
+
+fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: bool) {
+    let mut expected = vec!["uses: actions/checkout@v7\npersist-credentials: false".to_string()];
+    if full {
+        expected.push("run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"".to_string());
+    }
+    if job == "build" {
+        expected.push("run: |\nrustc --version\ncargo --version".to_string());
+    }
+    if matches!(job, "platform" | "folding-counters") {
+        expected.push("run: test \"$(uname -m)\" = arm64".to_string());
+    }
+    if job == "architecture" {
+        expected.push("uses: docker://rhysd/actionlint:1.7.12\nargs: -color".to_string());
+    }
+    expected.push("uses: Swatinem/rust-cache@v2".to_string());
+    for command in runs {
+        let command = if full {
+            command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")
+        } else {
+            command.to_string()
+        };
+        let mut step = format!("run: {command}");
+        if command.starts_with("cargo doc ") {
+            step.push_str("\nRUSTDOCFLAGS: -D warnings");
+        }
+        if command.contains("lane-suite.sh norn-host counter_gate")
+            || command.contains("lane-suite.sh norn-host folding_cost")
+        {
+            step.push_str("\nLANE_FEATURES: induced-failure");
+        }
+        expected.push(step);
+    }
+    if full {
+        expected.push("uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\nname: regression-${{ github.job }}-${{ github.run_attempt }}\npath: ${{ runner.temp }}/regression-identity.json\nif-no-files-found: error".to_string());
+    }
+    assert_eq!(
+        matrix_step_values(workflow, job),
+        expected,
+        "{job} changed its ordered execution or inputs"
+    );
+}
+
 fn assert_complete_active_matrix(workflow: &str, full: bool) {
     assert_matrix_mapping_keys(workflow, full);
     assert_eq!(
@@ -1544,23 +1641,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         } else {
             assert_job_cannot_skip_or_excuse(&lines);
         }
-        for command in *runs {
-            let command = if full {
-                command.replace("cargo test --locked", "cargo test --locked --no-fail-fast")
-            } else {
-                command.to_string()
-            };
-            assert_ci_lines(&lines, &[&format!("run: {command}")]);
-            let (_, body) = jobs(workflow)
-                .into_iter()
-                .find(|(found, _)| found == key)
-                .expect("the command's job");
-            assert!(
-                body.lines()
-                    .any(|line| line == format!("        run: {command}")),
-                "a required command must be an actual run key"
-            );
-        }
+        assert_matrix_step_values(workflow, key, runs, full);
     }
     assert!(
         !ci_job(workflow, "build")
@@ -1720,6 +1801,24 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
             1,
         ),
         workflow.replace("LANE_FEATURES: induced-failure", "LANE_FEATURES: missing"),
+        workflow.replace(
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace\n",
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace\n          || true\n",
+        ),
+        workflow.replace(
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace\n",
+            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --no-fail-fast --workspace\n          --lib\n",
+        ),
+        workflow.replace(
+            "      - name: Test\n",
+            "      - name: Extra compiler setting\n        if: ${{ !cancelled() }}\n        run: echo CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false >> \"$GITHUB_ENV\"\n      - name: Test\n",
+        ),
+        workflow.replace("          cargo --version\n", "          cargo --version\n          echo RUSTFLAGS=changed >> \"$GITHUB_ENV\"\n"),
+        workflow.replace("args: -color", "args: -version"),
+        workflow.replace(
+            "        run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"\n",
+            "        run: python3 .github/scripts/regression-identity.py \"$RUNNER_TEMP/regression-identity.json\"\n          || true\n",
+        ),
         workflow.replace(
             "  NORN_REGRESSION_SHA:",
             "  CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'false'\n  NORN_REGRESSION_SHA:",
