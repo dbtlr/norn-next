@@ -332,11 +332,11 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     // The stored document each judged link named before the plan, as the
     // one reading of a link resolved it: what a moved document's own
     // relative link named ([`Cascade::own_relative_links`]).
-    let mut named_before: BTreeMap<EntryKey, String> = BTreeMap::new();
+    let mut named_before: BTreeMap<EntryKey, DocumentPath> = BTreeMap::new();
     let mut ambiguous_before = BTreeSet::new();
     index.changes(&overlay, &probed, &mut |change| {
         if let Resolves::One { path } = &change.before {
-            named_before.insert(change_key(&change), path.as_str().to_string());
+            named_before.insert(change_key(&change), path.clone());
         }
         if matches!(change.before, Resolves::Several {}) {
             ambiguous_before.insert(change_key(&change));
@@ -763,7 +763,7 @@ impl<'a> Cascade<'a> {
     fn own_relative_links<I: LinkIndex + ?Sized>(
         &self,
         targets: &[Target<'_>],
-        named_before: &BTreeMap<EntryKey, String>,
+        named_before: &BTreeMap<EntryKey, DocumentPath>,
         ambiguous_before: &BTreeSet<EntryKey>,
         overlay: &norn_store::PathOverlay,
         index: &I,
@@ -808,12 +808,12 @@ impl<'a> Cascade<'a> {
                 let named = match named_before.get(&entry(landed, link)) {
                     Some(stored) => stored.clone(),
                     None => match norn_store::spelled_path(link, &source) {
-                        Some(spelled) => spelled,
+                        Some(spelled) => DocumentPath::new(spelled)
+                            .expect("a spelled path is a stored document path"),
                         None => continue,
                     },
                 };
-                let named = &named;
-                let destination = self.final_document(&holder, link, Named::One(named));
+                let destination = self.final_document(&holder, link, Named::One(&named));
                 if destination
                     .as_ref()
                     .is_some_and(|destination| matches!(destination.by, Decider::Authored(_)))
@@ -823,7 +823,7 @@ impl<'a> Cascade<'a> {
                 let named = destination
                     .and_then(|destination| destination.to)
                     .map(|(_, at)| at.as_str().to_string())
-                    .unwrap_or_else(|| named.clone());
+                    .unwrap_or_else(|| named.as_str().to_string());
                 // A spelling that still reaches the file from where the
                 // document lands is kept, however short another would be.
                 let reaches = |path: &String| {

@@ -110,7 +110,6 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
@@ -498,10 +497,10 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     // The forecast must retain anchor-only text writes before the index drops
     // unchanged address keys. Cascade probes keep only address authorship.
     for probe in &mut probed {
-        probe.written |= normalizer
-            .normalize(Path::new(probe.after_holder.as_str()))
-            .ok()
-            .is_some_and(|holder| written.holds_anchor(&holder, &probe.link));
+        probe.written |= written.holds_anchor(
+            &stored_identity(normalizer, &probe.after_holder),
+            &probe.link,
+        );
     }
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
     let retargeted = retarget_namings(lineage, &overlay, index)?;
@@ -518,17 +517,13 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     // naming it, or a wikilink rewrite's `old` names: one an ambiguous link
     // could name is a document a cascade would follow, were it known which
     // the link names.
-    let followed = |path: &str| {
-        normalizer
-            .normalize(Path::new(path))
-            .ok()
-            .is_some_and(|file| {
-                lineage.carried_to(&file).is_some()
-                    || named_by_old.contains(&file)
-                    || lineage
-                        .removed_by(&file)
-                        .is_some_and(|removal| removal.rewrite_to().is_some())
-            })
+    let followed = |path: &norn_store::DocumentPath| {
+        let file = stored_identity(normalizer, path);
+        lineage.carried_to(&file).is_some()
+            || named_by_old.contains(&file)
+            || lineage
+                .removed_by(&file)
+                .is_some_and(|removal| removal.rewrite_to().is_some())
     };
 
     let kept = left_as_written(skipped, kept);
@@ -554,10 +549,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // under a key a rewrite writes reads as written, so one a cascade
         // left as written there is known by its key alone.
         let address_written = change.written
-            && normalizer
-                .normalize(Path::new(change.holder.as_str()))
-                .ok()
-                .is_some_and(|holder| written.holds(&holder, &change.link));
+            && written.holds(&stored_identity(normalizer, &change.holder), &change.link);
         let unwritten = !address_written || kept.contains(&entry);
         // A backlink of a document a delete removes, a link left behind by
         // a cascade — a move's, a delete's rewriting the links naming its
@@ -624,14 +616,12 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         let names_another = unwritten
             && !fulfilled
             && names_another(&change.before, &change.after, lineage, normalizer);
-        let holder_moved = normalizer
-            .normalize(Path::new(change.holder.as_str()))
-            .ok()
-            .is_some_and(|holder| {
-                lineage
-                    .source(&holder)
-                    .is_some_and(|drawn| drawn.from != holder)
-            });
+        let holder_moved = {
+            let holder = stored_identity(normalizer, &change.holder);
+            lineage
+                .source(&holder)
+                .is_some_and(|drawn| drawn.from != holder)
+        };
         let relative = matches!(
             LinkAddress::of(
                 wire_family(change.link.family),
@@ -1358,13 +1348,13 @@ impl AmongFollowed {
     fn any(
         &mut self,
         lists: &[Arc<[norn_store::DocumentPath]>],
-        followed: &impl Fn(&str) -> bool,
+        followed: &impl Fn(&norn_store::DocumentPath) -> bool,
     ) -> bool {
         let mut among = false;
         for list in lists {
             let at = Arc::as_ptr(list).cast::<norn_store::DocumentPath>() as usize;
             let (_, follows) = self.read.entry(at).or_insert_with(|| {
-                let follows = list.iter().any(|place| followed(place.as_str()));
+                let follows = list.iter().any(followed);
                 (Arc::clone(list), follows)
             });
             among |= *follows;
@@ -1377,7 +1367,7 @@ impl AmongFollowed {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Named<'a> {
     /// Exactly the file at this path.
-    One(&'a str),
+    One(&'a DocumentPath),
     /// No document, the link broken as link health judges it; it could name
     /// a document standing at each of these places the plan reaches
     /// ([`LinkChange::before_targets`]).
@@ -1390,7 +1380,7 @@ impl<'a> Named<'a> {
     /// What `change`'s link named before the plan.
     pub(crate) fn of(change: &'a LinkChange) -> Self {
         match &change.before {
-            Resolves::One { path } => Named::One(path.as_str()),
+            Resolves::One { path } => Named::One(path),
             Resolves::None {}
                 if LinkHealth::of_address(change.address, 0) == LinkHealth::Broken =>
             {
@@ -1460,9 +1450,8 @@ pub(crate) fn selecting<'l>(
     match named {
         Named::One(path) => {
             crate::evidence::count_rewrite_selection_step();
-            if let Ok(file) = normalizer.normalize(Path::new(path)) {
-                selected.extend(indexed.resolved.get(&file).into_iter().flatten().copied());
-            }
+            let file = identity_of(normalizer, path);
+            selected.extend(indexed.resolved.get(&file).into_iter().flatten().copied());
         }
         Named::Broken(could) => {
             // Lists are shared by every link under a key in one judgment.
@@ -1475,10 +1464,9 @@ pub(crate) fn selecting<'l>(
                     let mut matches = BTreeMap::new();
                     for place in list.iter() {
                         crate::evidence::count_rewrite_selection_step();
-                        if let Ok(file) = normalizer.normalize(Path::new(place.as_str())) {
-                            for retarget in indexed.broken.get(&file).into_iter().flatten() {
-                                matches.insert(retarget.position, *retarget);
-                            }
+                        let file = stored_identity(normalizer, place);
+                        for retarget in indexed.broken.get(&file).into_iter().flatten() {
+                            matches.insert(retarget.position, *retarget);
                         }
                     }
                     (Arc::clone(list), matches.into_values().collect::<Vec<_>>())
@@ -1536,9 +1524,7 @@ impl<'l> Retargets<'l> {
                 ),
                 _ => continue,
             };
-            if let Some(file) =
-                place.and_then(|path| normalizer.normalize(Path::new(path.as_str())).ok())
-            {
+            if let Some(file) = place.map(|path| stored_identity(normalizer, &path)) {
                 keys.entry(file).or_default().push(retarget);
             }
         }
@@ -1568,11 +1554,8 @@ pub(crate) fn decider<'l>(
     indexed: &Retargets<'l>,
     normalizer: &PathNormalizer,
 ) -> Option<Decider<'l>> {
-    let held = normalizer.normalize(Path::new(holder.as_str())).ok();
-    if let Some(relink) = held
-        .as_ref()
-        .and_then(|held| lineage.relink(held, wire_family(link.family), &address(link)))
-    {
+    let held = stored_identity(normalizer, holder);
+    if let Some(relink) = lineage.relink(&held, wire_family(link.family), &address(link)) {
         return Some(Decider::Authored(relink));
     }
     if let Some(&first) = selecting(link, named, indexed, normalizer).first() {
@@ -1581,7 +1564,7 @@ pub(crate) fn decider<'l>(
     let Named::One(path) = named else {
         return None;
     };
-    let file = normalizer.normalize(Path::new(path)).ok()?;
+    let file = identity_of(normalizer, path);
     if let Some(removal) = lineage.removed_by(&file) {
         return Some(Decider::Removal(removal));
     }
@@ -1945,6 +1928,11 @@ pub(crate) fn stored_path(path: &DocumentPath) -> norn_store::DocumentPath {
 /// A stored path as the wire names it.
 fn wire_path(path: &norn_store::DocumentPath) -> DocumentPath {
     DocumentPath::new(path.as_str()).expect("a stored document path is a wire document path")
+}
+
+/// The identity of a stored path under `normalizer`: infallible, as a wire path's.
+fn stored_identity(normalizer: &PathNormalizer, path: &norn_store::DocumentPath) -> NormalizedPath {
+    identity_of(normalizer, &wire_path(path))
 }
 
 pub(crate) fn wire_family(family: norn_store::LinkFamily) -> LinkFamily {
@@ -2376,8 +2364,12 @@ mod tests {
                 let link = crate::derivation::document_links(b"[[old]]").remove(0);
                 for at in 0..size {
                     let name = format!("old{at}.md");
-                    let selected =
-                        super::selecting(&link, super::Named::One(&name), &indexed, &normalizer);
+                    let selected = super::selecting(
+                        &link,
+                        super::Named::One(&path(&name)),
+                        &indexed,
+                        &normalizer,
+                    );
                     assert_eq!(
                         selected
                             .iter()
@@ -2612,7 +2604,12 @@ mod tests {
             .collect();
         let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
         let link = crate::derivation::document_links(b"[[a]]").remove(0);
-        let selected = super::selecting(&link, super::Named::One("x/a.md"), &indexed, &normalizer);
+        let selected = super::selecting(
+            &link,
+            super::Named::One(&path("x/a.md")),
+            &indexed,
+            &normalizer,
+        );
         assert_eq!(
             selected
                 .iter()
@@ -2623,7 +2620,7 @@ mod tests {
         let by = super::decider(
             &super::stored_path(&path("h.md")),
             &link,
-            super::Named::One("x/a.md"),
+            super::Named::One(&path("x/a.md")),
             &lineage,
             &indexed,
             &normalizer,
@@ -2669,7 +2666,12 @@ mod tests {
         .collect();
         let indexed = super::Retargets::of(&lineage, &namings, &normalizer);
         let link = crate::derivation::document_links(b"[[a]]").remove(0);
-        let selected = super::selecting(&link, super::Named::One("a.md"), &indexed, &normalizer);
+        let selected = super::selecting(
+            &link,
+            super::Named::One(&path("a.md")),
+            &indexed,
+            &normalizer,
+        );
         assert_eq!(
             selected
                 .iter()
@@ -2680,7 +2682,7 @@ mod tests {
         let by = super::decider(
             &super::stored_path(&path("h.md")),
             &link,
-            super::Named::One("a.md"),
+            super::Named::One(&path("a.md")),
             &lineage,
             &indexed,
             &normalizer,
@@ -2712,7 +2714,7 @@ mod tests {
         let by = super::decider(
             &holder,
             &link,
-            super::Named::One("old.md"),
+            super::Named::One(&path("old.md")),
             &lineage,
             &Default::default(),
             &normalizer,
@@ -2869,9 +2871,9 @@ mod tests {
         };
         let (t, u) = (list("t"), list("u"));
         let read = std::cell::Cell::new(0usize);
-        let followed = |place: &str| {
+        let followed = |place: &norn_store::DocumentPath| {
             read.set(read.get() + 1);
-            place == "a/09/u.md"
+            place.as_str() == "a/09/u.md"
         };
         let mut among = AmongFollowed::default();
 
