@@ -347,7 +347,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthHeads => database.emitted_plan(
                 &sql,
                 params_from_iter(health::heads_parameters(
-                    &[(EXPLAINED_CLASS_KEY, 1)],
+                    &[(EXPLAINED_CLASS_KEY, 1, true)],
                     &[EXPLAINED_PAGE_CURSOR_LEAF],
                     CANDIDATE_HEAD,
                 )?),
@@ -355,7 +355,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthTotals => database.emitted_plan(
                 &sql,
                 params_from_iter(health::totals_parameters(
-                    &[(EXPLAINED_CLASS_KEY, 1)],
+                    &[(EXPLAINED_CLASS_KEY, 1, true)],
                     &[EXPLAINED_PAGE_CURSOR_LEAF],
                 )?),
             ),

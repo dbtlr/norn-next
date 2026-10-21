@@ -1209,10 +1209,14 @@ fn class_reads_seek_the_same_suffix_comparison_index_on_every_root() {
             .iter()
             .filter(|row| row.constraint() == Some(exact.as_str()))
             .filter_map(|row| {
-                read.rows()
-                    .iter()
-                    .find(|parent| parent.id == row.parent)
-                    .map(|parent| parent.detail.as_str())
+                let mut parent = row.parent;
+                while let Some(ancestor) = read.rows().iter().find(|row| row.id == parent) {
+                    if ancestor.detail.starts_with("SCALAR SUBQUERY") {
+                        return Some(ancestor.detail.as_str());
+                    }
+                    parent = ancestor.parent;
+                }
+                None
             })
             .collect();
         assert!(
@@ -4384,6 +4388,8 @@ struct WriteBar {
 fn write_bar(statement: WriteStatement) -> WriteBar {
     use WriteStatement::*;
     let seeks: &'static [(&'static str, Access<'static>, &'static str)] = match statement {
+        DeleteVaultFile => &[("vault_files", Access::Index("vault_files_path"), "(path=?)")],
+        UpsertVaultFile => &[],
         DiscardLinks => &[(
             "links",
             Access::Index("links_document_ordinal"),

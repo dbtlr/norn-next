@@ -391,24 +391,33 @@ pub(crate) fn heads_sql(key: SuffixKey) -> String {
         "json_extract(j.value, '$[0]')",
         "json_extract(j.value, '$[1]')",
         Some("?3"),
+        "json_extract(j.value, '$[2]')",
     );
     let path = resolve::link_key_path("dp", key, "j.value");
-    format!(
-        "SELECT {CLASS_ARM}, j.key, dc.id, dc.path, dc.{rung}
-         FROM json_each(?1) AS j CROSS JOIN documents AS dc
+    resolve::CANDIDATE_TABLES
+        .map(|table| {
+            resolve::candidate_aliases(
+                table,
+                format!(
+                    "SELECT {CLASS_ARM}, j.key, dc.id, dc.path, dc.{rung}
+         FROM json_each(?1) AS j CROSS JOIN {table} AS dc
          WHERE dc.id IN (SELECT id FROM ({class}))
          UNION ALL
          SELECT {PATH_ARM}, j.key, dc.id, dc.path, j.value
-         FROM json_each(?2) AS j CROSS JOIN documents AS dc
-         WHERE dc.id IN (SELECT dp.id FROM documents AS dp WHERE {path}
+         FROM json_each(?2) AS j CROSS JOIN {table} AS dc
+         WHERE dc.id IN (SELECT dp.id FROM {table} AS dp WHERE {path}
                          ORDER BY dp.path LIMIT ?3)"
-    )
+                ),
+                &["dc", "dp"],
+            )
+        })
+        .join(" UNION ALL ")
 }
 
 /// The values [`heads_sql`] binds: the suffix keys beside their segment
 /// counts, the path keys, and the head's bound.
 pub(crate) fn heads_parameters(
-    classes: &[(&str, u64)],
+    classes: &[(&str, u64, bool)],
     paths: &[&str],
     head: usize,
 ) -> Result<Vec<Value>, StoreError> {
@@ -419,7 +428,7 @@ pub(crate) fn heads_parameters(
     ])
 }
 
-/// [`crate::ExplainedStatement::LinkHealthTotals`]: how many documents each
+/// [`crate::ExplainedStatement::LinkHealthTotals`]: how many candidates each
 /// distinct key names, and how many of them stand at the key's exact path,
 /// each row the arm, the key's index in its list, the count and the exact
 /// count, over the two arms [`heads_sql`] reads. The class arm sums the
@@ -436,41 +445,53 @@ pub(crate) fn totals_sql(key: SuffixKey) -> String {
         key,
         "json_extract(j.value, '$[0]')",
         "json_extract(j.value, '$[1]')",
+        "json_extract(j.value, '$[2]')",
     );
     let exact = resolve::exact_count(
         key,
         "json_extract(j.value, '$[0]')",
         "json_extract(j.value, '$[1]')",
+        "json_extract(j.value, '$[2]')",
     );
     let path = resolve::link_key_path("dp", key, "j.value");
+    let paths = resolve::CANDIDATE_TABLES
+        .map(|table| {
+            resolve::candidate_aliases(
+                table,
+                format!("(SELECT COUNT(*) FROM {table} AS dp WHERE {path})"),
+                &["dp"],
+            )
+        })
+        .join(" + ");
     format!(
         "SELECT {CLASS_ARM}, j.key, ({total}), ({exact}) FROM json_each(?1) AS j
         UNION ALL
-        SELECT {PATH_ARM}, j.key, (SELECT COUNT(*) FROM documents AS dp WHERE {path}), 0
+        SELECT {PATH_ARM}, j.key, ({paths}), 0
         FROM json_each(?2) AS j"
     )
 }
 
 /// The suffix keys beside their segment counts, and the path keys.
 pub(crate) fn totals_parameters(
-    classes: &[(&str, u64)],
+    classes: &[(&str, u64, bool)],
     paths: &[&str],
 ) -> Result<Vec<Value>, StoreError> {
     Ok(vec![class_list(classes)?, path_list(paths)?])
 }
 
 /// The suffix keys beside their segment counts, as the list of `[key,
-/// segments]` pairs the class arm of [`heads_sql`] and [`totals_sql`] walks.
-fn class_list(classes: &[(&str, u64)]) -> Result<Value, StoreError> {
+/// segments, files]` entries the class arm of [`heads_sql`] and [`totals_sql`] walks.
+fn class_list(classes: &[(&str, u64, bool)]) -> Result<Value, StoreError> {
     canonical_json(&FrontmatterValue::Sequence(
         classes
             .iter()
-            .map(|(key, segments)| {
+            .map(|(key, segments, files)| {
                 FrontmatterValue::Sequence(vec![
                     FrontmatterValue::String((*key).to_string()),
                     FrontmatterValue::Int(
                         i64::try_from(*segments).expect("a segment count fits i64"),
                     ),
+                    FrontmatterValue::Bool(*files),
                 ])
             })
             .collect(),

@@ -70,6 +70,10 @@ macro_rules! registry {
 }
 
 registry! {
+    /// A name-only vault file, with a negative identity disjoint from documents.
+    UpsertVaultFile,
+    /// A vault file dies without a tombstone.
+    DeleteVaultFile,
     /// The document row's upsert: updated on a path conflict, so the row keeps
     /// its identity across a re-derivation.
     UpsertDocument,
@@ -152,6 +156,15 @@ impl WriteStatement {
     /// plan seam explains.
     pub(crate) fn sql(self) -> &'static str {
         match self {
+            Self::UpsertVaultFile => {
+                "INSERT INTO vault_files
+                (id, path, suffix_key, path_key, admitting_segments, generation)
+                VALUES ((SELECT coalesce(min(id), 0) - 1 FROM vault_files), ?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(path) DO UPDATE SET
+                    admitting_segments = excluded.admitting_segments,
+                    generation = excluded.generation"
+            }
+            Self::DeleteVaultFile => "DELETE FROM vault_files WHERE path = ?1",
             Self::UpsertDocument => {
                 "INSERT INTO documents (
                      path, suffix_key, path_key, admitting_segments, content_hash,

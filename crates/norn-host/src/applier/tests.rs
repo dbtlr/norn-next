@@ -2174,12 +2174,9 @@ fn a_move_respells_the_path_links_it_would_break_and_applies() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **The forecast advises as link health judges.** `[[v1.2]]` names an
-/// attachment by its extension, and link health judges such a link only
-/// where it resolves to a document, so a delete that leaves it resolving to
-/// none records the entry and advises nothing.
+/// A dotted target with no remaining document or vault file is left broken.
 #[test]
-fn a_delete_leaving_an_attachment_address_unresolved_records_it_and_advises_nothing() {
+fn a_delete_leaving_a_dotted_address_unresolved_advises_left_broken() {
     let mut fixture = Fixture::new(&[("v1.2.md", "version\n"), ("b.md", "[[v1.2]]\n")]);
     let resolution = fixture.resolution(vec![breaking("v1.2.md")]);
     assert_eq!(
@@ -2191,7 +2188,12 @@ fn a_delete_leaving_an_attachment_address_unresolved_records_it_and_advises_noth
             norn_wire::Resolves::none(),
         )]
     );
-    assert_eq!(resolution.forecast.links, vec![]);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(
+            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "v1.2")
+        )]
+    );
     applied(fixture.apply(resolution.plan));
 }
 

@@ -3267,16 +3267,14 @@ mod tests {
         ));
     }
 
-    /// **A link to an attachment is advised on as link health judges it**:
-    /// resolving to no document it is not judged at all, so going there from
-    /// one document leaves nothing broken, while going from none to several
-    /// makes it ambiguous.
+    /// A dotted address is left broken when its last candidate is removed,
+    /// and made ambiguous when several candidates replace an absence.
     #[test]
-    fn an_attachment_address_resolving_to_nothing_is_never_left_broken() {
+    fn a_vault_address_resolving_to_nothing_is_left_broken() {
         let judged = |before: Resolves, after: Resolves| {
             Judged {
                 key: key("b.md", "v1.2"),
-                address: LinkAddressKind::Attachment,
+                address: LinkAddressKind::Vault,
                 before,
                 after,
                 written: false,
@@ -3292,9 +3290,12 @@ mod tests {
         };
         assert_eq!(
             judged(Resolves::one(path("v1.2.md")), Resolves::none()),
-            None
+            Some(LinkAdvisory::left_broken(key("b.md", "v1.2")))
         );
-        assert_eq!(judged(Resolves::several(), Resolves::none()), None);
+        assert_eq!(
+            judged(Resolves::several(), Resolves::none()),
+            Some(LinkAdvisory::left_broken(key("b.md", "v1.2")))
+        );
         assert_eq!(
             judged(Resolves::none(), Resolves::several()),
             Some(LinkAdvisory::made_ambiguous(key("b.md", "v1.2")))
@@ -3312,7 +3313,7 @@ mod tests {
         let judged = |before: Resolves, after: Resolves, written: bool, members_moved: bool| {
             Judged {
                 key: key("b.md", "a"),
-                address: LinkAddressKind::Document,
+                address: LinkAddressKind::Vault,
                 before,
                 after,
                 written,

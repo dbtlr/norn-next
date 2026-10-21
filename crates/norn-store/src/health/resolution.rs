@@ -9,7 +9,8 @@
 //! read from the store as it stands. So the two vaults a link is resolved
 //! against are the store's documents less every target, with the targets
 //! present before added back for the first and the targets present after for
-//! the second. **Every target is overlaid both ways**, whatever the store
+//! the second. Vault files remain stored candidates on both sides.
+//! **Every target is overlaid both ways**, whatever the store
 //! holds at its path: a re-send whose landed targets the store has already
 //! taken in reads the same two vaults as the first send, so a plan's own
 //! progress never changes what it records (ADR 0037). An overlay target replaces
@@ -757,7 +758,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         if held
             .keys
             .iter()
-            .any(|(text, _)| text.as_str() < key && self.sought.contains(text))
+            .any(|(text, _, _)| text.as_str() < key && self.sought.contains(text))
         {
             return Ok(None);
         }
@@ -779,11 +780,12 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// `keys` in the store's key space, each once.
     fn in_space(&self, keys: Vec<link::LinkKey>) -> Vec<Key> {
+        let files = keys.len() == 1 || keys.first().is_none_or(|key| key.segments.is_none());
         let mut keys: Vec<Key> = keys
             .into_iter()
             .map(|key| {
                 let text = key.key;
-                (text, key.segments)
+                (text, key.segments, files)
             })
             .collect();
         keys.sort();
@@ -968,7 +970,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// Whether one of `keys` is sought: it could name a target the plan
     /// changes or a document it reaches.
     fn is_sought(&self, keys: &[Key]) -> bool {
-        keys.iter().any(|(text, _)| self.sought.contains(text))
+        keys.iter().any(|(text, _, _)| self.sought.contains(text))
     }
 
     /// Resolve every key `chunk` holds that is not yet resolved, hand each of
@@ -1023,7 +1025,7 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// The targets `key` names, the ambiguity-ignore set letting each in.
     fn members(&self, key: &Key) -> impl Iterator<Item = &Overlaid> {
-        let (text, segments) = key;
+        let (text, segments, _) = key;
         self.naming
             .get(text)
             .into_iter()
@@ -1043,7 +1045,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// The documents the plan reaches that `key` could name, the
     /// ambiguity-ignore set letting each in.
     fn reached(&self, key: &Key) -> impl Iterator<Item = &DocumentPath> {
-        let (text, segments) = key;
+        let (text, segments, _) = key;
         self.reaching
             .get(text)
             .into_iter()
@@ -1296,23 +1298,23 @@ fn in_key(key: &Key, rung: &str, exact: bool) -> bool {
 /// beside their segment counts, the path keys, and each arm's keys in the
 /// order its list names them.
 struct Arms<'k> {
-    classes: Vec<(&'k str, u64)>,
+    classes: Vec<(&'k str, u64, bool)>,
     paths: Vec<&'k str>,
     keys: [Vec<&'k Key>; 2],
 }
 
 /// `keys` split into the two arms the key statements walk.
 fn arms<'k>(keys: &[&'k Key]) -> Arms<'k> {
-    let mut classes: Vec<(&str, u64)> = Vec::new();
+    let mut classes: Vec<(&str, u64, bool)> = Vec::new();
     let mut paths: Vec<&str> = Vec::new();
     let mut arms: [Vec<&Key>; 2] = [Vec::new(), Vec::new()];
     for key in keys {
         match key {
-            (text, Some(segments)) => {
-                classes.push((text, *segments));
+            (text, Some(segments), files) => {
+                classes.push((text, *segments, *files));
                 arms[0].push(key);
             }
-            (text, None) => {
+            (text, None, _) => {
                 paths.push(text);
                 arms[1].push(key);
             }

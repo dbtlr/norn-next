@@ -63,8 +63,8 @@ use norn_wire::{FindingKind, LinkAddressKind, ValidateParams, ValidateReport, Va
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(16),
-    "a4fb7ea7d5747015709d0c405c9c56c709e29fb564c37dd3623c0173292c6281",
+    DerivationVersion::new(17),
+    "6dd2e19b78f4fb329facff200f3dc8b743050f6c0f5865f806ebdb1b90870eed",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -1020,8 +1020,8 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             glossary,
             Some("vault"),
             "v1.2",
-            &["v1.2.md"],
-            "a rooted non-Markdown leaf names only its complete Markdown stem",
+            &["v1.2", "v1.2.md"],
+            "a rooted non-Markdown leaf names its file and complete Markdown stem",
         ),
         (
             glossary,
@@ -1199,13 +1199,9 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         .collect();
     assert_eq!(
         kinds,
-        [
-            LinkAddressKind::Attachment,
-            LinkAddressKind::Document,
-            LinkAddressKind::Elsewhere
-        ]
-        .map(LinkAddressKind::as_str)
-        .into(),
+        [LinkAddressKind::Vault, LinkAddressKind::Elsewhere]
+            .map(LinkAddressKind::as_str)
+            .into(),
         "the glossary's links do not exercise every address kind"
     );
     assert!(

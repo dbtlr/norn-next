@@ -5,15 +5,15 @@
 //! # The rules are the ones every surface reads a link's health by
 //!
 //! A link's health is [`LinkHealth::of_address`] over the address kind stored
-//! beside it and how many documents its keys name now — the same judgment a
+//! beside it and how many documents or vault files its keys name now — the same judgment a
 //! links column reads through [`LinkHealth::of_link`]. What a link names is
 //! read through the keys the link index holds it under
 //! ([`crate::link::link_keys`]), each class less the places the vault's
 //! ambiguity-ignore globs keep out of it, exactly as a read resolves a link.
 //!
-//! - A link addressed elsewhere, and an attachment resolving to no document,
+//! - A link addressed elsewhere,
 //!   raise nothing.
-//! - An eligible link resolving to no document is broken, with an empty head.
+//! - A vault address resolving to no document or vault file is broken, with an empty head.
 //! - A link resolving to two or more is ambiguous: a head of at most
 //!   [`CANDIDATE_HEAD`] of them in the resolution ladder's order, each named by
 //!   its minimal disambiguating suffix, beside the exact total.
@@ -170,7 +170,9 @@ pub enum LinkSelection<'a> {
 
 /// One key a link is held under, under the comparison key, beside its segment
 /// count, which a suffix key carries and a path key does not.
-type Key = (String, Option<u64>);
+// A suffix address has two keys exactly when it spells optional `.md`.
+// That spelling names documents alone; a file is named with its own extension.
+type Key = (String, Option<u64>, bool);
 
 /// One link under judgment: where it is held, its row, and its keys.
 struct Held {
@@ -184,7 +186,7 @@ struct Held {
     keys: Vec<Key>,
 }
 
-/// One document a key names: its row id, its path, and its rung on the
+/// One candidate a key names: its row id, its path, and its rung on the
 /// resolution ladder.
 #[derive(Clone, Debug)]
 struct Named {
@@ -649,7 +651,7 @@ pub(crate) fn redecide(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != generation
-                        && !held.keys.iter().any(|(text, segments)| {
+                        && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_some()
                                 && class_of(text).is_some_and(|other| {
                                     other < class.as_str() && classes_hold(classes, other)
@@ -668,7 +670,7 @@ pub(crate) fn redecide(
             while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != generation
-                        && !held.keys.iter().any(|(text, segments)| {
+                        && !held.keys.iter().any(|(text, segments, _)| {
                             segments.is_none()
                                 && text.as_str() < path.as_str()
                                 && PathKey::new(text).is_ok_and(|other| paths.contains(&other))
@@ -756,7 +758,7 @@ fn occupied_keys(
 /// Whether `held` holds a suffix key in one of `classes`: a link the class arm
 /// reaches by its own key.
 fn reached_by_a_class(held: &Held, classes: &BTreeSet<ClassKey>) -> bool {
-    held.keys.iter().any(|(text, segments)| {
+    held.keys.iter().any(|(text, segments, _)| {
         segments.is_some() && class_of(text).is_some_and(|class| classes_hold(classes, class))
     })
 }
@@ -923,7 +925,7 @@ fn read_links(
                     id,
                     ordinal,
                     link,
-                    key.map(|key| (key, segments)),
+                    key.map(|key| (key, segments, true)),
                     after,
                 ))
             }))
@@ -948,6 +950,13 @@ fn read_links(
         });
         let keys = &mut links[at].keys;
         keys.extend(key.filter(|key| !keys.contains(key)));
+    }
+    for held in &mut links {
+        if held.keys.len() > 1 && held.keys[0].1.is_some() {
+            for key in &mut held.keys {
+                key.2 = false;
+            }
+        }
     }
     links.sort_by(|left, right| (&left.holder, left.ordinal).cmp(&(&right.holder, right.ordinal)));
     Ok((links, driven))
@@ -974,15 +983,15 @@ fn resolve_keys(
     // The keys in the order the two arms list them, each arm's list the
     // statements walk.
     let mut listed: [Vec<&Key>; 2] = [Vec::new(), Vec::new()];
-    let mut classes: Vec<(&str, u64)> = Vec::new();
+    let mut classes: Vec<(&str, u64, bool)> = Vec::new();
     let mut paths: Vec<&str> = Vec::new();
     for listed_key in unresolved {
         match listed_key {
-            (text, Some(segments)) => {
-                classes.push((text, *segments));
+            (text, Some(segments), files) => {
+                classes.push((text, *segments, *files));
                 listed[0].push(listed_key);
             }
-            (text, None) => {
+            (text, None, _) => {
                 paths.push(text);
                 listed[1].push(listed_key);
             }
@@ -1017,6 +1026,14 @@ fn resolve_keys(
     for (arm, index, named) in heads {
         summary(&mut read, arm, index)?.head.push(named);
     }
+    // Path heads are bounded per table before merging; the shared ladder
+    // keeps the union bounded without letting either kind crowd out the other.
+    for heads in &mut read {
+        for summary in heads {
+            summary.head.sort_by(Named::ladder);
+            summary.head.truncate(CANDIDATE_HEAD);
+        }
+    }
 
     // A head cut below its bound is the whole of what its key names; only a
     // filled head is counted, and only where no earlier resolution counted it.
@@ -1027,12 +1044,12 @@ fn resolve_keys(
             summary.total = summary.head.len() as u64;
             let key = listed[arm][index];
             summary.exact = match key {
-                (text, Some(_)) => summary
+                (text, Some(_), _) => summary
                     .head
                     .iter()
                     .filter(|named| named.rung == *text)
                     .count() as u64,
-                (_, None) => 0,
+                (_, None, _) => 0,
             };
             if summary.head.len() < CANDIDATE_HEAD {
                 continue;
@@ -1044,7 +1061,7 @@ fn resolve_keys(
         }
     }
     if filled.iter().any(|filled| !filled.is_empty()) {
-        let classes: Vec<(&str, u64)> = filled[0].iter().map(|at| classes[*at]).collect();
+        let classes: Vec<(&str, u64, bool)> = filled[0].iter().map(|at| classes[*at]).collect();
         let paths: Vec<&str> = filled[1].iter().map(|at| paths[*at]).collect();
         let totals = Request::read_all_on(
             connection,
@@ -1113,8 +1130,8 @@ fn verdict(held: &Held, summaries: &KeySummaries) -> Result<Option<Verdict>, Sto
     let exact_keys: Vec<&str> = held
         .keys
         .iter()
-        .filter(|(_, segments)| segments.is_some())
-        .map(|(text, _)| text.as_str())
+        .filter(|(_, segments, _)| segments.is_some())
+        .map(|(text, _, _)| text.as_str())
         .collect();
     let mut head: Vec<Named> = resolve::exact_members(
         &exact_keys,
@@ -1150,7 +1167,7 @@ fn missing_anchors(
         .zip(verdicts)
         .enumerate()
         .filter_map(|(at, (held, verdict))| match verdict {
-            Some(Verdict::One(one)) if held.link.fact.anchor.is_some() => {
+            Some(Verdict::One(one)) if one.id > 0 && held.link.fact.anchor.is_some() => {
                 Some((at, (held.id, one.id)))
             }
             _ => None,
@@ -1235,7 +1252,7 @@ fn finding(
 ) -> Result<FindingFacts, StoreError> {
     let mut class_keys = BTreeSet::new();
     let mut path_keys = BTreeSet::new();
-    for (key, segments) in &held.keys {
+    for (key, segments, _) in &held.keys {
         match segments {
             Some(_) => {
                 class_keys

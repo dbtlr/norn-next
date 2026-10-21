@@ -17,8 +17,8 @@
 //! alike in both families. [`Addressing`] maps it onto what the store reads.
 //! A link addressed elsewhere is held under no key. An unprefixed target is a
 //! suffix address, read through the one resolver whatever its leaf carries: a
-//! target naming an attachment still resolves to a document carrying that
-//! name, and is judged by what it resolves to.
+//! target naming a vault file can also resolve to a document carrying that
+//! name, and is judged by their combined candidates.
 //!
 //! A path form is joined to where it is read from: a target whose first
 //! segment is `.` or `..` to the folder of the document holding the link, a
@@ -27,7 +27,7 @@
 //! root names nothing. The joined path names a document by the naming rule:
 //! with `.md` appended, and, where its leaf already ends in `.md`, as it
 //! stands — so `./Notes` names `Notes.md`, `./Notes.md` names `Notes.md.md`
-//! and `Notes.md`, and `./v1.2` names only `v1.2.md`. An empty target names
+//! and `Notes.md`, and `./v1.2` names `v1.2.md` and the file `v1.2`. An empty target names
 //! the document holding the link.
 //!
 //! # The keys are what every read of a link seeks
@@ -183,7 +183,8 @@ pub(crate) fn keys_naming(document: &DocumentPath, key: SuffixKey) -> Vec<String
 /// The vault paths a path form names once read from the folder whose
 /// segments are `from` — the empty list being the vault root — by the naming
 /// rule: the joined path with `.md` appended and, where its leaf already
-/// ends in `.md` in any ASCII case, the joined path itself. None where the
+/// carries an extension, the joined path itself: a document or vault file.
+/// None where the
 /// path climbs above the root or names no document path, and none where its
 /// last segment is empty, `.` or `..`, which names a folder rather than a
 /// file.
@@ -196,7 +197,8 @@ fn path_names(from: Vec<String>, path: &str) -> Vec<String> {
         return Vec::new();
     };
     let leaf = path.rsplit(SEPARATOR).next().unwrap_or(&path);
-    let explicit = (markdown_stem(leaf) != leaf).then(|| path.clone());
+    let explicit = (markdown_stem(leaf) != leaf || leaf.rfind('.').is_some_and(|at| at > 0))
+        .then(|| path.clone());
     std::iter::once(format!("{path}.{DOCUMENT_EXTENSION}"))
         .chain(explicit)
         .filter(|path| DocumentPath::new(path).is_ok())
@@ -283,7 +285,7 @@ pub fn named_paths(link: &LinkFact, holder: &DocumentPath) -> Vec<String> {
 /// folder, or is no vault path.
 ///
 /// **What a moved document's own path link spelled.** A link that resolved
-/// to no document — an attachment's, or a broken one — is followed by the
+/// to no candidate is followed by the
 /// path it spells, so the planner respells it toward that same file.
 pub fn spelled_path(link: &LinkFact, holder: &DocumentPath) -> Option<String> {
     let (from, path) =
@@ -555,7 +557,7 @@ mod tests {
 
     /// **A `vault://` link is a path from the root in both families**, named
     /// by the one naming rule: `.md` appended and, where the leaf already
-    /// ends in `.md`, the path itself, with no other extension removed. A
+    /// carries an extension, the path itself, with no other extension removed. A
     /// wikilink's target is read as written and a Markdown destination's
     /// decoded; `.` and `..` fold, and a climb above the root or a folder
     /// leaf names nothing.
@@ -565,7 +567,7 @@ mod tests {
         for (family, target, keys) in [
             (Wikilink, "Notes", &["notes.md"][..]),
             (Wikilink, "Notes.md", &["notes.md.md", "notes.md"]),
-            (Wikilink, "v1.2", &["v1.2.md"]),
+            (Wikilink, "v1.2", &["v1.2.md", "v1.2"]),
             (Wikilink, "a.b/Notes", &["a.b/notes.md"]),
             (Wikilink, "my%20note", &["my%20note.md"]),
             (Wikilink, "Notes?x", &["notes?x.md"]),
@@ -635,7 +637,7 @@ mod tests {
     /// read from its document's folder and one opening with `/` from the
     /// vault root, split before it is decoded and its query cut off; it
     /// names the joined path with `.md` appended, and the joined path itself
-    /// where its leaf ends in `.md`. A climb above the root, a folder leaf
+    /// where its leaf carries an extension. A climb above the root, a folder leaf
     /// and a decoded separator name nothing.
     #[test]
     fn a_markdown_path_form_names_the_paths_it_joins_to() {
@@ -649,7 +651,7 @@ mod tests {
             ("./my%20note", &["a/b/my note.md"]),
             ("../x/my note", &["a/x/my note.md"]),
             ("../x/my%20note", &["a/x/my note.md"]),
-            ("./foo.png", &["a/b/foo.png.md"]),
+            ("./foo.png", &["a/b/foo.png.md", "a/b/foo.png"]),
             ("./sub/./c", &["a/b/sub/c.md"]),
             ("./q?x=1", &["a/b/q.md"]),
             ("./sub%2Fc.md", &[]),
@@ -840,7 +842,7 @@ mod tests {
         );
         assert_eq!(
             named_paths(&written(Wikilink, Some("vault"), "v1.2"), &holder),
-            ["v1.2.md"]
+            ["v1.2.md", "v1.2"]
         );
         assert_eq!(
             spelled_path(&written(Markdown, None, "../img.png"), &holder).as_deref(),

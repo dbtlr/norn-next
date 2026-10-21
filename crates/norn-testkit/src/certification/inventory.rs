@@ -376,6 +376,16 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "churn-vault-file-birth-and-death",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcher,
+        states: "a vault file's watcher birth and death re-judge its links, with each phase \
+                 equal to a build from zero over the same tree",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_vault_files_watcher_birth_and_death_equal_a_build_from_zero",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "churn-hub-class-change-and-rename",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

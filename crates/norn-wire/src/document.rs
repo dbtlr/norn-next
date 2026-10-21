@@ -33,8 +33,8 @@
 //! is ambiguous. **A link is judged by resolving it first**
 //! ([`LinkHealth::of_link`]): a link addressed elsewhere — a protocol other
 //! than `vault`, or a Markdown target opening with a URI scheme — is not judged
-//! and names no document, and one that resolves to no document is not judged
-//! where its target names an attachment. How a target reaches documents is
+//! and names no candidate. A vault address naming no candidate is broken,
+//! whatever extension its leaf carries. How a target reaches candidates is
 //! [`LinkAddress`], the one addressing selector. What the target resolved to
 //! crosses as a [`CandidateHead`] — the same bounded head of paths and total
 //! that a finding and the ambiguous-target refusal carry — so a short link a
@@ -79,7 +79,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::address::IllegalPath;
 use crate::finding_row::{CandidateHead, FindingRow};
 use crate::target::Anchor;
-use crate::vault_path::{PathProblem, leaf_extension};
+use crate::vault_path::PathProblem;
 
 /// What a document path is called in a refusal that names one.
 const DOCUMENT_PATH: &str = "document path";
@@ -540,33 +540,13 @@ impl<'a> LinkAddress<'a> {
         }
     }
 
-    /// Whether the address's last segment carries an extension other than
-    /// [`DOCUMENT_EXTENSION`], which names an attachment. An extension is what
-    /// follows the last dot inside the last segment: a dot leading the
-    /// segment starts a name rather than an extension, and a `.` or `..`
-    /// step names a folder rather than a file.
-    pub fn names_an_attachment(&self) -> bool {
-        let address = match self {
-            LinkAddress::Suffix(address)
-            | LinkAddress::RootedName(address)
-            | LinkAddress::Relative(address)
-            | LinkAddress::Rooted(address) => address.as_ref(),
-            LinkAddress::Unnameable(address) => address,
-            LinkAddress::Elsewhere | LinkAddress::HoldingDocument => return false,
-        };
-        let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
-        !matches!(leaf, "." | "..")
-            && leaf_extension(leaf).is_some_and(|extension| !is_document_extension(extension))
-    }
-
     /// How the address stands to judging the link: the one classification a
     /// link's health ([`LinkHealth::of_link`]) and a store's stored kind both
     /// read.
     pub fn kind(&self) -> LinkAddressKind {
         match self {
             LinkAddress::Elsewhere => LinkAddressKind::Elsewhere,
-            address if address.names_an_attachment() => LinkAddressKind::Attachment,
-            _ => LinkAddressKind::Document,
+            _ => LinkAddressKind::Vault,
         }
     }
 }
@@ -631,28 +611,20 @@ fn percent_decoded(text: &str) -> Option<String> {
 pub enum LinkAddressKind {
     /// The link addresses no document of the vault, so it is never judged.
     Elsewhere,
-    /// The link's target names an attachment, so it is judged only where it
-    /// resolves to a document.
-    Attachment,
-    /// The link's target can name only a document, so resolving to none
+    /// The link addresses the vault; resolving to no document or vault file
     /// breaks it.
-    Document,
+    Vault,
 }
 
 impl LinkAddressKind {
     /// Every kind, in declaration order.
-    pub const ALL: [LinkAddressKind; 3] = [
-        LinkAddressKind::Elsewhere,
-        LinkAddressKind::Attachment,
-        LinkAddressKind::Document,
-    ];
+    pub const ALL: [LinkAddressKind; 2] = [LinkAddressKind::Elsewhere, LinkAddressKind::Vault];
 
-    /// The kind as one word: `elsewhere`, `attachment` or `document`.
+    /// The kind as one word: `elsewhere` or `vault`.
     pub const fn as_str(self) -> &'static str {
         match self {
             LinkAddressKind::Elsewhere => "elsewhere",
-            LinkAddressKind::Attachment => "attachment",
-            LinkAddressKind::Document => "document",
+            LinkAddressKind::Vault => "vault",
         }
     }
 }
@@ -709,14 +681,13 @@ pub(crate) fn written_protocol(address: &str) -> Option<&str> {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LinkHealth {
-    /// The target resolves to exactly one document.
+    /// The target resolves to exactly one document or vault file.
     Healthy,
-    /// The target resolves to no document, and names no attachment.
+    /// The target resolves to no document or vault file.
     Broken,
-    /// The target resolves to more than one document.
+    /// The target resolves to more than one document or vault file.
     Ambiguous,
-    /// No resolution judges the link: it addresses no document of the vault,
-    /// or it resolves to none and its target names an attachment.
+    /// No resolution judges the link: it addresses elsewhere.
     NotJudged,
 }
 
@@ -726,9 +697,8 @@ impl LinkHealth {
     ///
     /// **A link is judged by resolving it first**, read through its address's
     /// kind ([`LinkAddress::kind`]). A link addressed elsewhere is not judged.
-    /// Any other link is healthy where it resolved to one document and
-    /// ambiguous where it resolved to more; one that resolved to none is not
-    /// judged where its target names an attachment, and broken otherwise. The
+    /// Any other link is healthy where it resolved to one document or vault
+    /// file, ambiguous where it resolved to more, and broken where none. The
     /// count is the head's total rather than the candidates it carries, so a
     /// head cut at its bound reports the health of the whole class.
     ///
@@ -744,10 +714,8 @@ impl LinkHealth {
     /// from the link as written.
     pub const fn of_address(kind: LinkAddressKind, targets: u64) -> Self {
         match (kind, targets) {
-            (LinkAddressKind::Elsewhere, _) | (LinkAddressKind::Attachment, 0) => {
-                LinkHealth::NotJudged
-            }
-            (LinkAddressKind::Document, 0) => LinkHealth::Broken,
+            (LinkAddressKind::Elsewhere, _) => LinkHealth::NotJudged,
+            (LinkAddressKind::Vault, 0) => LinkHealth::Broken,
             (_, 1) => LinkHealth::Healthy,
             _ => LinkHealth::Ambiguous,
         }
@@ -776,13 +744,8 @@ impl ElsewhereNamesDocuments {
     /// `targets`, if `health` can carry it: a link not judged because it
     /// addresses no document resolves to none. `health` is the derivation
     /// [`LinkHealth::of_link`] already ran, so this reuses its judgement
-    /// rather than re-deciding addressing on its own — a link resolves to no
-    /// document *and* is not judged for reasons other than being addressed
-    /// elsewhere (an attachment target resolving to none), and only the
-    /// elsewhere case is refused here; that case is exactly the one where
-    /// `health` is [`LinkHealth::NotJudged`] and `targets` is nonzero, because
-    /// the attachment reading of [`LinkHealth::NotJudged`] only ever arises at
-    /// a total of zero.
+    /// rather than re-deciding addressing on its own. Only a link addressed
+    /// elsewhere is unjudged, and it cannot carry candidates.
     fn check(health: LinkHealth, targets: u64) -> Result<(), Self> {
         if health == LinkHealth::NotJudged && targets != 0 {
             return Err(ElsewhereNamesDocuments { total: targets });

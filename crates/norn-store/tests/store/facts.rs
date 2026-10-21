@@ -305,8 +305,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
         };
         let expected = match (health(0), health(1)) {
             (LinkHealth::NotJudged, LinkHealth::NotJudged) => LinkAddressKind::Elsewhere,
-            (LinkHealth::NotJudged, LinkHealth::Healthy) => LinkAddressKind::Attachment,
-            (LinkHealth::Broken, LinkHealth::Healthy) => LinkAddressKind::Document,
+            (LinkHealth::Broken, LinkHealth::Healthy) => LinkAddressKind::Vault,
             other => panic!("{link:?} is judged {other:?}, which no address kind reads"),
         };
         assert_eq!(stored.address, expected, "{link:?}");
@@ -314,7 +313,7 @@ fn a_links_address_column_agrees_with_link_health_of_link() {
     }
     assert_eq!(
         seen,
-        BTreeSet::from(["attachment", "document", "elsewhere"]),
+        BTreeSet::from(["elsewhere", "vault"]),
         "the links do not exercise every address kind"
     );
     store.verify_integrity().expect("a store just written to");
@@ -375,6 +374,7 @@ fn a_link_is_held_under_the_keys_a_links_to_seek_reads() {
             key(10, "notes/x.md.md", None),
             key(13, "q.md/", Some(1)),
             key(13, "q/", Some(1)),
+            key(14, "notes/v1.2", None),
             key(14, "notes/v1.2.md", None),
         ]
     );

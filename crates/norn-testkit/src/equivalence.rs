@@ -115,6 +115,7 @@ pub const PAGE: usize = 128;
 /// [`StoreProjection::compare`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreProjection {
+    vault_files: Vec<StoredSuffixKeys>,
     documents: Vec<ProjectedDocument>,
     findings: Vec<ProjectedFinding>,
     terms: Vec<IndexedTerm>,
@@ -335,6 +336,7 @@ impl StoreProjection {
     /// [`StoreProjection::read`], holding the findings in `order`.
     fn read_in(store: &mut Store, order: FindingOrder) -> Result<Self, StoreError> {
         let mut projection = StoreProjection {
+            vault_files: Vec::new(),
             documents: Vec::new(),
             findings: Vec::new(),
             terms: Vec::new(),
@@ -344,6 +346,14 @@ impl StoreProjection {
             content_quarantines: Vec::new(),
         };
         let mut request = store.begin_request();
+
+        let mut after = None;
+        loop {
+            let page = request.vault_file_keys_after(after.as_ref(), PAGE)?;
+            let Some(last) = page.last() else { break };
+            after = Some(last.path.clone());
+            projection.vault_files.extend(page);
+        }
 
         // The sub-fingerprints are read off the change feed rather than off the
         // document row, because that is the only reader that hands them out:
@@ -637,6 +647,15 @@ impl StoreProjection {
     /// here, and a changed stored value moves exactly the field that holds it.
     fn entries(&self) -> BTreeMap<String, String> {
         let mut entries = Vec::new();
+        for file in &self.vault_files {
+            let at = format!("vault_file[{}]", file.path.as_str());
+            entries.push((format!("{at}.suffix_key"), quoted(&file.suffix_key)));
+            entries.push((format!("{at}.path_key"), quoted(&file.path_key)));
+            entries.push((
+                format!("{at}.admitting_segments"),
+                file.admitting_segments.to_string(),
+            ));
+        }
         for document in &self.documents {
             let at = format!("document[{}]", document.path);
             entries.push((format!("{at}.content_hash"), quoted(&document.content_hash)));
@@ -1511,6 +1530,7 @@ mod tests {
 
     fn projection() -> StoreProjection {
         StoreProjection {
+            vault_files: Vec::new(),
             documents: vec![ProjectedDocument {
                 path: "docs/a.md".to_string(),
                 content_hash: "hash-1".to_string(),
@@ -1600,7 +1620,7 @@ mod tests {
                     byte_offset: 1,
                 }),
             },
-            address: norn_wire::LinkAddressKind::Document,
+            address: norn_wire::LinkAddressKind::Vault,
         });
         let entries = linked.entries();
         let at = |column: &str| {

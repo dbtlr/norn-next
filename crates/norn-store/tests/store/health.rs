@@ -281,15 +281,15 @@ const SOURCE: &[(&str, Option<FindingKind>, Option<FindingKind>)] = {
         ("[bare](../x/y)", None, None),
         ("[bare gone](../x/z)", Some(Broken), Some(Broken)),
         ("[web](https://example.com)", None, None),
-        // An attachment resolving to nothing is not judged.
-        ("[[picture.png]]", None, None),
+        // A named file absent from the vault is broken.
+        ("[[picture.png]]", Some(Broken), Some(Broken)),
         ("[self](./a.md)", None, None),
         ("[[report.md]]", Some(Ambiguous), Some(Ambiguous)),
         // Its own document, which holds no such heading.
         ("[[#Heading]]", Some(MissingAnchor), Some(MissingAnchor)),
-        ("[img](img/pic.png)", None, None),
-        // An attachment resolving to a document is judged by it.
-        ("[[photo.png]]", None, None),
+        ("[img](img/pic.png)", Some(Broken), Some(Broken)),
+        // A dotted target with no matching document or file is broken.
+        ("[[photo.png]]", Some(Broken), Some(Broken)),
         ("[[crowd]]", Some(Ambiguous), Some(Ambiguous)),
         ("[[archive/glossary]]", None, None),
         ("[[vault://v1.md]]", Some(Ambiguous), Some(Ambiguous)),
@@ -584,7 +584,11 @@ fn a_markdown_image_is_judged_as_a_markdown_link_is() {
             None
         ]
     );
-    assert_eq!(kind(8), None, "an image naming no document is not judged");
+    assert_eq!(
+        kind(8),
+        Some(FindingKind::Broken),
+        "a missing image is broken"
+    );
 }
 
 /// **A `vault://` link naming one document files a vault-scheme finding, in
@@ -1641,7 +1645,16 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             .collect();
         assert_eq!(
             sorts,
-            [sorted],
+            vec![
+                sorted;
+                if matches!(statement, ExplainedStatement::LinkHealthHeads) {
+                    6
+                } else if matches!(statement, ExplainedStatement::LinkHealthSuffixes) {
+                    8
+                } else {
+                    1
+                }
+            ],
             "{statement:?} under {order:?}: {:?}",
             read.rows()
         );
@@ -1719,9 +1732,9 @@ fn the_link_health_judgment_seeks_every_row_it_reads() {
     }
 }
 
-/// An attachment-shaped target is unjudged until its complete stem names a document.
+/// A non-Markdown target keeps its extension when naming a document.
 #[test]
-fn an_attachment_target_never_drops_its_extension() {
+fn a_vault_file_target_never_drops_its_extension() {
     for order in [Sensitive, Folding] {
         let documents = [
             derived("photo.md", "photo\n"),
@@ -1729,7 +1742,7 @@ fn an_attachment_target_never_drops_its_extension() {
         ];
         let without = Judging::new("health-photo-without", order, &documents);
         let links = without.links("holder.md");
-        assert_eq!(links[0].health(), LinkHealth::NotJudged);
+        assert_eq!(links[0].health(), LinkHealth::Broken);
         assert!(row_head(&links[0]).is_empty());
         let mut documents = documents.to_vec();
         documents.push(derived("photo.png.md", "named stem\n"));

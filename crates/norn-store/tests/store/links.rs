@@ -646,8 +646,8 @@ fn addressed() -> Vec<DocumentFacts> {
 
 /// **A link is judged by resolving it first, and its address is read
 /// protocol first and form second**, on either root: `[[v1.2]]` names
-/// `v1.2.md`; `[[photo.png]]` naming no document is an attachment and not
-/// judged, while `[[diagram.png]]` names `diagram.png.md` and is healthy; a
+/// `v1.2.md`; `[[photo.png]]` naming no document or vault file is broken,
+/// while `[[diagram.png]]` names `diagram.png.md` and is healthy; a
 /// `vault://` link of either family is a path from the vault root; a Markdown
 /// target opening with a URI scheme is not judged; a Markdown target is split
 /// into segments before it is decoded, so `%2F` is a character inside a
@@ -659,7 +659,7 @@ fn a_link_is_judged_by_resolving_it_first() {
         let links = linked.links("x/src.md");
         for (at, expected) in [
             (0, names(LinkHealth::Healthy, &["v1.2.md"])),
-            (1, names(LinkHealth::NotJudged, &[])),
+            (1, names(LinkHealth::Broken, &[])),
             (2, names(LinkHealth::Healthy, &["diagram.png.md"])),
             (3, names(LinkHealth::Healthy, &["notes/glossary.md"])),
             (4, names(LinkHealth::Healthy, &["x/y.md"])),
@@ -739,7 +739,7 @@ fn a_vault_link_is_a_root_path_its_family_only_takes_the_text_of() {
         for (at, expected) in [
             ("h/w-notes.md", names(LinkHealth::Healthy, &["Notes.md"])),
             ("h/w-notes-md.md", names(LinkHealth::Healthy, &["Notes.md"])),
-            ("h/w-v12.md", names(LinkHealth::NotJudged, &[])),
+            ("h/w-v12.md", names(LinkHealth::Broken, &[])),
             ("h/w-deep.md", names(LinkHealth::Broken, &[])),
             ("h/w-encoded.md", names(LinkHealth::Broken, &[])),
             ("h/w-query.md", names(LinkHealth::Broken, &[])),
@@ -850,19 +850,24 @@ fn a_percent_not_before_two_hexadecimal_digits_is_itself() {
     );
 }
 
-/// **A link addressed elsewhere, or naming an attachment no document is, is
-/// not judged**: one written with a protocol and one naming an attachment
-/// that resolves to no document each carry no document and the fourth
-/// health, on either root.
+/// Only links addressed elsewhere are unjudged. A named file absent from
+/// the vault is broken under the same rule as an absent document.
 #[test]
-fn a_link_addressed_elsewhere_or_to_an_absent_attachment_is_not_judged() {
+fn only_a_link_addressed_elsewhere_is_not_judged() {
     for order in [Sensitive, Folding] {
         let linked = Linked::new(&format!("links-unjudged-{order:?}"), order, 0);
         let links = linked.links("src/a.md");
         for at in [9, 10] {
             assert_eq!(
                 reading(&links[at]),
-                names(LinkHealth::NotJudged, &[]),
+                names(
+                    if at == 9 {
+                        LinkHealth::NotJudged
+                    } else {
+                        LinkHealth::Broken
+                    },
+                    &[]
+                ),
                 "{order:?} {:?}",
                 links[at].target
             );
@@ -1716,4 +1721,362 @@ fn no_link_read_reads_a_documents_payload() {
             reads_of(&hydrate.plan).assert_reads_none_of(DOCUMENT_PAYLOAD)
         });
     }
+}
+
+/// A vault file is a name-only candidate, born and gone in the same changeset
+/// that re-judges its links; a document carrying its name shares its class.
+#[test]
+fn vault_file_birth_and_death_rejudge_its_links() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    for order in [Sensitive, Folding] {
+        let mut linked = Linked::holding_under(
+            &format!("vault-file-lifecycle-{order:?}"),
+            order,
+            &[holding(
+                "src.md",
+                vec![wikilink("photo.png"), markdown("/photo.png")],
+            )],
+            &bare(),
+        );
+        let read = |linked: &Linked| linked.links_under("src.md", &bare());
+        assert!(
+            read(&linked)
+                .iter()
+                .all(|link| link.health() == LinkHealth::Broken)
+        );
+        let path = DocumentPath::new("photo.png").expect("a vault file path");
+        linked
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::FileBirth { path: path.clone() }],
+                &[],
+                &bare(),
+            )
+            .expect("a file birth");
+        for link in read(&linked) {
+            assert_eq!(reading(&link), names(LinkHealth::Healthy, &["photo.png"]));
+        }
+        assert_eq!(linked.backlinks("photo.png"), ["src.md"]);
+        linked
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::FileDeath { path: path.clone() }],
+                &[],
+                &bare(),
+            )
+            .expect("the sole target dies");
+        assert!(
+            read(&linked)
+                .iter()
+                .all(|link| link.health() == LinkHealth::Broken)
+        );
+        linked
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::FileBirth { path: path.clone() }],
+                &[],
+                &bare(),
+            )
+            .expect("the target returns");
+        linked
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(holding("photo.png.md", Vec::new()))],
+                &[],
+                &bare(),
+            )
+            .expect("a document sharing the file's class");
+        assert_eq!(
+            reading(&read(&linked)[0]),
+            names(LinkHealth::Ambiguous, &["photo.png", "photo.png.md"])
+        );
+        assert!(
+            linked.backlinks("photo.png.md").is_empty(),
+            "an ambiguous link is no unique backlink"
+        );
+        linked
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::FileDeath { path }],
+                &[],
+                &bare(),
+            )
+            .expect("a file death");
+        let links = read(&linked);
+        assert_eq!(
+            reading(&links[0]),
+            names(LinkHealth::Healthy, &["photo.png.md"])
+        );
+        assert_eq!(
+            reading(&links[1]),
+            names(LinkHealth::Healthy, &["photo.png.md"])
+        );
+    }
+}
+
+/// Extensions are names, and a file has no heading or block inventory to judge.
+#[test]
+fn vault_files_resolve_by_path_and_keep_anchors_healthy() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    let mut block = wikilink("photo.png");
+    block.anchor = Some(norn_store::LinkAnchor::Block {
+        id: "absent".into(),
+    });
+    let mut image = markdown("gone.png");
+    image.embed = true;
+    let mut linked = Linked::holding_under(
+        "vault-file-paths",
+        Sensitive,
+        &[
+            holding("deep/photo.png.md", Vec::new()),
+            holding(
+                "src.md",
+                vec![
+                    wikilink("v1.2"),
+                    image,
+                    link(LinkFamily::Wikilink, None, "photo.png", Some("Absent")),
+                    markdown("/photo.png"),
+                    markdown("./photo.png"),
+                    block,
+                ],
+            ),
+        ],
+        &bare(),
+    );
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                "photo.png",
+                "deep/photo.png",
+                "LICENSE",
+                ".gitignore",
+                ".secret.png",
+            ]
+            .map(|at| Change::FileBirth {
+                path: DocumentPath::new(at).expect("a path"),
+            }),
+            &[],
+            &bare(),
+        )
+        .expect("name-only files");
+    let links = linked.links_under("src.md", &bare());
+    assert_eq!(reading(&links[0]), names(LinkHealth::Broken, &[]));
+    assert_eq!(reading(&links[1]), names(LinkHealth::Broken, &[]));
+    for link in &links[2..] {
+        assert_eq!(reading(link), names(LinkHealth::Healthy, &["photo.png"]));
+    }
+    let findings = linked
+        .store
+        .begin_request()
+        .stored_findings(&DocumentPath::new("src.md").expect("a path"))
+        .expect("link findings");
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().all(|finding| finding.kind == "link/broken"));
+    assert!(
+        matches!(
+            linked.snapshot().get(
+                &GetParams::new(address(), resolution("photo.png")),
+                &bare(),
+                &NoText,
+            ),
+            Err(norn_store::PageRefusal::UnknownTarget { .. })
+        ),
+        "a file has no document payload"
+    );
+    let found = linked
+        .snapshot()
+        .find(
+            &FindParams::new(address())
+                .with_predicates([Predicate::resolves(resolution("photo.png"))]),
+            &bare(),
+        )
+        .expect("a document find resolving to an exact file");
+    assert!(
+        found.rows.is_empty(),
+        "an exact file supplies no document row"
+    );
+    let counted = linked
+        .snapshot()
+        .count(&CountParams::new(address()), &bare())
+        .expect("a document count beside files");
+    assert_eq!(
+        counted.tallies[0].count, 2,
+        "only the two documents are counted"
+    );
+    let files = linked
+        .store
+        .begin_request()
+        .stored_targets_in_range_after_ordered(norn_store::SubjectScope::Vault, None, 20, Sensitive)
+        .expect("targets");
+    assert_eq!(
+        files
+            .iter()
+            .filter(|row| row.document.is_none())
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["deep/photo.png", "photo.png"]
+    );
+}
+
+/// Ignored files are admitted by the same segments as ignored documents.
+#[test]
+fn ambiguity_ignore_drops_vault_files_before_resolution() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    let mut linked = Linked::holding(
+        "vault-file-ignore",
+        Sensitive,
+        &[
+            holding("notes/photo.png.md", Vec::new()),
+            holding(
+                "src.md",
+                vec![wikilink("photo.png"), wikilink("archive/photo.png")],
+            ),
+        ],
+    );
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::FileBirth {
+                path: DocumentPath::new("archive/photo.png").expect("a path"),
+            }],
+            &[],
+            &declared(),
+        )
+        .expect("a file in the ignored place");
+    let links = linked.links("src.md");
+    assert_eq!(
+        reading(&links[0]),
+        names(LinkHealth::Healthy, &["notes/photo.png.md"])
+    );
+    assert_eq!(
+        reading(&links[1]),
+        names(LinkHealth::Healthy, &["archive/photo.png"])
+    );
+}
+
+/// Only documents omit `.md`; the two readings of a shared suffix key must
+/// stay distinct when a page or judgment resolves both at once.
+#[test]
+fn optional_md_names_documents_alone_beside_a_vault_file() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    let mut linked = Linked::holding_under(
+        "file-optional-md",
+        Sensitive,
+        &[holding(
+            "src.md",
+            vec![wikilink("photo.png"), wikilink("photo.png.md")],
+        )],
+        &bare(),
+    );
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::FileBirth {
+                path: DocumentPath::new("photo.png").unwrap(),
+            }],
+            &[],
+            &bare(),
+        )
+        .unwrap();
+    let links = linked.links_under("src.md", &bare());
+    assert_eq!(
+        reading(&links[0]),
+        names(LinkHealth::Healthy, &["photo.png"])
+    );
+    assert_eq!(reading(&links[1]), names(LinkHealth::Broken, &[]));
+    let mut kinds = || {
+        linked
+            .store
+            .begin_request()
+            .stored_findings(&DocumentPath::new("src.md").unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|finding| (finding.kind, finding.ordinal))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kinds(), [("link/broken".into(), Some(1))]);
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(holding("photo.png.md", Vec::new()))],
+            &[],
+            &bare(),
+        )
+        .unwrap();
+    let links = linked.links_under("src.md", &bare());
+    assert_eq!(
+        reading(&links[0]),
+        names(LinkHealth::Ambiguous, &["photo.png", "photo.png.md"])
+    );
+    assert_eq!(
+        reading(&links[1]),
+        names(LinkHealth::Healthy, &["photo.png.md"])
+    );
+    let findings = linked
+        .store
+        .begin_request()
+        .stored_findings(&DocumentPath::new("src.md").unwrap())
+        .unwrap();
+    assert_eq!(
+        findings
+            .iter()
+            .map(|f| (f.kind.as_str(), f.ordinal))
+            .collect::<Vec<_>>(),
+        [("link/ambiguous", Some(0))]
+    );
+}
+
+/// A vault file's written name opens the same suffix key its birth re-judges.
+#[test]
+fn a_vault_files_written_name_resolves_with_contextual_lowercasing() {
+    use norn_store::{Change, DocumentPath, IncrementProvenance};
+    let mut linked = Linked::holding_under(
+        "vault-file-contextual-lowercase",
+        Sensitive,
+        &[holding("src.md", vec![wikilink("foo.ΟΣ")])],
+        &bare(),
+    );
+    linked
+        .store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::FileBirth {
+                path: DocumentPath::new("foo.ΟΣ").expect("a file path"),
+            }],
+            &[],
+            &bare(),
+        )
+        .expect("a file birth");
+    assert_eq!(
+        reading(&linked.links_under("src.md", &bare())[0]),
+        names(LinkHealth::Healthy, &["foo.ΟΣ"])
+    );
+    assert!(
+        linked
+            .store
+            .begin_request()
+            .stored_findings(&DocumentPath::new("src.md").expect("a document path"),)
+            .expect("the stored link health")
+            .is_empty()
+    );
 }

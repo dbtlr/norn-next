@@ -572,7 +572,10 @@ impl Snapshot {
             declared.ambiguity_ignore(),
             &mut lookups.ran,
         )? {
-            Naming::Nothing => Err(PageRefusal::UnknownTarget {
+            Naming::Nothing
+            | Naming::One {
+                document: ..=-1, ..
+            } => Err(PageRefusal::UnknownTarget {
                 target: target.clone(),
             }),
             Naming::One { document, path } => Ok(Named {

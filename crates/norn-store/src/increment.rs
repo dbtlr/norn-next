@@ -35,6 +35,12 @@ use crate::write_path::WriteStatement;
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)] // An upsert is the common entry: boxing it would allocate once per document to shrink the rarer death.
 pub enum Change {
+    /// A regular vault file admitted by the walk and path grammar. Only its
+    /// name is stored; no bytes, hash, fact rows or tombstone belong to it.
+    FileBirth { path: DocumentPath },
+    /// A vault file no longer admitted at this path. Its class and path keys
+    /// re-judge the same link neighborhood a document death reaches.
+    FileDeath { path: DocumentPath },
     /// A document as it now stands.
     ///
     /// It replaces the document's row and every parse fact derived from that
@@ -297,6 +303,9 @@ pub(crate) fn apply(
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
             let subject = subject(&change);
+            if matches!(&change, Change::FileBirth { path } if !path.is_vault_file()) {
+                continue;
+            }
             // Every refusal from here is wrapped in the entry that caused it.
             // A heal streaming fifty thousand entries fails on whichever one is
             // pathological, and the operation alone reads the same for all of
@@ -311,6 +320,24 @@ pub(crate) fn apply(
                 continue;
             }
             let applied = match &change {
+                Change::FileBirth { path } => statements
+                    .upsert_file
+                    .execute(params![
+                        path.as_str(),
+                        path.suffix_key(),
+                        path.path_key(),
+                        declared
+                            .ambiguity_ignore()
+                            .admitting_segments(path.as_str()) as i64,
+                        stamp,
+                    ])
+                    .map(|_| ())
+                    .map_err(|error| error::sql("writing a vault file", error)),
+                Change::FileDeath { path } => statements
+                    .delete_file
+                    .execute(params![path.as_str()])
+                    .map(|_| ())
+                    .map_err(|error| error::sql("deleting a vault file", error)),
                 Change::Upsert(facts) => {
                     refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| {
@@ -479,6 +506,8 @@ struct Tally {
 /// make a changeset cost its own size in facts on top of the rows it writes —
 /// the iterator hands one over at a time and nothing here keeps it.
 struct Statements<'t> {
+    upsert_file: CachedStatement<'t>,
+    delete_file: CachedStatement<'t>,
     upsert_document: CachedStatement<'t>,
     /// One per fact table, in the order [`WriteStatement::FACT_DISCARDS`] names them.
     discard_facts: Vec<CachedStatement<'t>>,
@@ -544,6 +573,14 @@ impl<'t> Statements<'t> {
                 .map_err(move |error| error::sql(what, error))
         };
         Ok(Statements {
+            upsert_file: registered(
+                WriteStatement::UpsertVaultFile,
+                "preparing a vault file birth",
+            )?,
+            delete_file: registered(
+                WriteStatement::DeleteVaultFile,
+                "preparing a vault file death",
+            )?,
             // The document row keeps its identity across a re-derivation: it is
             // updated rather than replaced, so a deleted row means a death and
             // the cascade fires only for one.
@@ -957,7 +994,10 @@ fn refuse_a_declaration_the_store_does_not_pin(
 fn subject(change: &Change) -> &DocumentPath {
     match change {
         Change::Upsert(facts) => &facts.path,
-        Change::Death { path, .. } | Change::Vacated { path } => path,
+        Change::Death { path, .. }
+        | Change::Vacated { path }
+        | Change::FileBirth { path }
+        | Change::FileDeath { path } => path,
     }
 }
 

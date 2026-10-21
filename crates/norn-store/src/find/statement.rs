@@ -1056,19 +1056,29 @@ pub(crate) fn compose_candidate_suffixes(
         ),
         "json_extract(j.value, '$[2]')",
         Some("2"),
+        "json_array_length(json_extract(j.value, '$[3]')) = 1",
     );
     let exact_first = resolve::exact_first(
         "dr",
         SuffixKey::Comparison,
         "SELECT value FROM json_each(json_extract(j.value, '$[3]'))",
         "json_extract(j.value, '$[2]')",
+        "json_array_length(json_extract(j.value, '$[3]')) = 1",
     );
     Ok((
-        format!(
-            "SELECT j.key, dc.id FROM json_each(?1) AS j
-        CROSS JOIN documents AS dc
-        WHERE dc.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
-        ),
+        resolve::CANDIDATE_TABLES
+            .map(|table| {
+                resolve::candidate_aliases(
+                    table,
+                    format!(
+                        "SELECT j.key, dc.id FROM json_each(?1) AS j
+             CROSS JOIN {table} AS dc
+             WHERE dc.id IN (SELECT dr.id FROM ({class}) AS dr WHERE {exact_first})"
+                    ),
+                    &["dc"],
+                )
+            })
+            .join(" UNION ALL "),
         vec![Value::Text(listed)],
     ))
 }
@@ -1098,44 +1108,76 @@ pub(crate) fn compose_candidate_suffixes(
 pub(crate) fn compose_link_targets(links: &[i64], head: usize) -> (String, Vec<Value>) {
     let key = SuffixKey::Comparison;
     let link_key = resolve::link_key_column(key);
-    let class = resolve::link_key_rows(key, "keyed.key", "keyed.segments", Some("?2"));
-    let total = resolve::link_key_total(key, "keyed.key", "keyed.segments");
-    let exact = resolve::exact_count(key, "keyed.key", "keyed.segments");
+    let class = resolve::link_key_rows(
+        key,
+        "keyed.key",
+        "keyed.segments",
+        Some("?2"),
+        "keyed.files",
+    );
+    let total = resolve::link_key_total(key, "keyed.key", "keyed.segments", "keyed.files");
+    let exact = resolve::exact_count(key, "keyed.key", "keyed.segments", "keyed.files");
     let path = resolve::link_key_path("dp", key, "keyed.key");
     let rung = format!("dc.{}", key.column());
     let ladder = resolve::ladder("reached.rung", "reached.path");
+    let path_total = resolve::CANDIDATE_TABLES
+        .map(|table| {
+            resolve::candidate_aliases(
+                table,
+                format!("(SELECT COUNT(*) FROM {table} AS dp WHERE {path})"),
+                &["dp"],
+            )
+        })
+        .join(" + ");
+    let reached = resolve::CANDIDATE_TABLES
+        .map(|table| {
+            resolve::candidate_aliases(
+                table,
+                format!(
+                    "SELECT keyed.key, keyed.files, dc.id, dc.path, {rung}, {rung} = keyed.key
+         FROM keyed CROSS JOIN {table} AS dc
+         WHERE keyed.segments IS NOT NULL AND dc.id IN (SELECT id FROM ({class}))
+         UNION ALL
+         SELECT keyed.key, keyed.files, dc.id, dc.path, keyed.key, 0
+         FROM keyed CROSS JOIN {table} AS dc
+         WHERE keyed.segments IS NULL AND dc.id IN (
+             SELECT dp.id FROM {table} AS dp WHERE {path} ORDER BY dp.path LIMIT ?2)"
+                ),
+                &["dc", "dp"],
+            )
+        })
+        .join(" UNION ALL ");
     (
         format!(
             "WITH page(link) AS (SELECT value FROM json_each(?1)),
-             keyed(key, segments) AS MATERIALIZED (
-                 SELECT DISTINCT lk.{link_key}, lk.segments
+             keyed(key, segments, files) AS MATERIALIZED (
+                 SELECT DISTINCT lk.{link_key}, lk.segments,
+                     lk.segments IS NULL OR NOT EXISTS (SELECT 1 FROM link_keys AS lx
+                         WHERE lx.link = lk.link AND lx.key <> lk.key)
                  FROM page CROSS JOIN link_keys AS lk WHERE lk.link = page.link),
-             totals(key, total, exact) AS MATERIALIZED (
-                 SELECT keyed.key,
+             totals(key, files, total, exact) AS MATERIALIZED (
+                 SELECT keyed.key, keyed.files,
                      CASE WHEN keyed.segments IS NOT NULL THEN ({total})
-                         ELSE (SELECT COUNT(*) FROM documents AS dp WHERE {path}) END,
+                         ELSE ({path_total}) END,
                      CASE WHEN keyed.segments IS NOT NULL THEN ({exact}) ELSE 0 END
                  FROM keyed),
-             reached(key, id, path, rung, exact) AS MATERIALIZED (
-                 SELECT keyed.key, dc.id, dc.path, {rung}, {rung} = keyed.key
-                 FROM keyed CROSS JOIN documents AS dc
-                 WHERE keyed.segments IS NOT NULL AND dc.id IN (SELECT id FROM ({class}))
-                 UNION ALL
-                 SELECT keyed.key, dc.id, dc.path, keyed.key, 0
-                 FROM keyed CROSS JOIN documents AS dc
-                 WHERE keyed.segments IS NULL AND dc.id IN (
-                     SELECT dp.id FROM documents AS dp WHERE {path} ORDER BY dp.path LIMIT ?2)),
+             reached(key, files, id, path, rung, exact) AS MATERIALIZED (
+                 {reached}),
              linked(link, id, path, rung, exact, preferred) AS (
                  SELECT lr.link, reached.id, reached.path, reached.rung, reached.exact,
                         MAX(reached.exact) OVER (PARTITION BY lr.link)
                  FROM page CROSS JOIN link_keys AS lr CROSS JOIN reached
-                 WHERE lr.link = page.link AND reached.key = lr.{link_key}),
+                 WHERE lr.link = page.link AND reached.key = lr.{link_key}
+                   AND reached.files = (lr.segments IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM link_keys AS lx WHERE lx.link = lr.link AND lx.key <> lr.key))),
              ranked(link, id, path, place, total) AS (
                  SELECT reached.link, reached.id, reached.path,
                         ROW_NUMBER() OVER (PARTITION BY reached.link ORDER BY {ladder}),
                         (SELECT CASE WHEN SUM(t.exact) > 0 THEN SUM(t.exact) ELSE SUM(t.total) END
                          FROM link_keys AS lt CROSS JOIN totals AS t
-                         WHERE lt.link = reached.link AND t.key = lt.{link_key})
+                         WHERE lt.link = reached.link AND t.key = lt.{link_key}
+                           AND t.files = (lt.segments IS NULL OR NOT EXISTS (
+                               SELECT 1 FROM link_keys AS lx WHERE lx.link = lt.link AND lx.key <> lt.key)))
                  FROM linked AS reached WHERE reached.exact = reached.preferred)
              SELECT link, id, path, total FROM ranked WHERE place <= ?2
              ORDER BY link, place"

@@ -48,14 +48,10 @@
 //! from spans: link ranges of the two families may overlap and nest, so a
 //! span comparison is not a total order and `ordinal` is.
 //!
-//! **`address` is what judging a link reads of that selector**, and nothing
-//! more: `elsewhere`, where the link addresses no document of the vault;
-//! `attachment`, where its target names one, so resolving to no document
-//! leaves it unjudged; and `document` otherwise. It is the wire's
-//! `LinkAddress::kind`, computed at the write, which is the one classification
-//! a link's read-time health (`LinkHealth::of_link`) is judged by too, so the
-//! two cannot disagree, and a predicate over links reads it as a column rather
-//! than re-running the selector per row.
+//! **`address` is what judging a link reads of that selector**: `elsewhere`
+//! for a link outside the vault, `vault` otherwise. It is the wire's
+//! `LinkAddress::kind`, computed at the write and read by the same health rule
+//! on every surface. No extension exempts an unresolved target from judgment.
 //!
 //! **A frontmatter link may have no span.** A wikilink written in a
 //! frontmatter value whose bytes are not its text — a flow sequence item, an
@@ -107,8 +103,8 @@
 //!   are the complete root paths its optional `.md` spellings name, one
 //!   or two where the target ends in `.md`. `segments` is `NULL` beside a path's key.
 //!
-//! A target naming an attachment is keyed like any other, since a document
-//! may carry the attachment's name. A link addressed elsewhere — a protocol
+//! A target naming a vault file is keyed like any other, since a document
+//! may carry the same name. A link addressed elsewhere — a protocol
 //! other than `vault`, a Markdown target opening with a URI scheme — and a
 //! target that names no vault path are held under no key.
 //!

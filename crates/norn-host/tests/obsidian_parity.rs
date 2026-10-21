@@ -203,7 +203,7 @@ fn expectations() -> BTreeMap<&'static str, Answer> {
     expect(&["M22"], Answer::Broken);
     expect(&["M23", "W07"], healthy(&exact));
     expect(&["M24", "W15"], healthy(&dotted));
-    expect(&["M25", "W13"], Answer::NotJudged);
+    expect(&["M25", "W13"], healthy(&p("dots/photo.png")));
     expect(&["M26", "W14"], healthy(&p("dots/v1.2.md")));
     expect(
         &["W12"],
@@ -250,15 +250,6 @@ fn compatible(expected: &Answer, observed: &Observed) -> Result<(), String> {
             Ok(())
         }
         Answer::Broken if observed.outcome == "open_error" => Ok(()),
-        Answer::NotJudged
-            if destination.as_deref().is_some_and(|destination| {
-                !Path::new(destination)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-            }) =>
-        {
-            Ok(())
-        }
         _ => Err(format!(
             "expected {expected:?}, which Obsidian's recorded `{observed}` does not permit"
         )),

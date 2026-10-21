@@ -85,8 +85,12 @@ impl DocumentPath {
             });
         }
         let path_key = comparison_key(path);
-        let suffix_key = suffix_of_path(&path_key);
         let leaf = path.rsplit(SEPARATOR).next().expect("a path has a leaf");
+        let suffix_key = if is_vault_file_leaf(leaf) {
+            suffix_in_document_frame(path)
+        } else {
+            suffix_of_path(&path_key)
+        };
         Ok(DocumentPath {
             path: path.to_string(),
             path_key,
@@ -155,6 +159,13 @@ impl DocumentPath {
     /// The path as written, which is the document's name and unique key.
     pub fn as_str(&self) -> &str {
         &self.path
+    }
+
+    /// Whether the leaf carries a non-Markdown extension. Leading dots name
+    /// dotfiles, and extensionless leaves name no vault-file target.
+    pub fn is_vault_file(&self) -> bool {
+        let leaf = self.path.rsplit('/').next().expect("a path has a leaf");
+        is_vault_file_leaf(leaf)
     }
 
     /// Whether this path carries [`RENDERED_MARKER`] anywhere in it.
@@ -599,9 +610,7 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     if stem != *leaf {
         ranges.push(bounded(suffix_of_path(&comparison_key(target))));
     }
-    ranges.push(bounded(suffix_of_path(&comparison_key(&format!(
-        "{target}.md"
-    )))));
+    ranges.push(bounded(suffix_in_document_frame(target)));
     Ok(SuffixProbe {
         key: SuffixKey::Comparison,
         ranges,
@@ -641,10 +650,24 @@ pub(crate) fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
     }
     Ok(SuffixProbe {
         key: SuffixKey::Comparison,
-        ranges: vec![bounded(suffix_of_path(&comparison_key(&format!(
-            "{stem}.md"
-        ))))],
+        ranges: vec![bounded(suffix_in_document_frame(stem))],
     })
+}
+
+/// Normalize the complete `name.md` before stripping `.md`, so a vault file
+/// and the document-oriented probe derive their class from the same string.
+/// Where contextual lowercasing depends on what follows a name's last character,
+/// as with final capital sigma, a suffix-addressed link spelling the folded
+/// character itself may not reach a vault file that the file's own spelling reaches.
+fn suffix_in_document_frame(name: &str) -> String {
+    suffix_of_path(&comparison_key(&format!("{name}.md")))
+}
+
+fn is_vault_file_leaf(leaf: &str) -> bool {
+    !leaf.starts_with('.')
+        && leaf
+            .rfind('.')
+            .is_some_and(|at| at > 0 && !leaf[at + 1..].eq_ignore_ascii_case("md"))
 }
 
 /// Reverse a normalized complete path, dropping only its Markdown extension.
