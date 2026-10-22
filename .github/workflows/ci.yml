@@ -92,6 +92,10 @@ jobs:
         run: cargo build --locked --workspace
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Lint the performance worker
+        run: cargo clippy --locked -p norn-host --test performance -- -D warnings
+      - name: Test the performance harness
+        run: python3 -m unittest discover -s scripts/performance -v
       # The lint above never sees norn-db's, norn-fs's or norn-store's library
       # with the feature off. norn-fs and norn-store are each their own
       # dev-dependency with `induced-failure` on, and norn-store forwards the

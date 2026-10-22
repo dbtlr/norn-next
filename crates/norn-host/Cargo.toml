@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Explicitly invoked measurement executable. It has no libtest cases and is
+# excluded from ordinary suite execution; the external runner owns its lifetime.
+[[test]]
+name = "performance"
+path = "tests/performance.rs"
+harness = false
+test = false
+
 # `induced-failure` is this crate's harness-reachable surface, and it carries
 # two things. It forwards to the feature of the same name in both effect crates:
 # `norn-store`'s, which is the fenced seam a suite reaches a rung or a refusal
