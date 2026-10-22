@@ -1199,6 +1199,61 @@ fn several_targets_named_in_one_judgment_answer_as_each_named_alone() {
     });
 }
 
+/// A deeper vault file does not displace the exact-document count when the
+/// exact candidates fill the head, even though both kinds supply rows.
+#[test]
+fn a_target_head_counts_exact_documents_past_its_bound_beside_a_deeper_file() {
+    let mut vault = Vault::new("target-naming-mixed-exact-head", Sensitive);
+    let paths: Vec<String> = (0..8u8)
+        .map(|bits| {
+            let stem: String = "abc"
+                .chars()
+                .enumerate()
+                .map(|(at, letter)| {
+                    if bits & (1 << at) == 0 {
+                        letter
+                    } else {
+                        letter.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            format!("{stem}.png.md")
+        })
+        .collect();
+    let documents: Vec<(&str, &str)> = paths.iter().map(|at| (at.as_str(), "x\n")).collect();
+    vault.write(&documents);
+    vault
+        .store
+        .begin_request()
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [norn_store::Change::FileBirth {
+                path: path("deep/abc.png"),
+            }],
+            &[],
+            &declared(),
+        )
+        .expect("a deeper file sharing the documents' class");
+    let naming = named(&vault, &PathOverlay::new(), "abc.png");
+    assert_eq!(naming.before, Resolves::several());
+    assert_eq!(naming.after, Resolves::several());
+    let head = naming.candidates.expect("an ambiguous head");
+    assert_eq!(head.total(), 8);
+    assert_eq!(
+        head.candidates()
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "ABC.png.md",
+            "ABc.png.md",
+            "AbC.png.md",
+            "Abc.png.md",
+            "aBC.png.md"
+        ]
+    );
+}
+
 /// **A target naming several documents after a plan carries the head of
 /// them, as a store built at the plan's after-state reads it**: the documents
 /// in the resolution ladder's order, each named by its minimal disambiguating

@@ -1235,10 +1235,15 @@ impl<'a, R: Runner> Judging<'a, R> {
                 heads.entry(key.clone()).or_default().push((rung, path));
             }
         }
-        for head in heads.values_mut() {
+        // Each candidate kind supplies a bounded head. Re-cut their merge
+        // before callers decide whether the filled head contains only exact
+        // members and therefore owes an exact-path count.
+        for (key, bound) in bounds {
+            let head = heads.entry((*key).clone()).or_default();
             head.sort_by(|left, right| {
                 crate::resolve::ladder_cmp((&left.0, &left.1), (&right.0, &right.1))
             });
+            head.truncate(*bound);
         }
         Ok(heads)
     }
