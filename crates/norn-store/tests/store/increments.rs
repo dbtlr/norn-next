@@ -79,8 +79,7 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
         request
             .emitted_plan(ExplainedStatement::Write(statement))
             .expect("the registered fact discard")
-            .sql()
-            .to_owned()
+            .sql
     });
     let discards = || {
         let mut statements = induced_failure::statements_begun();
