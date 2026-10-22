@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fixture import prepare_probes, tree_digest
 from results import distribution, record, validate_paths, validate_write
-from provenance import source_tree_digest, verify_build
+from provenance import cargo_configs, source_tree_digest, verify_build
 from report import summarize
 from transport import stop_process
 
@@ -130,6 +130,7 @@ class BuildTests(unittest.TestCase):
             receipt.write_text(json.dumps({"executable": str(binary),
                 "sha256": hashlib.sha256(b"compiled").hexdigest(),
                 "profile": {"opt_level": "3", "debug_assertions": False},
+                "cargo_configs": cargo_configs(repo),
                 "source_tree_sha256": source_tree_digest(repo)}))
             verify_build(receipt, repo)
             source.write_text("different")

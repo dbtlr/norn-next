@@ -174,6 +174,8 @@ The second command compiles the explicit measurement target. It has
 `harness = false` and `test = false`, so ordinary suite execution does not run
 it and it claims no ignored CI test lane. The baseline runner invokes its
 `generate` and `serve` modes with issued roots and tokens.
+PR and full-regression workflows explicitly lint this target and run the Python
+checks without executing a benchmark or requiring the legacy binary.
 Its functional trial can use one scale, one warmup, two samples, and one
 repetition before collecting a full baseline. Measurement records require an
 independent validity review and a separate reproduction.

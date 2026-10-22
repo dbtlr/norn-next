@@ -58,6 +58,11 @@ jobs:
       - name: Lint
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Performance harness checks
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: |
+          cargo clippy --locked -p norn-host --test performance -- -D warnings
+          python3 -m unittest discover -s scripts/performance -v
       - name: Lint the shipped libraries
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
