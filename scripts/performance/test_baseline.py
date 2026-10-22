@@ -34,6 +34,22 @@ class FixtureTests(unittest.TestCase):
 
 
 class AnswerTests(unittest.TestCase):
+    def test_a_successful_cached_read_does_not_prove_the_field_was_written(self):
+        before = b"---\nstatus: draft\nperf_bucket: probe\n---\nKeep the body.\n"
+        state = {"bench/subject.md": {"path": "bench/subject.md", "body": "Keep the body.\n",
+                                     "fields": {"status": "draft", "perf_bucket": "probe"}}}
+        class Worker:
+            def call(self, _command):
+                return {"structuredContent": {"records": [{"path": "bench/subject.md", "body": "Keep the body.\n",
+                    "frontmatter": {"status": "value0", "perf_bucket": "probe"}}]}}, 1
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "vault/bench").mkdir(parents=True)
+            (root / "vault/bench/subject.md").write_bytes(before)
+            with self.assertRaises(ValueError):
+                verify_mutation(Worker(), "legacy", {"op": "set", "value": "value0"}, root,
+                    {"structuredContent": {"report": {"outcome": "applied"}}}, state, before)
+
     def test_a_confirming_get_cannot_hide_an_unexpected_advisory(self):
         with self.assertRaises(ValueError):
             record("current", {"answer": {"advisories": [{"unexpected": "diagnostic"}],
