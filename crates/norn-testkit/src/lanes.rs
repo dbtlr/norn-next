@@ -78,12 +78,18 @@ use crate::workflows::{CiSteps, LANE_FEATURES, LANE_SCRIPT, ci_steps_in};
 /// prefix a crate binds is one a lane recognizes, and every prefix a lane
 /// recognizes is bound by some crate.
 pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
+    ("norn", &["audit-lane case:"]),
     ("norn-fixtures", &["memory-lane case:", "soak-lane case:"]),
     ("norn-fs", &["memory-lane case:"]),
     ("norn-store", &["memory-lane case:"]),
     (
         "norn-host",
-        &["counter-lane case:", "memory-lane case:", "soak-lane case:"],
+        &[
+            "counter-lane case:",
+            "memory-lane case:",
+            "soak-lane case:",
+            "fault-lane case:",
+        ],
     ),
     ("norn-text", &["soak-lane case:"]),
 ];

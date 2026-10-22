@@ -74,9 +74,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_testkit::regression::{
-    Binding, BindingStatus, Ground, Kind, LAYER_LANDING, Registry, TestIndex,
-};
+use norn_testkit::regression::{Binding, BindingStatus, Ground, Kind, LAYER_LANDING, Registry};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
@@ -213,29 +211,28 @@ fn registry() -> Registry {
     Registry::load(&path).unwrap_or_else(|e| panic!("the registry did not load: {e}"))
 }
 
-/// The record holds together: every case is named once in kebab-case, states a
-/// property no other case states and cites sources shaped like citations, sits
-/// at a venue the scale names, and carries a binding that says something true
-/// — a bound case names tests whose files resolve exactly as spelled, which
-/// declare themselves with `#[test]`, and which cargo compiled into the target
-/// the reference names — and a dormant case names none and explains itself
-/// where its venue already exists. The mandatory set is exactly the one the
-/// harness pins.
-///
-/// Asking cargo what compiled is what makes this a claim about the suite that
-/// runs rather than about the text of a file. On Unix, each package builds its selected
-/// targets once per feature selection; private copies of the reported test
-/// executables supply the complete and ignored lists. A target missing a cited
-/// test without the carrier feature is listed again with it on.
+/// Registry shape, mandatory membership and stale dormancy stay in ordinary CI.
 #[test]
 fn the_registry_is_structurally_sound() {
-    let registry = registry();
-    let root = workspace_root();
-    let tests = registry.test_index(&root);
-    let problems = registry.audit(&root, &tests);
+    let problems = registry().audit_structure(&workspace_root());
     assert!(
         problems.is_empty(),
         "the registry is not structurally sound:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+/// Cargo listings prove that bound carriers exist and CI adopts ignored cases.
+#[test]
+#[ignore = "audit-lane case: compiled registry bindings and carriers run in full regression"]
+fn the_registry_has_compiled_carriers() {
+    let registry = registry();
+    let root = workspace_root();
+    let tests = registry.test_index(&root);
+    let problems = registry.audit_compiled(&root, &tests);
+    assert!(
+        problems.is_empty(),
+        "the compiled carriers are not sound:\n  {}",
         problems.join("\n  ")
     );
 }
@@ -251,9 +248,8 @@ fn the_registry_is_structurally_sound() {
 /// reason the registry's own entries at and below [`LAYER_LANDING`] can be
 /// trusted to describe the workspace as it is rather than as it was.
 ///
-/// The audit runs against an empty test index here, because what a bound case's
-/// carriers compiled into is a different question and asking cargo about it
-/// costs a full listing pass. The problem asserted is the grounds' own.
+/// The structural audit reads no compiled index: the grounds are checked
+/// against the tree independently of the carrier listings.
 #[test]
 fn a_dormancy_reason_whose_subject_landed_fails_the_audit() {
     let mut registry = registry();
@@ -270,7 +266,7 @@ fn a_dormancy_reason_whose_subject_landed_fails_the_audit() {
         grounds: vec![Ground::Absent("crates/norn-store/src/store.rs".to_string())],
     };
 
-    let problems = registry.audit(&workspace_root(), &TestIndex::default());
+    let problems = registry.audit_structure(&workspace_root());
     let stale: Vec<&String> = problems
         .iter()
         .filter(|problem| {

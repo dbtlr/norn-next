@@ -244,6 +244,7 @@ fn arming_the_process() -> std::sync::RwLockWriteGuard<'static, ()> {
 /// that attach says it got there by writing the rows the refusal withheld
 /// rather than by deriving the vault over again.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
     let _exclusive = arming_the_process();
     let vault = Vault::new("full-disk");
@@ -361,6 +362,7 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
 /// what makes the heal's door the one door this case has on every platform, and
 /// why the subtree case below is the one stated over two.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
     let _beside = beside_the_arms();
     let vault = Vault::new("unreadable-document");
@@ -484,6 +486,7 @@ fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
 /// on every platform is a revoked *document*, which is its own case above,
 /// because a document is read by nothing but the heal.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
     let _beside = beside_the_arms();
     let vault = Vault::new("permission-loss");
@@ -601,6 +604,7 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
 /// between the tear and it, so what converges the store is the hash comparison
 /// a heal always runs rather than anything a crash arranged.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     let _beside = beside_the_arms();
     let vault = Vault::new("chunk-tear");
@@ -690,6 +694,7 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
 /// writes nothing: what a converged pair leaves over is no work at all, where a
 /// torn one would leave the degraded document to be read again.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_flush_commits_its_findings_with_its_changeset() {
     let _beside = beside_the_arms();
     let vault = Vault::new("findings-tear");
@@ -834,6 +839,7 @@ fn a_flush_commits_its_findings_with_its_changeset() {
 /// **No file is edited between the kill and the heal after it**, and that heal
 /// writes nothing.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_flush_commits_its_rule_findings_with_its_changeset() {
     let _beside = beside_the_arms();
     let vault = Vault::new("rule-findings-tear");
@@ -975,6 +981,7 @@ const UNDECODABLE: &[u8] = &[0xff, 0xfe, 0x00, 0x9f, 0x92, 0x96];
 /// resumption is the same control over a vault of its own, for the same reason:
 /// each armed child's record is read against a control that ran the same way.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_attach_that_cannot_install_coverage_acquires_nothing() {
     let _beside = beside_the_arms();
     let vault = Vault::new("watch-install-refused");
@@ -1068,6 +1075,7 @@ fn an_attach_that_cannot_install_coverage_acquires_nothing() {
 /// parent asserts exactly one record, because a second record is a delivery this
 /// case leaked into a subscription it states nothing about.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
     let _beside = beside_the_arms();
     let vault = Vault::new("watch-stream-failed");
@@ -1142,6 +1150,7 @@ fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
 /// edited path. A store holding that row would say something put coverage back
 /// while this case says nothing did.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_published_watcher_cause_outlives_the_production_ticks_after_it() {
     let _beside = beside_the_arms();
     let vault = Vault::new("watch-cause-outlives");
@@ -1224,6 +1233,7 @@ fn a_published_watcher_cause_outlives_the_production_ticks_after_it() {
 /// of this suite: it writes no record into the record file the spawn creates for
 /// it, which is what makes the armed child's single record a count of firings.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_attach_whose_boundary_never_arrives_acquires_nothing() {
     let _beside = beside_the_arms();
     let vault = Vault::new("watch-barrier-expired");
@@ -1342,6 +1352,7 @@ fn an_attach_whose_boundary_never_arrives_acquires_nothing() {
 /// no second report of a lost path set — and the parent's single record is what
 /// says no second arm stood in place of it.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed() {
     let _beside = beside_the_arms();
     let vault = Vault::new("watch-stream-rescans");
@@ -1422,6 +1433,7 @@ const OVERFLOWED_DOCUMENTS: usize = 200;
 /// from a store rebuilt and walked again — one row, one changeset, where a
 /// derivation from zero writes four.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes() {
     let _beside = beside_the_arms();
     let vault = Vault::new("walk-page-vanishes");
@@ -1493,6 +1505,7 @@ fn an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes() {
 /// answer as a deletion. Rung 3 is forbidden for the same reason a full disk
 /// forbids it: the environment is broken and the stored state is not.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it() {
     let _beside = beside_the_arms();
     let vault = Vault::new("walk-page-denied");
@@ -1573,6 +1586,7 @@ fn an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it()
 /// record file the spawn creates empty and reads back, and the arm is the only
 /// difference between them.
 #[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
 fn the_child_role_attaches_under_whatever_it_was_armed_at() {
     let Some(root) = std::env::var_os(CHILD_ROOT) else {
         the_control_attaches_with_nothing_armed();
@@ -2635,6 +2649,7 @@ impl Vault {
                 "--exact",
                 "the_child_role_attaches_under_whatever_it_was_armed_at",
                 "--nocapture",
+                "--include-ignored",
             ])
             .deadline(CHILD_DEADLINE)
             .env(CHILD_ROOT, &self.root)

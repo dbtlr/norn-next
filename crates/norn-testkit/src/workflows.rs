@@ -23,8 +23,12 @@
 //! run.** A step or job carrying `continue-on-error:`, whatever the value, may
 //! fail without failing the run, and one carrying an `if:` may be skipped —
 //! unless the condition is `always()` or `!cancelled()`, which only widen when
-//! a step runs. Any other condition vouches for nothing, which is the strict
-//! side: a condition that would have held is refused with one that would not.
+//! a step runs, or exactly `!cancelled() && steps.identity.outcome == 'success'`.
+//! That conjunction vouches only on a step after its own job's `id: identity`
+//! step with no `if:` or `continue-on-error:`. It never vouches at job level,
+//! without that prerequisite, or before it. Failed candidate identity withholds
+//! full-regression evidence; the certification guard also pins its command.
+//! Every other condition vouches for nothing.
 //! Nor does any step of a workflow holding a YAML merge key, `<<`, anywhere:
 //! the parser does not apply it, so what it merges in would go unseen. Nor
 //! does a step whose environment — its own, its job's and its workflow's —
@@ -289,7 +293,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
         }
         // A job that may be skipped, may fail unnoticed, or holds a key this
         // does not read vouches for none of its steps.
-        let job_refuses = is_conditional(job) || !holds_only(job, JOB_KEYS);
+        let job_refuses = is_conditional(job, false) || !holds_only(job, JOB_KEYS);
         let job_shell = workflow_shell.under(Shell::defaulted_by(job));
         let job_env = layered(workflow_env.as_ref(), job.get("env"));
         let Some(declared) = job.get("steps") else {
@@ -298,6 +302,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
         let declared = declared
             .as_sequence()
             .ok_or_else(|| format!("job `{name}`'s `steps` is not a sequence"))?;
+        let mut identity_precedes = false;
         for step in declared {
             if !step.is_mapping() {
                 return Err(format!("a step of job `{name}` is not a mapping"));
@@ -309,12 +314,17 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             steps.push(Step {
                 run: step.get("run").and_then(Value::as_str).map(str::to_string),
                 env: env.unwrap_or_default(),
-                vouches: !(job_refuses || is_conditional(step))
+                vouches: !(job_refuses || is_conditional(step, identity_precedes))
                     && holds_only(step, STEP_KEYS)
                     && job_shell.under(Shell::named_by(step)).runs_one_process()
                     && env_reads
                     && !merged,
             });
+            // Only an earlier unconditional identity step can be a prerequisite.
+            // Update after reading this step so an identity cannot vouch for itself.
+            identity_precedes |= step.get("id").and_then(Value::as_str) == Some("identity")
+                && step.get("if").is_none()
+                && step.get("continue-on-error").is_none();
         }
     }
     Ok(steps)
@@ -441,12 +451,15 @@ fn holds_only(node: &Value, keys: &[&str]) -> bool {
 
 /// Whether a job or step carries a key that lets it be skipped or fail
 /// without failing the run: any `continue-on-error:`, and any `if:` other
-/// than one of [`WIDENING_CONDITIONS`].
-fn is_conditional(node: &Value) -> bool {
+/// than one of [`WIDENING_CONDITIONS`]. A step may also use the exact
+/// [`IDENTITY_CONDITION`] after an unconditional identity in its own job;
+/// callers pass `false` for jobs, where that prerequisite cannot exist.
+fn is_conditional(node: &Value, identity_precedes: bool) -> bool {
     let narrows = node.get("if").is_some_and(|condition| {
-        !condition
-            .as_str()
-            .is_some_and(|condition| WIDENING_CONDITIONS.contains(&unwrapped(condition)))
+        !condition.as_str().is_some_and(|condition| {
+            WIDENING_CONDITIONS.contains(&unwrapped(condition))
+                || identity_precedes && unwrapped(condition) == IDENTITY_CONDITION
+        })
     });
     narrows || node.get("continue-on-error").is_some()
 }
@@ -455,6 +468,10 @@ fn is_conditional(node: &Value) -> bool {
 /// every case the default `success()` does, and in more. Any other condition
 /// may skip a step the run needed, so it fails closed.
 const WIDENING_CONDITIONS: &[&str] = &["always()", "!cancelled()"];
+
+// Full regression withholds evidence after failed candidate identity. This
+// exception requires a preceding unconditional identity step in the same job.
+const IDENTITY_CONDITION: &str = "!cancelled() && steps.identity.outcome == 'success'";
 
 /// A condition with its optional `${{ }}` wrapper and surrounding whitespace
 /// taken off.
@@ -944,6 +961,103 @@ mod tests {
                 conditional_under(condition),
                 (false, false),
                 "`if: {condition}` was read as narrowing when the step runs"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_exact_identity_conjunction_vouches() {
+        let adopts = |workflow: &str| {
+            let mut read = super::CiSteps::default();
+            read.read(workflow).unwrap();
+            read.adopted("norn-host", "lockdown").is_some()
+        };
+        let identity = "      - id: identity\n        run: x\n";
+        let lane = "      - if: ${{ !cancelled() && steps.identity.outcome == 'success' }}\n        run: .github/scripts/lane-suite.sh norn-host lockdown\n";
+        for condition in [
+            "${{ !cancelled() && steps.identity.outcome == 'success' }}",
+            "\"!cancelled() && steps.identity.outcome == 'success'\"",
+        ] {
+            let workflow = format!(
+                "jobs:\n  j:\n    steps:\n{identity}      - if: {condition}\n        run: .github/scripts/lane-suite.sh norn-host lockdown\n"
+            );
+            assert!(adopts(&workflow), "valid prerequisite: {condition}");
+        }
+        let guarded_identity = identity.replace(
+            "        run:",
+            "        if: github.event_name == 'push'\n        run:",
+        );
+        for (label, workflow) in [
+            (
+                "conditional identity",
+                format!(
+                    "on: [workflow_dispatch]\njobs:\n  j:\n    steps:\n{guarded_identity}{lane}"
+                ),
+            ),
+            (
+                "missing identity",
+                format!("jobs:\n  j:\n    steps:\n{lane}"),
+            ),
+            (
+                "later identity",
+                format!("jobs:\n  j:\n    steps:\n{lane}{identity}"),
+            ),
+            (
+                "identity in another job",
+                format!("jobs:\n  other:\n    steps:\n{identity}  j:\n    steps:\n{lane}"),
+            ),
+            (
+                "job-level conjunction",
+                format!(
+                    "jobs:\n  j:\n    if: ${{{{ !cancelled() && steps.identity.outcome == 'success' }}}}\n    steps:\n{identity}      - run: .github/scripts/lane-suite.sh norn-host lockdown\n"
+                ),
+            ),
+        ] {
+            assert!(
+                !adopts(&workflow),
+                "{label} vouched for a skipped lane:\n{workflow}"
+            );
+        }
+        for setting in [
+            "if: always()",
+            "continue-on-error: false",
+            "continue-on-error: true",
+        ] {
+            let identity =
+                identity.replace("        run:", &format!("        {setting}\n        run:"));
+            assert!(
+                !adopts(&format!("jobs:\n  j:\n    steps:\n{identity}{lane}")),
+                "identity with {setting} vouched"
+            );
+        }
+        for condition in [
+            "${{ !cancelled() || steps.identity.outcome == 'success' }}",
+            "${{ !cancelled() && steps.identity.outcome == 'failure' }}",
+            "${{ !cancelled() && steps.other.outcome == 'success' }}",
+            "${{ !cancelled() && steps.identity.conclusion == 'success' }}",
+            "${{ !cancelled() && steps.identity.outcome == 'success' && false }}",
+            "${{ always() && steps.identity.outcome == 'success' }}",
+        ] {
+            let workflow = format!(
+                "jobs:\n  j:\n    steps:\n{identity}      - if: {condition}\n        run: .github/scripts/lane-suite.sh norn-host lockdown\n"
+            );
+            assert!(!adopts(&workflow), "broader condition vouched: {condition}");
+        }
+        let mut regression = super::CiSteps::default();
+        regression
+            .read(include_str!("../../../.github/workflows/regression.yml"))
+            .unwrap();
+        for (package, target) in [
+            ("norn", "regression"),
+            ("norn", "certification"),
+            ("norn-host", "lockdown"),
+            ("norn-host", "kill_recovery"),
+            ("norn-host", "counter_gate"),
+            ("norn-host", "memory"),
+        ] {
+            assert!(
+                regression.adopted(package, target).is_some(),
+                "full regression stopped vouching for {package} {target}"
             );
         }
     }

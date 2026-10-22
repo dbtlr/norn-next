@@ -21,7 +21,9 @@
 #
 # A suite whose cases sit behind a feature compiles to zero tests without it and
 # leaves a log saying nothing ran, so the feature is this script's third
-# argument and belongs to the target rather than to the lane.
+# argument and belongs to the target rather than to the lane. The dedicated
+# host fault targets are ignored outside their lanes; certification includes
+# those cases without enabling unrelated ignored library probes.
 #
 # usage: certification-suite.sh <package> <lib|target stem> [feature]
 
@@ -58,10 +60,18 @@ else
   selector=(--test "$target")
 fi
 
+# Keep the include list aligned with inventory's admitted fault carriers.
+ignored=()
+if [ "$package" = norn-host ] && [ "$feature" = induced-failure ]; then
+  case "$target" in
+    lockdown|kill_recovery) ignored=(-- --include-ignored) ;;
+  esac
+fi
+
 # Streamed to the job log as it happens and captured at the same time: a step a
 # timeout kills mid-run leaves nothing behind if the output is held until the
 # command returns. `PIPESTATUS[0]` names cargo's own status rather than tee's.
-cargo test --locked -p "$package" "${selector[@]}" ${features[@]+"${features[@]}"} 2>&1 | tee "$log"
+cargo test --locked -p "$package" "${selector[@]}" ${features[@]+"${features[@]}"} ${ignored[@]+"${ignored[@]}"} 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 
 if [ "$status" -ne 0 ]; then

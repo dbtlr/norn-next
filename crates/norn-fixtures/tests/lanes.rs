@@ -1,8 +1,8 @@
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
 //! Two CI lanes adopt this crate's ignored cases by asking for them wholesale:
-//! the per-PR memory job and the nightly soak lane each run a suite's ignored
-//! cases and assert that a non-zero number of them passed. That is what makes a
+//! the full-regression memory job and the nightly soak lane each run a suite's
+//! ignored cases and assert that a non-zero number of them passed. That is what makes a
 //! name filter unnecessary, and it is also what makes a stray `#[ignore]`
 //! dangerous — an `#[ignore = "flaky"]` added for a local reason would be
 //! silently adopted by whichever lane runs that suite, and would run nightly
@@ -18,8 +18,8 @@
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.
-/// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
-///   step.
+/// - `memory-lane case:` — the full-regression `memory invariant` job's
+///   `--ignored` step.
 ///
 /// An ignored case in a new test file means adding that file's stem here, in
 /// the same diff: a stem this table does not name is an error, not a case with

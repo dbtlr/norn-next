@@ -50,6 +50,7 @@ fn workspace_root() -> PathBuf {
 /// case deleted, renamed or left behind a feature nothing turns on, and a case
 /// added to a suite and not to the record.
 #[test]
+#[ignore = "audit-lane case: compiled suite inventory runs in full regression"]
 fn the_inventory_reconciles_with_the_suites() {
     let problems = inventory::reconciliation_problems(&workspace_root());
     assert!(
@@ -1280,13 +1281,52 @@ fn ci_job(workflow: &str, key: &str) -> Vec<String> {
     lines.collect()
 }
 
-/// Bootstrap retains the full existing PR matrix before any cadence cut.
+/// The PR gate retains every ordinary host target while deep lanes run in full regression.
 #[test]
-fn the_bootstrap_keeps_the_complete_pr_matrix() {
+fn the_fast_gate_keeps_ordinary_functional_coverage() {
     let gate = std::fs::read_to_string(workspace_root().join(".github/workflows/ci.yml"))
         .expect("reading the PR gate");
+    assert_fast_gate(&gate);
+    let mut mutants = vec![
+        gate.replace("  architecture:", "  missing:"),
+        gate.replace(
+            "--features induced-failure\n",
+            "--features induced-failure --skip ordinary\n",
+        ),
+        gate.replace(
+            "--features induced-failure\n",
+            "--features induced-failure --test churn\n",
+        ),
+        gate.replace("--include-ignored", ""),
+        gate.replace(
+            "    name: build and test",
+            "    if: always()\n    name: build and test",
+        ),
+        gate.replace(
+            "      - name: Test\n",
+            "      - name: Test\n        if: always()\n",
+        ),
+    ];
+    for case in NATIVE_CASES {
+        mutants.push(
+            gate.lines()
+                .filter(|line| !line.contains(case))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    for mutant in mutants {
+        assert_ne!(mutant, gate, "a mutant made no change");
+        assert!(
+            std::panic::catch_unwind(|| assert_fast_gate(&mutant)).is_err(),
+            "a PR coverage mutant survived"
+        );
+    }
+}
+
+fn assert_fast_gate(workflow: &str) {
     assert_triggers(
-        &gate,
+        workflow,
         &[
             "pull_request:",
             "push:",
@@ -1294,23 +1334,92 @@ fn the_bootstrap_keeps_the_complete_pr_matrix() {
             "workflow_dispatch:",
         ],
     );
-    assert_complete_active_matrix(&gate, false);
-    for mutant in [
-        gate.replace(
-            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace\n",
-            "        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace\n          || true\n",
+    assert_complete_active_matrix(workflow, false);
+}
+
+const NATIVE_CASES: &[&str] = &[
+    "a_case_flip_converges_on_a_build_from_zero",
+    "a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero",
+    "an_unreadable_document_refuses_the_heal_rather_than_quarantining_it",
+    "an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it",
+];
+
+/// Full regression alone must vouch for every fault and compiled-audit target.
+#[test]
+fn full_regression_adopts_fault_and_audit_cases_with_their_features() {
+    let root = workspace_root();
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "regression-routing")
+        .expect("a sandbox for regression alone");
+    let workflows = sandbox.root().join(".github/workflows");
+    std::fs::create_dir_all(&workflows).unwrap();
+    std::fs::copy(
+        root.join(".github/workflows/regression.yml"),
+        workflows.join("regression.yml"),
+    )
+    .unwrap();
+    for (package, targets, prefix) in [
+        (
+            "norn-host",
+            &["lockdown", "kill_recovery"][..],
+            "fault-lane case:",
         ),
-        gate.replace(
-            "      - name: Test\n",
-            "      - name: Duplicate host recovery\n        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure\n      - name: Test\n",
-        ),
-        gate.replace(
-            "      - name: Host filesystem contracts\n",
-            "      - name: Duplicate folding target\n        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1\n        env:\n          LANE_FEATURES: induced-failure\n      - name: Host filesystem contracts\n",
+        (
+            "norn",
+            &["regression", "certification"][..],
+            "audit-lane case:",
         ),
     ] {
-        assert!(std::panic::catch_unwind(|| assert_complete_active_matrix(&mutant, false)).is_err());
+        let manifest = sandbox.root().join(package);
+        std::fs::create_dir_all(manifest.join("tests")).unwrap();
+        let mut lanes: Vec<_> = targets.iter().map(|stem| (*stem, prefix)).collect();
+        if package == "norn-host" {
+            for (target, lane) in [
+                ("counter_gate", "counter-lane case:"),
+                ("folding_cost", "counter-lane case:"),
+                ("memory", "memory-lane case:"),
+            ] {
+                lanes.push((target, lane));
+                std::fs::copy(
+                    root.join(format!("crates/{package}/tests/{target}.rs")),
+                    manifest.join(format!("tests/{target}.rs")),
+                )
+                .unwrap();
+            }
+        }
+        for target in targets {
+            let source =
+                std::fs::read_to_string(root.join(format!("crates/{package}/tests/{target}.rs")))
+                    .unwrap();
+            assert!(
+                source.contains(&format!("#[ignore = \"{prefix}")),
+                "{package} {target} has no lane case"
+            );
+            if package == "norn-host" {
+                let tests = source
+                    .lines()
+                    .filter(|line| line.trim() == "#[test]")
+                    .count();
+                let ignored = source
+                    .lines()
+                    .filter(|line| line.trim().starts_with("#[ignore = \"fault-lane case:"))
+                    .count();
+                assert_eq!(tests, ignored, "every fault case is ignored");
+                assert_eq!(tests, if *target == "lockdown" { 14 } else { 1 });
+            }
+            std::fs::write(manifest.join(format!("tests/{target}.rs")), source).unwrap();
+        }
+        norn_testkit::lanes::assert_lane_steps_agree(&manifest, package, &lanes);
+        norn_testkit::lanes::assert_lane_steps_name_the_features_their_targets_need(
+            &manifest, package, &lanes,
+        );
     }
+    let gate = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    assert_fast_gate(&gate);
+    let manifest = std::fs::read_to_string(root.join("crates/norn-host/Cargo.toml")).unwrap();
+    assert!(
+        !manifest.contains("autotests = false"),
+        "ordinary host targets remain auto-discovered"
+    );
 }
 
 const FULL_JOB_KEYS: &[&str] = &[
@@ -1522,8 +1631,9 @@ fn assert_matrix_step_values(workflow: &str, job: &str, runs: &[&str], full: boo
         if command.starts_with("cargo doc ") {
             step.push_str("\nRUSTDOCFLAGS: -D warnings");
         }
-        if command.contains("lane-suite.sh norn-host counter_gate")
-            || command.contains("lane-suite.sh norn-host folding_cost")
+        if ["counter_gate", "folding_cost", "lockdown", "kill_recovery"]
+            .iter()
+            .any(|target| command.contains(&format!("lane-suite.sh norn-host {target}")))
         {
             step.push_str("\nLANE_FEATURES: induced-failure");
         }
@@ -1547,7 +1657,11 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             .iter()
             .map(|(key, _)| key.as_str())
             .collect::<Vec<_>>(),
-        FULL_JOB_KEYS
+        if full {
+            FULL_JOB_KEYS
+        } else {
+            &["build", "host-functional", "platform", "architecture"]
+        }
     );
     let commands: &[(&str, &str, &[&str])] = &[
         (
@@ -1614,7 +1728,38 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             ],
         ),
     ];
-    for (key, name, runs) in commands {
+    for &(mut key, mut name, runs) in commands {
+        if !full && matches!(key, "folding-counters" | "gates" | "memory") {
+            continue;
+        }
+        let mut runs = runs.to_vec();
+        if full {
+            match key {
+                "build" => runs.extend([
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn regression",
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn certification",
+                ]),
+                "induced-failure" | "platform" => runs.extend([
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host lockdown",
+                    ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host kill_recovery",
+                ]),
+                _ => {},
+            }
+        } else if key == "induced-failure" {
+            key = "host-functional";
+            name = "host functional (induced-failure)";
+        } else if key == "platform" {
+            runs = vec![
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism",
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs",
+                ".github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure --test obsidian_parity",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_flip_converges_on_a_build_from_zero -- --exact --include-ignored",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test churn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero -- --exact --include-ignored",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_document_refuses_the_heal_rather_than_quarantining_it -- --exact --include-ignored",
+                ".github/scripts/flake-tripwire.sh .github/scripts/test-suite.sh cargo test --locked -p norn-host --features induced-failure --test lockdown an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it -- --exact --include-ignored",
+                ".github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1",
+            ];
+        }
         let lines = ci_job(workflow, key);
         let name = if full {
             format!("full {name}")
@@ -1622,13 +1767,13 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
             name.to_string()
         };
         assert_ci_lines(&lines, &[&format!("name: {name}")]);
-        let timeout = match *key {
+        let timeout = match key {
             "memory" => 20,
             "architecture" => 10,
             _ => 30,
         };
         assert_ci_lines(&lines, &[&format!("timeout-minutes: {timeout}")]);
-        let mac = matches!(*key, "platform" | "folding-counters");
+        let mac = matches!(key, "platform" | "folding-counters");
         assert_ci_lines(
             &lines,
             &[if mac {
@@ -1645,7 +1790,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
         } else {
             assert_job_cannot_skip_or_excuse(&lines);
         }
-        assert_matrix_step_values(workflow, key, runs, full);
+        assert_matrix_step_values(workflow, key, &runs, full);
     }
     assert!(
         !ci_job(workflow, "build")
@@ -1654,33 +1799,6 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 && line.contains("cargo test")
                 && line.contains("--features induced-failure")),
         "host recovery stays in its independent job"
-    );
-    assert!(
-        !ci_job(workflow, "platform")
-            .iter()
-            .any(|line| line.starts_with("run:") && line.contains("lane-suite.sh")),
-        "folding counters stay in their independent job"
-    );
-    assert_ci_lines(&ci_job(workflow, "build"), &["RUSTDOCFLAGS: -D warnings"]);
-    assert_ci_lines(
-        &ci_job(workflow, "architecture"),
-        &["uses: docker://rhysd/actionlint:1.7.12"],
-    );
-    for key in ["folding-counters", "gates"] {
-        assert_eq!(
-            ci_job(workflow, key)
-                .iter()
-                .filter(|line| *line == "LANE_FEATURES: induced-failure")
-                .count(),
-            2
-        );
-    }
-    assert_eq!(
-        ci_job(workflow, "memory")
-            .iter()
-            .filter(|line| *line == "LANE_FEATURES: induced-failure")
-            .count(),
-        0
     );
 }
 
@@ -1789,6 +1907,30 @@ fn full_regression_keeps_every_active_obligation_and_collects_later_failures() {
         std::fs::read_to_string(workspace_root().join(".github/workflows/regression.yml"))
             .expect("reading full regression");
     assert_regression_workflow(&workflow);
+    for job in ["build", "induced-failure", "platform"] {
+        let targets: &[&str] = if job == "build" {
+            &["norn regression", "norn certification"]
+        } else {
+            &["norn-host lockdown", "norn-host kill_recovery"]
+        };
+        for target in targets {
+            let (key, body) = jobs(&workflow)
+                .into_iter()
+                .find(|(key, _)| key == job)
+                .unwrap();
+            let mutant_body = body
+                .lines()
+                .filter(|line| !line.contains(&format!("lane-suite.sh {target}")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mutant = workflow.replace(&body, &mutant_body);
+            assert_ne!(mutant, workflow, "{key} {target} removal changed nothing");
+            assert!(
+                std::panic::catch_unwind(|| assert_regression_workflow(&mutant)).is_err(),
+                "{key} lost {target}"
+            );
+        }
+    }
     for mutant in [
         workflow.replace(" && steps.identity.outcome == 'success'", ""),
         workflow.replace("        id: identity\n", ""),
@@ -1987,6 +2129,61 @@ fn a_suite_runner_rejects_empty_runs_and_preserves_failures() {
                 expected_args
             );
         }
+    }
+}
+
+/// Certification still executes fault carriers after they move out of ordinary CI.
+#[test]
+#[cfg(unix)]
+fn certification_executes_ignored_fault_carriers() {
+    use norn_testkit::process::{Run, RunStatus};
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "certification-faults",
+    )
+    .unwrap();
+    let (_, search) = fixture_cargo(&sandbox);
+    let args = sandbox.work_dir().join("cargo-args");
+    for (target, feature) in [
+        ("lockdown", Some("induced-failure")),
+        ("kill_recovery", Some("induced-failure")),
+        ("lib", None),
+        ("churn", Some("induced-failure")),
+        ("lockdown", None),
+    ] {
+        let mut run = Run::new(
+            &sandbox,
+            workspace_root().join(".github/scripts/certification-suite.sh"),
+        )
+        .args(["norn-host", target]);
+        if let Some(feature) = feature {
+            run = run.arg(feature);
+        }
+        let outcome = run
+            .env("PATH", &search)
+            .env("NORN_CERTIFICATION_LOGS", sandbox.work_dir().join("logs"))
+            .env("NORN_FIXTURE_ARGS", &args)
+            .env("NORN_FIXTURE_OUTPUT", "test result: ok. 1 passed; 0 failed")
+            .env("NORN_FIXTURE_STATUS", "0")
+            .wait()
+            .unwrap();
+        assert_eq!(outcome.status, RunStatus::Exited(0));
+        let mut expected = vec!["test", "--locked", "-p", "norn-host"];
+        if target == "lib" {
+            expected.push("--lib");
+        } else {
+            expected.extend(["--test", target]);
+        }
+        if let Some(feature) = feature {
+            expected.extend(["--features", feature]);
+        }
+        if matches!(target, "lockdown" | "kill_recovery") && feature == Some("induced-failure") {
+            expected.extend(["--", "--include-ignored"]);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&args).unwrap(),
+            format!("{}\n", expected.join("\n"))
+        );
     }
 }
 

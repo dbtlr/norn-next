@@ -1,9 +1,9 @@
-//! The complete PR/main gate and nightly/manual regression both adopt the active lanes.
+//! Full regression adopts fault, counter and memory lanes; PR macOS also runs the spelling bar.
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
-//! Three CI lanes adopt this crate's ignored cases by asking for them
-//! wholesale: the per-PR counter gates job, the per-PR memory job, and the
-//! nightly soak lane each run a suite's ignored cases and assert that a
+//! CI lanes adopt this crate's ignored cases wholesale. Full regression runs
+//! fault, counter and memory cases; PR macOS also runs the spelling bar, and
+//! the soak workflow runs its own cases. Each step asserts that a
 //! non-zero number of them passed. That is what makes a name filter
 //! unnecessary, and it is also what makes a stray `#[ignore]` dangerous — an
 //! `#[ignore = "flaky"]` added for a local reason would be silently adopted by
@@ -18,11 +18,11 @@
 /// Which lane prefix a file's `#[ignore]` reasons must open with, keyed by
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
-/// - `counter-lane case:` — the per-PR `counter gates` job's `--ignored` step,
-///   and the macOS folding-root counter job's `folding_cost` and
-///   `counter_gate` steps.
-/// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
+/// - `counter-lane case:` — the full-regression counter jobs' `--ignored` steps;
+///   PR macOS also adopts `folding_cost`.
+/// - `memory-lane case:` — the full-regression `memory invariant` job's `--ignored`
 ///   step.
+/// - `fault-lane case:` — full-regression Linux and macOS recovery steps.
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.
 ///
 /// An ignored case in a new test file means adding that file's stem here, in
@@ -31,6 +31,8 @@
 /// that no CI step runs is a lane measuring nothing — and both directions are
 /// checked below against the workflows themselves.
 const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
+    ("lockdown", "fault-lane case:"),
+    ("kill_recovery", "fault-lane case:"),
     ("counter_gate", "counter-lane case:"),
     ("folding_cost", "counter-lane case:"),
     ("memory", "memory-lane case:"),
