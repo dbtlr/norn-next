@@ -186,7 +186,12 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
         .verify_integrity()
         .expect("fact ownership remains intact");
     induced_failure::stop_recording_statements();
-    println!("{COMPLETED}");
+    report_census_completion(COMPLETED);
+}
+
+#[allow(clippy::disallowed_macros)] // Machine-consumed child completion signal.
+fn report_census_completion(marker: &str) {
+    println!("{marker}");
 }
 
 /// Parent ids must remain correct while document, link, rule-set and finding

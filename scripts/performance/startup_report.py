@@ -21,6 +21,7 @@ WORK = ("document_opens", "documents_derived", "changesets_applied", "links_rede
 
 
 def validate_samples(metadata, samples):
+    """Refuse publication when the requested grid or its required clocks are incomplete."""
     if not metadata["completed"]:
         raise ValueError("the startup experiment did not complete")
     expected = {(repetition, size, batch, variant["build_kind"], variant["profiling"], stage)
@@ -48,6 +49,7 @@ def optional_distribution(samples, key):
 
 
 def summarize(metadata, samples):
+    """Retain individual repetitions beside distributions so medians cannot hide variation."""
     validate_samples(metadata, samples)
     summaries = []
     for size, batch, variant, stage in itertools.product(
@@ -80,6 +82,7 @@ def summarize(metadata, samples):
 
 
 def render(metadata, rows):
+    """Keep missing identity labels and historical clocks visibly distinct from measurements."""
     esc = html.escape
     latencies, phases, work = [], [], []
     identities = ''.join(

@@ -59,6 +59,7 @@ def partition(ready: dict) -> dict | None:
 
 
 def validate_work(evidence, stage, documents, batch):
+    """Reject timings made cheaper by skipped import work or a changed restart."""
     if evidence is None:
         return
     if stage == "fresh" and evidence["changesets_applied"] < (documents + batch - 1) // batch:
@@ -70,6 +71,7 @@ def validate_work(evidence, stage, documents, batch):
 
 def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch: int,
             build_kind: str, profiling: bool, stage: str) -> dict:
+    """Time the validated worker lifecycle, keeping the persisted-state audit outside it."""
     from startup_audit import audit_store
 
     load = os.getloadavg()
