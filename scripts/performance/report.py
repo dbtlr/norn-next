@@ -60,6 +60,11 @@ def summarize(metadata: dict, observations: list[dict]) -> list[dict]:
 
 def render(metadata, rows, observations):
     esc = html.escape
+    largest = max(metadata["sizes"])
+    startup_at_largest = {engine: distribution([item["first_validated_query_ns"] for item in observations
+        if item["kind"] == "startup" and item["background_documents"] == largest and item["engine"] == engine])["median_ms"] / 1000
+        for engine in ("current", "legacy")}
+    warm_wins = sum(row["current_over_legacy"] < 1 for row in rows)
     sections = []
     for size in metadata["sizes"]:
         body = []
@@ -130,6 +135,11 @@ legacy {esc(metadata["legacy_version"])} through its warm MCP daemon. These are 
 different frontends and contracts. They do not establish a pure engine speedup or predict the unfinished current CLI.</p>
 <p>Every read was checked against authored fixture answers. Every write was applied and read back;
 the hub rename also checked all ten rewritten files. All measurements below come from a completed run.</p>
+<p><strong>Warm calls and fresh-store startup:</strong> current had lower median request latency in
+{warm_wins} of {len(rows)} workload/size comparisons. At {largest + 14:,} documents, startup from an empty
+derived store through the first validated query measured <strong>{startup_at_largest["current"]:.2f} s current</strong>
+and <strong>{startup_at_largest["legacy"]:.2f} s legacy</strong> (median of the recorded starts).
+Fresh-store startup and warm requests are separate costs.</p>
 {''.join(sections)}
 <h2>Writes plus immediate readback</h2><p class="note">Sum of the write reply and its confirming get, in milliseconds.
 Filesystem checks run outside these clocks. This exposes work deferred until the next read.</p>
@@ -138,11 +148,12 @@ Filesystem checks run outside these clocks. This exposes work deferred until the
 End readings follow all work and a one-second pause. These short runs cannot establish a leak or a long-term retention slope.
 The controller, generator and legacy background child processes are excluded. CPU seconds cover all operations and warmups after readiness.</p>
 <div class="table-wrap"><table><thead><tr><th>Documents</th><th>Engine</th><th>Run</th><th>Ready RSS</th><th>End RSS</th><th>Peak RSS</th><th>Open FDs</th><th>CPU s</th></tr></thead><tbody>{''.join(memory)}</tbody></table></div>
-<details><summary>Startup and logical work</summary><p>Startup is process launch through the first validated common-text query.
+<h2>Fresh-store startup</h2><p>Startup is process launch through the first validated common-text query.
 Stores are fresh; OS caches are uncontrolled. It includes setup and observation overhead.</p>
 <p>Current host setup includes case detection, construction and acquisition of the shared test-watcher lease.
 A large setup time can reflect another test holding that lease; it is not indexing time.</p>
 <table><thead><tr><th>Documents</th><th>Engine</th><th>Run</th><th>Total seconds</th><th>Host setup ms</th></tr></thead><tbody>{''.join(startups)}</tbody></table>
+<details><summary>Logical work counters</summary>
 <p>Current snapshot counter ranges across measured calls. SQLite VM steps do not count all internal FTS posting-list work.</p>
 <div class="table-wrap"><table><thead><tr><th>Documents</th><th>Operation</th><th>Statements</th><th>VM steps</th><th>Full-scan steps</th></tr></thead><tbody>{''.join(counters)}</tbody></table></div></details>
 <h2>How to interpret the comparison</h2><ul>
@@ -188,7 +199,7 @@ def main():
     observations = [json.loads(line) for line in (args.run / "samples.jsonl").read_text().splitlines()]
     rows = summarize(metadata, observations)
     (args.run / "summary.json").write_text(json.dumps(rows, indent=2) + "\n")
-    (args.run / "report.html").write_text(render(metadata, rows, observations))
+    (args.run / "report.html").write_text(render(metadata, rows, observations), encoding="utf-8")
     print(args.run / "report.html")
 
 

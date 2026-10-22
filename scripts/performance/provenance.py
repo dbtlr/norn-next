@@ -8,6 +8,25 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from transport import stop_process
+
+
+def run_build(command: list[str], repo: Path, env: dict, receipt: Path,
+              timeout: float = 1800) -> str:
+    """Keep live build diagnostics, including when the isolated build times out."""
+    output = receipt.with_suffix(".cargo.jsonl")
+    errors = receipt.with_suffix(".cargo.log")
+    with output.open("w", encoding="utf-8") as stdout, errors.open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(command, cwd=repo, env=env, stdout=stdout, stderr=stderr,
+                                   start_new_session=True)
+        try:
+            returncode = process.wait(timeout=timeout)
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
+        finally:
+            stop_process(process)
+    return output.read_text(encoding="utf-8")
+
 
 def sha256(path: Path) -> str:
     with path.open("rb") as file:
@@ -15,7 +34,7 @@ def sha256(path: Path) -> str:
 
 
 def source_tree_digest(repo: Path) -> str:
-    names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=repo)
+    names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=repo, timeout=30)
     digest = hashlib.sha256()
     for name in sorted(set(names.split(b"\0")) - {b""}):
         path = repo / os.fsdecode(name)
@@ -56,7 +75,7 @@ def main():
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     toolchain = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
-    compiler = subprocess.check_output(["rustup", "which", "--toolchain", toolchain, "rustc"], text=True).strip()
+    compiler = subprocess.check_output(["rustup", "which", "--toolchain", toolchain, "rustc"], text=True, timeout=30).strip()
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("CARGO_PROFILE_", "CARGO_BUILD_"))
            and key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL", "RUSTC_FORCE_INCREMENTAL")}
@@ -68,22 +87,19 @@ def main():
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     source_hash = source_tree_digest(repo)
     configs = cargo_configs(repo)
-    result = subprocess.run(command, cwd=repo, env=env, text=True, capture_output=True)
-    args.receipt.with_suffix(".cargo.jsonl").write_text(result.stdout)
-    args.receipt.with_suffix(".cargo.log").write_text(result.stderr)
-    result.check_returncode()
+    output = run_build(command, repo, env, args.receipt)
     if source_tree_digest(repo) != source_hash or cargo_configs(repo) != configs:
         raise ValueError("source or Cargo configuration changed during compilation")
-    artifacts = [json.loads(line) for line in result.stdout.splitlines()]
+    artifacts = [json.loads(line) for line in output.splitlines()]
     artifact = next(item for item in artifacts if item.get("reason") == "compiler-artifact"
                     and item["target"]["name"] == "performance" and item.get("executable"))
     receipt = {"executable": artifact["executable"], "sha256": sha256(Path(artifact["executable"])),
                "profile": artifact["profile"], "features": artifact["features"], "command": command,
-               "rustc": subprocess.check_output([compiler, "-vV"], text=True),
+               "rustc": subprocess.check_output([compiler, "-vV"], text=True, timeout=30),
                "effective_compiler": compiler, "encoded_rustflags": "", "compiler_wrappers": "disabled",
-               "cargo": subprocess.check_output(["rustup", "run", toolchain, "cargo", "--version"], text=True),
-               "repository_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
-               "repository_status": subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True),
+               "cargo": subprocess.check_output(["rustup", "run", toolchain, "cargo", "--version"], text=True, timeout=30),
+               "repository_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True, timeout=30).strip(),
+               "repository_status": subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True, timeout=30),
                "worker_source_sha256": sha256(repo / "crates/norn-host/tests/performance.rs"),
                "cargo_lock_sha256": sha256(repo / "Cargo.lock"), "source_tree_sha256": source_hash,
                "cargo_configs": configs,

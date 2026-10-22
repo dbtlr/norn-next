@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fixture import prepare_probes, tree_digest
 from results import distribution, record, validate_paths, validate_write
-from provenance import cargo_configs, source_tree_digest, verify_build
+from provenance import cargo_configs, run_build, source_tree_digest, verify_build
 from report import summarize
 from transport import stop_process
 
@@ -116,6 +116,15 @@ class AnswerTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_a_timed_out_build_preserves_its_partial_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = [sys.executable, "-c", "import sys,time; print('{}',flush=True); print('diagnostic',file=sys.stderr,flush=True); time.sleep(60)"]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_build(command, root, os.environ.copy(), root / "build.json", timeout=2)
+            self.assertIn("diagnostic", (root / "build.cargo.log").read_text())
+            self.assertIn("{}", (root / "build.cargo.jsonl").read_text())
+
     def test_an_unchanged_binary_does_not_hide_changed_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

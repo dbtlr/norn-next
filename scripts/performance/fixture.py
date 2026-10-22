@@ -29,14 +29,14 @@ def prepare_probes(root: Path) -> dict:
     active = []
     background = sorted(root.rglob("*.md"))
     for number, path in enumerate(background):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if COMMON in text or RARE in text or MISSING in text:
             raise ValueError("probe token collides with the generated background")
         bucket = "active" if number % 2 == 0 else "archived"
         if not text.startswith("---\n"):
             raise ValueError("generated documents must have frontmatter")
         text = "---\nperf_bucket: " + bucket + "\n" + text[4:]
-        path.write_text(text + "\n" + COMMON + "\n")
+        path.write_text(text + "\n" + COMMON + "\n", encoding="utf-8")
         if bucket == "active":
             active.append(path.relative_to(root).as_posix())
 

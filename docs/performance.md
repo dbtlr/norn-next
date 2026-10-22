@@ -41,7 +41,9 @@ assertions disabled. The receipt hashes all nonignored source files before and
 after compilation. A changed source tree requires a new receipt before running.
 Cargo configuration files, including files outside the repository, are recorded
 by hash and checked again before execution. Build and incremental environment
-overrides are removed.
+overrides are removed. Builds have a 30-minute timeout and stream diagnostics to
+the receipt's `.cargo.jsonl` and `.cargo.log` siblings, preserving partial output
+on failure. Metadata commands have a 30-second timeout.
 The report distinguishes executable source identity from runner identity and
 states whether the build checkout was dirty. A test target retains its development
 dependency features; the receipt records them separately from a shipping binary claim.
