@@ -95,6 +95,9 @@ const PREPARED_STATEMENT_CACHE: usize = 32;
 /// chunks. A larger interval amortizes that work without enlarging the page
 /// cache or a transaction. It is a trigger, not a WAL size cap: a transaction
 /// can cross it, and a reader can keep a passive checkpoint from completing.
+/// Every durable writer uses this interval. Under `synchronous=NORMAL`, spacing
+/// checkpoints out also spaces out automatic WAL sync opportunities; it does
+/// not preserve the previous power-loss persistence window.
 const WAL_CHECKPOINT_FRAMES: i64 = 16_384;
 
 /// What connecting to a path produced.

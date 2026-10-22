@@ -100,7 +100,12 @@ def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch:
                   "storage_bytes_at_first_query": disk_at_first_query,
                   "verified_reads": verified, "load_start": load, "load_end": os.getloadavg()}
     finally:
+        closing = time.perf_counter_ns()
         worker.close()
+        closed = time.perf_counter_ns()
+    result["shutdown_ns"] = closed - closing
+    result["validated_lifecycle_ns"] = closed - began
+    result["storage_bytes_after_close"] = storage_bytes(root)
     for name in ("worker.stdout.log", "worker.stderr.log"):
         shutil.copyfile(root / name, root / (stage + "." + name))
     result["store"] = audit_store(audit_binary, root, manifest)
@@ -167,7 +172,7 @@ def main():
         variants.append({"build_kind": "standard", "profiling": False})
     if "baseline" in binaries:
         variants.append({"build_kind": "baseline", "profiling": False})
-    metadata = {"workload_version": "startup-attribution-v1", "completed": False,
+    metadata = {"workload_version": "startup-attribution-v2", "completed": False,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "current_build": receipt, "builds": receipts, "runner_source_sha256": source_tree_digest(repo),
                 "sizes": args.sizes, "batches": args.batches, "repetitions": args.repetitions,

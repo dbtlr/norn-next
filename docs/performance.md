@@ -218,14 +218,15 @@ python3 scripts/performance/startup.py \
   --baseline-source "$BASELINE_SOURCE" \
   --fixtures "$PERF_HOME/run-001/fixtures" \
   --output "$PERF_HOME/revision-001" \
-  --batches 128 --repetitions 3 --timings both
+  --batches 128 --repetitions 4 --timings both
 ```
 
 The baseline receipt must match its own checkout and executable. Both source
 trees must remain unchanged until measurement ends. The report names every
 build's source and executable hashes. Compare `baseline` with `standard` for
 revision changes; compare the candidate's profile variants to assess timing
-and feature overhead. Every variant uses the same frozen source fixture and
+and feature overhead. Use an even repetition count to balance variant order.
+Every variant uses the same frozen source fixture and
 persisted-state audit. A baseline with a different store schema needs a
 compatible audit before this runner can compare it.
 
@@ -255,6 +256,11 @@ After the first validated query, the runner records database, WAL, and shared
 memory file lengths while the worker remains open. These readings are outside
 the startup clock. They are file lengths at that boundary, not peak disk
 usage or allocated filesystem blocks.
+Clean shutdown is timed separately, including process exit and controller
+cleanup. The validated lifecycle runs from process launch through all
+known-answer reads and shutdown. The persisted-state audit follows that clock.
+Report both alongside startup when a change can defer checkpoint work until
+after readiness.
 
 After each process closes, the runner checks every document hash against the
 fixture and compares normalized semantic store contents across configurations.

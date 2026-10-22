@@ -107,6 +107,25 @@ class StartupAccountingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_work({**unchanged, key: 1}, "restart", 314, 128)
 
+    def test_revision_reports_require_shutdown_and_the_complete_validated_lifecycle(self):
+        metadata = {"completed": True, "workload_version": "startup-attribution-v2", "sizes": [300],
+                    "batches": [128], "variants": [{"build_kind": "standard", "profiling": False}], "repetitions": 1}
+        common = {"repetition": 0, "background_documents": 300, "changeset_size": 128,
+                  "build_kind": "standard", "profiling": False, "verified": True,
+                  "first_validated_query_ns": 20, "shutdown_ns": 30, "validated_lifecycle_ns": 60}
+        samples = [{**common, "stage": stage} for stage in ("fresh", "restart")]
+        validate_samples(metadata, samples)
+        for key in ("shutdown_ns", "validated_lifecycle_ns"):
+            incomplete = copy.deepcopy(samples)
+            del incomplete[0][key]
+            with self.assertRaises(ValueError):
+                validate_samples(metadata, incomplete)
+        for shutdown, lifecycle in ((-1, 60), (30, 49)):
+            inconsistent = copy.deepcopy(samples)
+            inconsistent[0].update(shutdown_ns=shutdown, validated_lifecycle_ns=lifecycle)
+            with self.assertRaises(ValueError):
+                validate_samples(metadata, inconsistent)
+
 
 if __name__ == "__main__":
     unittest.main()
