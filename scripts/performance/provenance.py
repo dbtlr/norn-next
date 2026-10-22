@@ -72,6 +72,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-directory", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--startup-profile", action="store_true",
+                        help="include the host's harness-only startup timing and work readers")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     outputs = (args.target_directory, args.receipt, args.receipt.with_suffix(".cargo.jsonl"),
@@ -88,6 +90,8 @@ def main():
     env.update(CARGO_ENCODED_RUSTFLAGS="", RUSTC=compiler, RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
     command = ["rustup", "run", toolchain, "cargo", "test", "--locked", "--release", "-p",
                "norn-host", "--test", "performance", "--no-run", "--message-format=json"]
+    if args.startup_profile:
+        command.extend(["--features", "induced-failure"])
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     source_hash = source_tree_digest(repo)
     configs = cargo_configs(repo)

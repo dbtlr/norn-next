@@ -85,15 +85,18 @@ def resources(pid: int) -> dict:
 
 
 class Current:
-    def __init__(self, binary: Path, root: Path):
+    def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False):
         token = issue_root(root)
-        self.stderr = (root / "worker.stderr.log").open("w")
-        self.raw = (root / "worker.stdout.log").open("w")
+        env = environment(root, token)
+        env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
+                   NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
+        self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
+        self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
         self.process = subprocess.Popen(
             [str(binary), "serve"],
-            cwd=root, env=environment(root, token), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=self.stderr, text=True, bufsize=1,
+            cwd=root, env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=self.stderr, text=True, encoding="utf-8", bufsize=1,
             start_new_session=True,
         )
         self.reader = threading.Thread(target=self._read, daemon=True)

@@ -1105,6 +1105,8 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.heal");
         if !attachment
             .maintainership
             .still_current()
@@ -1455,6 +1457,8 @@ impl EntryOps for ProductionEntryOps {
         registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.attach");
         // Everything up to the heal takes the maintainer lock, sweeps the
         // shadow home, installs watcher coverage and opens the store — work
         // that counts no document and can take a while on a loaded machine.
@@ -1478,8 +1482,11 @@ impl EntryOps for ProductionEntryOps {
         // key wherever the device comparison places it.
         let key = maintainership_key(&self.dirs, &registration.name);
         let schema = Self::schema_path(registration);
-        let (subscription, own_writes) =
-            Self::start_watch(registration, &schema).map_err(watcher)?;
+        let (subscription, own_writes) = {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.watch_start");
+            Self::start_watch(registration, &schema).map_err(watcher)?
+        };
         let covered_root = subscription.covered_root().to_owned();
         let root_identity = subscription.root_identity();
         let path_order = stored_path_order(subscription.case_sensitivity());
@@ -1508,18 +1515,26 @@ impl EntryOps for ProductionEntryOps {
         // No root identity is recorded in the store. A registry root hand edit
         // keeps its epoch when those rebuild inputs agree. `vault set --root`
         // discards derived state so the next attach mints a new epoch.
-        let mut store = Store::open(
-            derived.join(STORE_FILE),
-            path_order,
-            crate::DERIVATION_VERSION,
-        )
-        .map_err(store_effect)?;
+        let mut store = {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.store_open");
+            Store::open(
+                derived.join(STORE_FILE),
+                path_order,
+                crate::DERIVATION_VERSION,
+            )
+            .map_err(store_effect)?
+        };
         store
             .set_count_retention(self.policy.count_retention)
             .map_err(store_effect)?;
-        subscription
-            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
-            .map_err(watcher)?;
+        {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.watch_sync_wait");
+            subscription
+                .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+                .map_err(watcher)?;
+        }
         let candidate =
             ReloadCandidate::read_at(registration, &covered_root).map_err(JobFailure::Reload)?;
         let rolling = rolling::RollingHeal::new(
@@ -1556,7 +1571,11 @@ impl EntryOps for ProductionEntryOps {
             // controls the attachment holds.
             return Ok(attachment);
         }
-        attachment.pin(&candidate)?;
+        {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.schema_pin");
+            attachment.pin(&candidate)?;
+        }
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
         // never read is met by the first read that does. Rung 3 runs here
@@ -1580,6 +1599,8 @@ impl EntryOps for ProductionEntryOps {
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.reconcile");
         rolling::watcher_turn(attachment, &work.batch)?;
         let ended = self.reconcile_leg(name, attachment, work, progress);
         self.leg_ended(attachment, progress, ended)
@@ -2535,6 +2556,8 @@ fn open_enumerated<I>(
 where
     I: Iterator<Item = Result<(Vec<u8>, norn_fs::WalkFact), norn_fs::WalkError>>,
 {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.document_read");
     let (_, norn_fs::WalkFact::File(file)) = files.next().expect("peeked").map_err(effect)? else {
         panic!("the merge stands on the file whose name it read");
     };
@@ -3807,6 +3830,8 @@ fn close_job(
     policy: ProductionPolicy,
     account: &mut Account,
 ) -> Result<(), JobFailure> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.close_job");
     revisit_vacated(store, root, exclusions, policy, account)?;
     prune_unaccounted(store, policy, account)
 }

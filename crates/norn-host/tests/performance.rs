@@ -53,16 +53,107 @@ fn performance_generate() {
     emit(json!({"generated": profile.docs}));
 }
 
+#[cfg(feature = "induced-failure")]
+fn performance_audit() {
+    let root = root();
+    let vault = attach::Vault::adopt(&root);
+    let summary = norn_store::startup_audit::audit(&vault.database(), |path, hash, byte_length| {
+        emit(json!({"document": {"path": path, "content_hash": hash, "byte_length": byte_length}}));
+        Ok(())
+    })
+    .expect("audit the closed startup store");
+    emit(json!({"summary": summary}));
+}
+
 fn performance_worker() {
     let root = root();
+    let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
+        value.parse().expect("an integer changeset size")
+    });
+    let policy =
+        norn_host::ProductionPolicy::new(128, changeset_size).expect("bounded measurement policy");
+    let profiling = std::env::var("NORN_PERFORMANCE_PROFILE").is_ok_and(|value| value == "1");
+    #[cfg(not(feature = "induced-failure"))]
+    assert!(
+        !profiling,
+        "startup profiling requires the induced-failure build feature"
+    );
+    #[cfg(feature = "induced-failure")]
+    let recording = profiling.then(|| {
+        norn_store::profiling::start(&[
+            "host.attach",
+            "host.watch_start",
+            "host.store_open",
+            "host.watch_sync_wait",
+            "host.schema_pin",
+            "host.heal",
+            "host.reconcile",
+            "host.document_read",
+            "host.document_plan",
+            "host.parse_map",
+            "host.frontmatter_parse",
+            "host.body_scan",
+            "host.close_job",
+            "store.increment",
+            "store.upsert",
+            "store.document_row",
+            "store.link_health",
+            "store.commit",
+        ])
+        .expect("start the isolated timing record")
+    });
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
-    let host = vault.host();
+    let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
-    let _demand = attach::attach_and_wait(&host, vault.name());
+    let _demand = host.demand(vault.name()).expect("request attachment");
+    let until = Instant::now() + std::time::Duration::from_secs(240);
+    while host.state(vault.name()).expect("registered vault state") != norn_wire::TrustState::Ready
+    {
+        assert!(Instant::now() < until, "startup did not become ready");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let ready_ns = began.elapsed().as_nanos();
+    #[cfg(feature = "induced-failure")]
+    let (timings, evidence) = {
+        // Ready is published before the job folds its account; wait for that tail.
+        let until = Instant::now() + std::time::Duration::from_secs(30);
+        while !host
+            .work_in_flight(vault.name())
+            .expect("a registered vault")
+            .is_quiet()
+        {
+            assert!(Instant::now() < until, "startup work did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let timings = recording.map(|recording| {
+            let report = recording.finish();
+            json!({"entries": report.entries.iter().map(|entry| json!({
+                "label": entry.label, "calls": entry.calls, "elapsed_ns": entry.elapsed_ns,
+            })).collect::<Vec<_>>(), "unknown_labels": report.unknown_labels,
+                "unfinished_spans": report.unfinished_spans})
+        });
+        let e = host.evidence();
+        (
+            timings,
+            json!({"document_opens": e.document_opens, "stats": e.stats,
+            "walk_dirents": e.walk_dirents, "documents_derived": e.documents_derived,
+            "changesets_applied": e.changesets_applied, "documents_upserted": e.documents_upserted,
+            "documents_deleted": e.documents_deleted, "findings_written": e.findings_written,
+            "findings_discarded": e.findings_discarded, "links_redecided": e.links_redecided,
+            "link_health_keys_resolved": e.link_health_keys_resolved,
+            "link_health_candidates_read": e.link_health_candidates_read,
+            "changeset_read_steps": e.changeset_read_steps, "recoveries_run": e.recoveries_run,
+            "rebuilds_run": e.rebuilds_run, "watcher_polls": e.watcher_polls}),
+        )
+    };
+    #[cfg(not(feature = "induced-failure"))]
+    let (timings, evidence): (Option<Value>, Value) = (None, Value::Null);
     emit(
-        json!({"ready": true, "attach_ns": began.elapsed().as_nanos(),
-                "host_setup_ns": host_setup.as_nanos()}),
+        json!({"ready": true, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
+                "observed_ready_ns": ready_ns, "host_setup_ns": host_setup.as_nanos(),
+                "store_page_size": policy.store_page_size, "changeset_size": policy.changeset_size,
+                "timings": timings, "job_evidence": evidence}),
     );
     let address = VaultAddress::name(vault.name().clone());
 
@@ -192,6 +283,8 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("generate") => performance_generate(),
         Some("serve") => performance_worker(),
+        #[cfg(feature = "induced-failure")]
+        Some("audit") => performance_audit(),
         _ => panic!("the performance worker requires generate or serve from its external runner"),
     }
 }
