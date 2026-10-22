@@ -1691,9 +1691,13 @@ impl<'a> Request<'a> {
         read: impl FnMut(&Row<'_>) -> Reading<T>,
         operation: &'static str,
     ) -> Result<Vec<T>, StoreError> {
+        #[cfg(feature = "induced-failure")]
+        let prepare_timing = norn_db::profiling::span("store.prepare_read");
         let mut statement = connection
             .prepare_cached(sql)
             .map_err(|error| error::sql(operation, error))?;
+        #[cfg(feature = "induced-failure")]
+        drop(prepare_timing);
         // A cached statement carries the steps of every earlier run.
         statement.reset_status(StatementStatus::VmStep);
         let rows = statement

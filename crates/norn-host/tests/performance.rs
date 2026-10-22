@@ -101,6 +101,8 @@ fn performance_worker() {
             "store.commit",
             "store.write_finding",
             "health.discard",
+            "health.prepare_discard",
+            "store.prepare_read",
             "health.judge",
             "health.read_links",
             "health.resolve_keys",

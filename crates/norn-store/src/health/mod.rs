@@ -773,9 +773,15 @@ fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u6
     }
     let ids: Vec<i64> = findings.iter().copied().collect();
     let values = statement::ids_parameters(&ids)?;
-    let discarded = transaction
+    #[cfg(feature = "induced-failure")]
+    let prepare_timing = norn_db::profiling::span("health.prepare_discard");
+    let mut statement = transaction
         .prepare_cached(&statement::discard_sql())
-        .and_then(|mut discard| discard.execute(params_from_iter(values)))
+        .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
+    #[cfg(feature = "induced-failure")]
+    drop(prepare_timing);
+    let discarded = statement
+        .execute(params_from_iter(values))
         .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
     Ok(discarded as u64)
 }
