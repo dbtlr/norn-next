@@ -65,6 +65,10 @@ def summarize(metadata, samples):
 def render(metadata, rows):
     esc = html.escape
     latencies, phases, work = [], [], []
+    identities = ''.join(
+        f'<tr><th>{esc(kind)}</th><td><code>{esc(build["repository_head"])}</code></td>'
+        f'<td><code>{esc(build["sha256"])}</code></td><td><code>{esc(build["source_tree_sha256"])}</code></td></tr>'
+        for kind, build in metadata["builds"].items())
     for row in rows:
         timing = "on" if row["profiling"] else "off"
         label = f'{row["document_count"]:,} / {row["changeset_size"]} / {row["build_kind"]} {timing} / {row["stage"]}'
@@ -88,7 +92,7 @@ th,td{{padding:8px;border-bottom:1px solid var(--border,#ddd);text-align:left;ve
 tbody th{{font-weight:500}}.wrap{{overflow:auto}}small{{display:block;color:var(--muted-foreground,#666)}}
 code{{overflow-wrap:anywhere}}li{{margin-bottom:6px}}</style></head><body><main>
 <h1>Norn startup attribution</h1><p>{esc(metadata["started_at"])} · {metadata["repetitions"]} repetitions per configuration.
-Store read pages stay at 128 rows; only the changeset bound varies.</p>
+Store read pages stay at 128 rows. Changeset bounds and build variants are listed below.</p>
 <p>All known-answer search/get checks passed. Every document hash matches the frozen source.
 Normalized persisted facts and findings agree across configurations. Each unchanged restart preserves its store epoch and write generation.</p>
 <h2>Fresh indexing and existing-index restart</h2><p>End-to-end time runs from launching the worker through its first validated common-text query.
@@ -108,11 +112,10 @@ The total is worker setup through completed startup bookkeeping; the first query
 <li>Watcher background work can overlap caller intervals. These are elapsed scopes, not per-phase CPU samples.</li>
 <li>All cells run serially. Size and batch order rotate, and variant order reverses on alternating repetitions. The audit reads source files and the store before restart, deliberately warming caches. This is a cache-warmed existing-index restart. Other host activity is uncontrolled.</li>
 <li>The persisted-state check normalizes surrogate IDs, generations and timestamps. FTS vocabulary and document token sizes are compared, alongside authored search answers; every term-to-document posting is not independently audited.</li>
-<li>This experiment measures startup and immediate restart, not long-term retained memory. No production defaults are changed.</li></ul>
-<h2>Identity and evidence</h2><p>Executable SHA-256: <code>{esc(metadata["current_build"]["sha256"])}</code><br>
-Compiled source SHA-256: <code>{esc(metadata["current_build"]["source_tree_sha256"])}</code><br>
-Source base: <code>{esc(metadata["current_build"]["repository_head"])}</code><br>
-Platform: {esc(metadata["platform"])}<br>System load start/end: {esc(str(metadata["load_start"]))} / {esc(str(metadata["load_end"]))}</p>
+<li>This experiment measures startup and immediate restart, not long-term retained memory. The harness overrides changeset size in its isolated workers.</li>
+<li>When present, baseline is the earlier revision's standard build. Compare baseline with standard for revision gains or losses; profile variants measure candidate instrumentation overhead. The baseline source and executable are verified against their own receipt.</li></ul>
+<h2>Identity and evidence</h2><div class="wrap"><table><thead><tr><th>Build</th><th>Source base</th><th>Executable SHA-256</th><th>Compiled source SHA-256</th></tr></thead><tbody>{identities}</tbody></table></div>
+<p>Platform: {esc(metadata["platform"])}<br>System load start/end: {esc(str(metadata["load_start"]))} / {esc(str(metadata["load_end"]))}</p>
 <p>run.json preserves build and fixture identity. samples.jsonl preserves every clock, inclusive scope, counter and semantic audit.
 The frozen worker and per-stage logs remain with the run. summary.json preserves the distributions shown here.</p>
 </main></body></html>'''

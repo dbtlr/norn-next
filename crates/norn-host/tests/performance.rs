@@ -108,8 +108,7 @@ fn performance_worker() {
             "health.resolve_keys",
             "health.anchors",
             "health.candidate_names",
-            "db.read_meta",
-            "db.next_generation",
+            "store.finding_metadata",
         ])
         .expect("start the isolated timing record")
     });

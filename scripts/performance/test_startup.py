@@ -1,11 +1,55 @@
 import copy
+import hashlib
+import json
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
-from startup import partition, validate_work
+from provenance import cargo_configs, source_tree_digest
+from startup import baseline_build, partition, storage_bytes, validate_work
 from startup_report import validate_samples
 
 
 class StartupAccountingTests(unittest.TestCase):
+    def test_storage_readings_include_the_open_wal_without_reading_database_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data/private-store"
+            data.mkdir(parents=True)
+            (data / "store.sqlite3").write_bytes(b"database")
+            (data / "store.sqlite3-wal").write_bytes(b"wal")
+            self.assertEqual(storage_bytes(root), {"database": 8, "wal": 3, "shared_memory": 0})
+            (data / "store.sqlite3-wal").unlink()
+            self.assertEqual(storage_bytes(root)["wal"], 0)
+
+    def test_revision_comparison_verifies_the_baselines_own_source_and_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "baseline-source"
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            (source / "worker.rs").write_text("baseline", encoding="utf-8")
+            binary = root / "baseline-worker"
+            binary.write_bytes(b"compiled baseline")
+            receipt = root / "baseline.json"
+            built = {"executable": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                     "profile": {"opt_level": "3", "debug_assertions": False}, "features": [],
+                     "cargo_configs": cargo_configs(source), "source_tree_sha256": source_tree_digest(source)}
+            receipt.write_text(json.dumps(built), encoding="utf-8")
+            self.assertEqual(baseline_build(receipt, source), built)
+            (source / "worker.rs").write_text("changed baseline", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source tree"):
+                baseline_build(receipt, source)
+            (source / "worker.rs").write_text("baseline", encoding="utf-8")
+            binary.write_bytes(b"different executable")
+            with self.assertRaisesRegex(ValueError, "executable"):
+                baseline_build(receipt, source)
+            binary.write_bytes(b"compiled baseline")
+            built["features"] = ["induced-failure"]
+            receipt.write_text(json.dumps(built), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no-feature"):
+                baseline_build(receipt, source)
+
     def ready(self):
         return {"startup_complete_ns": 30, "timings": {
             "unknown_labels": 0, "unfinished_spans": 0,

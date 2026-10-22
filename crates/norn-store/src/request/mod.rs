@@ -1915,10 +1915,14 @@ pub(crate) fn write_finding(
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.write_finding");
+    #[cfg(feature = "induced-failure")]
+    let metadata_timing = norn_db::profiling::span("store.finding_metadata");
     let generation = norn_db::meta::next_generation(transaction)?;
     let fingerprint: String =
         norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
             .unwrap_or_default();
+    #[cfg(feature = "induced-failure")]
+    drop(metadata_timing);
     let rule_set = cited_rule_set(transaction, &fingerprint, &finding.rules)?;
     let value = finding.value.as_deref().map(crate::hash::value_head);
 
