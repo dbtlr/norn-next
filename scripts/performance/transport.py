@@ -6,6 +6,7 @@ import queue
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -141,7 +142,8 @@ class Current:
         self.stderr.close()
         self.process.stdin.close()
         self.process.stdout.close()
-        if self.process.returncode != 0:
+        # Preserve the request failure that run.json records when cleanup follows it.
+        if self.process.returncode != 0 and sys.exc_info()[0] is None:
             raise RuntimeError("current worker did not shut down cleanly; inspect worker logs")
 
 

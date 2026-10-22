@@ -14,7 +14,7 @@ from fixture import prepare_probes, tree_digest
 from results import distribution, record, validate_paths, validate_write
 from provenance import cargo_configs, run_build, source_tree_digest, verify_build
 from report import summarize
-from transport import stop_process
+from transport import Current, stop_process
 
 
 class FixtureTests(unittest.TestCase):
@@ -168,6 +168,24 @@ class ReportTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux process-group lifecycle")
 class ProcessTests(unittest.TestCase):
+    def test_shutdown_preserves_a_request_failure_but_rejects_an_unclean_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "worker"
+            binary.write_text("#!/usr/bin/env python3\nimport sys\n"
+                              "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                              "sys.stdin.readline()\nsys.exit(17)\n")
+            binary.chmod(0o700)
+            worker = Current(binary, root / "failed-request")
+            with self.assertRaisesRegex(RuntimeError, "current worker ended"):
+                try:
+                    worker.call({"op": "search"})
+                finally:
+                    worker.close()
+            worker = Current(binary, root / "failed-shutdown")
+            with self.assertRaisesRegex(RuntimeError, "did not shut down cleanly"):
+                worker.close()
+
     def test_cleanup_stops_descendants_after_the_leader_exits(self):
         code = "import os,signal,time\npid=os.fork()\nif pid==0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n print(os.getpid(),flush=True)\n time.sleep(60)\nelse:\n time.sleep(0.1)\n"
         process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,
