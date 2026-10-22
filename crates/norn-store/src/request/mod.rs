@@ -1909,6 +1909,8 @@ pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
 ) -> Result<(), StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("store.write_finding");
     let generation = norn_db::meta::next_generation(transaction)?;
     let fingerprint: String =
         norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?

@@ -139,6 +139,8 @@ pub fn read_meta<T: rusqlite::types::FromSql>(
     key: &str,
 ) -> rusqlite::Result<Option<T>> {
     #[cfg(feature = "induced-failure")]
+    let _timing = crate::profiling::span("db.read_meta");
+    #[cfg(feature = "induced-failure")]
     if crate::faults::NEXT_META_READ_FAILS.replace(false) {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
@@ -155,6 +157,8 @@ pub fn read_meta<T: rusqlite::types::FromSql>(
 /// Taking it is the same act as recording it, so the counter cannot be read by
 /// one write and used by another: the update and the read are one statement.
 pub fn next_generation(connection: &Connection) -> Result<i64, DbError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = crate::profiling::span("db.next_generation");
     connection
         .query_row(
             NEXT_GENERATION_SQL,

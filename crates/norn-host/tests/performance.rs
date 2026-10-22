@@ -99,6 +99,15 @@ fn performance_worker() {
             "store.document_row",
             "store.link_health",
             "store.commit",
+            "store.write_finding",
+            "health.discard",
+            "health.judge",
+            "health.read_links",
+            "health.resolve_keys",
+            "health.anchors",
+            "health.candidate_names",
+            "db.read_meta",
+            "db.next_generation",
         ])
         .expect("start the isolated timing record")
     });
