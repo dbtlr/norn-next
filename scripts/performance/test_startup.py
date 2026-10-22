@@ -8,10 +8,36 @@ from pathlib import Path
 
 from provenance import cargo_configs, source_tree_digest
 from startup import baseline_build, partition, storage_bytes, validate_work
-from startup_report import validate_samples
+from startup_report import render, validate_samples
 
 
 class StartupAccountingTests(unittest.TestCase):
+    def test_report_keeps_measurements_when_optional_build_identity_was_not_recorded(self):
+        build = {"sha256": "binary-hash", "source_tree_sha256": "source-hash"}
+        metadata = {"builds": {"baseline": build}, "started_at": "2026-10-22", "repetitions": 1,
+                    "platform": "test platform", "load_start": [0, 0, 0], "load_end": [0, 0, 0]}
+        row = {"document_count": 314, "changeset_size": 128, "build_kind": "baseline",
+               "profiling": False, "stage": "fresh", "shutdown": None, "validated_lifecycle": None,
+               "first_validated_query": {"median_ms": 1234}, "observed_ready": {"median_ms": 1000},
+               "repetition_seconds": [1.234], "cpu_seconds": 0.9, "peak_mib": 20, "work": None}
+        recorded = {"repository_head": "revision<one>", "rustc": "rustc <version>\nmore details",
+                    "cargo_lock_sha256": "lock-hash"}
+        for fields in ({}, dict.fromkeys(recorded), dict.fromkeys(recorded, ""), recorded):
+            with self.subTest(fields=fields):
+                build.clear()
+                build.update(sha256="binary-hash", source_tree_sha256="source-hash", **fields)
+                page = render(metadata, [row])
+                self.assertIn("<td>1.234</td>", page)
+                self.assertIn("<code>binary-hash</code>", page)
+                self.assertIn("<code>source-hash</code>", page)
+                if fields == recorded:
+                    self.assertIn("revision&lt;one&gt;", page)
+                    self.assertIn("rustc &lt;version&gt;", page)
+                    self.assertIn("lock-hash", page)
+                    self.assertNotIn("more details", page)
+                else:
+                    self.assertEqual(page.count("not recorded"), 5)
+
     def test_storage_readings_include_the_open_wal_without_reading_database_contents(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

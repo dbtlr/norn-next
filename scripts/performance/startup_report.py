@@ -83,9 +83,9 @@ def render(metadata, rows):
     esc = html.escape
     latencies, phases, work = [], [], []
     identities = ''.join(
-        f'<tr><th>{esc(kind)}</th><td><code>{esc(build["repository_head"])}</code></td>'
+        f'<tr><th>{esc(kind)}</th><td><code>{esc(build.get("repository_head") or "not recorded")}</code></td>'
         f'<td><code>{esc(build["sha256"])}</code></td><td><code>{esc(build["source_tree_sha256"])}</code></td>'
-        f'<td>{esc(build["rustc"].splitlines()[0])}<br><code>{esc(build["cargo_lock_sha256"])}</code></td></tr>'
+        f'<td>{esc((build.get("rustc") or "not recorded").splitlines()[0])}<br><code>{esc(build.get("cargo_lock_sha256") or "not recorded")}</code></td></tr>'
         for kind, build in metadata["builds"].items())
     for row in rows:
         timing = "on" if row["profiling"] else "off"

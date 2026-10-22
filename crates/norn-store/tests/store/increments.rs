@@ -44,6 +44,7 @@ fn death(at: &str, provenance: Provenance) -> Change {
 #[test]
 fn fact_discards_follow_standing_rows_in_the_transaction() {
     const CHILD: &str = "NORN_FACT_DISCARD_CENSUS_CHILD";
+    const COMPLETED: &str = "fact discard census completed";
     if std::env::var_os(CHILD).is_none() {
         let child = Command::new(std::env::current_exe().expect("this suite's executable"))
             .args([
@@ -59,6 +60,11 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
             "fact discard census failed:\n{}\n{}",
             String::from_utf8_lossy(&child.stdout),
             String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains(COMPLETED),
+            "the isolated child did not complete the census:\n{}",
+            String::from_utf8_lossy(&child.stdout)
         );
         return;
     }
@@ -180,6 +186,7 @@ fn fact_discards_follow_standing_rows_in_the_transaction() {
         .verify_integrity()
         .expect("fact ownership remains intact");
     induced_failure::stop_recording_statements();
+    println!("{COMPLETED}");
 }
 
 /// Parent ids must remain correct while document, link, rule-set and finding
