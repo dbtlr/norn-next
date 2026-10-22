@@ -444,7 +444,7 @@ fn checkpoints_amortize_import_chunks_without_waiting_for_close() {
     let schema = schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY, body BLOB)");
     let (writer, _) = norn_db::open(&database, &schema, &TrialClient::new(Answer::Keep))
         .expect("a durable writer");
-    let initial_bytes = std::fs::metadata(&database).expect("a database file").len();
+    let initial_bytes = database_file_bytes(&database);
     for number in 0..8 {
         writer
             .execute(
@@ -454,7 +454,7 @@ fn checkpoints_amortize_import_chunks_without_waiting_for_close() {
             .expect("one committed import chunk");
     }
     assert_eq!(
-        std::fs::metadata(&database).expect("a database file").len(),
+        database_file_bytes(&database),
         initial_bytes,
         "8 MiB of separate chunks should accumulate before checkpointing"
     );
@@ -474,10 +474,16 @@ fn checkpoints_amortize_import_chunks_without_waiting_for_close() {
             .expect("one committed import chunk");
     }
     assert!(
-        std::fs::metadata(&database).expect("a database file").len() > initial_bytes,
+        database_file_bytes(&database) > initial_bytes,
         "the writer must checkpoint during an 80 MiB import, before close"
     );
     assert_eq!(count(), 80);
+}
+
+/// Database-file lengths expose checkpoint writes at the substrate seam.
+#[allow(clippy::disallowed_methods)]
+fn database_file_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).expect("a database file").len()
 }
 
 /// A read-only open creates nothing. Without it a reader over a path whose
