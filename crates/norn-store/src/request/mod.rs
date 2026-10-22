@@ -1931,28 +1931,25 @@ pub(crate) fn write_finding(
     let id: i64 = transaction
         .prepare_cached(WriteStatement::InsertFinding.sql())
         .and_then(|mut insert| {
-            insert.query_row(
-                params![
-                    fingerprint,
-                    generation,
-                    finding.kind.as_str(),
-                    finding.severity.as_str(),
-                    finding.path.as_str(),
-                    finding.target,
-                    finding.span.map(|span| span.line),
-                    finding.span.map(|span| span.column),
-                    finding.span.map(|span| span.byte_offset),
-                    finding.candidates_total,
-                    finding.message,
-                    finding.detail,
-                    finding.ordinal,
-                    rule_set,
-                    value.as_ref().map(norn_wire::ValueHead::text),
-                    value.as_ref().map(norn_wire::ValueHead::byte_length),
-                    value.as_ref().map(|value| value.hash().as_str()),
-                ],
-                |row| row.get(0),
-            )
+            insert.insert(params![
+                fingerprint,
+                generation,
+                finding.kind.as_str(),
+                finding.severity.as_str(),
+                finding.path.as_str(),
+                finding.target,
+                finding.span.map(|span| span.line),
+                finding.span.map(|span| span.column),
+                finding.span.map(|span| span.byte_offset),
+                finding.candidates_total,
+                finding.message,
+                finding.detail,
+                finding.ordinal,
+                rule_set,
+                value.as_ref().map(norn_wire::ValueHead::text),
+                value.as_ref().map(norn_wire::ValueHead::byte_length),
+                value.as_ref().map(|value| value.hash().as_str()),
+            ])
         })
         .map_err(|error| error::sql("writing a finding", error))?;
 

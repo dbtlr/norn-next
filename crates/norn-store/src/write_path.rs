@@ -77,8 +77,8 @@ registry! {
     /// The document row's upsert: updated on a path conflict, so the row keeps
     /// its identity across a re-derivation.
     UpsertDocument,
-    /// The replacement of a document's link rows, discarded before they are
-    /// written. The five fact discards below are one statement per table.
+    /// The replacement of a standing document's link rows, discarded before
+    /// they are written. The five fact discards below are one per table.
     DiscardLinks,
     DiscardHeadings,
     DiscardBlocks,
@@ -198,8 +198,7 @@ impl WriteStatement {
                      document, ordinal, family, embed, protocol, target, title, anchor,
                      anchor_text, anchor_marked, block_ref, address, span_line, span_column,
                      span_offset, field
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-                 RETURNING id"
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
             }
             Self::InsertLinkKey => {
                 "INSERT INTO link_keys (link, document, key, segments)
@@ -255,8 +254,7 @@ impl WriteStatement {
                      ordinal, rule_set, value_head, value_bytes, value_hash
                  ) VALUES (
                      ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
-                 )
-                 RETURNING id"
+                 )"
             }
             Self::InsertFindingCandidate => {
                 "INSERT INTO finding_candidates (finding, rank, path, suffix)

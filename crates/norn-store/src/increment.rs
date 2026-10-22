@@ -715,11 +715,15 @@ fn upsert(
         }
     }
 
-    for statement in &mut statements.discard_facts {
-        tally.fact_rows_discarded += statement
-            .execute(params![document])
-            .map_err(|error| error::sql("discarding a document's fact rows", error))?
-            as u64;
+    // A fresh document cannot own facts: their foreign keys cascade on death,
+    // and the document insert's triggers write no facts.
+    if stood {
+        for statement in &mut statements.discard_facts {
+            tally.fact_rows_discarded += statement
+                .execute(params![document])
+                .map_err(|error| error::sql("discarding a document's fact rows", error))?
+                as u64;
+        }
     }
 
     for (ordinal, link) in facts.links.iter().enumerate() {
@@ -732,27 +736,24 @@ fn upsert(
         };
         let row: i64 = statements
             .insert_link
-            .query_row(
-                params![
-                    document,
-                    ordinal as i64,
-                    link.family.as_str(),
-                    link.embed,
-                    link.protocol,
-                    link.target,
-                    link.title,
-                    anchor,
-                    readings.map(|readings| &readings.text),
-                    readings.and_then(|readings| readings.marked.as_ref()),
-                    block_ref,
-                    address_kind(link).as_str(),
-                    link.span.map(|span| span.line),
-                    link.span.map(|span| span.column),
-                    link.span.map(|span| span.byte_offset),
-                    link.field,
-                ],
-                |row| row.get(0),
-            )
+            .insert(params![
+                document,
+                ordinal as i64,
+                link.family.as_str(),
+                link.embed,
+                link.protocol,
+                link.target,
+                link.title,
+                anchor,
+                readings.map(|readings| &readings.text),
+                readings.and_then(|readings| readings.marked.as_ref()),
+                block_ref,
+                address_kind(link).as_str(),
+                link.span.map(|span| span.line),
+                link.span.map(|span| span.column),
+                link.span.map(|span| span.byte_offset),
+                link.field,
+            ])
             .map_err(|error| error::sql("writing a link row", error))?;
         for key in link_keys(link, &facts.path) {
             statements
