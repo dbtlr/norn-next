@@ -61,6 +61,9 @@ jobs:
       - name: Lint the performance worker
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: cargo clippy --locked -p norn-host --test performance -- -D warnings
+      - name: Lint startup profiling
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        run: cargo clippy --locked -p norn-host --test performance --features induced-failure -- -D warnings
       - name: Test the performance harness
         if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
         run: python3 -m unittest discover -s scripts/performance -v

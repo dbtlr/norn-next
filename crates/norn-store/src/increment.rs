@@ -243,6 +243,8 @@ pub(crate) fn apply(
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
 ) -> Result<IncrementOutcome, StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("store.increment");
     // The first entry is what decides whether the changeset half is an act at
     // all, so it is taken before anything is opened: an empty changeset writes
     // no document row and takes no generation. An act carrying findings and no
@@ -418,20 +420,28 @@ pub(crate) fn apply(
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
     let redecided = match generation {
-        Some(generation) => health::redecide(
-            &transaction,
-            work,
-            declared.ambiguity_ignore(),
-            generation,
-            &tally.affected_classes,
-            &tally.affected_paths,
-        )?,
+        Some(generation) => {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_db::profiling::span("store.link_health");
+            health::redecide(
+                &transaction,
+                work,
+                declared.ambiguity_ignore(),
+                generation,
+                &tally.affected_classes,
+                &tally.affected_paths,
+            )?
+        }
         None => Redecided::default(),
     };
 
-    transaction
-        .commit()
-        .map_err(|error| error::sql("committing an increment", error))?;
+    {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.commit");
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing an increment", error))?;
+    }
 
     // The act is at rest, findings included. A process that ends here has lost
     // nothing: what the transaction carried landed whole, and what it did not
@@ -654,6 +664,8 @@ fn upsert(
     admitting: usize,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("store.upsert");
     refuse_a_document_that_does_not_add_up(facts)?;
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
@@ -664,28 +676,34 @@ fn upsert(
         .query_row(params![facts.path.as_str()], |row| row.get(0))
         .map_err(|error| error::sql("probing a document row", error))?;
 
-    let document: i64 = statements
-        .upsert_document
-        .query_row(
-            params![
-                facts.path.as_str(),
-                facts.path.suffix_key(),
-                facts.path.path_key(),
-                i64::try_from(admitting).expect("a segment count fits i64"),
-                facts.content_hash,
-                facts.byte_length,
-                facts.body,
-                hash::sub_fingerprint(&facts.body),
-                facts.body_offset,
-                projection,
-                projection_hash,
-                facts.frontmatter_diagnostic_count,
-                generation,
-                derived_at,
-            ],
-            |row| row.get(0),
-        )
-        .map_err(|error| error::sql("writing a document row", error))?;
+    let document: i64 = {
+        // This includes parameter evaluation and SQLite's triggers, so it is
+        // the document-row operation's cost, not isolated SQL execution time.
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_db::profiling::span("store.document_row");
+        statements
+            .upsert_document
+            .query_row(
+                params![
+                    facts.path.as_str(),
+                    facts.path.suffix_key(),
+                    facts.path.path_key(),
+                    i64::try_from(admitting).expect("a segment count fits i64"),
+                    facts.content_hash,
+                    facts.byte_length,
+                    facts.body,
+                    hash::sub_fingerprint(&facts.body),
+                    facts.body_offset,
+                    projection,
+                    projection_hash,
+                    facts.frontmatter_diagnostic_count,
+                    generation,
+                    derived_at,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("writing a document row", error))?
+    };
 
     if !stood {
         for trigram in crate::similarity::trigrams(facts.path.stem()) {

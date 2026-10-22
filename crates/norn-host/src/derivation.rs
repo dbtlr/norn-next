@@ -704,6 +704,8 @@ pub(crate) fn map_document(
     hash: String,
     model: &ContentModel,
 ) -> Result<Derived, Quarantine> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.parse_map");
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
     let document_path = document_path(Path::new(path))?;
@@ -711,7 +713,11 @@ pub(crate) fn map_document(
         cause: Undecodable::BodyBytes,
         problem: problem.to_string(),
     })?;
-    let document = Document::parse(source);
+    let document = {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.frontmatter_parse");
+        Document::parse(source)
+    };
     // The text layer reads a block only up to its own bound and says so rather
     // than parsing past it, so this costs the bound at worst however the block
     // is shaped. A block nothing read — unclosed, not well-formed, or past the
@@ -727,7 +733,11 @@ pub(crate) fn map_document(
     // The body is read once, and before the facts take their own copy of it:
     // the scan builds a tree of several bodies and frees it as it returns, so
     // a copy made first would stand beside that tree.
-    let scan = document.source_scan();
+    let scan = {
+        #[cfg(feature = "induced-failure")]
+        let _timing = norn_store::profiling::span("host.body_scan");
+        document.source_scan()
+    };
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64)
         .with_frontmatter(document.frontmatter().map(map_value), model);
     facts.body_offset = document.body_start() as u64;
@@ -898,6 +908,8 @@ pub(crate) fn plan_document(
     declared: &Declared,
     case: CaseFold,
 ) -> Plan {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_store::profiling::span("host.document_plan");
     match map_document(spelling, bytes, hash, declared.content_model()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();

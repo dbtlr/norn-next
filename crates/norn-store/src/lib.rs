@@ -124,6 +124,9 @@
 pub mod ddl;
 pub mod similarity;
 
+#[cfg(feature = "induced-failure")]
+pub use norn_db::profiling;
+
 mod anchor;
 mod count;
 mod counters;
@@ -151,6 +154,9 @@ mod request;
 mod resolve;
 mod rule_set;
 mod search;
+#[cfg(feature = "induced-failure")]
+#[doc(hidden)]
+pub mod startup_audit;
 mod store;
 mod validate;
 mod write_path;

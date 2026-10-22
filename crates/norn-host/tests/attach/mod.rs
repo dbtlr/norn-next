@@ -320,6 +320,11 @@ impl Vault {
         self.host_under([self.name.clone()])
     }
 
+    /// Compose the measurement worker with explicit bounded maintenance settings.
+    pub fn host_with_policy(&self, policy: ProductionPolicy) -> ServingHost {
+        self.serve_with_policy([self.name.clone()], None, policy, |ops| ops)
+    }
+
     /// A host serving this vault's root under each of `names`, holding the
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.
@@ -357,13 +362,27 @@ impl Vault {
         schema_source: Option<SchemaSource>,
         compose: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
     ) -> ServingHost {
+        self.serve_with_policy(
+            names,
+            schema_source,
+            ProductionPolicy::new(128, 128).expect("production policy"),
+            compose,
+        )
+    }
+
+    fn serve_with_policy(
+        &self,
+        names: impl IntoIterator<Item = VaultName>,
+        schema_source: Option<SchemaSource>,
+        policy: ProductionPolicy,
+        compose: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
+    ) -> ServingHost {
         let root = VaultRoot::new(&self.vault).expect("vault root");
         let registry = RegistryRead::from_entries(names.into_iter().map(|name| {
             let mut entry = Entry::new(name, root.clone());
             entry.schema_source = schema_source.clone();
             entry
         }));
-        let policy = ProductionPolicy::new(128, 128).expect("production policy");
         // Taken before the host exists, because the watcher is installed by
         // the attach the host runs and there is no later moment that is still
         // ahead of it.

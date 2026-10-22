@@ -1672,6 +1672,7 @@ fn assert_complete_active_matrix(workflow: &str, full: bool) {
                 "cargo build --locked --workspace",
                 "cargo clippy --locked --workspace --all-targets -- -D warnings",
                 "cargo clippy --locked -p norn-host --test performance -- -D warnings",
+                "cargo clippy --locked -p norn-host --test performance --features induced-failure -- -D warnings",
                 "python3 -m unittest discover -s scripts/performance -v",
                 "cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings",
                 "cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings",

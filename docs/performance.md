@@ -168,18 +168,82 @@ verification outcome. `fixtures/` holds immutable sources and manifests.
 logs. `summary.json` records distributions, per-process medians, and counters.
 `report.html` is self-contained and contains no local filesystem paths.
 
+## Attribute startup cost
+
+The startup experiment reuses the frozen corpus and known-answer reads. It runs
+each fresh process through its first validated query, closes it, then restarts
+over the same derived store. No writes are part of this experiment. The second
+start is a **cache-warmed existing-index restart**: the intervening equivalence
+audit reads every source document and the derived store. A cold-cache restart
+is a separate experiment.
+
+```sh
+python3 scripts/performance/provenance.py \
+  --target-directory "$PERF_HOME/build" \
+  --receipt "$PERF_HOME/startup-standard.json"
+python3 scripts/performance/provenance.py \
+  --startup-profile \
+  --target-directory "$PERF_HOME/build" \
+  --receipt "$PERF_HOME/startup-build.json"
+python3 scripts/performance/startup.py \
+  --current-build "$PERF_HOME/startup-build.json" \
+  --control-build "$PERF_HOME/startup-standard.json" \
+  --fixtures "$PERF_HOME/run-001/fixtures" \
+  --output "$PERF_HOME/startup-001" \
+  --batches 128 512 1024 --repetitions 3 --timings both
+python3 scripts/performance/startup_report.py "$PERF_HOME/startup-001"
+```
+
+The profiling build enables the existing `induced-failure` harness feature.
+Its timing recorder is disabled until the worker explicitly arms it. Use
+`--timings both` to compare timing on and off with the same executable, or
+`--timings off` for a clock-disabled control. `--control-build` additionally
+interleaves a standard build from the same source without the host feature,
+separating feature and job-tail costs from timing-recorder overhead. Inherited fault environment
+variables are removed by the adapter. These builds are measurement subjects,
+not shipping-binary performance claims.
+
+The experiment varies changeset size while keeping the store page at 128 rows.
+Existing suites retain their original policy. Each configuration runs serially;
+size and batch order rotate between repetitions. Record CPU and main-process RSS
+alongside the elapsed clocks. The worker waits for the startup job's bookkeeping
+to finish after observing `Ready`, and reports both boundaries separately:
+`attach_ns` and `observed_ready_ns` end at observed readiness;
+`startup_complete_ns` additionally includes the feature build's bookkeeping wait.
+The worker polls readiness every millisecond instead of using the test helper's
+adaptive backoff, whose maximum interval is 50 milliseconds.
+
+Timers report inclusive elapsed time and call counts. Parent and child times
+must not be added together. The top-level breakdown partitions document planning,
+row and index writes, link-health maintenance, commit, other increment work and
+remaining startup time. Document-row timing includes parameter preparation and
+SQLite triggers, including FTS; it does not isolate FTS alone. Watch installation
+and synchronization are caller intervals, and background watcher work can overlap
+them. The worker rejects unknown or unfinished timing evidence through the runner.
+
+After each process closes, the runner checks every document hash against the
+fixture and compares normalized semantic store contents across configurations.
+An unchanged restart must preserve the store epoch and write generation, and
+the profiling build must report no recovery, rebuild or document derivation. Raw
+samples retain the full phase hierarchy and logical work counters. Results are
+diagnostic observations; elapsed-time thresholds do not enter PR gates.
+After a verified fresh/restart pair, its disposable vault and derived state are
+removed. Each run retains one frozen corpus, both executables, runner sources,
+audit evidence and logs, so accumulated work trees do not bias later cells.
+
 Run the focused harness checks:
 
 ```sh
 python3 -m unittest discover -s scripts/performance -v
-cargo test --locked -p norn-host --test performance --no-run
+cargo test --locked -p norn-host --test performance --features induced-failure --no-run
 ```
 
 The second command compiles the explicit measurement target. It has
 `harness = false` and `test = false`, so ordinary suite execution does not run
 it and it claims no ignored CI test lane. The baseline runner invokes its
-`generate` and `serve` modes with issued roots and tokens.
-PR and full-regression workflows explicitly lint this target and run the Python
+`generate` and `serve` modes with issued roots and tokens. The profiling build
+also exposes `audit`, which reads the closed store through its owning crate.
+PR and full-regression workflows explicitly lint the profiling target and run the Python
 checks without executing a benchmark or requiring the legacy binary.
 Its functional trial can use one scale, one warmup, two samples, and one
 repetition before collecting a full baseline. Measurement records require an

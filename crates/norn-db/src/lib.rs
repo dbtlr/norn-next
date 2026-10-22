@@ -72,6 +72,8 @@ mod error;
 pub mod faults;
 pub mod meta;
 mod plan;
+#[cfg(feature = "induced-failure")]
+pub mod profiling;
 mod schema;
 mod temporary;
 
