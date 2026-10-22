@@ -202,6 +202,9 @@ interleaves a standard build from the same source without the host feature,
 separating feature and job-tail costs from timing-recorder overhead. Inherited fault environment
 variables are removed by the adapter. These builds are measurement subjects,
 not shipping-binary performance claims.
+Both worker variants retain the store/database development dependency features;
+the standard variant omits the host's additional feature. Compare the
+observed-Ready column for a common boundary across those two builds.
 
 The experiment varies changeset size while keeping the store page at 128 rows.
 Existing suites retain their original policy. Each configuration runs serially;

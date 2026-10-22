@@ -186,7 +186,7 @@ def main():
                                             raise ValueError("unchanged restart rebuilt or wrote derived state")
                                 previous = result["store"]
                                 append(samples, {**context, **result, "verified": True})
-                                print(f"{size + 14} documents, batch {batch}, {build_kind}, timing {profiling}, {stage}: {result['first_validated_query_ns'] / 1e9:.3f}s verified", flush=True)
+                                print(f"{manifest['document_count']} documents, batch {batch}, {build_kind}, timing {profiling}, {stage}: {result['first_validated_query_ns'] / 1e9:.3f}s verified", flush=True)
                             # Retain logs and audits; one frozen corpus can recreate every cell.
                             for name in ("vault", "data", "cache", "state", "config"):
                                 path = root / name

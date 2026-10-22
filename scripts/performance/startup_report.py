@@ -42,7 +42,7 @@ def summarize(metadata, samples):
                   (sample["background_documents"], sample["changeset_size"], sample["build_kind"], sample["profiling"], sample["stage"])
                   == (size, batch, build_kind, profiling, stage)]
         phases = [partition(sample["ready"]) for sample in chosen]
-        row = {"background_documents": size, "document_count": size + 14, "changeset_size": batch,
+        row = {"background_documents": size, "document_count": chosen[0]["document_count"], "changeset_size": batch,
                "build_kind": build_kind, "profiling": profiling, "stage": stage,
                "first_validated_query": distribution([sample["first_validated_query_ns"] for sample in chosen]),
                "startup_complete": distribution([sample["ready"]["startup_complete_ns"] for sample in chosen]),
@@ -69,6 +69,7 @@ def render(metadata, rows):
         timing = "on" if row["profiling"] else "off"
         label = f'{row["document_count"]:,} / {row["changeset_size"]} / {row["build_kind"]} {timing} / {row["stage"]}'
         latencies.append(f'<tr><th>{label}</th><td>{row["first_validated_query"]["median_ms"] / 1000:.3f}</td>'
+                         f'<td>{row["observed_ready"]["median_ms"] / 1000:.3f}</td>'
                          f'<td>{esc(", ".join(f"{value:.3f}" for value in row["repetition_seconds"]))}</td>'
                          f'<td>{row["cpu_seconds"]:.2f}</td><td>{row["peak_mib"]:.1f}</td></tr>')
         if row["work"] is not None:
@@ -92,14 +93,15 @@ Store read pages stay at 128 rows; only the changeset bound varies.</p>
 Normalized persisted facts and findings agree across configurations. Each unchanged restart preserves its store epoch and write generation.</p>
 <h2>Fresh indexing and existing-index restart</h2><p>End-to-end time runs from launching the worker through its first validated common-text query.
 CPU and peak RSS are Linux main-process readings at that boundary. Repetition values expose variation; none are removed.</p>
-<div class="wrap"><table><thead><tr><th>Documents / batch / timers / stage</th><th>Median s</th><th>Each repetition · s</th><th>Median CPU s</th><th>Median peak MiB</th></tr></thead><tbody>{''.join(latencies)}</tbody></table></div>
+<p>Observed-Ready medians share the same boundary across builds. Profile builds additionally wait for bookkeeping before sending the first query; standard builds can overlap that tail.</p>
+<div class="wrap"><table><thead><tr><th>Documents / batch / build and timers / stage</th><th>Median first query · s</th><th>Median observed Ready · s</th><th>Each repetition · s</th><th>Median CPU s</th><th>Median peak MiB</th></tr></thead><tbody>{''.join(latencies)}</tbody></table></div>
 <h2>Startup phase attribution</h2><p>Mean seconds across repetitions, partitioned without adding parent and child spans.
 The total is worker setup through completed startup bookkeeping; the first query follows this timing window.</p>
 <div class="wrap"><table><thead><tr><th>Documents / batch / timers / stage</th>{''.join('<th>' + esc(label) + '</th>' for label in PHASES.values())}</tr></thead><tbody>{''.join(phases)}</tbody></table></div>
 <h2>Logical work</h2><p>Minimum and maximum across repetitions. Existing-index restarts still read and hash source documents.</p>
 <div class="wrap"><table><thead><tr><th>Documents / batch / timers / stage</th>{''.join('<th>' + key.replace('_', ' ') + '</th>' for key in WORK)}</tr></thead><tbody>{''.join(work)}</tbody></table></div>
 <h2>Scope and interpretation</h2><ul>
-<li>Real production host paths run through a development worker. Profile builds enable the host's harness-only induced-failure feature; standard builds do not. Fault environment variables are removed.</li>
+<li>Real production host paths run through a development worker. Profile builds enable the host's harness-only induced-failure feature; standard builds omit that host feature. Both retain store/database development dependency features, recorded in the build receipts. Fault environment variables are removed.</li>
 <li>Timers are explicitly armed per process and retain only bounded aggregates. Timing-on and timing-off controls use the same executable; compare them before treating instrumented clocks as absolute budgets.</li>
 <li>Row and index writes include FTS triggers, fact rows and filename trigrams. The raw document-row subspan includes parameter preparation and triggers; it does not isolate FTS alone.</li>
 <li>Nested attach, heal, parsing and database spans remain in raw evidence. Production attach ends before lifecycle bookkeeping and possible follow-up reconciliation. The partition uses disjoint planning and increment work across that complete window.</li>
