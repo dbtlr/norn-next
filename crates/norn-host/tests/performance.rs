@@ -40,8 +40,6 @@ fn root() -> PathBuf {
     root
 }
 
-#[test]
-#[ignore = "external performance runner only"]
 fn performance_generate() {
     let root = root();
     let mut profile = norn_fixtures::Profile::by_name("realistic").expect("the realistic profile");
@@ -55,8 +53,6 @@ fn performance_generate() {
     emit(json!({"generated": profile.docs}));
 }
 
-#[test]
-#[ignore = "external performance runner only"]
 fn performance_worker() {
     let root = root();
     let began = Instant::now();
@@ -189,5 +185,13 @@ fn performance_worker() {
             _ => panic!("unknown performance operation {op}"),
         };
         emit(json!({"answer": answer, "host_ns": elapsed.as_nanos(), "counters": counters}));
+    }
+}
+
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("generate") => performance_generate(),
+        Some("serve") => performance_worker(),
+        _ => panic!("the performance worker requires generate or serve from its external runner"),
     }
 }

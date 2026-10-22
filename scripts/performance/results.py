@@ -32,6 +32,8 @@ def payload(engine: str, response: dict) -> dict:
 def record(engine: str, response: dict) -> dict:
     answer = payload(engine, response)
     if engine == "current":
+        if response["answer"].get("advisories"):
+            raise ValueError(f"unexpected confirming-get advisory: {response['answer']['advisories']}")
         document = answer["document"]
         body = document["body"]
         if len(body["text"].encode()) != body["byte_length"]:

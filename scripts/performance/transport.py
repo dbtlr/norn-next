@@ -35,13 +35,36 @@ def issue_root(root: Path) -> str:
 
 def stop_process(process: subprocess.Popen) -> None:
     # Each process owns a new session; its descendants belong to this run too.
-    if process.poll() is None:
+    try:
         os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    # A leader can exit before a sweep, including one that ignores SIGTERM.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=10)
+    until = time.monotonic() + 2
+    while group_running(process.pid):
+        if time.monotonic() >= until:
+            raise RuntimeError("a subject descendant remains running after group cleanup")
+        time.sleep(0.01)
+
+
+def group_running(group: int) -> bool:
+    for path in Path("/proc").glob("[0-9]*/stat"):
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+            fields = path.read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if int(fields[2]) == group and fields[0] not in ("Z", "X"):
+            return True
+    return False
 
 
 def resources(pid: int) -> dict:
@@ -67,7 +90,7 @@ class Current:
         self.raw = (root / "worker.stdout.log").open("w")
         self.messages = queue.Queue()
         self.process = subprocess.Popen(
-            [str(binary), "--ignored", "--exact", "performance_worker", "--nocapture"],
+            [str(binary), "serve"],
             cwd=root, env=environment(root, token), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=self.stderr, text=True, bufsize=1,
             start_new_session=True,

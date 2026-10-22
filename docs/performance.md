@@ -39,6 +39,9 @@ disables wrappers, and sets the highest-precedence Rust flags to empty. The runn
 changed executable or a profile other than optimization level 3 with debug
 assertions disabled. The receipt hashes all nonignored source files before and
 after compilation. A changed source tree requires a new receipt before running.
+Cargo configuration files, including files outside the repository, are recorded
+by hash and checked again before execution. Build and incremental environment
+overrides are removed.
 The report distinguishes executable source identity from runner identity and
 states whether the build checkout was dirty. A test target retains its development
 dependency features; the receipt records them separately from a shipping binary claim.
@@ -88,9 +91,9 @@ refuses incomplete or missing samples. No schedule is activated by these command
 | Small get | Complete body of about 2 KiB and its two frontmatter fields |
 | Large get | Complete body of about 48 KiB and its two frontmatter fields |
 | Section get | The known `Details` section within the large document |
-| Field update | A new value each time, confirmed by a get |
+| Field update | A new value each time, confirmed by a get and an independent file check |
 | Create | A fresh explicit path, exact authored bytes, and immediate get |
-| Rename | Alternating paths with no backlinks; old path absent and new get succeeds |
+| Rename | Alternating paths with no backlinks; old path absent, destination bytes preserved, and new get succeeds |
 | Hub rename | Alternating paths with ten backlink rewrites, checked on disk |
 
 The background uses `norn-fixtures`' realistic shape at seed 7, with document
@@ -130,6 +133,9 @@ Creates add the same bounded number of documents to each engine's run.
 - Write timing ends at the applied reply. A separate write-plus-readback
   measurement includes the confirming get. Filesystem assertions are outside
   those clocks. A partial write, stale readback, or missing backlink fails the run.
+  The controller reads set/move source bytes before timing; these are warm-file
+  workloads on both engines. Creates and backlink rewrites are checked as bytes,
+  without newline normalization.
 - Startup ends at the first validated common-text query, because a protocol
   hello can precede lazy indexing. Every process starts with fresh derived
   state. OS filesystem caches are uncontrolled; this is not cold-disk latency.
@@ -161,11 +167,13 @@ Run the focused harness checks:
 
 ```sh
 python3 -m unittest discover -s scripts/performance -v
-cargo test --locked -p norn-host --test performance
+cargo test --locked -p norn-host --test performance --no-run
 ```
 
-The second command checks compilation and leaves the two explicit workers
-ignored. The baseline runner exercises them with issued roots and tokens.
+The second command compiles the explicit measurement target. It has
+`harness = false` and `test = false`, so ordinary suite execution does not run
+it and it claims no ignored CI test lane. The baseline runner invokes its
+`generate` and `serve` modes with issued roots and tokens.
 Its functional trial can use one scale, one warmup, two samples, and one
 repetition before collecting a full baseline. Measurement records require an
 independent validity review and a separate reproduction.

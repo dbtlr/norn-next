@@ -28,6 +28,13 @@ def source_tree_digest(repo: Path) -> str:
     return digest.hexdigest()
 
 
+def cargo_configs(repo: Path) -> list[dict]:
+    folders = [parent / ".cargo" for parent in (repo, *repo.parents)]
+    folders.append(Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))))
+    paths = {folder / name for folder in folders for name in ("config", "config.toml")}
+    return [{"path": str(path), "sha256": sha256(path)} for path in sorted(paths) if path.is_file()]
+
+
 def verify_build(path: Path, repo: Path | None = None) -> dict:
     receipt = json.loads(path.read_text())
     if receipt["profile"]["opt_level"] != "3" or receipt["profile"]["debug_assertions"]:
@@ -37,6 +44,8 @@ def verify_build(path: Path, repo: Path | None = None) -> dict:
     repo = repo or Path(__file__).resolve().parents[2]
     if source_tree_digest(repo) != receipt["source_tree_sha256"]:
         raise ValueError("the source tree differs from the build receipt; rebuild in this checkout")
+    if cargo_configs(repo) != receipt.get("cargo_configs", []):
+        raise ValueError("Cargo configuration differs from the build receipt")
     return receipt
 
 
@@ -49,7 +58,8 @@ def main():
     toolchain = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     compiler = subprocess.check_output(["rustup", "which", "--toolchain", toolchain, "rustc"], text=True).strip()
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith("CARGO_PROFILE_") and key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
+           if not key.startswith(("CARGO_PROFILE_", "CARGO_BUILD_"))
+           and key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL", "RUSTC_FORCE_INCREMENTAL")}
     env["CARGO_TARGET_DIR"] = str(args.target_directory.resolve())
     # These highest-precedence settings also override target/config rustflags and compiler wrappers.
     env.update(CARGO_ENCODED_RUSTFLAGS="", RUSTC=compiler, RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
@@ -57,12 +67,13 @@ def main():
                "norn-host", "--test", "performance", "--no-run", "--message-format=json"]
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     source_hash = source_tree_digest(repo)
+    configs = cargo_configs(repo)
     result = subprocess.run(command, cwd=repo, env=env, text=True, capture_output=True)
     args.receipt.with_suffix(".cargo.jsonl").write_text(result.stdout)
     args.receipt.with_suffix(".cargo.log").write_text(result.stderr)
     result.check_returncode()
-    if source_tree_digest(repo) != source_hash:
-        raise ValueError("the source tree changed during compilation")
+    if source_tree_digest(repo) != source_hash or cargo_configs(repo) != configs:
+        raise ValueError("source or Cargo configuration changed during compilation")
     artifacts = [json.loads(line) for line in result.stdout.splitlines()]
     artifact = next(item for item in artifacts if item.get("reason") == "compiler-artifact"
                     and item["target"]["name"] == "performance" and item.get("executable"))
@@ -75,6 +86,7 @@ def main():
                "repository_status": subprocess.check_output(["git", "status", "--porcelain"], cwd=repo, text=True),
                "worker_source_sha256": sha256(repo / "crates/norn-host/tests/performance.rs"),
                "cargo_lock_sha256": sha256(repo / "Cargo.lock"), "source_tree_sha256": source_hash,
+               "cargo_configs": configs,
                "workspace_library_features": {item["target"]["name"]: item["features"] for item in artifacts
                    if item.get("reason") == "compiler-artifact" and "lib" in item["target"]["kind"]
                    and item["target"]["name"].startswith("norn")}}

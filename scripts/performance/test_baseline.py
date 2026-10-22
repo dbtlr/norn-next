@@ -3,6 +3,10 @@ import unittest
 import json
 import hashlib
 import subprocess
+import os
+import signal
+import sys
+import time
 from baseline import verify_mutation
 from pathlib import Path
 
@@ -10,6 +14,7 @@ from fixture import prepare_probes, tree_digest
 from results import distribution, record, validate_paths, validate_write
 from provenance import source_tree_digest, verify_build
 from report import summarize
+from transport import stop_process
 
 
 class FixtureTests(unittest.TestCase):
@@ -29,6 +34,26 @@ class FixtureTests(unittest.TestCase):
 
 
 class AnswerTests(unittest.TestCase):
+    def test_a_confirming_get_cannot_hide_an_unexpected_advisory(self):
+        with self.assertRaises(ValueError):
+            record("current", {"answer": {"advisories": [{"unexpected": "diagnostic"}],
+                "report": {"document": {"path": "a.md", "body": {"text": "", "byte_length": 0}, "fields": {}}}}})
+
+    def test_exact_create_bytes_are_not_newline_normalized(self):
+        command = {"op": "new", "path": "new.md", "body": "# New\n",
+                   "content": "---\nstatus: draft\n---\n# New\n"}
+        class Worker:
+            def call(self, _command):
+                return {"structuredContent": {"records": [{"path": "new.md", "body": "# New\n",
+                    "frontmatter": {"status": "draft"}}]}}, 1
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "vault").mkdir()
+            (root / "vault/new.md").write_bytes(command["content"].replace("\n", "\r\n").encode())
+            with self.assertRaises(ValueError):
+                verify_mutation(Worker(), "legacy", command, root,
+                    {"structuredContent": {"report": {"outcome": "applied"}}}, {})
+
     def test_a_write_that_loses_unrelated_content_is_rejected(self):
         class Worker:
             def call(self, command):
@@ -113,6 +138,37 @@ class ReportTests(unittest.TestCase):
             summarize({"completed": False}, [])
         with self.assertRaises(ValueError):
             summarize({"completed": True, "sizes": [300], "samples": 25, "repetitions": 2}, [])
+
+
+@unittest.skipUnless(sys.platform == "linux", "Linux process-group lifecycle")
+class ProcessTests(unittest.TestCase):
+    def test_cleanup_stops_descendants_after_the_leader_exits(self):
+        code = "import os,signal,time\npid=os.fork()\nif pid==0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n print(os.getpid(),flush=True)\n time.sleep(60)\nelse:\n time.sleep(0.1)\n"
+        process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        try:
+            child = int(process.stdout.readline())
+            process.wait(timeout=5)
+            stop_process(process)
+            until = time.monotonic() + 2
+            state = ""
+            while time.monotonic() < until:
+                try:
+                    state = (Path("/proc") / str(child) / "stat").read_text().rsplit(")", 1)[1].split()[0]
+                except FileNotFoundError:
+                    break
+                if state == "Z":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail(f"descendant still runs after cleanup: {state}")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            process.stdout.close()
 
 
 if __name__ == "__main__":

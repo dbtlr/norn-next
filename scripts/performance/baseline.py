@@ -52,7 +52,7 @@ def mutation(name, iteration):
     return {"op": "move", "from": source, "to": destination}
 
 
-def verify_mutation(worker, engine, command, root, response, state):
+def verify_mutation(worker, engine, command, root, response, state, before_bytes=None):
     validate_write(engine, response)
     target = {"set": "bench/subject.md", "new": command.get("path"),
               "move": command.get("to")}[command["op"]]
@@ -62,7 +62,7 @@ def verify_mutation(worker, engine, command, root, response, state):
         expected = {**state[target], "fields": {**state[target]["fields"], "status": command["value"]}}
     elif command["op"] == "new":
         expected = {"path": target, "body": command["body"], "fields": {"status": "draft"}}
-        if (root / "vault" / target).read_text() != command["content"]:
+        if (root / "vault" / target).read_bytes() != command["content"].encode():
             raise ValueError("created bytes differ from the authored document")
     else:
         expected = {**state[command["from"]], "path": target}
@@ -74,15 +74,31 @@ def verify_mutation(worker, engine, command, root, response, state):
             for number in range(10):
                 name = f"bench/referrer-{number:02}.md"
                 body = state[name]["body"].replace(previous_link, link)
-                text = (root / "vault" / name).read_text()
-                if text != "---\nstatus: draft\nperf_bucket: probe\n---\n" + body:
+                data = (root / "vault" / name).read_bytes()
+                if data != ("---\nstatus: draft\nperf_bucket: probe\n---\n" + body).encode():
                     raise ValueError("rename did not preserve a referrer's content around its rewritten link")
                 state[name] = {**state[name], "body": body}
         del state[command["from"]]
     if document != expected:
         raise ValueError("the write lost or changed content outside its authored effect")
+    if command["op"] in ("set", "move"):
+        if before_bytes is None:
+            raise ValueError("a mutation needs its independently captured before-bytes")
+        after_bytes = (root / "vault" / target).read_bytes()
+        if command["op"] == "move" and after_bytes != before_bytes:
+            raise ValueError("rename changed the destination's bytes")
+        if command["op"] == "set":
+            before_lines, after_lines = before_bytes.splitlines(keepends=True), after_bytes.splitlines(keepends=True)
+            field = next(index for index, line in enumerate(before_lines) if line.startswith(b"status:"))
+            allowed = [f"status: {value}\n".encode() for value in
+                       (command["value"], json.dumps(command["value"]), "'" + command["value"] + "'")]
+            if len(before_lines) != len(after_lines) or after_lines[field] not in allowed:
+                raise ValueError("the field value was not written to disk")
+            if before_lines[:field] + before_lines[field + 1:] != after_lines[:field] + after_lines[field + 1:]:
+                raise ValueError("set changed bytes outside the authored field")
     state[target] = expected
-    return read_ns
+    diagnostics = readback.get("answer", {}).get("advisories", []) if engine == "current" else readback["structuredContent"].get("notes", [])
+    return read_ns, diagnostics
 
 
 def run_worker(args, engine, size, repetition, fixture, manifest, samples):
@@ -114,12 +130,15 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
             before = resources(worker.process.pid)
             for iteration in range(args.warmups + args.samples):
                 command = base_command or mutation(name, iteration)
+                before_path = "bench/subject.md" if command["op"] == "set" else command.get("from")
+                before_bytes = (root / "vault" / before_path).read_bytes() if before_path is not None else None
                 response, elapsed = worker.call(command)
                 if base_command is not None:
                     validate_read(engine, command, response, manifest)
                     readback = None
+                    readback_diagnostics = None
                 else:
-                    readback = verify_mutation(worker, engine, command, root, response, state)
+                    readback, readback_diagnostics = verify_mutation(worker, engine, command, root, response, state, before_bytes)
                 if iteration == args.warmups:
                     write_json(root / f"{name}-example.json", {"command": command, "response": response})
                 append(samples, {**context, "kind": "sample", "scenario": name,
@@ -130,6 +149,7 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
                                  "legacy_warnings": response.get("structuredContent", {}).get("report", {}).get("warnings", []),
                                  "counters": response.get("counters"),
                                  "readback_ns": readback,
+                                 "readback_diagnostics": readback_diagnostics,
                                  "write_and_readback_ns": elapsed + readback if readback is not None else None,
                                  "verified": True})
             append(samples, {**context, "kind": "resources", "scenario": name,
@@ -163,7 +183,7 @@ def prepare(args, size):
     env = environment(root, token)
     env["NORN_PERFORMANCE_DOCUMENTS"] = str(size)
     with (root / "generation.log").open("w") as log:
-        subprocess.run([str(args.current), "--ignored", "--exact", "performance_generate", "--nocapture"],
+        subprocess.run([str(args.current), "generate"],
                        env=env, cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
     manifest = prepare_probes(root / "vault")
     write_json(root / "manifest.json", manifest)
