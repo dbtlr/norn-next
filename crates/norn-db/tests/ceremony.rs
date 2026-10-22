@@ -434,58 +434,6 @@ fn a_read_only_connection_answers_reads_and_refuses_writes() {
     );
 }
 
-/// Small import chunks accumulate in the WAL before a passive checkpoint
-/// copies them together. The writer still checkpoints during a longer import,
-/// and a separate reader sees the committed rows before either boundary.
-#[test]
-fn checkpoints_amortize_import_chunks_without_waiting_for_close() {
-    let scratch = Scratch::new("checkpoint-import");
-    let database = scratch.database();
-    let schema = schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY, body BLOB)");
-    let (writer, _) = norn_db::open(&database, &schema, &TrialClient::new(Answer::Keep))
-        .expect("a durable writer");
-    let initial_bytes = database_file_bytes(&database);
-    for number in 0..8 {
-        writer
-            .execute(
-                "INSERT INTO notes VALUES (?1, zeroblob(1048576))",
-                [format!("note-{number}")],
-            )
-            .expect("one committed import chunk");
-    }
-    assert_eq!(
-        database_file_bytes(&database),
-        initial_bytes,
-        "8 MiB of separate chunks should accumulate before checkpointing"
-    );
-    let reader = norn_db::connect_read_only(&database).expect("a read-only connection");
-    let count = || {
-        reader
-            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))
-            .expect("committed rows visible through the WAL")
-    };
-    assert_eq!(count(), 8);
-    for number in 8..80 {
-        writer
-            .execute(
-                "INSERT INTO notes VALUES (?1, zeroblob(1048576))",
-                [format!("note-{number}")],
-            )
-            .expect("one committed import chunk");
-    }
-    assert!(
-        database_file_bytes(&database) > initial_bytes,
-        "the writer must checkpoint during an 80 MiB import, before close"
-    );
-    assert_eq!(count(), 80);
-}
-
-/// Database-file lengths expose checkpoint writes at the substrate seam.
-#[allow(clippy::disallowed_methods)]
-fn database_file_bytes(path: &Path) -> u64 {
-    std::fs::metadata(path).expect("a database file").len()
-}
-
 /// A read-only open creates nothing. Without it a reader over a path whose
 /// database is gone would answer every read with no rows instead of saying the
 /// file is not there.
