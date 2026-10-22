@@ -206,6 +206,29 @@ Both worker variants retain the store/database development dependency features;
 the standard variant omits the host's additional feature. Compare the
 observed-Ready column for a common boundary across those two builds.
 
+To compare revisions, build a standard worker in the baseline checkout with
+that checkout's `provenance.py`. Add both reference arguments to the startup
+command, keeping the candidate's `--control-build`:
+
+```sh
+python3 scripts/performance/startup.py \
+  --current-build "$PERF_HOME/startup-build.json" \
+  --control-build "$PERF_HOME/startup-standard.json" \
+  --baseline-build "$PERF_HOME/baseline-standard.json" \
+  --baseline-source "$BASELINE_SOURCE" \
+  --fixtures "$PERF_HOME/run-001/fixtures" \
+  --output "$PERF_HOME/revision-001" \
+  --batches 128 --repetitions 3 --timings both
+```
+
+The baseline receipt must match its own checkout and executable. Both source
+trees must remain unchanged until measurement ends. The report names every
+build's source and executable hashes. Compare `baseline` with `standard` for
+revision changes; compare the candidate's profile variants to assess timing
+and feature overhead. Every variant uses the same frozen source fixture and
+persisted-state audit. A baseline with a different store schema needs a
+compatible audit before this runner can compare it.
+
 The experiment varies changeset size while keeping the store page at 128 rows.
 Existing suites retain their original policy. Each configuration runs serially;
 size and batch order rotate between repetitions. Record CPU and main-process RSS
@@ -223,6 +246,15 @@ remaining startup time. Document-row timing includes parameter preparation and
 SQLite triggers, including FTS; it does not isolate FTS alone. Watch installation
 and synchronization are caller intervals, and background watcher work can overlap
 them. The worker rejects unknown or unfinished timing evidence through the runner.
+Nested link-health timings separate candidate resolution, link reads, finding
+discards, and finding writes. Preparation scopes distinguish compiling or
+retrieving SQL statements from executing them. The finding metadata scope
+includes its generation update and schema-fingerprint read.
+
+After the first validated query, the runner records database, WAL, and shared
+memory file lengths while the worker remains open. These readings are outside
+the startup clock. They are file lengths at that boundary, not peak disk
+usage or allocated filesystem blocks.
 
 After each process closes, the runner checks every document hash against the
 fixture and compares normalized semantic store contents across configurations.
@@ -231,7 +263,7 @@ the profiling build must report no recovery, rebuild or document derivation. Raw
 samples retain the full phase hierarchy and logical work counters. Results are
 diagnostic observations; elapsed-time thresholds do not enter PR gates.
 After a verified fresh/restart pair, its disposable vault and derived state are
-removed. Each run retains one frozen corpus, both executables, runner sources,
+removed. Each run retains one frozen corpus, all executables, runner sources,
 audit evidence and logs, so accumulated work trees do not bias later cells.
 
 Run the focused harness checks:

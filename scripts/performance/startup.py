@@ -19,7 +19,7 @@ from transport import Current, resources
 
 def baseline_build(receipt: Path, source: Path) -> dict:
     """Verify the reference revision independently of the candidate checkout."""
-    built = verify_build(receipt, source)
+    built = verify_build(receipt, source.resolve())
     if built["features"]:
         raise ValueError("the revision baseline must be a no-feature build")
     return built

@@ -89,6 +89,14 @@ const NOT_A_FILE: &[&str] = &[":memory:", ""];
 /// take that client over.
 const PREPARED_STATEMENT_CACHE: usize = 32;
 
+/// Checkpoint passively after this many WAL frames. A frame holds one database
+/// page, so 4 KiB pages reach this threshold at about 64 MiB of page data.
+/// Frequent checkpoints repeatedly copy pages dirtied by successive import
+/// chunks. A larger interval amortizes that work without enlarging the page
+/// cache or a transaction. It is a trigger, not a WAL size cap: a transaction
+/// can cross it, and a reader can keep a passive checkpoint from completing.
+const WAL_CHECKPOINT_FRAMES: i64 = 16_384;
+
 /// What connecting to a path produced.
 pub enum Attempt {
     /// The connection is open and in the state a schema is designed to be read
@@ -447,6 +455,9 @@ pub fn connect(path: &Path) -> Result<Attempt, DbError> {
     connection
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(|error| error::sql("setting the synchronous mode", error))?;
+    connection
+        .pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_FRAMES)
+        .map_err(|error| error::sql("setting the passive checkpoint interval", error))?;
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| error::sql("turning foreign keys on", error))?;
