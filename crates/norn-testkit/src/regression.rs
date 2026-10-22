@@ -1080,7 +1080,8 @@ impl Registry {
 
     /// Registry shape, mandatory membership, binding/dormancy metadata and
     /// source-level carrier contracts, including exact paths, reachable modules
-    /// and test declarations. No compiled index is needed.
+    /// and test declarations. Plain ignores also require a vouching wholesale
+    /// integration-target adopter in the workflows. No compiled index is needed.
     pub fn audit_structure(&self, workspace_root: &Path) -> Vec<String> {
         let mut problems = Vec::new();
         self.audit_venues(&mut problems);
@@ -1089,9 +1090,12 @@ impl Registry {
         self.audit_mandatory(&mut problems);
         self.audit_binding_records(workspace_root, &mut problems);
         let mut sources = BTreeMap::new();
+        let mut steps = None;
         for case in self.bound_cases() {
             for reference in &case.binding.tests {
-                if let Err(problem) = self.source_carrier(workspace_root, &mut sources, reference) {
+                if let Err(problem) =
+                    self.source_carrier(workspace_root, &mut sources, &mut steps, reference)
+                {
                     problems.push(format!("`{}` {problem}", case.name));
                 }
             }
@@ -1109,7 +1113,7 @@ impl Registry {
         for case in self.bound_cases() {
             for reference in &case.binding.tests {
                 if let Ok((test, target, text)) =
-                    self.source_carrier(workspace_root, &mut sources, reference)
+                    self.source_carrier(workspace_root, &mut sources, &mut steps, reference)
                 {
                     for problem in self.audit_compiled_carrier(
                         workspace_root,
@@ -1375,13 +1379,16 @@ impl Registry {
     ///
     /// A reference must name a supported target, resolve under its exact
     /// spelling, be reachable through the module tree, and declare the named
-    /// test. A plain ignore attribute must also name a sanctioned lane. These
-    /// are facts about the tree and must fail ordinary PR checks even when no
-    /// Cargo listing is collected. The cache reads each carrier file once.
+    /// test. A plain ignore attribute must name a sanctioned lane and have a
+    /// vouching workflow step adopting its integration target wholesale; no
+    /// lane adopts a library target. These are facts about source and workflow
+    /// files, so they must fail ordinary PR checks without a Cargo listing.
+    /// The caches read each carrier file and the workflows once per audit.
     fn source_carrier<'a>(
         &self,
         workspace_root: &Path,
         sources: &'a mut BTreeMap<PathBuf, Option<String>>,
+        steps: &mut Option<Steps>,
         reference: &str,
     ) -> Result<(TestRef, TargetRef, &'a str), String> {
         let test = TestRef::parse(reference)?;
@@ -1419,6 +1426,24 @@ impl Registry {
                     reason.map_or("none".to_string(), |reason| format!("{reason:?}"))
                 ));
             }
+            let adopted = match &target.target {
+                Target::Integration(stem) => {
+                    let read = steps.get_or_insert_with(|| {
+                        crate::workflows::ci_steps_in(&workspace_root.join(".github/workflows"))
+                    });
+                    let read = read.as_ref().map_err(|problem| {
+                        format!("names `{test}`, whose lane steps could not be read: {problem}")
+                    })?;
+                    read.adopted(&target.package, stem).is_some()
+                }
+                Target::Lib => false,
+            };
+            if !adopted {
+                return Err(format!(
+                    "names `{test}`, which has a plain ignore, and no CI step runs the ignored cases of `{} {}` wholesale. An ignored carrier runs only where a lane step adopts its target, whole and unconditionally",
+                    target.package, target.target
+                ));
+            }
         }
         Ok((test, target, text))
     }
@@ -1427,13 +1452,11 @@ impl Registry {
     /// A declaration behind a disabled cfg is source-valid but still needs
     /// the compiled listing to prove it runs.
     ///
-    /// An ignored carrier passes only when a lane adopts it, because a lane
-    /// running a suite's ignored cases wholesale is the only thing that makes
-    /// an ignored test run. Adoption is two facts, and both are read: its
-    /// reason opens with a lane prefix, and a CI step under
-    /// `.github/workflows` runs its target's ignored cases wholesale. The
-    /// target's own lane guard ([`crate::lanes`]) holds the prefix to the
-    /// lane that step runs.
+    /// Source validation already checks plain ignores' reasons and adopters.
+    /// Conditional ignores need the compiled listing to establish that they
+    /// took effect, so their reasons and adopters are checked here. The
+    /// target's own lane guard ([`crate::lanes`]) additionally holds a prefix
+    /// to the lane that step runs where the crate has a lane table.
     ///
     /// **A carrier cargo compiles only with [`CARRIER_FEATURE`] on passes only
     /// where a step builds it that way**, which is the same rule seen through a
@@ -1473,13 +1496,15 @@ impl Registry {
                 }
             },
         };
-        if !ignored && !featured {
+        let plain_ignore = ignore_attribute(text, &test.function).is_some();
+        if !featured && (!ignored || plain_ignore) {
             return problems;
         }
 
         // A conditional ignore may take effect only in a compiled build.
-        // Plain ignore reasons have already passed source validation.
-        if ignored {
+        // Plain ignore reasons and adopters have passed source validation;
+        // only their feature requirements still need the compiled listing.
+        if ignored && !plain_ignore {
             let reason = ignore_reason(text, &test.function);
             let adopted = reason
                 .is_some_and(|reason| LANE_IGNORE_PREFIXES.iter().any(|p| reason.starts_with(p)));
@@ -3493,6 +3518,52 @@ fn a_carrier() {}
                 "An ignored carrier runs only where a lane adopts it",
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranges an ignored library carrier.
+    fn structural_audit_rejects_plain_ignored_library_carriers() {
+        let root = scratch();
+        std::fs::create_dir_all(root.join("crates/demo/src")).unwrap();
+        std::fs::write(
+            root.join("crates/demo/src/lib.rs"),
+            "#[test]\n#[ignore = \"fault-lane case: recovery\"]\nfn a_library_carrier() {}\n",
+        )
+        .unwrap();
+        assert_structural_carrier_problem(
+            &root,
+            "crates/demo/src/lib.rs::a_library_carrier",
+            "no CI step runs the ignored cases of `demo --lib` wholesale",
+        );
+    }
+
+    #[test]
+    fn structural_audit_rejects_unadopted_plain_ignored_integration_carriers() {
+        let root = scratch();
+        adopt(&root, &["demo other"]);
+        assert_structural_carrier_problem(
+            &root,
+            "crates/demo/tests/suite.rs::an_adopted_carrier",
+            "no CI step runs the ignored cases of `demo --test suite` wholesale",
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: changes a conditional lane to a vouching adopter.
+    fn structural_audit_requires_vouching_plain_ignore_adopters() {
+        let root = scratch();
+        std::fs::write(root.join(".github/workflows/lanes.yml"), "jobs:\n  lanes:\n    steps:\n      - if: false\n        run: .github/scripts/lane-suite.sh demo suite\n").unwrap();
+        assert_structural_carrier_problem(
+            &root,
+            "crates/demo/tests/suite.rs::an_adopted_carrier",
+            "no CI step runs the ignored cases of `demo --test suite` wholesale",
+        );
+        adopt(&root, &["demo suite"]);
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests =
+            vec!["crates/demo/tests/suite.rs::an_adopted_carrier".to_string()];
+        assert!(registry.audit_structure(root.root()).is_empty());
+        assert!(registry.audit(root.root(), &index()).is_empty());
     }
 
     #[test]
