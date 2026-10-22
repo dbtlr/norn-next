@@ -17,6 +17,25 @@ from results import validate_read
 from transport import Current, resources
 
 
+def baseline_build(receipt: Path, source: Path) -> dict:
+    """Verify the reference revision independently of the candidate checkout."""
+    built = verify_build(receipt, source.resolve())
+    if built["features"]:
+        raise ValueError("the revision baseline must be a no-feature build")
+    return built
+
+
+def storage_bytes(root: Path) -> dict:
+    """Read file lengths while the worker still holds its database and WAL open."""
+    stores = list((root / "data").rglob("store.sqlite3"))
+    if len(stores) != 1:
+        raise ValueError("storage readings require exactly one store.sqlite3")
+    database = stores[0]
+    paths = {"database": database, "wal": database.with_name(database.name + "-wal"),
+             "shared_memory": database.with_name(database.name + "-shm")}
+    return {name: path.stat().st_size if path.exists() else 0 for name, path in paths.items()}
+
+
 def partition(ready: dict) -> dict | None:
     """Partition inclusive spans once; retain nested detail separately in raw evidence."""
     timings = ready["timings"]
@@ -40,6 +59,7 @@ def partition(ready: dict) -> dict | None:
 
 
 def validate_work(evidence, stage, documents, batch):
+    """Reject timings made cheaper by skipped import work or a changed restart."""
     if evidence is None:
         return
     if stage == "fresh" and evidence["changesets_applied"] < (documents + batch - 1) // batch:
@@ -51,6 +71,7 @@ def validate_work(evidence, stage, documents, batch):
 
 def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch: int,
             build_kind: str, profiling: bool, stage: str) -> dict:
+    """Time the validated worker lifecycle, keeping the persisted-state audit outside it."""
     from startup_audit import audit_store
 
     load = os.getloadavg()
@@ -61,6 +82,7 @@ def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch:
         validate_read("current", {"op": "search", "query": COMMON}, first, manifest)
         elapsed = time.perf_counter_ns() - began
         at_first_query = resources(worker.process.pid)
+        disk_at_first_query = storage_bytes(root)
         ready = worker.ready
         if ready["changeset_size"] != batch or ready["store_page_size"] != 128:
             raise ValueError("worker did not use the requested policy")
@@ -77,9 +99,15 @@ def run_one(binary: Path, audit_binary: Path, root: Path, manifest: dict, batch:
                   "first_query_round_trip_ns": query_ns, "first_query_host_ns": first["host_ns"],
                   "first_query_counters": first["counters"], "ready": ready, "partition_ns": phases,
                   "resources_at_first_query": at_first_query, "resources_after_checks": resources(worker.process.pid),
+                  "storage_bytes_at_first_query": disk_at_first_query,
                   "verified_reads": verified, "load_start": load, "load_end": os.getloadavg()}
     finally:
+        closing = time.perf_counter_ns()
         worker.close()
+        closed = time.perf_counter_ns()
+    result["shutdown_ns"] = closed - closing
+    result["validated_lifecycle_ns"] = closed - began
+    result["storage_bytes_after_close"] = storage_bytes(root)
     for name in ("worker.stdout.log", "worker.stderr.log"):
         shutil.copyfile(root / name, root / (stage + "." + name))
     result["store"] = audit_store(audit_binary, root, manifest)
@@ -91,6 +119,10 @@ def main():
     parser.add_argument("--current-build", type=Path, required=True)
     parser.add_argument("--control-build", type=Path,
                         help="interleave a standard no-feature build from the same source")
+    parser.add_argument("--baseline-build", type=Path,
+                        help="interleave a no-feature build from an earlier revision")
+    parser.add_argument("--baseline-source", type=Path,
+                        help="checkout matching the baseline build receipt")
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", type=int, nargs="+", default=[300, 2000, 10000])
@@ -104,6 +136,12 @@ def main():
         parser.error("startup resource readings require Linux")
     if args.output.exists() or args.output.is_relative_to(repo):
         parser.error("use a new output directory outside the repository")
+    if bool(args.baseline_build) != bool(args.baseline_source):
+        parser.error("--baseline-build and --baseline-source are required together")
+    if args.baseline_build and not args.control_build:
+        parser.error("a revision comparison also requires --control-build")
+    if args.baseline_source and args.output.is_relative_to(args.baseline_source.resolve()):
+        parser.error("the output directory must also be outside the baseline checkout")
     if args.repetitions < 1 or any(not 1 <= batch <= 1024 for batch in args.batches):
         parser.error("positive repetitions and changeset sizes between 1 and 1024 are required")
     if len(set(args.sizes)) != len(args.sizes) or len(set(args.batches)) != len(args.batches):
@@ -122,6 +160,8 @@ def main():
         if control["features"] or control["source_tree_sha256"] != receipt["source_tree_sha256"]:
             raise ValueError("control must be a no-feature build from the same source tree")
         receipts["standard"] = control
+    if args.baseline_build is not None:
+        receipts["baseline"] = baseline_build(args.baseline_build, args.baseline_source)
     binaries = {}
     for kind, built in receipts.items():
         binaries[kind] = args.output / (kind + "-worker")
@@ -132,7 +172,9 @@ def main():
     variants = [{"build_kind": "profile", "profiling": mode} for mode in modes]
     if "standard" in binaries:
         variants.append({"build_kind": "standard", "profiling": False})
-    metadata = {"workload_version": "startup-attribution-v1", "completed": False,
+    if "baseline" in binaries:
+        variants.append({"build_kind": "baseline", "profiling": False})
+    metadata = {"workload_version": "startup-attribution-v2", "completed": False,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "current_build": receipt, "builds": receipts, "runner_source_sha256": source_tree_digest(repo),
                 "sizes": args.sizes, "batches": args.batches, "repetitions": args.repetitions,
@@ -194,6 +236,8 @@ def main():
                                     shutil.rmtree(path)
         if source_tree_digest(repo) != metadata["runner_source_sha256"]:
             raise ValueError("source changed during measurement; preserve this run as incomplete")
+        if args.baseline_source and source_tree_digest(args.baseline_source) != receipts["baseline"]["source_tree_sha256"]:
+            raise ValueError("baseline source changed during measurement")
         metadata["completed"] = True
     except BaseException as problem:
         metadata["failure"] = repr(problem)

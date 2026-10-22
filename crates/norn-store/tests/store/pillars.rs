@@ -4486,6 +4486,100 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
     )
 }
 
+/// Measure the registered SQL against its former RETURNING form under the
+/// same schema, bindings and starting rows. Rollback keeps the comparison's
+/// row ids and index contents identical.
+#[test]
+fn single_row_parent_inserts_take_fewer_vm_steps_without_returning() {
+    use norn_db::rusqlite::{Connection, StatementStatus, ToSql, params};
+
+    fn steps(connection: &Connection, sql: &str, bindings: &[&dyn ToSql]) -> u64 {
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("a control transaction");
+        let mut statement = transaction.prepare(sql).expect("the measured insert");
+        if statement.column_count() == 0 {
+            statement.insert(bindings).expect("one parent inserted");
+        } else {
+            let ids = statement
+                .query_map(bindings, |row| row.get::<_, i64>(0))
+                .expect("the RETURNING control")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("draining the control");
+            assert_eq!(ids.len(), 1);
+        }
+        let measured = statement.get_status(StatementStatus::VmStep) as u64;
+        drop(statement);
+        transaction
+            .rollback()
+            .expect("restoring the same starting rows");
+        measured
+    }
+
+    let scratch = Scratch::new("single-insert-work");
+    let mut store = scratch.open();
+    write_document(
+        &mut store.begin_request(),
+        &document("holder.md", "hash", "body\n"),
+    );
+    let norn_db::Attempt::Connected(connection) =
+        norn_db::connect(&scratch.database()).expect("the fixture's connection")
+    else {
+        panic!("the fixture is readable")
+    };
+    let document: i64 = connection
+        .query_row(
+            "SELECT id FROM documents WHERE path = 'holder.md'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the parent document");
+    let absent: Option<&str> = None;
+    let link = params![
+        document, 0, "wikilink", false, absent, "target", absent, absent, absent, absent, absent,
+        "vault", absent, absent, absent, absent
+    ];
+    let finding = params![
+        "",
+        1,
+        "document/path-names-no-document",
+        "warning",
+        "holder.md",
+        absent,
+        absent,
+        absent,
+        absent,
+        0,
+        "a finding",
+        absent,
+        absent,
+        absent,
+        absent,
+        absent,
+        absent
+    ];
+    for (named, bindings) in [
+        (WriteStatement::InsertLink, link),
+        (WriteStatement::InsertFinding, finding),
+    ] {
+        let emitted = write_plan(&mut store, named);
+        let sql = emitted.sql();
+        let control = format!(
+            "{} RETURNING id",
+            sql.trim_end().trim_end_matches("RETURNING id").trim_end()
+        );
+        let measured = steps(&connection, sql, bindings);
+        let returning = steps(&connection, &control, bindings);
+        eprintln!("{named:?}: {measured} VM steps; RETURNING control: {returning}");
+        assert!(
+            measured < returning,
+            "{named:?} did not reduce VM work: {measured} vs {returning}"
+        );
+    }
+    drop(connection);
+    store.verify_integrity().expect("both controls rolled back");
+}
+
 /// **No statement the write path runs scans a table, and each keyed one seeks
 /// its table by the constraint it binds.** An increment runs these once per
 /// document, per fact row or per finding, so a statement that read a table end
@@ -4577,19 +4671,27 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
         let mut store = scratch.open();
         induced_failure::execute_out_of_band(&mut store, "DROP INDEX link_keys_link")
             .expect("dropping link_keys_link");
-        for statement in [WriteStatement::DiscardLinks, WriteStatement::InsertLink] {
-            let read = write_plan(&mut store, statement);
-            assert!(
-                !read.unbounded_steps().is_empty(),
-                "{statement:?} no longer reads unbounded with link_keys_link dropped: {:?}",
-                read.rows()
-            );
-            assert!(
-                !meets_write_bar(&read, &write_bar(statement)),
-                "the bar for {statement:?} held with link_keys_link dropped: {:?}",
-                read.rows()
-            );
-        }
+        let statement = WriteStatement::DiscardLinks;
+        let read = write_plan(&mut store, statement);
+        assert!(
+            !read.unbounded_steps().is_empty(),
+            "{statement:?} no longer reads unbounded with link_keys_link dropped: {:?}",
+            read.rows()
+        );
+        assert!(
+            !meets_write_bar(&read, &write_bar(statement)),
+            "the bar for {statement:?} held with link_keys_link dropped: {:?}",
+            read.rows()
+        );
+        // A single-row insert has no existing link's children to inspect.
+        // Keep it under the universal no-scan bar even without this index.
+        let inserted = write_plan(&mut store, WriteStatement::InsertLink);
+        assert!(
+            meets_write_bar(&inserted, &write_bar(WriteStatement::InsertLink)),
+            "a link insert reads its child table: {:?}",
+            inserted.rows()
+        );
+        assert!(inserted.searches_of("link_keys").is_empty());
     }
 
     for (statements, indexes) in [

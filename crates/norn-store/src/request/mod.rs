@@ -1691,9 +1691,13 @@ impl<'a> Request<'a> {
         read: impl FnMut(&Row<'_>) -> Reading<T>,
         operation: &'static str,
     ) -> Result<Vec<T>, StoreError> {
+        #[cfg(feature = "induced-failure")]
+        let prepare_timing = norn_db::profiling::span("store.prepare_read");
         let mut statement = connection
             .prepare_cached(sql)
             .map_err(|error| error::sql(operation, error))?;
+        #[cfg(feature = "induced-failure")]
+        drop(prepare_timing);
         // A cached statement carries the steps of every earlier run.
         statement.reset_status(StatementStatus::VmStep);
         let rows = statement
@@ -1909,10 +1913,16 @@ pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
 ) -> Result<(), StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("store.write_finding");
+    #[cfg(feature = "induced-failure")]
+    let metadata_timing = norn_db::profiling::span("store.finding_metadata");
     let generation = norn_db::meta::next_generation(transaction)?;
     let fingerprint: String =
         norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
             .unwrap_or_default();
+    #[cfg(feature = "induced-failure")]
+    drop(metadata_timing);
     let rule_set = cited_rule_set(transaction, &fingerprint, &finding.rules)?;
     let value = finding.value.as_deref().map(crate::hash::value_head);
 
@@ -1921,28 +1931,25 @@ pub(crate) fn write_finding(
     let id: i64 = transaction
         .prepare_cached(WriteStatement::InsertFinding.sql())
         .and_then(|mut insert| {
-            insert.query_row(
-                params![
-                    fingerprint,
-                    generation,
-                    finding.kind.as_str(),
-                    finding.severity.as_str(),
-                    finding.path.as_str(),
-                    finding.target,
-                    finding.span.map(|span| span.line),
-                    finding.span.map(|span| span.column),
-                    finding.span.map(|span| span.byte_offset),
-                    finding.candidates_total,
-                    finding.message,
-                    finding.detail,
-                    finding.ordinal,
-                    rule_set,
-                    value.as_ref().map(norn_wire::ValueHead::text),
-                    value.as_ref().map(norn_wire::ValueHead::byte_length),
-                    value.as_ref().map(|value| value.hash().as_str()),
-                ],
-                |row| row.get(0),
-            )
+            insert.insert(params![
+                fingerprint,
+                generation,
+                finding.kind.as_str(),
+                finding.severity.as_str(),
+                finding.path.as_str(),
+                finding.target,
+                finding.span.map(|span| span.line),
+                finding.span.map(|span| span.column),
+                finding.span.map(|span| span.byte_offset),
+                finding.candidates_total,
+                finding.message,
+                finding.detail,
+                finding.ordinal,
+                rule_set,
+                value.as_ref().map(norn_wire::ValueHead::text),
+                value.as_ref().map(norn_wire::ValueHead::byte_length),
+                value.as_ref().map(|value| value.hash().as_str()),
+            ])
         })
         .map_err(|error| error::sql("writing a finding", error))?;
 

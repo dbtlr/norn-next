@@ -390,8 +390,9 @@ pub struct ResolutionWork {
     /// or a reached place, and once per run of consecutive chunks holding it
     /// for any other key.
     pub keys_resolved: u64,
-    /// Rows the key resolutions read, each a document a key names, at most
-    /// two more than the targets the key could name.
+    /// Driver rows read for candidate heads, before the candidate kinds merge.
+    /// Each kind contributes at most the requested head bound per key, including
+    /// the extra slots reserved for targets the overlay may replace.
     pub head_rows: u64,
     /// Resolved keys each chunk's end visited to drop those the next chunk
     /// will not reuse: the keys the chunk before it held and its own, never
@@ -1235,10 +1236,15 @@ impl<'a, R: Runner> Judging<'a, R> {
                 heads.entry(key.clone()).or_default().push((rung, path));
             }
         }
-        for head in heads.values_mut() {
+        // Each candidate kind supplies a bounded head. Re-cut their merge
+        // before callers decide whether the filled head contains only exact
+        // members and therefore owes an exact-path count.
+        for (key, bound) in bounds {
+            let head = heads.entry((*key).clone()).or_default();
             head.sort_by(|left, right| {
                 crate::resolve::ladder_cmp((&left.0, &left.1), (&right.0, &right.1))
             });
+            head.truncate(*bound);
         }
         Ok(heads)
     }

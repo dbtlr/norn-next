@@ -766,14 +766,22 @@ fn reached_by_a_class(held: &Held, classes: &BTreeSet<ClassKey>) -> bool {
 /// Discard the findings whose row ids `findings` holds, and report how many
 /// went.
 fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u64, StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.discard");
     if findings.is_empty() {
         return Ok(0);
     }
     let ids: Vec<i64> = findings.iter().copied().collect();
     let values = statement::ids_parameters(&ids)?;
-    let discarded = transaction
+    #[cfg(feature = "induced-failure")]
+    let prepare_timing = norn_db::profiling::span("health.prepare_discard");
+    let mut statement = transaction
         .prepare_cached(&statement::discard_sql())
-        .and_then(|mut discard| discard.execute(params_from_iter(values)))
+        .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
+    #[cfg(feature = "induced-failure")]
+    drop(prepare_timing);
+    let discarded = statement
+        .execute(params_from_iter(values))
         .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
     Ok(discarded as u64)
 }
@@ -818,6 +826,8 @@ fn judge_links(
     links: &[Held],
     summaries: &mut KeySummaries,
 ) -> Result<Vec<FindingFacts>, StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.judge");
     if links.is_empty() {
         return Ok(Vec::new());
     }
@@ -888,6 +898,8 @@ fn read_links(
     selected: Selected,
     values: Vec<Value>,
 ) -> Result<(Vec<Held>, BTreeSet<After>), StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.read_links");
     // A snapshot runs this only in the shape that pages one key's links, so
     // that is the name it records; the writer records no name.
     let rows = runner.read_all(
@@ -972,6 +984,8 @@ fn resolve_keys(
     links: &[Held],
     summaries: &mut KeySummaries,
 ) -> Result<(), StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.resolve_keys");
     let unresolved: BTreeSet<&Key> = links
         .iter()
         .flat_map(|held| &held.keys)
@@ -1162,6 +1176,8 @@ fn missing_anchors(
     links: &[Held],
     verdicts: &[Option<Verdict>],
 ) -> Result<BTreeSet<usize>, StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.anchors");
     let (positions, pairs): (Vec<usize>, Vec<(i64, i64)>) = links
         .iter()
         .zip(verdicts)
@@ -1208,6 +1224,8 @@ fn candidate_names(
     ignore: &AmbiguityIgnore,
     named: &BTreeMap<i64, &str>,
 ) -> Result<HashMap<i64, CandidateName>, StoreError> {
+    #[cfg(feature = "induced-failure")]
+    let _timing = norn_db::profiling::span("health.candidate_names");
     if named.is_empty() {
         return Ok(HashMap::new());
     }

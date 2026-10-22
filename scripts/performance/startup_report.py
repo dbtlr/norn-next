@@ -21,6 +21,7 @@ WORK = ("document_opens", "documents_derived", "changesets_applied", "links_rede
 
 
 def validate_samples(metadata, samples):
+    """Refuse publication when the requested grid or its required clocks are incomplete."""
     if not metadata["completed"]:
         raise ValueError("the startup experiment did not complete")
     expected = {(repetition, size, batch, variant["build_kind"], variant["profiling"], stage)
@@ -30,9 +31,25 @@ def validate_samples(metadata, samples):
     actual = [tuple(sample[key] for key in KEYS) for sample in samples]
     if len(actual) != len(expected) or set(actual) != expected or not all(sample["verified"] for sample in samples):
         raise ValueError("startup sample identities are missing, duplicated or unverified")
+    if metadata.get("workload_version") == "startup-attribution-v2":
+        for sample in samples:
+            if not {"shutdown_ns", "validated_lifecycle_ns"} <= sample.keys():
+                raise ValueError("startup shutdown or lifecycle evidence is missing")
+            if sample["shutdown_ns"] < 0 or sample["validated_lifecycle_ns"] < sample["first_validated_query_ns"] + sample["shutdown_ns"]:
+                raise ValueError("startup and shutdown exceed the validated lifecycle")
+
+
+def optional_distribution(samples, key):
+    """Keep unavailable clocks in historical runs distinct from zero cost."""
+    if all(key not in sample for sample in samples):
+        return None
+    if any(key not in sample for sample in samples):
+        raise ValueError("a clock is missing from part of the startup experiment")
+    return distribution([sample[key] for sample in samples])
 
 
 def summarize(metadata, samples):
+    """Retain individual repetitions beside distributions so medians cannot hide variation."""
     validate_samples(metadata, samples)
     summaries = []
     for size, batch, variant, stage in itertools.product(
@@ -45,6 +62,8 @@ def summarize(metadata, samples):
         row = {"background_documents": size, "document_count": chosen[0]["document_count"], "changeset_size": batch,
                "build_kind": build_kind, "profiling": profiling, "stage": stage,
                "first_validated_query": distribution([sample["first_validated_query_ns"] for sample in chosen]),
+               "shutdown": optional_distribution(chosen, "shutdown_ns"),
+               "validated_lifecycle": optional_distribution(chosen, "validated_lifecycle_ns"),
                "startup_complete": distribution([sample["ready"]["startup_complete_ns"] for sample in chosen]),
                "observed_ready": distribution([sample["ready"]["observed_ready_ns"] for sample in chosen]),
                "first_query": distribution([sample["first_query_host_ns"] for sample in chosen]),
@@ -63,15 +82,24 @@ def summarize(metadata, samples):
 
 
 def render(metadata, rows):
+    """Keep missing identity labels and historical clocks visibly distinct from measurements."""
     esc = html.escape
     latencies, phases, work = [], [], []
+    identities = ''.join(
+        f'<tr><th>{esc(kind)}</th><td><code>{esc(build.get("repository_head") or "not recorded")}</code></td>'
+        f'<td><code>{esc(build["sha256"])}</code></td><td><code>{esc(build["source_tree_sha256"])}</code></td>'
+        f'<td>{esc((build.get("rustc") or "not recorded").splitlines()[0])}<br><code>{esc(build.get("cargo_lock_sha256") or "not recorded")}</code></td></tr>'
+        for kind, build in metadata["builds"].items())
     for row in rows:
         timing = "on" if row["profiling"] else "off"
         label = f'{row["document_count"]:,} / {row["changeset_size"]} / {row["build_kind"]} {timing} / {row["stage"]}'
+        shutdown = f'{row["shutdown"]["median_ms"] / 1000:.3f}' if row["shutdown"] else "not recorded"
+        lifecycle = f'{row["validated_lifecycle"]["median_ms"] / 1000:.3f}' if row["validated_lifecycle"] else "not recorded"
         latencies.append(f'<tr><th>{label}</th><td>{row["first_validated_query"]["median_ms"] / 1000:.3f}</td>'
                          f'<td>{row["observed_ready"]["median_ms"] / 1000:.3f}</td>'
                          f'<td>{esc(", ".join(f"{value:.3f}" for value in row["repetition_seconds"]))}</td>'
-                         f'<td>{row["cpu_seconds"]:.2f}</td><td>{row["peak_mib"]:.1f}</td></tr>')
+                         f'<td>{row["cpu_seconds"]:.2f}</td><td>{row["peak_mib"]:.1f}</td>'
+                         f'<td>{shutdown}</td><td>{lifecycle}</td></tr>')
         if row["work"] is not None:
             work.append(f'<tr><th>{label}</th>' + ''.join(f'<td>{esc(str(row["work"][key]))}</td>' for key in WORK) + '</tr>')
         if row["profiling"]:
@@ -88,13 +116,14 @@ th,td{{padding:8px;border-bottom:1px solid var(--border,#ddd);text-align:left;ve
 tbody th{{font-weight:500}}.wrap{{overflow:auto}}small{{display:block;color:var(--muted-foreground,#666)}}
 code{{overflow-wrap:anywhere}}li{{margin-bottom:6px}}</style></head><body><main>
 <h1>Norn startup attribution</h1><p>{esc(metadata["started_at"])} · {metadata["repetitions"]} repetitions per configuration.
-Store read pages stay at 128 rows; only the changeset bound varies.</p>
+Store read pages stay at 128 rows. Changeset bounds and build variants are listed below.</p>
 <p>All known-answer search/get checks passed. Every document hash matches the frozen source.
 Normalized persisted facts and findings agree across configurations. Each unchanged restart preserves its store epoch and write generation.</p>
 <h2>Fresh indexing and existing-index restart</h2><p>End-to-end time runs from launching the worker through its first validated common-text query.
 CPU and peak RSS are Linux main-process readings at that boundary. Repetition values expose variation; none are removed.</p>
 <p>Observed-Ready medians share the same boundary across builds. Profile builds additionally wait for bookkeeping before sending the first query; standard builds can overlap that tail.</p>
-<div class="wrap"><table><thead><tr><th>Documents / batch / build and timers / stage</th><th>Median first query · s</th><th>Median observed Ready · s</th><th>Each repetition · s</th><th>Median CPU s</th><th>Median peak MiB</th></tr></thead><tbody>{''.join(latencies)}</tbody></table></div>
+<p>Clean shutdown includes the stop request, process exit and controller cleanup. The validated lifecycle includes startup, all known-answer reads and clean shutdown; the persisted-state audit follows it. This exposes checkpoint work deferred past readiness.</p>
+<div class="wrap"><table><thead><tr><th>Documents / batch / build and timers / stage</th><th>Median first query · s</th><th>Median observed Ready · s</th><th>Each repetition · s</th><th>Median CPU s</th><th>Median peak MiB</th><th>Median shutdown · s</th><th>Median validated lifecycle · s</th></tr></thead><tbody>{''.join(latencies)}</tbody></table></div>
 <h2>Startup phase attribution</h2><p>Mean seconds across repetitions, partitioned without adding parent and child spans.
 The total is worker setup through completed startup bookkeeping; the first query follows this timing window.</p>
 <div class="wrap"><table><thead><tr><th>Documents / batch / timers / stage</th>{''.join('<th>' + esc(label) + '</th>' for label in PHASES.values())}</tr></thead><tbody>{''.join(phases)}</tbody></table></div>
@@ -108,11 +137,10 @@ The total is worker setup through completed startup bookkeeping; the first query
 <li>Watcher background work can overlap caller intervals. These are elapsed scopes, not per-phase CPU samples.</li>
 <li>All cells run serially. Size and batch order rotate, and variant order reverses on alternating repetitions. The audit reads source files and the store before restart, deliberately warming caches. This is a cache-warmed existing-index restart. Other host activity is uncontrolled.</li>
 <li>The persisted-state check normalizes surrogate IDs, generations and timestamps. FTS vocabulary and document token sizes are compared, alongside authored search answers; every term-to-document posting is not independently audited.</li>
-<li>This experiment measures startup and immediate restart, not long-term retained memory. No production defaults are changed.</li></ul>
-<h2>Identity and evidence</h2><p>Executable SHA-256: <code>{esc(metadata["current_build"]["sha256"])}</code><br>
-Compiled source SHA-256: <code>{esc(metadata["current_build"]["source_tree_sha256"])}</code><br>
-Source base: <code>{esc(metadata["current_build"]["repository_head"])}</code><br>
-Platform: {esc(metadata["platform"])}<br>System load start/end: {esc(str(metadata["load_start"]))} / {esc(str(metadata["load_end"]))}</p>
+<li>This experiment measures startup and immediate restart, not long-term retained memory. The harness overrides changeset size in its isolated workers.</li>
+<li>When present, baseline is the earlier revision's standard build. Compare baseline with standard for revision gains or losses; profile variants measure candidate instrumentation overhead. The baseline source and executable are verified against their own receipt.</li></ul>
+<h2>Identity and evidence</h2><div class="wrap"><table><thead><tr><th>Build</th><th>Source base</th><th>Executable SHA-256</th><th>Compiled source SHA-256</th><th>Compiler and Cargo.lock SHA-256</th></tr></thead><tbody>{identities}</tbody></table></div>
+<p>Platform: {esc(metadata["platform"])}<br>System load start/end: {esc(str(metadata["load_start"]))} / {esc(str(metadata["load_end"]))}</p>
 <p>run.json preserves build and fixture identity. samples.jsonl preserves every clock, inclusive scope, counter and semantic audit.
 The frozen worker and per-stage logs remain with the run. summary.json preserves the distributions shown here.</p>
 </main></body></html>'''

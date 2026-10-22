@@ -38,6 +38,288 @@ fn death(at: &str, provenance: Provenance) -> Change {
     }
 }
 
+/// The statement census is process-wide, so this case runs alone in its child.
+/// Fresh rows owe no fact deletion; replacements still clear every fact lane,
+/// including a second write at the same path inside one changeset.
+#[test]
+fn fact_discards_follow_standing_rows_in_the_transaction() {
+    const CHILD: &str = "NORN_FACT_DISCARD_CENSUS_CHILD";
+    const COMPLETED: &str = "fact discard census completed";
+    if std::env::var_os(CHILD).is_none() {
+        let child = Command::new(std::env::current_exe().expect("this suite's executable"))
+            .args([
+                "--exact",
+                "increments::fact_discards_follow_standing_rows_in_the_transaction",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("running the isolated statement census");
+        assert!(
+            child.status.success(),
+            "fact discard census failed:\n{}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains(COMPLETED),
+            "the isolated child did not complete the census:\n{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        return;
+    }
+
+    use norn_store::{WriteStatement, induced_failure};
+    induced_failure::record_statements_begun();
+    let scratch = Scratch::new("fact-discard-census");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let discard_sql = [
+        WriteStatement::DiscardLinks,
+        WriteStatement::DiscardHeadings,
+        WriteStatement::DiscardBlocks,
+        WriteStatement::DiscardTags,
+        WriteStatement::DiscardFields,
+    ]
+    .map(|statement| {
+        request
+            .emitted_plan(ExplainedStatement::Write(statement))
+            .expect("the registered fact discard")
+            .sql
+    });
+    let discards = || {
+        let mut statements = induced_failure::statements_begun();
+        // SQLite repeats the parent's SQL while entering foreign-key cascade
+        // programs. Adjacent repeats are one prepared DELETE's execution.
+        statements.dedup();
+        discard_sql
+            .each_ref()
+            .map(|discard| statements.iter().filter(|sql| *sql == discard).count())
+    };
+
+    // Neither finding requires a document row. Both invalidation axes must
+    // still run when a document arrives for the first time.
+    request
+        .record_finding(&violation("fresh.md"))
+        .expect("a subject finding");
+    request
+        .record_finding(&keyed_by_paths("observer.md", &["fresh.md"]))
+        .expect("a path-key finding");
+    induced_failure::statements_begun();
+    write_document(&mut request, &document_with_every_fact("fresh.md", "first"));
+    assert_eq!(discards(), [0; 5], "a fresh row executed fact DELETEs");
+    assert_eq!(request.counters().get("findings_discarded"), Some(2));
+    assert!(
+        request
+            .stored_findings(&path("observer.md"))
+            .expect("findings")
+            .is_empty()
+    );
+
+    write_document(
+        &mut request,
+        &document("fresh.md", "second", "replacement\n"),
+    );
+    assert_eq!(discards(), [1; 5], "a standing row skipped a fact lane");
+    let replaced = request
+        .stored_facts(&path("fresh.md"))
+        .expect("facts")
+        .expect("the row");
+    assert!(
+        replaced.links.is_empty()
+            && replaced.headings.is_empty()
+            && replaced.blocks.is_empty()
+            && replaced.tags.is_empty()
+            && replaced.fields.is_empty()
+    );
+
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                Change::Upsert(document_with_every_fact("twice.md", "first")),
+                upsert("twice.md", "second", "last write\n"),
+            ],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
+        .expect("two writes at one path");
+    assert_eq!(
+        discards(),
+        [1; 5],
+        "the second entry did not see the first row"
+    );
+    let twice = request
+        .stored_facts(&path("twice.md"))
+        .expect("facts")
+        .expect("the row");
+    assert_eq!(twice.document.content_hash, "second");
+    assert!(twice.links.is_empty() && twice.fields.is_empty());
+
+    write_document(
+        &mut request,
+        &document_with_every_fact("fresh.md", "before-death"),
+    );
+    induced_failure::statements_begun();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                death("fresh.md", Provenance::WatcherRemoval),
+                upsert("fresh.md", "reborn", "reborn\n"),
+            ],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
+        .expect("death and rebirth");
+    assert_eq!(discards(), [0; 5], "a reborn row executed fact DELETEs");
+    assert_eq!(
+        request
+            .stored_document(&path("fresh.md"))
+            .expect("row")
+            .expect("reborn")
+            .content_hash,
+        "reborn"
+    );
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("fact ownership remains intact");
+    induced_failure::stop_recording_statements();
+    report_census_completion(COMPLETED);
+}
+
+#[allow(clippy::disallowed_macros)] // Machine-consumed child completion signal.
+fn report_census_completion(marker: &str) {
+    println!("{marker}");
+}
+
+/// Parent ids must remain correct while document, link, rule-set and finding
+/// inserts interleave, including after a refused transaction is retried.
+#[test]
+fn inserted_links_and_findings_keep_their_own_children_after_rollback() {
+    let scratch = Scratch::new("inserted-parent-children");
+    let mut store = scratch.open();
+    norn_store::induced_failure::execute_out_of_band(
+        &mut store,
+        "CREATE TRIGGER refuse_test_finding BEFORE INSERT ON findings
+         WHEN new.message = 'injected write failure'
+         BEGIN SELECT RAISE(ABORT, 'injected write failure'); END",
+    )
+    .expect("a refusal after the earlier findings have written their children");
+    let mut request = store.begin_request();
+    let mut documents = Vec::new();
+    let mut findings = Vec::new();
+    for (at, target, rule, candidates) in [
+        (
+            "first.md",
+            "alpha",
+            "first-rule",
+            ["a/alpha.md", "b/alpha.md"],
+        ),
+        (
+            "second.md",
+            "beta",
+            "second-rule",
+            ["a/beta.md", "b/beta.md"],
+        ),
+    ] {
+        let mut facts = document_with_every_fact(at, "hash");
+        let mut link = facts.links[0].clone();
+        link.anchor = None;
+        link.target = target.to_string();
+        facts.links = vec![link.clone(), link];
+        documents.push(facts);
+        let mut finding =
+            path_names_no_document_in_class(at, target, &format!("{target}/"), &candidates, 2);
+        finding.path_keys.insert(path_key(candidates[0]));
+        finding.rules = [rule.to_string(), "shared-rule".to_string()].into();
+        findings.push(DerivedFinding {
+            facts: finding,
+            replaces: None,
+            bytes_hash: None,
+        });
+    }
+
+    // The injected refusal comes after both parent findings and their children
+    // were written. Their transaction must leave no rows.
+    let mut refused = findings.clone();
+    let mut injected = findings[0].clone();
+    injected.facts.message = "injected write failure".to_string();
+    refused.push(injected);
+    let refusal = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            documents.iter().cloned().map(Change::Upsert),
+            &refused,
+            &norn_store::ContentModel::none(),
+        )
+        .expect_err("the injected finding write refusal");
+    assert!(
+        refusal.to_string().contains("injected write failure"),
+        "{refusal}"
+    );
+    for facts in &documents {
+        assert!(request.stored_facts(&facts.path).expect("facts").is_none());
+        assert!(
+            request
+                .stored_findings(&facts.path)
+                .expect("findings")
+                .is_empty()
+        );
+    }
+
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            documents.iter().cloned().map(Change::Upsert),
+            &findings,
+            &norn_store::ContentModel::none(),
+        )
+        .expect("a retry without the injected refusal");
+    for (facts, expected) in documents.iter().zip(&findings) {
+        let stored = request
+            .stored_facts(&facts.path)
+            .expect("facts")
+            .expect("the document");
+        assert_eq!(crate::common::written_links(&stored), facts.links);
+        let key = format!("{}/", expected.facts.target.as_deref().expect("target"));
+        assert_eq!(
+            stored.link_keys,
+            vec![
+                norn_store::StoredLinkKey {
+                    link: 0,
+                    key: key.clone(),
+                    segments: Some(1)
+                },
+                norn_store::StoredLinkKey {
+                    link: 1,
+                    key,
+                    segments: Some(1)
+                },
+            ]
+        );
+        let stored_findings = request.stored_findings(&facts.path).expect("findings");
+        let stored_finding = stored_findings
+            .iter()
+            .find(|finding| finding.kind == FindingKind::PathNamesNoDocument.as_str())
+            .expect("the caller's finding");
+        assert_eq!(stored_finding.candidates, expected.facts.candidates);
+        assert_eq!(stored_finding.class_keys, expected.facts.class_keys);
+        assert_eq!(stored_finding.path_keys, expected.facts.path_keys);
+        assert_eq!(stored_finding.rules, expected.facts.rules);
+    }
+    request.finish();
+    norn_store::induced_failure::execute_out_of_band(
+        &mut store,
+        "DROP TRIGGER refuse_test_finding",
+    )
+    .expect("removing the induced refusal");
+    store
+        .verify_integrity()
+        .expect("children and rule citations agree with their parents");
+}
+
 #[test]
 fn stored_document_pages_are_bounded_ordered_and_exclusive() {
     let scratch = Scratch::new("document-pages");

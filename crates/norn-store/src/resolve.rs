@@ -360,41 +360,53 @@ pub(crate) fn range_rows(
 ) -> String {
     let rung = key.column();
     let rows = CANDIDATES
-        .map(|candidates| {
-            let table = candidates.table;
-            let da = candidates.alias("a");
-            let dl = candidates.alias("l");
-            let counts = admitting_counts(bounds.0);
-            let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
-            let within = admitting_count_within("n", segments);
-            let eligible = if table == "vault_files" { files } else { "1" };
-            let rows = if let Some(head) = head {
-                let order = ladder(&format!("{dl}.{rung}"), &format!("{dl}.path"));
-                format!(
-                    "{da}.id IN (SELECT {dl}.id FROM {table} AS {dl} WHERE {admitted}
-                             ORDER BY {order} LIMIT {head})"
-                )
-            } else {
-                range_admitted(&da, key, bounds, &admitting_count("n"))
-            };
-            let cut = head
-                .map(|head| {
-                    format!(
-                        " ORDER BY {} LIMIT {head}",
-                        ladder(&format!("{da}.{rung}"), &format!("{da}.path"))
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "SELECT * FROM (SELECT {da}.id, {da}.path, {da}.{rung}
-            FROM {counts} AS n CROSS JOIN {table} AS {da} WHERE {eligible} AND {within} AND {rows}{cut})"
-            )
-        })
+        .map(|candidates| candidate_range_rows(&candidates, key, bounds, segments, head, files))
         .join(" UNION ALL ");
     let cut = head
         .map(|head| format!(" ORDER BY {rung}, path LIMIT {head}"))
         .unwrap_or_default();
     format!("SELECT * FROM ({rows}){cut}")
+}
+
+/// One candidate kind's admitted runs. A head bounds each run and their merge
+/// before other kinds join it, so a class never enters memory whole.
+pub(crate) fn candidate_range_rows(
+    candidates: &Candidates,
+    key: SuffixKey,
+    bounds: (&str, &str),
+    segments: &str,
+    head: Option<&str>,
+    files: &str,
+) -> String {
+    let rung = key.column();
+    let table = candidates.table;
+    let da = candidates.alias("a");
+    let dl = candidates.alias("l");
+    let counts = admitting_counts(bounds.0);
+    let admitted = range_admitted(&dl, key, bounds, &admitting_count("n"));
+    let within = admitting_count_within("n", segments);
+    let eligible = if table == "vault_files" { files } else { "1" };
+    let rows = if let Some(head) = head {
+        let order = ladder(&format!("{dl}.{rung}"), &format!("{dl}.path"));
+        format!(
+            "{da}.id IN (SELECT {dl}.id FROM {table} AS {dl} WHERE {admitted}
+                     ORDER BY {order} LIMIT {head})"
+        )
+    } else {
+        range_admitted(&da, key, bounds, &admitting_count("n"))
+    };
+    let cut = head
+        .map(|head| {
+            format!(
+                " ORDER BY {} LIMIT {head}",
+                ladder(&format!("{da}.{rung}"), &format!("{da}.path"))
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "SELECT * FROM (SELECT {da}.id, {da}.path, {da}.{rung}
+    FROM {counts} AS n CROSS JOIN {table} AS {da} WHERE {eligible} AND {within} AND {rows}{cut})"
+    )
 }
 
 /// A class range counts each table's disjoint admitted runs by index seek.

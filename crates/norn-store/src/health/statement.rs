@@ -345,18 +345,19 @@ pub(crate) fn discard_sql() -> String {
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each
-/// distinct key names, at most `?3` documents in the resolution ladder's
-/// order, each row the arm, the key's index in its list, and the document's
+/// distinct key names, at most `?3` candidates per kind in the resolution ladder's
+/// order, each row the arm, the key's index in its list, and the candidate's
 /// id, path and rung.
 ///
 /// Two arms, one per key space a link is addressed in. The class arm walks
-/// the suffix keys `?1` lists, each a `[key, segments]` pair, and reads the
-/// members each key's class admits through [`resolve::link_key_rows`],
-/// its rung the document's suffix key. The path arm walks the path keys `?2`
-/// lists and reads the documents at each through [`resolve::link_key_path`],
+/// the suffix keys `?1` lists, each a `[key, segments, files]` entry, and reads the
+/// members each key's class admits through [`resolve::candidate_range_rows`],
+/// its rung the candidate's suffix key. The path arm walks the path keys `?2`
+/// lists and reads the candidates at each through [`resolve::link_key_path`],
 /// its rung the key itself, so a path key's rows rank by the path alone. Each
-/// head is cut in the statement, so a key hands back at most `?3` rows,
-/// however large its class.
+/// kind's head is cut in the statement, so a key hands back at most twice `?3`
+/// rows, however large its class. Consumers merge and cut to `?3` before
+/// deciding whether the head fills or contains only exact members.
 ///
 /// # A class's head is read past none of the members it keeps out
 ///
@@ -366,8 +367,8 @@ pub(crate) fn discard_sql() -> String {
 /// count stand together in that count's run of the admitted-key index, in
 /// ladder order, so the class arm enumerates each count from one to
 /// `segments` through [`resolve::admitting_counts`]. It seeks each run cut at
-/// `?3` rows, then cuts their union at `?3` in ladder order. That sort holds
-/// at most `segments` heads, never the class. A key costs its segments'
+/// `?3` rows, then cuts their union per kind at `?3` in ladder order. Each sort
+/// holds at most `segments` heads, never the class. A key costs its segments'
 /// worth of bounded seeks, and the members its class keeps out, however many
 /// sort ahead of its head, are never read.
 ///
@@ -381,20 +382,23 @@ pub(crate) fn discard_sql() -> String {
 /// re-decided by every changeset that writes one of its members, the last of
 /// them after every member is derived under the new set.
 ///
-/// The rows come back in no stated order: the judgment orders each head, and
-/// merges a link's heads, by [`resolve::ladder_cmp`], the order the cut here
-/// spells in SQL.
+/// The rows come back in no stated order: the judgment merges and cuts each
+/// key's head, then merges a link's heads, by [`resolve::ladder_cmp`], the order
+/// the cuts here spell in SQL.
 pub(crate) fn heads_sql(key: SuffixKey) -> String {
     let rung = key.column();
-    let class = resolve::link_key_rows(
-        key,
-        "json_extract(j.value, '$[0]')",
-        "json_extract(j.value, '$[1]')",
-        Some("?3"),
-        "json_extract(j.value, '$[2]')",
-    );
+    let lower = "json_extract(j.value, '$[0]')";
+    let upper = format!("{}({lower})", resolve::SUCCESSOR_FUNCTION);
     resolve::CANDIDATES
         .map(|candidates| {
+            let class = resolve::candidate_range_rows(
+                &candidates,
+                key,
+                (lower, &upper),
+                "json_extract(j.value, '$[1]')",
+                Some("?3"),
+                "json_extract(j.value, '$[2]')",
+            );
             let table = candidates.table;
             let dc = candidates.alias("c");
             let dp = candidates.alias("p");

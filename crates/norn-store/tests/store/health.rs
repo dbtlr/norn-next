@@ -869,6 +869,98 @@ fn a_head_merged_across_two_keys_is_cut_to_the_bound() {
     }
 }
 
+/// Mixed candidate kinds share one ordered head and exact total; exact paths
+/// precede deeper suffixes, and optional `.md` admits documents alone.
+#[test]
+fn mixed_candidate_heads_preserve_order_totals_and_exact_paths() {
+    for order in [Sensitive, Folding] {
+        let mut judging = Judging::new(
+            &format!("health-mixed-head-{order:?}"),
+            order,
+            &[
+                derived("b/photo.png.md", "b\n"),
+                derived("d/photo.png.md", "d\n"),
+                derived("f/photo.png.md", "f\n"),
+                derived(
+                    "holder.md",
+                    &body_of(&[
+                        "[[photo.png]]",
+                        "[[/b/photo.png]]",
+                        "[[b/photo.png]]",
+                        "[[photo.png.md]]",
+                    ]),
+                ),
+            ],
+        );
+        judging
+            .store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [
+                    "a/photo.png",
+                    "c/photo.png",
+                    "e/photo.png",
+                    "g/photo.png",
+                    "deep/b/photo.png",
+                ]
+                .map(|at| Change::FileBirth { path: path(at) }),
+                &[],
+                &declared(),
+            )
+            .expect("files sharing the documents' class");
+        let (findings, _) = judging.judged(&["holder.md"]);
+        assert_filed(&judging.request(), "holder.md", &findings);
+        assert_eq!(findings.len(), 2, "{order:?}: {findings:?}");
+        for (finding, ordinal, total, expected) in [
+            (
+                &findings[0],
+                0,
+                8,
+                vec![
+                    "a/photo.png",
+                    "b/photo.png.md",
+                    "deep/b/photo.png",
+                    "c/photo.png",
+                    "d/photo.png.md",
+                ],
+            ),
+            (
+                &findings[1],
+                3,
+                3,
+                vec!["b/photo.png.md", "d/photo.png.md", "f/photo.png.md"],
+            ),
+        ] {
+            assert_eq!(finding.kind, FindingKind::Ambiguous, "{order:?}");
+            assert_eq!(finding.ordinal, Some(ordinal), "{order:?}");
+            assert_eq!(finding.candidates_total, total, "{order:?}");
+            assert_eq!(
+                finding
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.path.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{order:?}"
+            );
+        }
+        let links = judging.links("holder.md");
+        for ordinal in [1, 2] {
+            assert_eq!(links[ordinal].health(), LinkHealth::Healthy, "{order:?}");
+            assert_eq!(
+                row_head(&links[ordinal]),
+                vec![("b/photo.png.md".into(), "b/photo.png".into())]
+            );
+        }
+        for finding in &findings {
+            let link = &links[finding.ordinal.expect("a link ordinal") as usize];
+            assert_eq!(finding_head(finding), row_head(link), "{order:?}");
+            assert_eq!(finding.candidates_total, link.targets.total(), "{order:?}");
+        }
+    }
+}
+
 /// **The exact path comes first across a link's keys, however many stand
 /// there** (ADR 0040). On a root that tells spellings apart, eight case
 /// variants of `c/abc.md` and `c/abc.md.md` all stand at an exact path of
@@ -1648,7 +1740,7 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             vec![
                 sorted;
                 if matches!(statement, ExplainedStatement::LinkHealthHeads) {
-                    6
+                    2
                 } else if matches!(statement, ExplainedStatement::LinkHealthSuffixes) {
                     8
                 } else {
@@ -1700,6 +1792,34 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             read.rows(),
             read.sql()
         );
+    }
+}
+
+/// A head seeks each candidate kind once before its bounded heads are merged.
+#[test]
+fn a_link_health_head_seeks_each_candidate_kind_once() {
+    for order in [Sensitive, Folding] {
+        let scratch = Scratch::new(&format!("health-head-seeks-once-{order:?}"));
+        let mut store = scratch.open_under(order);
+        let read = plan(
+            store
+                .begin_request()
+                .emitted_plan(ExplainedStatement::LinkHealthHeads)
+                .expect("a query plan"),
+        );
+        for (alias, index) in [
+            ("dl", "documents_admitted_suffix_key"),
+            ("fl", "vault_files_admitted_suffix_key"),
+        ] {
+            let seeks = read
+                .rows()
+                .iter()
+                .filter(|row| {
+                    row.searches() == Some(alias) && row.access() == Some(Access::Index(index))
+                })
+                .count();
+            assert_eq!(seeks, 1, "{order:?}: {index}: {:?}", read.rows());
+        }
     }
 }
 
