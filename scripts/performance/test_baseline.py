@@ -9,10 +9,11 @@ import sys
 import time
 from baseline import verify_mutation
 from pathlib import Path
+from unittest.mock import patch
 
 from fixture import prepare_probes, tree_digest
 from results import distribution, record, validate_paths, validate_write
-from provenance import cargo_configs, run_build, source_tree_digest, verify_build
+from provenance import cargo_configs, main as build_main, run_build, source_tree_digest, verify_build
 from report import summarize
 from transport import Current, stop_process
 
@@ -116,6 +117,27 @@ class AnswerTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_build_outputs_inside_source_are_rejected_before_any_build_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            output = root / "artifacts"
+            output.mkdir()
+            linked_log = output / "linked.cargo.log"
+            linked_log.symlink_to(repo / "source.rs")
+            cases = [(repo / "new/receipt.json", output / "target"),
+                     (output / "receipt.json", repo / "target"),
+                     (output / "linked.json", output / "target")]
+            for receipt, target in cases:
+                with self.subTest(receipt=receipt, target=target):
+                    argv = ["provenance", "--receipt", str(receipt), "--target-directory", str(target)]
+                    with patch("provenance.__file__", str(repo / "scripts/performance/provenance.py")), patch.object(sys, "argv", argv):
+                        with self.assertRaisesRegex(ValueError, "outside the repository"):
+                            build_main()
+            self.assertEqual(list(repo.iterdir()), [])
+            self.assertEqual(list(output.iterdir()), [linked_log])
+
     def test_a_timed_out_build_preserves_its_partial_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

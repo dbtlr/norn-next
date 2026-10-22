@@ -16,6 +16,9 @@ binary. The resource collector reads the subject process's own `/proc` entries.
 Choose an output directory outside the repository, with a short absolute path
 so the private Unix socket fits the platform limit. Keep other builds and
 benchmarks idle while collecting timings.
+The build helper also requires its target directory, receipt and receipt log
+paths to resolve outside the repository. It rejects an in-tree path before
+creating outputs, so generated artifacts cannot change the source digest.
 
 Set the output home and the actual legacy executable, avoiding a version-manager shim:
 

@@ -74,6 +74,10 @@ def main():
     parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
+    outputs = (args.target_directory, args.receipt, args.receipt.with_suffix(".cargo.jsonl"),
+               args.receipt.with_suffix(".cargo.log"))
+    if any(path.resolve().is_relative_to(repo) for path in outputs):
+        raise ValueError("build outputs must resolve outside the repository; choose another target directory and receipt path")
     toolchain = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     compiler = subprocess.check_output(["rustup", "which", "--toolchain", toolchain, "rustc"], text=True, timeout=30).strip()
     env = {key: value for key, value in os.environ.items()
