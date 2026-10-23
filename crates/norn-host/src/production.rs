@@ -668,7 +668,8 @@ impl ProductionEntryOps {
         self
     }
 
-    /// Give an isolated worker one cache window on its first empty import.
+    /// Give an isolated worker one induced-failure cache attempt on its first
+    /// `Created` or `RebuiltFromZero` store, only if empty. `Reused` stores skip it.
     #[cfg(feature = "induced-failure")]
     pub fn with_initial_import_cache(
         mut self,
@@ -11957,6 +11958,123 @@ mod tests {
             1,
             "the rebuild derived no finding, so the equality above compared none"
         );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    fn damage_cache_writer_schema(store: &mut Store) {
+        norn_store::induced_failure::execute_out_of_band(
+            store,
+            "PRAGMA writable_schema=ON;
+             UPDATE sqlite_schema SET sql='invalid schema' WHERE name='documents';
+             PRAGMA writable_schema=OFF;
+             PRAGMA schema_version=123456;",
+        )
+        .unwrap();
+        let failure =
+            norn_store::induced_failure::execute_out_of_band(store, "SELECT * FROM documents")
+                .expect_err(
+                    "the next read meets the malformed schema and resets SQLite's schema cache",
+                );
+        assert!(matches!(store_effect(failure), JobFailure::StoreDamaged(_)));
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn initial_cache_heal_damage_survives_failed_restore_and_reaches_rebuild() {
+        let f = Fixture::new("cache-heal-damage");
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
+        let epoch = attachment.store.epoch().to_string();
+        let (attachment, healed) =
+            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
+                damage_cache_writer_schema(&mut attachment.store);
+                Err(JobFailure::StoreDamaged("damage met by heal".into()))
+            })
+            .expect("damage must return the owned attachment to attach's recovery decision");
+        assert!(matches!(healed, Err(JobFailure::StoreDamaged(ref detail))
+            if detail == "damage met by heal"));
+        assert!(cache.receipt().is_none(), "restoration did not succeed");
+        fs::write(f.vault().join("arrived.md"), "# Arrived\n").unwrap();
+        let mut attachment = ops.rung_three(attachment, &progress).unwrap();
+        assert_ne!(attachment.store.epoch(), epoch);
+        assert_eq!(stored_paths(&mut attachment.store), ["arrived.md"]);
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn initial_cache_precheck_damage_returns_attachment_without_running_heal() {
+        let f = Fixture::new("cache-precheck-damage");
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
+        damage_cache_writer_schema(&mut attachment.store);
+        let (attachment, healed) =
+            startup_experiment::initial_heal(attachment, Some(&cache), |_| {
+                panic!("cache precheck damage must reach rung three before any ordinary heal")
+            })
+            .expect("precheck damage must reach attach's existing recovery decision");
+        assert!(matches!(healed, Err(JobFailure::StoreDamaged(_))));
+        assert!(cache.receipt().is_none());
+        fs::write(f.vault().join("arrived.md"), "# Arrived\n").unwrap();
+        let mut attachment = ops.rung_three(attachment, &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store), ["arrived.md"]);
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn initial_cache_restore_damage_with_successful_heal_still_requires_rebuild() {
+        let f = Fixture::new("cache-restore-damage");
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
+        let (attachment, healed) =
+            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
+                damage_cache_writer_schema(&mut attachment.store);
+                Ok(())
+            })
+            .expect("restore damage must reach attach's recovery decision");
+        assert!(matches!(healed, Err(JobFailure::StoreDamaged(_))));
+        assert!(cache.receipt().is_none());
+        let attachment = ops.rung_three(attachment, &progress).unwrap();
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn initial_cache_unwind_with_failed_restore_closes_the_writer() {
+        let f = Fixture::new("cache-unwind-damage");
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
+        let epoch = attachment.store.epoch().to_string();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
+                damage_cache_writer_schema(&mut attachment.store);
+                panic!("stop import with a writer whose cache cannot be restored");
+            })
+        }));
+        let panic = unwound.err().expect("the import must unwind");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"stop import with a writer whose cache cannot be restored")
+        );
+        assert!(cache.receipt().is_none());
+        // Reattach also proves the guard released maintainership after closing
+        // the damaged writer, instead of leaking its enlarged cache connection.
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_ne!(attachment.store.epoch(), epoch);
+        attachment.store.verify_integrity().unwrap();
         ops.detach(&name, attachment);
     }
 

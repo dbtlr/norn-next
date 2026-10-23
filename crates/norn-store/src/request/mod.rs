@@ -665,8 +665,9 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
-    /// Only the initial attach may enter this window. On restoration failure,
-    /// the caller must close the writer rather than publish an attachment.
+    /// Only the initial attach may enter this window. The owner must restore it
+    /// on this same writer before readiness. Any error can leave the cache state
+    /// unknown; close or replace the writer rather than publish that attachment.
     #[cfg(feature = "induced-failure")]
     pub fn start_initial_import_cache(
         &mut self,
@@ -710,7 +711,8 @@ impl<'a> Request<'a> {
         Ok(window)
     }
 
-    /// Restore before ordinary readiness, including an import that returned an error.
+    /// Restore on the same writer that opened the window before ordinary readiness,
+    /// including an import that returned an error. On failure, close or replace it.
     #[cfg(feature = "induced-failure")]
     pub fn restore_initial_import_cache(
         &mut self,

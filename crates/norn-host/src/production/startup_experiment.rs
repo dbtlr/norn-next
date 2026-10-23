@@ -366,7 +366,9 @@ fn load_fact(
     Ok(())
 }
 
-/// Independent of loading order and health mode; supplied only by a harness.
+/// Harness-only, induced-failure cache option, independent of loading order and
+/// health mode. Each worker gets at most one attempt, on its first `Created` or
+/// `RebuiltFromZero` store if empty. `Reused` stores skip without spending the attempt.
 /// Diagnostic reads must run separately from accepted timing samples.
 pub struct InitialImportCache {
     size: norn_store::startup_experiment::WriterCacheSize,
@@ -375,6 +377,8 @@ pub struct InitialImportCache {
     receipt: std::sync::Mutex<Option<InitialImportCacheReceipt>>,
 }
 
+/// Harness-only receipt of a restored initial-import window under induced-failure.
+/// This records the one worker attempt, not warm-performance or RSS qualification.
 #[derive(Clone, Copy, Debug)]
 pub struct InitialImportCacheReceipt {
     pub writer: norn_store::startup_experiment::WriterCacheReceipt,
@@ -382,6 +386,8 @@ pub struct InitialImportCacheReceipt {
 }
 
 impl InitialImportCache {
+    /// Configure one isolated worker's induced-failure window (1..=8192 KiB).
+    /// Enable extra diagnostic reads only in runs separate from timing samples.
     pub fn new(kib: u32, diagnostics: bool) -> Result<Arc<Self>, norn_store::StoreError> {
         Ok(Arc::new(Self {
             size: norn_store::startup_experiment::WriterCacheSize::new(kib)?,
@@ -391,6 +397,8 @@ impl InitialImportCache {
         }))
     }
 
+    /// Read the harness-only receipt after successful restoration of this worker's
+    /// one window. None means it was skipped or restoration has not succeeded.
     pub fn receipt(&self) -> Option<InitialImportCacheReceipt> {
         *self
             .receipt
@@ -399,7 +407,7 @@ impl InitialImportCache {
     }
 }
 
-/// Own the not-yet-attached store so every failed restore closes its writer.
+/// Own the unpublished store so restoration failure closes or replaces its writer.
 /// This runs only in attach, never in warm heals, requests or recovery.
 pub(super) fn initial_heal(
     mut attachment: ProductionAttachment,
@@ -416,32 +424,35 @@ pub(super) fn initial_heal(
         return Ok((attachment, result));
     };
     let order = attachment.store.path_order();
-    if !attachment
+    let empty = match attachment
         .store
         .begin_request()
         .stored_documents_after_ordered(None, 1, order)
-        .map_err(store_effect)?
-        .is_empty()
     {
+        Ok(documents) => documents.is_empty(),
+        Err(error) => return Ok((attachment, Err(store_effect(error)))),
+    };
+    if !empty {
         let result = heal(&mut attachment);
         return Ok((attachment, result));
     }
-    let window = attachment
+    let window = match attachment
         .store
         .begin_request()
         .start_initial_import_cache(cache.size, cache.diagnostics)
-        .map_err(store_effect)?;
+    {
+        Ok(window) => window,
+        // Start may have changed the budget before its diagnostic and restore
+        // both failed. Only attach's error/rebuild arms may own this writer now.
+        Err(error) => return Ok((attachment, Err(store_effect(error)))),
+    };
     let mut guarded = InitialCacheGuard {
         attachment: Some(attachment),
         window: Some(window),
         cache,
     };
     let result = heal(guarded.attachment.as_mut().expect("unpublished attachment"));
-    guarded.restore(result.is_ok()).map_err(store_effect)?;
-    Ok((
-        guarded.attachment.take().expect("restored attachment"),
-        result,
-    ))
+    guarded.finish(result)
 }
 
 struct InitialCacheGuard<'a> {
@@ -451,6 +462,25 @@ struct InitialCacheGuard<'a> {
 }
 
 impl InitialCacheGuard<'_> {
+    fn finish(
+        mut self,
+        result: Result<(), JobFailure>,
+    ) -> Result<(ProductionAttachment, Result<(), JobFailure>), JobFailure> {
+        let restored = self.restore(result.is_ok()).map_err(store_effect);
+        let result = match (result, restored) {
+            // Damage must reach attach's rung-three decision even when restore
+            // fails differently: that rung replaces this writer before Ready.
+            (Err(failure @ JobFailure::StoreDamaged(_)), _)
+            | (_, Err(failure @ JobFailure::StoreDamaged(_))) => Err(failure),
+            (_, Err(failure)) => return Err(failure),
+            (result, Ok(())) => result,
+        };
+        // Either restore succeeded or rung three owns replacement. Disarm before
+        // transferring the attachment so Drop can never restore a missing writer.
+        self.window = None;
+        Ok((self.attachment.take().expect("owned attachment"), result))
+    }
+
     fn restore(&mut self, import_succeeded: bool) -> Result<(), norn_store::StoreError> {
         if let Some(window) = &self.window {
             let writer = self

@@ -136,14 +136,18 @@ impl WriterCacheSize {
     }
 }
 
-/// Saved state belongs to this live writer; never substitute SQLite defaults.
+/// Saved state must be restored on the same live writer that opened the window.
+/// The owner must restore before readiness or close/replace that writer on failure.
+#[must_use = "restore on the same writer before readiness, or close/replace the writer"]
 pub struct WriterCacheWindow {
     pub(crate) before: i64,
     pub(crate) during: Option<i64>,
     pub(crate) retained_cache_budget_kib: Option<u64>,
 }
 
-/// Extra live reads are diagnostic-only. A restored budget does not evict pages.
+/// Extra live reads are diagnostic-only. Shrinking the default SQLite cache can
+/// evict pages, but the allocator may retain RSS. Restoration gives no process-RSS
+/// guarantee; attach high-water and retained warm RSS still require measurement.
 #[derive(Clone, Copy, Debug)]
 pub struct WriterCacheReceipt {
     pub before: i64,
