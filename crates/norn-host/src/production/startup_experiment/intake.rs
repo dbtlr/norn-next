@@ -33,7 +33,7 @@ impl IntakeReader {
     }
     fn retire(&self) {
         if let Some(reader) = self.reader.lock().expect("intake reader poisoned").take() {
-            reader.retire();
+            reader.retire_intake();
         }
     }
 }
@@ -114,14 +114,13 @@ impl IntakeSnapshot {
 }
 
 pub(super) struct Projection {
-    store: Option<norn_store::Store>,
     reader: Arc<IntakeReader>,
 }
 
 impl Projection {
-    pub(super) fn close(mut self) -> Result<(), JobFailure> {
+    pub(super) fn close(self) -> Result<(), JobFailure> {
         self.reader.retire();
-        self.store.take().unwrap().close().map_err(store_effect)
+        Ok(())
     }
 }
 impl Drop for Projection {
@@ -143,8 +142,8 @@ pub(super) fn prepare(
     let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
     let nonce = std::collections::hash_map::RandomState::new().hash_one(std::process::id());
-    let mut store = norn_store::Store::open_throwaway(
-        attachment
+    let mut builder = norn_store::startup_experiment::IntakeBuilder::create(
+        &attachment
             .shadows
             .directory()
             .join("canonical-intake")
@@ -159,51 +158,53 @@ pub(super) fn prepare(
         .vault_schema_pin()
         .map_err(store_effect)?
     {
-        store
-            .begin_request()
-            .pin_vault_schema(&pin.bytes, &pin.fingerprint)
+        builder
+            .write(|store| {
+                store
+                    .begin_request()
+                    .pin_vault_schema(&pin.bytes, &pin.fingerprint)
+            })
             .map_err(store_effect)?;
     }
     loop {
         let page = inventory.advance(policy.store_page_size).map_err(effect)?;
         // Quarantine bookkeeping is scoped to one page as well as the write
         // queue. Its rich diagnostics are outside this reader's capabilities.
-        let mut account = Account::default();
-        let mut pending = Pending::new(
-            &mut store,
-            policy.changeset_size,
-            root,
-            exclusions,
-            &mut account,
-        )?;
-        for record in page.records {
-            load_fact(
-                &mut pending,
-                inventory.replay(&record.value).map_err(effect)?,
-                Depth::Metadata,
-                false,
-            )?;
-            if pending.is_full() {
-                pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
+        builder.write(|store| {
+            let mut account = Account::default();
+            let mut pending =
+                Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
+            for record in page.records {
+                load_fact(
+                    &mut pending,
+                    inventory.replay(&record.value).map_err(effect)?,
+                    Depth::Metadata,
+                    false,
+                )?;
+                if pending.is_full() {
+                    pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
+                }
             }
-        }
-        pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
-        drop(pending);
-        if !account.withheld.roots.is_empty() || account.withheld.rendered {
-            return Err(JobFailure::Environmental(
-                "metadata inventory could not read the complete frozen copy".into(),
-            ));
-        }
+            pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
+            drop(pending);
+            if !account.withheld.roots.is_empty() || account.withheld.rendered {
+                return Err(JobFailure::Environmental(
+                    "metadata inventory could not read the complete frozen copy".into(),
+                ));
+            }
+            Ok(())
+        })?;
         if page.complete {
             break;
         }
     }
     let reader = Arc::new(IntakeReader {
-        reader: Mutex::new(Some(Arc::new(store.reader_pool(&attachment.readers)))),
+        reader: Mutex::new(Some(Arc::new(
+            builder.finish(&attachment.readers).map_err(store_effect)?,
+        ))),
         model: model.clone(),
     });
     let projection = Projection {
-        store: Some(store),
         reader: reader.clone(),
     };
     drop(timing);

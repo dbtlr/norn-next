@@ -77,6 +77,8 @@ pub mod profiling;
 mod schema;
 mod temporary;
 
+#[cfg(feature = "induced-failure")]
+pub use ceremony::initialize_disposable;
 pub use ceremony::{
     Adoption, Client, OpenOutcome, Operations, RebuildReason, Schema, open, rebuild,
 };

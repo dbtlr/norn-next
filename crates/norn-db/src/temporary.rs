@@ -71,6 +71,12 @@ impl std::fmt::Display for TemporaryReadError {
 impl std::error::Error for TemporaryReadError {}
 
 impl TemporaryFile {
+    /// Experimental immutable source reads retain the ordinary snapshot seal.
+    #[cfg(feature = "induced-failure")]
+    pub fn open_snapshot(self: &Arc<Self>) -> Result<crate::Database, TemporaryReadError> {
+        let (database, _owner) = self.open_reader()?.into_database()?;
+        Ok(database)
+    }
     /// Open an independent sealed reader of the completed file.
     #[allow(clippy::disallowed_methods)] // Driver and disposable-file mechanics live here.
     pub fn open_reader(self: &Arc<Self>) -> Result<TemporaryDatabase, TemporaryReadError> {
@@ -175,6 +181,18 @@ pub fn temporary_store_parents(root: &Path) -> Result<Vec<PathBuf>, DbError> {
 }
 
 impl TemporaryDatabase {
+    /// Hand a disposable domain writer to the ordinary database machinery.
+    /// The returned owner must outlive every connection that uses this file.
+    #[cfg(feature = "induced-failure")]
+    pub fn into_database(self) -> Result<(crate::Database, Arc<TemporaryFile>), DbError> {
+        let file = self.file.ok_or_else(|| DbError::Sql {
+            operation: "adopting disposable domain storage",
+            condition: None,
+            message: "a reopenable source needs named scratch storage".into(),
+        })?;
+        let database = crate::Database::adopt(self.connection, &file.path)?;
+        Ok((database, file))
+    }
     /// Allocate an exclusive name inside a configured disposable-storage directory.
     pub fn create_in(
         directory: &Path,

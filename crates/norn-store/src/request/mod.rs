@@ -421,11 +421,13 @@ impl<'a> Request<'a> {
         findings: &[DerivedFinding<'_>],
         declared: &ContentModel,
     ) -> Result<IncrementOutcome, StoreError> {
-        assert_eq!(
-            self.store.mode(),
-            crate::StoreMode::Throwaway,
-            "metadata cannot enter a lasting store"
-        );
+        if self.store.mode() != crate::StoreMode::Throwaway {
+            return Err(StoreError::Lifecycle {
+                operation: "writing experimental metadata",
+                path: self.store.path().to_path_buf(),
+                message: "metadata cannot enter a lasting store".into(),
+            });
+        }
         increment::apply(
             self.store,
             &mut self.counters,

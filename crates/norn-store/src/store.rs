@@ -96,6 +96,11 @@ use crate::hash;
 use crate::read::{Ran, ReadFilter, ReadStatement, StatementFailure, Stepped};
 use crate::request::Request;
 
+#[cfg(feature = "induced-failure")]
+mod intake;
+#[cfg(feature = "induced-failure")]
+pub use intake::IntakeBuilder;
+
 /// The read-only snapshot handle wire reads run on.
 ///
 /// Host requests use [`Store::reader_pool`], a zero-I/O handle whose independent
@@ -136,6 +141,8 @@ use crate::request::Request;
 /// }
 /// ```
 pub struct SnapshotReader {
+    #[cfg(feature = "induced-failure")]
+    intake_file: Option<Arc<norn_db::TemporaryFile>>,
     budget: Option<Arc<crate::ReadBudget>>,
     pool: Option<crate::read_budget::Pool>,
     source: Option<std::path::PathBuf>,
@@ -223,11 +230,29 @@ impl SnapshotReader {
         };
         if grant.source.item.is_none() {
             let result = (|| {
-                let database = norn_db::open_read_only_until(
-                    self.source.as_ref().expect("pooled source"),
-                    deadline,
-                )
-                .adopted?;
+                let open_ordinary = || {
+                    norn_db::open_read_only_until(
+                        self.source.as_ref().expect("pooled source"),
+                        deadline,
+                    )
+                    .adopted
+                    .map_err(StoreError::from)
+                };
+                #[cfg(feature = "induced-failure")]
+                let database = if let Some(file) = &self.intake_file {
+                    file.open_snapshot().map_err(|error| match error {
+                        norn_db::TemporaryReadError::Failed(error) => StoreError::from(error),
+                        norn_db::TemporaryReadError::Lost { path } => StoreError::Lifecycle {
+                            operation: "opening sealed experimental metadata",
+                            path,
+                            message: "the disposable source is missing or replaced".into(),
+                        },
+                    })?
+                } else {
+                    open_ordinary()?
+                };
+                #[cfg(not(feature = "induced-failure"))]
+                let database = open_ordinary()?;
                 if database.epoch() != self.epoch {
                     return Err(StoreError::Sql {
                         operation: "opening a snapshot reader",
@@ -262,6 +287,18 @@ impl SnapshotReader {
     pub fn retire(&self) {
         if let Some(pool) = &self.pool {
             pool.retire();
+        }
+    }
+    /// Frozen-copy intake retires outside the entry gate and closes idle scratch now.
+    #[cfg(feature = "induced-failure")]
+    pub fn retire_intake(&self) {
+        assert!(
+            self.intake_file.is_some(),
+            "only sealed intake uses this retirement"
+        );
+        self.retire();
+        if let Some(budget) = &self.budget {
+            budget.drain();
         }
     }
     pub fn last_open_failure(&self) -> Option<StoreError> {
@@ -397,6 +434,11 @@ impl SnapshotReader {
 
 impl Drop for SnapshotReader {
     fn drop(&mut self) {
+        #[cfg(feature = "induced-failure")]
+        if self.intake_file.is_some() {
+            self.retire_intake();
+            return;
+        }
         self.retire();
     }
 }
@@ -981,6 +1023,8 @@ impl StoreMode {
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
+    #[cfg(feature = "induced-failure")]
+    intake_unsealed: bool,
     count_results: Arc<crate::count::CountResults>,
     pub(crate) database: Database,
     mode: StoreMode,
@@ -994,7 +1038,9 @@ impl Store {
     /// Mint a zero-I/O handle. Layer 6 callers share one host-owned budget;
     /// private writer jobs continue to use the eager standalone mint.
     pub fn reader_pool(&self, budget: &Arc<crate::ReadBudget>) -> SnapshotReader {
-        SnapshotReader {
+        let reader = SnapshotReader {
+            #[cfg(feature = "induced-failure")]
+            intake_file: None,
             budget: Some(Arc::clone(budget)),
             pool: Some(budget.pool(
                 self.database.path().to_path_buf(),
@@ -1006,7 +1052,12 @@ impl Store {
             order: self.order,
             connection: Mutex::new(None),
             returned: Condvar::new(),
+        };
+        #[cfg(feature = "induced-failure")]
+        if self.intake_unsealed {
+            reader.retire();
         }
+        reader
     }
     /// Open, or create, the durable store at `path` for a vault root proven to
     /// have `order`'s case behaviour, whose rows `derivation` writes.
@@ -1061,6 +1112,8 @@ impl Store {
         refuse_incomplete_startup(&database)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
+            #[cfg(feature = "induced-failure")]
+            intake_unsealed: false,
             count_results: Arc::new(crate::count::CountResults::for_store(
                 crate::CountRetentionPolicy::default(),
                 path,
@@ -1241,6 +1294,17 @@ impl Store {
     /// the mint answers for those statements, and a mint that refused held
     /// that lock for the ones it ran before it refused.
     pub fn open_reader(&self) -> ReaderMint {
+        #[cfg(feature = "induced-failure")]
+        if self.intake_unsealed {
+            return ReaderMint {
+                reader: Err(StoreError::Sql {
+                    operation: "opening experimental metadata before sealing",
+                    condition: None,
+                    message: "seal metadata indexes before minting readers".into(),
+                }),
+                statements: 0,
+            };
+        }
         let path = self.database.path().to_path_buf();
         let opened = norn_db::open_read_only(&path);
         let reader = opened
@@ -1256,6 +1320,8 @@ impl Store {
                 Ok(database)
             })
             .map(|database| SnapshotReader {
+                #[cfg(feature = "induced-failure")]
+                intake_file: None,
                 budget: None,
                 pool: None,
                 source: None,

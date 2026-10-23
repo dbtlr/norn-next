@@ -11,6 +11,8 @@ use crate::find::{compose_class_head, compose_class_total};
 use crate::resolve::TargetClass;
 use crate::{AmbiguityIgnore, DocumentPath, StoreError};
 
+pub use crate::store::IntakeBuilder;
+
 /// A bounded head and exact count of provisional file and document names, using production SQL.
 pub struct CatalogueCandidates {
     pub paths: Vec<String>,
@@ -265,6 +267,34 @@ mod intake_tests {
         Change, ContentModel, DerivationVersion, DocumentFacts, DocumentPath, Store,
         StoredPathOrder,
     };
+
+    #[test]
+    fn metadata_refuses_a_lasting_store_without_changing_it() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-lasting-refusal");
+        let path = scratch.join("lasting.sqlite3");
+        let mut store =
+            Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        let epoch = store.epoch().to_string();
+        let facts = DocumentFacts::new(DocumentPath::new("first.md").unwrap(), "hash", "body", 4);
+        assert!(
+            store
+                .begin_request()
+                .apply_intake_increment([Change::Upsert(facts)], &[], &ContentModel::none())
+                .is_err()
+        );
+        store.close().unwrap();
+        let mut reopened =
+            Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        assert_eq!(reopened.epoch(), epoch);
+        assert!(
+            reopened
+                .begin_request()
+                .stored_facts(&DocumentPath::new("first.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        reopened.verify_integrity().unwrap();
+    }
 
     #[test]
     fn metadata_omits_payload_after_validating_real_source_lengths() {
