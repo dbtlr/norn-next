@@ -502,6 +502,15 @@ pub fn connect_read_only(path: &Path) -> Result<Connection, DbError> {
 /// caller counting a whole open passes one tally through every step of it.
 #[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Connection, DbError> {
+    connect_read_only_bounded(path, statements, None)
+}
+
+#[allow(clippy::disallowed_methods)] // All connection opens are substrate-owned.
+fn connect_read_only_bounded(
+    path: &Path,
+    statements: &mut u64,
+    deadline: Option<std::time::Instant>,
+) -> Result<Connection, DbError> {
     refuse_a_name_that_is_not_a_file("opening the database read-only", path)?;
     let connection =
         Connection::open_with_flags(path, READ_ONLY_FLAGS).map_err(|error| DbError::Lifecycle {
@@ -510,7 +519,10 @@ fn connect_read_only_counting(path: &Path, statements: &mut u64) -> Result<Conne
             message: error.to_string(),
         })?;
     connection
-        .busy_timeout(BUSY_TIMEOUT)
+        .busy_timeout(deadline.map_or(BUSY_TIMEOUT, |end| {
+            end.saturating_duration_since(std::time::Instant::now())
+                .min(BUSY_TIMEOUT)
+        }))
         .map_err(|error| error::sql("setting the busy timeout", error))?;
     connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
 
@@ -580,6 +592,30 @@ pub fn open_read_only(path: &Path) -> ReadOnlyOpen {
     }
 }
 
+/// All SQLite busy waits in a cold open consume the caller's remaining deadline.
+pub fn open_read_only_until(path: &Path, deadline: std::time::Instant) -> ReadOnlyOpen {
+    let mut statements = 0;
+    let adopted =
+        connect_read_only_bounded(path, &mut statements, Some(deadline)).and_then(|connection| {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(DbError::Lifecycle {
+                    operation: "opening a snapshot reader",
+                    path: path.to_path_buf(),
+                    message: "the reader acquisition deadline passed".into(),
+                });
+            }
+            connection
+                .busy_timeout(remaining.min(BUSY_TIMEOUT))
+                .map_err(|error| error::sql("bounding reader open", error))?;
+            Database::adopt_counting(connection, path, &mut statements)
+        });
+    ReadOnlyOpen {
+        adopted,
+        statements,
+    }
+}
+
 /// Permission for one act of transaction control on a sealed read-only
 /// connection, withdrawn where it drops.
 ///
@@ -617,7 +653,7 @@ impl Drop for SnapshotControl<'_> {
 ///
 /// A writable connection has no authorizer, so nothing consults the flag on
 /// one and a writer's transactions are unaffected.
-fn arm_the_snapshot_control(
+pub(crate) fn arm_the_snapshot_control(
     connection: &Connection,
     control: Arc<AtomicBool>,
 ) -> Result<(), DbError> {
