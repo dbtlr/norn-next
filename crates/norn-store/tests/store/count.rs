@@ -56,7 +56,18 @@ fn a_temporary_result_identity_inspection_failure_keeps_the_continuation_retryab
     budget.trim(Instant::now() + Duration::from_secs(6));
     let source = take();
     let directory = store.store.path().with_extension("count-results");
+    let result_path = std::fs::read_dir(&directory)
+        .unwrap()
+        .next()
+        .expect("the retained result exists")
+        .unwrap()
+        .path();
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::symlink_metadata(&result_path).is_ok() {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("skipped: this account inspects a file inside a mode-000 directory");
+        return;
+    }
     let refused = source.count(&continuation, &declared());
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     drop(source);

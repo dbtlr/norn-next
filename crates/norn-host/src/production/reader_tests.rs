@@ -20,6 +20,11 @@ fn one_inaccessible_startup_store_does_not_skip_other_stores() {
     }
     let inaccessible = dirs.derived_dir(&VaultName::new("aaa-failed").unwrap());
     std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&inaccessible).is_ok() {
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700)).unwrap();
+        eprintln!("skipped: this account reads a mode-000 directory");
+        return;
+    }
     let ops = ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(64, 64).unwrap());
     std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(ops.last_reader_cleanup_error().is_some());
