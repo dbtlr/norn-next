@@ -81,6 +81,8 @@ def resources(pid: int) -> dict:
     result["open_fds"] = len(list((proc / "fd").iterdir()))
     fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
     result["cpu_seconds"] = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    result["process_io"] = {name: int(value) for line in (proc / "io").read_text().splitlines()
+                            for name, value in [line.split(":", 1)]}
     return result
 
 

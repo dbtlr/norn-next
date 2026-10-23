@@ -326,7 +326,8 @@ lexical queries share a boundary in this first experiment. The frontmatter check
 admits field predicates, not the tag facet, which also depends on body tags.
 
 Failed experimental stores retain an incomplete marker. Every ordinary store open
-refuses that marker, including builds without experimental support. Completed imports
+refuses that marker, including builds without experimental support. Recovery also
+checks a retained experimental attachment before it can heal again. Completed imports
 remove it and restore the writer's original temporary-storage settings. No crash-resume
 or live-vault migration claim is made. Full-text rank-1 and store integrity checks run
 after shutdown, outside startup clocks.
@@ -351,3 +352,7 @@ ordinary and staged imports. It compares a standard baseline build, the candidat
 in ordinary mode, and the requested silent loading modes. It retains all read and
 write checks, final source equality, and normalized derived-store equality. These
 measurements qualify the resulting warm index separately from first-load clocks.
+
+Resource samples include Linux process I/O counters. `write_bytes` is storage
+traffic charged to the process; `wchar` and `syscw` count write-call traffic.
+These counters describe work, not device latency or physical-media durability.
