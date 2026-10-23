@@ -5794,9 +5794,16 @@ impl<O: EntryOps> Host<O> {
                 return Err(ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()));
             };
             (state, opening, stance) = round;
+            // Every exit below can release the last replaced pool handle,
+            // including a retired acquisition that returned no connection.
+            state.retired_readers.push(Arc::clone(&reader));
+            let still_the_entrys = state
+                .reader
+                .as_ref()
+                .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
             let turn = match acquired {
                 Ok(turn) => turn,
-                Err(error) if error.damaged => {
+                Err(error) if error.damaged && still_the_entrys => {
                     let verdict = judge_damage_a_read_met(
                         &mut state,
                         name,
@@ -5810,7 +5817,7 @@ impl<O: EntryOps> Host<O> {
                     drop(outside);
                     return Err(verdict.refusal);
                 }
-                Err(error) if state.answers_a_read(met_at) => {
+                Err(error) if still_the_entrys && state.answers_a_read(met_at) => {
                     return Err(ReadRefusal::ReaderUnavailable(error));
                 }
                 Err(_) => None,
@@ -5823,17 +5830,12 @@ impl<O: EntryOps> Host<O> {
             };
             // The connection is this read's from here, so nothing else can be
             // establishing on it.
-            let still_the_entrys = state
-                .reader
-                .as_ref()
-                .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
             if still_the_entrys && state.answers_a_read(met_at) {
                 break (turn, reader);
             }
             // A replaced pool's last handle can own result storage. The hold
             // drops these only after unlocking, including on a refusal.
             state.retired_turns.push(turn);
-            state.retired_readers.push(reader);
         };
         // The gate and the connection's turn are both this read's from here,
         // so nothing runs on the connection but what this hold runs: this
@@ -8812,7 +8814,17 @@ mod tests {
         /// that reads this holds what an unwind there leaves behind once the
         /// acquisition has given the gate back and taken it again.
         establish_panics: std::sync::atomic::AtomicBool,
+        acquisition_blocked: Mutex<Option<BlockedAcquisition>>,
+        gate_held_at_reader_drop: Mutex<Option<GateAtReaderDrop>>,
+        readers_dropped_under_gate: AtomicUsize,
     }
+
+    type BlockedAcquisition = (
+        bool,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
+    type GateAtReaderDrop = Box<dyn Fn() -> bool + Send + Sync>;
 
     impl Default for ReaderLedger {
         fn default() -> Self {
@@ -8830,6 +8842,9 @@ mod tests {
                 wait_panics: std::sync::atomic::AtomicBool::default(),
                 waited_until: Mutex::default(),
                 establish_panics: std::sync::atomic::AtomicBool::default(),
+                acquisition_blocked: Mutex::default(),
+                gate_held_at_reader_drop: Mutex::default(),
+                readers_dropped_under_gate: AtomicUsize::default(),
             }
         }
     }
@@ -8926,6 +8941,26 @@ mod tests {
     impl ReadSource for FakeReader {
         type Snapshot = FakeSnapshot;
         type Turn = FakeTurn;
+
+        fn acquire_for(
+            self: &Arc<Self>,
+            _need: norn_store::ReadNeed,
+            deadline: Instant,
+        ) -> Result<Option<FakeTurn>, ReaderUnavailable> {
+            let blocked = self.ledger.acquisition_blocked.lock().unwrap().take();
+            if let Some((fail, entered, release)) = blocked {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+                return if fail {
+                    Err(ReaderUnavailable::new(
+                        "a cold open failed after retirement",
+                    ))
+                } else {
+                    Ok(None)
+                };
+            }
+            Ok(self.wait_for_the_connection_until(deadline))
+        }
 
         fn try_take(self: &Arc<Self>) -> Option<FakeTurn> {
             let mut free = self.free.lock().expect("a fake reader's connection");
@@ -9070,6 +9105,18 @@ mod tests {
 
     impl Drop for FakeReader {
         fn drop(&mut self) {
+            if let Some(held) = self
+                .ledger
+                .gate_held_at_reader_drop
+                .lock()
+                .unwrap()
+                .as_ref()
+                && held()
+            {
+                self.ledger
+                    .readers_dropped_under_gate
+                    .fetch_add(1, Ordering::SeqCst);
+            }
             self.ledger.closed.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -19725,6 +19772,69 @@ mod tests {
         );
         drop(state);
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_waiter_releases_a_retired_pool_outside_the_gate_when_acquisition_returns_none() {
+        last_replaced_reader_is_released_after_unlock(false);
+    }
+
+    #[test]
+    fn a_waiter_releases_a_retired_pool_outside_the_gate_when_a_cold_open_fails() {
+        last_replaced_reader_is_released_after_unlock(true);
+    }
+
+    fn last_replaced_reader_is_released_after_unlock(fail: bool) {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let _lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).unwrap().clone();
+        let old = entry.gate.lock().unwrap().reader.clone().unwrap();
+        let busy = old.try_take().expect("occupy the old connection");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *ops.readers.acquisition_blocked.lock().unwrap() = Some((fail, entered_tx, release_rx));
+        let observed_entry = Arc::downgrade(&entry);
+        *ops.readers.gate_held_at_reader_drop.lock().unwrap() = Some(Box::new(move || {
+            observed_entry.upgrade().is_some_and(|entry| {
+                matches!(
+                    entry.gate.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                )
+            })
+        }));
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name).map(drop));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the read left the gate");
+            {
+                let mut state = entry.gate.lock().unwrap();
+                state.close_reader();
+                assert!(state.remint_for_a_read().handle.is_some());
+            }
+            drop((busy, old));
+            let before = ops.readers.closed.load(Ordering::SeqCst);
+            release_tx.send(()).unwrap();
+            let answered = reading.join().unwrap();
+            assert!(
+                answered.is_ok(),
+                "a replaced pool's acquisition outcome cannot refuse the current pool"
+            );
+            assert!(
+                ops.readers.closed.load(Ordering::SeqCst) > before,
+                "the old pool must be released"
+            );
+            assert_eq!(
+                ops.readers
+                    .readers_dropped_under_gate
+                    .load(Ordering::SeqCst),
+                0,
+                "a waiter cannot close the last old handle under the gate"
+            );
+        });
     }
 
     /// An attach that installs no coverage mints no reader. The mint is a limb

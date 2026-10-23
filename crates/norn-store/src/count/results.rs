@@ -838,14 +838,11 @@ impl Snapshot {
         })?;
         let open = || {
             file.open_reader().map_err(|error| match &error {
-                norn_db::DbError::Lifecycle {
-                    operation: "checking disposable result identity",
-                    ..
-                } => {
+                norn_db::TemporaryReadError::Lost { .. } => {
                     retained.healthy.store(false, Ordering::Release);
                     PageRefusal::CountCursorExpired
                 }
-                norn_db::DbError::Damaged { .. } => {
+                norn_db::TemporaryReadError::Failed(norn_db::DbError::Damaged { .. }) => {
                     retained.healthy.store(false, Ordering::Release);
                     failed(error)
                 }

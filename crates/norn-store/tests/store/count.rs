@@ -28,6 +28,48 @@ use norn_wire::{
 
 // ---- fixtures ----
 
+#[cfg(unix)]
+#[test]
+#[allow(clippy::disallowed_methods)] // Arrange temporary access loss to private result storage.
+fn a_temporary_result_identity_inspection_failure_keeps_the_continuation_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("result-identity-permission", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(
+                norn_store::ReadNeed::SourceAndScratch,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let first = take().count(&params, &declared()).unwrap();
+    let continuation = params.with_after(first.next.unwrap());
+    budget.trim(Instant::now() + Duration::from_secs(6));
+    let source = take();
+    let directory = store.store.path().with_extension("count-results");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let refused = source.count(&continuation, &declared());
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    drop(source);
+    assert!(
+        matches!(refused, Err(PageRefusal::CountResultFailed { .. })),
+        "inability to inspect identity is transient: {refused:?}"
+    );
+    let retried = take()
+        .count(&continuation, &declared())
+        .expect("restoring access preserves the same retained count");
+    assert_eq!(retried.tallies.len(), 3);
+}
+
 #[test]
 fn a_source_only_first_page_does_not_wait_for_an_identical_population() {
     use std::sync::mpsc;

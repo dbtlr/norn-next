@@ -42,10 +42,38 @@ pub struct TemporaryFile {
     identity: (u64, u64),
 }
 
+/// Loss of disposable storage is distinct from a failed attempt to inspect or read it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TemporaryReadError {
+    Lost { path: PathBuf },
+    Failed(DbError),
+}
+
+impl From<DbError> for TemporaryReadError {
+    fn from(error: DbError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for TemporaryReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lost { path } => write!(
+                formatter,
+                "disposable storage at {} is missing or replaced",
+                path.display()
+            ),
+            Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for TemporaryReadError {}
+
 impl TemporaryFile {
     /// Open an independent sealed reader of the completed file.
     #[allow(clippy::disallowed_methods)] // Driver and disposable-file mechanics live here.
-    pub fn open_reader(self: &Arc<Self>) -> Result<TemporaryDatabase, DbError> {
+    pub fn open_reader(self: &Arc<Self>) -> Result<TemporaryDatabase, TemporaryReadError> {
         self.verify_identity()?;
         let connection = Connection::open_with_flags(
             &self.path,
@@ -79,18 +107,26 @@ impl TemporaryFile {
     }
 
     #[allow(clippy::disallowed_methods)] // File identity belongs to the substrate.
-    fn verify_identity(&self) -> Result<(), DbError> {
-        let metadata = fs::symlink_metadata(&self.path).map_err(|error| {
-            file_error("checking disposable result identity", &self.path, error)
-        })?;
+    fn verify_identity(&self) -> Result<(), TemporaryReadError> {
+        let metadata = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TemporaryReadError::Lost {
+                    path: self.path.clone(),
+                });
+            }
+            Err(error) => {
+                return Err(
+                    file_error("checking disposable result identity", &self.path, error).into(),
+                );
+            }
+        };
         let same = metadata.is_file();
         #[cfg(unix)]
         let same = same && (metadata.dev(), metadata.ino()) == self.identity;
         if !same {
-            return Err(DbError::Lifecycle {
-                operation: "checking disposable result identity",
+            return Err(TemporaryReadError::Lost {
                 path: self.path.clone(),
-                message: "the result file was replaced".to_string(),
             });
         }
         Ok(())
@@ -114,22 +150,9 @@ fn file_error(operation: &'static str, path: &Path, error: std::io::Error) -> Db
     }
 }
 
-/// Discover stores with disposable storage without opening a source database.
+/// List candidate storage parents without opening a source or inspecting child storage.
 #[allow(clippy::disallowed_methods)] // Derived SQLite-file lifecycle belongs to this substrate.
-pub fn temporary_store_parents(
-    root: &Path,
-    directory_name: &std::ffi::OsStr,
-) -> Result<Vec<PathBuf>, DbError> {
-    let mut components = Path::new(directory_name).components();
-    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-        || components.next().is_some()
-    {
-        return Err(DbError::Lifecycle {
-            operation: "discovering disposable storage",
-            path: root.to_path_buf(),
-            message: "the storage directory must be one file name".to_string(),
-        });
-    }
+pub fn temporary_store_parents(root: &Path) -> Result<Vec<PathBuf>, DbError> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -145,15 +168,7 @@ pub fn temporary_store_parents(
         {
             continue;
         }
-        let directory = entry.path().join(directory_name);
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) if metadata.is_dir() => parents.push(entry.path()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(file_error("checking disposable storage", &directory, error));
-            }
-        }
+        parents.push(entry.path());
     }
     parents.sort();
     Ok(parents)

@@ -88,6 +88,6 @@ pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{ColumnRead, EmittedPlan, PlanStep};
 pub use schema::{digest, schema_digest};
 pub use temporary::{
-    TemporaryDatabase, TemporaryFile, TemporarySetup, sweep_temporary_directory,
-    temporary_store_parents,
+    TemporaryDatabase, TemporaryFile, TemporaryReadError, TemporarySetup,
+    sweep_temporary_directory, temporary_store_parents,
 };

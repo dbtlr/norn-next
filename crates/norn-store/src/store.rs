@@ -15,8 +15,8 @@
 //! same vault entry gets interleaving, not a refusal. The missing half is the
 //! maintainer file lock taken outside the store, in the derived directory the
 //! store's file sits in, which is what makes "one writer" a property of the
-//! derived store rather than of the handle; it is carved and not built
-//! (NORN-33).
+//! derived store rather than of the handle. The host holds that lock for
+//! the attachment's lifetime.
 //!
 //! **Reads belong on a separate handle, not on this connection.** That is
 //! recorded here because it is the other half of the writer discipline: a wire
@@ -268,15 +268,10 @@ impl SnapshotReader {
         self.pool.as_ref()?.last_failure()
     }
 
-    /// Take this handle's connection where no read holds it. **Never waits.**
-    ///
-    /// This is the spelling a caller holding a lock takes: the answer is the
-    /// turn or nothing, and nothing is another read holding the connection
-    /// rather than a fault.
-    ///
-    /// The handle is taken by [`Arc`] because the turn keeps it, and the
-    /// snapshot after it keeps it too: a read runs after the caller that
-    /// established it has let its own hold go.
+    /// Try for a source-only warm grant without waiting or opening a database.
+    /// A cold pool returns nothing even when the shared budget has capacity;
+    /// [`SnapshotReader::acquire`] can open it outside the caller's gate.
+    /// The turn keeps this handle alive through establishment and query work.
     pub fn try_take(self: &Arc<Self>) -> Option<ConnectionTurn> {
         self.try_take_for(
             crate::ReadNeed::Source,
@@ -406,13 +401,8 @@ impl Drop for SnapshotReader {
     }
 }
 
-/// A minted read handle, and what minting it ran against the database.
-///
-/// The mint is a second open of the file a live store is holding, and it is
-/// paid for under whatever lock its caller took: the count is what that caller
-/// reports about the lock it held. It is carried on both answers because both
-/// cost the same lock — a refusal that waited out a busy timeout and then
-/// failed cost what a handle cost.
+/// An eager private reader and the statements its source open ran.
+/// Host requests instead use the zero-I/O [`Store::reader_pool`] path.
 #[derive(Debug)]
 pub struct ReaderMint {
     /// The handle this store's reads run on, or why the store has none.
@@ -1107,13 +1097,9 @@ impl Store {
         crate::count::CountResults::for_store(crate::CountRetentionPolicy::default(), path).sweep()
     }
 
-    /// Discover count residue without opening source stores or following directory links.
-    pub fn count_residue_stores(
-        root: &Path,
-        source_file: &str,
-    ) -> Result<Vec<PathBuf>, StoreError> {
-        let directory = Path::new(source_file).with_extension("count-results");
-        norn_db::temporary_store_parents(root, directory.as_os_str()).map_err(StoreError::from)
+    /// List candidate stores; maintainership must precede inspection of their storage.
+    pub fn count_residue_stores(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
+        norn_db::temporary_store_parents(root).map_err(StoreError::from)
     }
 
     /// The database file this store is holding.

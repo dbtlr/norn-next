@@ -1183,42 +1183,15 @@ pub struct ReadReading {
     /// the lock however many statements the count across it reads. Served and
     /// refused establishments alike are in it.
     pub gate_retakes_within_establishing_holds: u64,
-    /// Acquisitions that gave the entry gate back and waited for the one
-    /// connection their entry holds. Nonzero is reader contention, measured
-    /// rather than assumed.
-    ///
-    /// **Counted where the wait begins, whichever way the acquisition
-    /// leaves.** The count moves while the acquisition is still waiting, so a
-    /// reading taken during contention already names every acquisition that
-    /// found the connection taken. A wait that begins returns only with the
-    /// connection, so each one counted here also ends. An acquisition that
-    /// waited and was then refused, because its entry stopped serving or
-    /// because its handle was replaced while it waited, paid the whole of that
-    /// wait, so it is one of these and is not among `reads_served`. Those are
-    /// the paths contention is most likely to be interesting on, and a reading
-    /// that held only served reads would under-report exactly there.
-    ///
-    /// It is a wait for the reader's connection and not for a gate: no
-    /// acquisition waits for that connection while it holds the entry gate,
-    /// and nothing here counts a wait for the gate itself.
+    /// Outside-gate acquisitions started, including cold opens, capacity waits,
+    /// failures and retired-pool outcomes. Counted before acquisition begins.
+    /// This counter alone does not distinguish a cold open from contention.
     pub reader_waits: u64,
-    /// Rounds of the entry gate acquisitions took after their first, summed
-    /// over acquisitions.
-    ///
-    /// **One per wait for the connection, served or refused.** Every
-    /// acquisition takes a first round of the gate. One that found the
-    /// connection taken gives the gate back, waits, and takes another round,
-    /// in which it reads afresh the stance its entry stands at, because the
-    /// instant it read before is not the instant it answers under. That round
-    /// is the cost of contention: a hold of the gate taken again. The stance
-    /// read inside it is an in-memory read under that hold, so the round is
-    /// what is counted, and a round is the one way an acquisition reads the
-    /// stance again. Each acquisition counts its own rounds and records them
-    /// once, where it leaves. So this equals [`ReadReading::reader_waits`],
-    /// and a count below it is a contended acquisition that answered under
-    /// the stance it read before it waited. The rounds after a settle wait
-    /// are [`ReadReading::settle_rounds`], which is what keeps that
-    /// equality whole.
+    /// Successful entry-gate retakes after outside-gate acquisition, summed
+    /// over served and refused requests. Each retake rechecks the current
+    /// pool identity and stance. A request whose deadline prevents a retake
+    /// contributes an acquisition but no retake. Settle retakes are counted
+    /// separately in [`ReadReading::settle_rounds`].
     pub gate_rounds_after_the_first: u64,
     /// The most rounds of the entry gate any one acquisition took after its
     /// first.
@@ -1249,7 +1222,7 @@ pub struct ReadReading {
     /// recorded where each acquisition leaves.
     ///
     /// **Counted apart from [`ReadReading::gate_rounds_after_the_first`]**, so
-    /// that reading goes on equalling [`ReadReading::reader_waits`]: every
+    /// that reading remains separate from [`ReadReading::reader_waits`]: every
     /// wait for the connection is followed by one round, and every settle
     /// wait by one round here. So this equals `settle_waits` over any
     /// window in which no acquisition is still waiting.
@@ -1538,7 +1511,7 @@ impl ReadEvidence {
         );
     }
 
-    /// Record that one acquisition waited for its entry's connection.
+    /// Record an outside-gate acquisition before it waits or opens.
     ///
     /// **This is called where the wait begins and not where the read leaves**:
     /// the acquisition has given the entry gate back and found the connection

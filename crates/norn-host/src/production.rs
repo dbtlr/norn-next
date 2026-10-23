@@ -661,7 +661,7 @@ impl ProductionEntryOps {
     }
 
     fn sweep_count_orphans(&self) -> Result<(), String> {
-        let stores = Store::count_residue_stores(&self.dirs.vaults_dir(), STORE_FILE)
+        let stores = Store::count_residue_stores(&self.dirs.vaults_dir())
             .map_err(|error| error.to_string())?;
         let mut last_error = None;
         for directory in stores {
