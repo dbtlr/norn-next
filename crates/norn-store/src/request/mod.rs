@@ -385,7 +385,35 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
+            #[cfg(feature = "induced-failure")]
+            false,
         )
+    }
+
+    /// Experimental import seam for isolated, disposable startup simulations.
+    /// Partial results must not be published as an ordinary ready store.
+    #[cfg(feature = "induced-failure")]
+    pub fn apply_startup_increment(
+        &mut self,
+        changes: impl IntoIterator<Item = Change>,
+        findings: &[DerivedFinding<'_>],
+        declared: &ContentModel,
+    ) -> Result<IncrementOutcome, StoreError> {
+        increment::apply(
+            self.store,
+            &mut self.counters,
+            &self.read_work,
+            changes,
+            findings,
+            declared,
+            true,
+        )
+    }
+
+    /// Complete the deferred findings of an isolated startup experiment.
+    #[cfg(feature = "induced-failure")]
+    pub fn finish_startup_health(&mut self, declared: &ContentModel) -> Result<(), StoreError> {
+        increment::finish_startup_health(self.store, &mut self.counters, &self.read_work, declared)
     }
 
     /// Record one finding, with the head of its candidates.

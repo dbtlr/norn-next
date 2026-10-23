@@ -289,3 +289,42 @@ checks without executing a benchmark or requiring the legacy binary.
 Its functional trial can use one scale, one warmup, two samples, and one
 repetition before collecting a full baseline. Measurement records require an
 independent validity review and a separate reproduction.
+
+## Simulate layered loading
+
+`loading.py` compares ordinary loading with an explicitly enabled experiment on
+disposable fixture copies. The experiment inventories names into bounded,
+disk-backed storage, loads the requested document, writes frontmatter and bodies,
+adds rich Markdown facts, and finally judges link health over the complete facts.
+The ordinary full-text triggers run with the body writes, so the first experiment
+has one frontmatter-plus-lexical checkpoint.
+
+The checkpoint observer runs real store query builders on store-minted readers.
+It records the first slug get, metadata predicates, lexical queries, a section
+get, and a validation summary. Coverage counts check that the metadata and lexical
+checkpoints include the complete fixture. The final normalized store must match
+an ordinary build. Catalogue entries describe observed names; they do not certify
+content eligibility before a candidate is read.
+
+```sh
+python3 scripts/performance/loading.py \
+  --build "$PERF_HOME/startup-build.json" \
+  --fixtures "$PERF_HOME/run-001/fixtures" \
+  --output "$PERF_HOME/loading-001" \
+  --sizes 300 2000 10000 --repetitions 2
+```
+
+This is an isolated loading-cost experiment, not a production admission policy.
+The normal host remains warming until all stages and watcher reconciliation finish.
+Checkpoint probes currently pause the loading worker while they read. Their costs
+remain inside total completion time, and ordinary warm requests use the normal host
+after completion. Continuous request traffic during loading needs its own measurement.
+Failed experimental stores are disposable and must not be reused. No crash-resume
+or live-vault migration claim is made.
+
+The experiment is compiled only with `induced-failure` and activated by the
+measurement worker's explicit loading selection. It does not change ordinary
+changeset semantics or an accepted architectural decision. It intentionally observes
+partial projections and defers health outside the ordinary per-changeset contract.
+Semantic model loading and inference are not measured: this checkout has only the
+deterministic stub embedder, and the measurement worker composes no semantic engine.

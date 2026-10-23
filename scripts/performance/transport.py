@@ -85,11 +85,14 @@ def resources(pid: int) -> dict:
 
 
 class Current:
-    def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False):
+    def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
+                 loading: str | None = None, stage_handler=None):
         token = issue_root(root)
         env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
+        if loading is not None:
+            env["NORN_PERFORMANCE_LOADING"] = loading
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
@@ -101,8 +104,16 @@ class Current:
         )
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
+        self.stages = []
         try:
             self.ready = self.receive()
+            while "startup_stage" in self.ready:
+                stage = self.ready
+                if stage_handler is not None:
+                    stage_handler(stage)
+                stage["resources_when_observed"] = resources(self.process.pid)
+                self.stages.append(stage)
+                self.ready = self.receive()
             if not self.ready.get("ready"):
                 raise ValueError(f"current worker did not become ready: {self.ready}")
         except BaseException:

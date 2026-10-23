@@ -4,6 +4,9 @@
 #![allow(clippy::disallowed_methods)] // Measurement harness: isolated trees and JSONL readings.
 
 mod attach;
+#[cfg(feature = "induced-failure")]
+#[path = "performance/staged.rs"]
+mod staged;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -114,6 +117,19 @@ fn performance_worker() {
     });
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
+    #[cfg(feature = "induced-failure")]
+    let host = if std::env::var("NORN_PERFORMANCE_LOADING").is_ok_and(|mode| mode == "layered") {
+        vault.host_with_startup_experiment(
+            policy,
+            norn_host::startup_experiment::Experiment::new(
+                "small",
+                std::sync::Arc::new(staged::Reporter::new(began, vault.name().clone())),
+            ),
+        )
+    } else {
+        vault.host_with_policy(policy)
+    };
+    #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");

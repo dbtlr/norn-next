@@ -1,0 +1,298 @@
+//! Opt-in phase experiments over disposable vault copies. Ordinary readiness
+//! remains closed until the complete store and watcher have converged.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use norn_store::{ContentModel, SnapshotReader, startup_experiment::Catalogue};
+
+/// Query checkpoints are experimental capabilities, not ordinary trust states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    RequestedDocument,
+    Frontmatter,
+    RichFacts,
+    LinkHealth,
+}
+
+/// Store reads at a checkpoint prove query cost without claiming host admission.
+pub trait Observer: Send + Sync {
+    fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String>;
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String>;
+}
+
+/// The experiment is explicitly supplied by an isolated measurement worker.
+pub struct Experiment {
+    pub get_target: String,
+    pub observer: Arc<dyn Observer>,
+    started: AtomicBool,
+}
+
+impl Experiment {
+    pub fn new(get_target: impl Into<String>, observer: Arc<dyn Observer>) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+        })
+    }
+
+    pub(super) fn take_initial_attempt(&self) -> bool {
+        !self.started.swap(true, Ordering::SeqCst)
+    }
+}
+
+/// The same document reader used by normal gets, for a checkpoint's snapshot.
+pub fn get(
+    snapshot: &norn_store::Snapshot,
+    params: &norn_wire::GetParams,
+    model: &ContentModel,
+) -> Result<norn_store::Gotten, norn_store::PageRefusal> {
+    snapshot.get(params, model, &crate::text::TextLayer)
+}
+
+use super::{
+    Account, Declaration, JobFailure, Pending, ProductionAttachment, ProductionPolicy, close_job,
+    count_document_derived, count_increment_work, document_path, effect, is_markdown,
+    plan_document, store_effect,
+};
+use crate::Healing;
+use crate::derivation::plan_base_document;
+use norn_fs::walk::inventory::InventoryWalk;
+use norn_store::Change;
+use std::path::{Path, PathBuf};
+
+/// The regular attach prologue already owns coverage, maintainership and the pin.
+pub(super) fn run(
+    attachment: &mut ProductionAttachment,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    experiment: &Experiment,
+) -> Result<(), JobFailure> {
+    let root = attachment.covered_root.clone();
+    let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
+    let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
+    let store = &mut attachment.store;
+    let declared = Declaration::read(store)?;
+    let model = Arc::clone(declared.model.shared_content_model());
+    let directory = attachment.shadows.directory().join("startup-catalogue");
+    let mut catalogue = Catalogue::open(&directory).map_err(store_effect)?;
+    store
+        .begin_request()
+        .prepare_inventory()
+        .map_err(store_effect)?;
+    loop {
+        let page = inventory.advance(policy.store_page_size).map_err(effect)?;
+        for record in page.records {
+            if let norn_fs::WalkFact::File(file) =
+                inventory.replay(&record.value).map_err(effect)?
+                && is_markdown(file.path().as_path())
+                && let Ok(path) = document_path(file.path().as_path())
+            {
+                catalogue
+                    .record_document(&path, model.ambiguity_ignore())
+                    .map_err(store_effect)?;
+            }
+            store
+                .begin_request()
+                .inventory_record(&record.key, &record.value)
+                .map_err(store_effect)?;
+        }
+        if page.complete {
+            break;
+        }
+    }
+    catalogue.finish_inventory().map_err(store_effect)?;
+    experiment
+        .observer
+        .catalogue(&catalogue, &model)
+        .map_err(JobFailure::Environmental)?;
+    let reader = Arc::new(store.reader_pool(&attachment.readers));
+    let mut account = Account::default();
+    let candidates = catalogue
+        .candidates(&experiment.get_target, model.ambiguity_ignore())
+        .map_err(store_effect)?
+        .expect("completed catalogue");
+    if candidates.total != 1 {
+        return Err(JobFailure::Environmental(
+            "the experiment's requested slug is not a unique catalogue candidate".into(),
+        ));
+    }
+    {
+        let fact = source
+            .fact(Path::new(&candidates.paths[0]))
+            .map_err(effect)?;
+        let mut pending = Pending::new(
+            store,
+            policy.changeset_size,
+            &root,
+            exclusions,
+            &mut account,
+        )?;
+        load_fact(&mut pending, fact, true, true)?;
+        pending.flush_for_mode(true)?;
+    }
+    notify(experiment, Stage::RequestedDocument, &reader, &model)?;
+    replay_phase(
+        store,
+        &inventory,
+        &root,
+        exclusions,
+        policy,
+        &mut account,
+        true,
+        progress,
+    )?;
+    notify(experiment, Stage::Frontmatter, &reader, &model)?;
+    replay_phase(
+        store,
+        &inventory,
+        &root,
+        exclusions,
+        policy,
+        &mut account,
+        false,
+        progress,
+    )?;
+    notify(experiment, Stage::RichFacts, &reader, &model)?;
+    close_job(store, &root, exclusions, policy, &mut account)?;
+    {
+        let mut request = store.begin_request();
+        request
+            .finish_startup_health(&model)
+            .map_err(store_effect)?;
+        count_increment_work(request.counters(), request.read_steps());
+    }
+    notify(experiment, Stage::LinkHealth, &reader, &model)?;
+    reader.retire();
+    store
+        .begin_request()
+        .reset_inventory()
+        .map_err(store_effect)?;
+    attachment.skipped_links = account.links;
+    Ok(())
+}
+
+fn notify(
+    experiment: &Experiment,
+    stage: Stage,
+    reader: &Arc<SnapshotReader>,
+    model: &Arc<ContentModel>,
+) -> Result<(), JobFailure> {
+    experiment
+        .observer
+        .indexed(stage, Arc::clone(reader), Arc::clone(model))
+        .map_err(JobFailure::Environmental)
+}
+
+#[allow(clippy::too_many_arguments)] // Each pass uses the same bounded queue and ordinary pending writer.
+fn replay_phase(
+    store: &mut norn_store::Store,
+    inventory: &InventoryWalk,
+    root: &Path,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    account: &mut Account,
+    base: bool,
+    progress: &Healing<'_, ProductionAttachment>,
+) -> Result<(), JobFailure> {
+    let mut after: Option<Vec<u8>> = None;
+    let mut processed = 0;
+    loop {
+        let page = store
+            .begin_request()
+            .inventory_after(after.as_deref(), policy.store_page_size)
+            .map_err(store_effect)?;
+        if page.is_empty() {
+            break;
+        }
+        let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
+        for (_, record) in &page {
+            let fact = inventory.replay(record).map_err(effect)?;
+            load_fact(&mut pending, fact, base, base)?;
+            processed += 1;
+            if pending.is_full() {
+                pending.flush_for_mode(true)?;
+            }
+        }
+        pending.flush_for_mode(true)?;
+        after = page.last().map(|(key, _)| key.clone());
+        progress.report(processed, None);
+    }
+    Ok(())
+}
+
+fn load_fact(
+    pending: &mut Pending<'_>,
+    fact: norn_fs::WalkFact,
+    base: bool,
+    files: bool,
+) -> Result<(), JobFailure> {
+    match fact {
+        norn_fs::WalkFact::Skipped(skip) => {
+            pending.passed_over(skip.path().as_path(), skip.reason())
+        }
+        norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
+            if files
+                && let Ok(path) = document_path(file.path().as_path())
+                && path.is_vault_file()
+            {
+                pending.push(Change::FileBirth { path });
+            }
+        }
+        norn_fs::WalkFact::File(file) => {
+            let path = file.path().as_path().to_owned();
+            let Some(spelling) = path.to_str() else {
+                if let Err(quarantine) = document_path(&path) {
+                    pending.quarantine(&path, quarantine);
+                }
+                return Ok(());
+            };
+            let Some(read) = file.read_optional().map_err(effect)? else {
+                pending.withhold_entry(&path);
+                return Ok(());
+            };
+            pending.account.bytes_read += read.bytes().len() as u64;
+            let stored = match document_path(&path) {
+                Ok(path) => pending
+                    .store
+                    .begin_request()
+                    .stored_document(&path)
+                    .map_err(store_effect)?
+                    .map(|row| row.path),
+                Err(_) => None,
+            };
+            let hash = read.content_hash().to_string();
+            count_document_derived();
+            let plan = if base {
+                plan_base_document(
+                    &path,
+                    spelling,
+                    read.bytes(),
+                    hash.clone(),
+                    stored.as_ref(),
+                    &pending.declared.model,
+                    pending.store.path_order().glob_case(),
+                )
+            } else {
+                plan_document(
+                    &path,
+                    spelling,
+                    read.bytes(),
+                    hash.clone(),
+                    stored.as_ref(),
+                    &pending.declared.model,
+                    pending.store.path_order().glob_case(),
+                )
+            };
+            pending.record_plan(plan, hash);
+        }
+    }
+    Ok(())
+}
