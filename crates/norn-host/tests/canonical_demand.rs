@@ -215,23 +215,33 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
     std::fs::write(root.join("last.md"), "[[note-0269#Heading]] [[missing]]").unwrap();
     let vault = attach::Vault::adopt(scratch.root());
     let mut audits = vec![];
-    for canonical in [false, true] {
-        let machine = vault.beside(&scratch.join(if canonical { "canonical" } else { "ordinary" }));
+    for (name, canonical, cached) in [
+        ("ordinary", false, false),
+        ("ordinary-cached", false, true),
+        ("canonical", true, false),
+        ("canonical-cached", true, true),
+    ] {
+        let machine = vault.beside(&scratch.join(name));
         let probe = Arc::new(Probe {
             target: "note-0269".into(),
             answers: Mutex::new(vec![]),
         });
         let policy = norn_host::ProductionPolicy::new(128, 128).unwrap();
-        let host = if canonical {
-            machine.host_with_startup_experiment(
-                policy,
-                Experiment::canonical_demand("note-0269", probe),
-            )
-        } else {
-            machine.host_with_policy(policy)
-        };
+        let cache = cached
+            .then(|| norn_host::startup_experiment::InitialImportCache::new(8192, true).unwrap());
+        let host = machine.host_with_loading_options(
+            policy,
+            canonical.then(|| Experiment::canonical_demand("note-0269", probe)),
+            cache.clone(),
+        );
         let demand = host.demand(machine.name()).unwrap();
         wait_ready(&host, machine.name());
+        if let Some(cache) = cache {
+            let receipt = cache.receipt().expect("initial cache window ran");
+            assert!(receipt.import_succeeded);
+            assert_eq!(receipt.writer.during, Some(-8192));
+            assert_eq!(receipt.writer.after, Some(receipt.writer.before));
+        }
         drop(demand);
         drop(host);
         machine.store().verify_integrity().unwrap();
@@ -246,7 +256,9 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
         "page_map_sha256",
     ] {
         assert!(!audits[0][key].is_null(), "missing diagnostic {key}");
-        assert_eq!(audits[0][key], audits[1][key], "{key}");
+        for audit in &audits[1..] {
+            assert_eq!(audits[0][key], audit[key], "{key}");
+        }
     }
 }
 
