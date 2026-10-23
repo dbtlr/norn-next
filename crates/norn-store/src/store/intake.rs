@@ -1,7 +1,7 @@
 //! Unpublished metadata construction for the frozen-copy startup experiment.
 use super::*;
 
-/// A disposable ordinary writer whose non-unique secondary indexes wait for sealing.
+/// A disposable metadata writer that seals its deferred indexes before reads.
 /// A failed write or seal abandons the whole file; journal-OFF has no rollback promise.
 pub struct IntakeBuilder {
     store: Option<Store>,
@@ -23,12 +23,13 @@ impl IntakeBuilder {
             .map_err(|error| error::sql("enabling intake constraints", error))?;
         connection.set_prepared_statement_cache_capacity(32);
         let mut schema = store_schema();
-        // Match only canonical plain CREATE INDEX statements. UNIQUE indexes,
-        // table constraints, virtual tables and triggers execute during creation.
-        let (indexes, immediate): (Vec<_>, Vec<_>) = schema
-            .statements
-            .into_iter()
-            .partition(|statement| statement.starts_with("CREATE INDEX "));
+        // Findings indexes also serve ingestion's per-subject cleanup, which
+        // must stay bounded before sealing. UNIQUE indexes and constraints stay immediate.
+        let (indexes, immediate): (Vec<_>, Vec<_>) =
+            schema.statements.into_iter().partition(|statement| {
+                statement.starts_with("CREATE INDEX ")
+                    && !statement.starts_with("CREATE INDEX finding")
+            });
         schema.statements = immediate;
         norn_db::initialize_disposable(
             connection,
@@ -64,7 +65,8 @@ impl IntakeBuilder {
     }
 
     /// Run one bounded loading step through the ordinary store writer.
-    /// Failure closes the writer and deletes scratch, so it cannot be resumed or sealed.
+    /// Returned errors close and delete scratch. Unwinding prevents resumption or
+    /// sealing; the builder's drop then releases its remaining file owner.
     pub fn write<T, E>(&mut self, write: impl FnOnce(&mut Store) -> Result<T, E>) -> Result<T, E> {
         // Taking ownership also abandons the writer if the callback unwinds.
         let mut store = self
@@ -125,6 +127,77 @@ impl IntakeBuilder {
 mod tests {
     use super::*;
     use crate::{Change, ContentModel, DocumentFacts, DocumentPath};
+
+    #[test]
+    fn unreadable_metadata_does_not_turn_findings_cleanup_into_a_corpus_scan() {
+        use crate::{DerivedFinding, FindingFacts};
+        use norn_wire::{FindingKind, Severity};
+        let scratch = norn_testkit::scratch::Scratch::new("intake-findings-cost");
+        let mut builder = IntakeBuilder::create(
+            &scratch.join("intake.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        for batch in 0..2 {
+            builder
+                .write(|store| {
+                    let paths: Vec<_> = (0..128)
+                        .map(|i| {
+                            DocumentPath::new(&format!("note-{}.md", batch * 128 + i)).unwrap()
+                        })
+                        .collect();
+                    let changes = paths.iter().map(|path| {
+                        Change::Upsert(DocumentFacts::new(path.clone(), "hash", "body", 4))
+                    });
+                    let findings: Vec<_> = paths
+                        .iter()
+                        .map(|path| DerivedFinding {
+                            facts: FindingFacts {
+                                kind: FindingKind::FrontmatterUnreadable,
+                                severity: Severity::Error,
+                                path: path.clone(),
+                                class_keys: Default::default(),
+                                path_keys: std::collections::BTreeSet::from([crate::PathKey::new(
+                                    path.as_str(),
+                                )
+                                .unwrap()]),
+                                target: None,
+                                span: None,
+                                ordinal: None,
+                                candidates: Vec::new(),
+                                candidates_total: 0,
+                                message: "Unreadable frontmatter".into(),
+                                detail: Some("Malformed block".into()),
+                                rules: Default::default(),
+                                value: None,
+                            },
+                            replaces: None,
+                            bytes_hash: None,
+                        })
+                        .collect();
+                    store.begin_request().apply_intake_increment(
+                        changes,
+                        &findings,
+                        &ContentModel::none(),
+                    )?;
+                    for sql in [
+                        crate::request::SUBJECT_DISCARD_SQL,
+                        crate::request::PATH_DISCARD_SQL,
+                    ] {
+                        let mut statement = store.database.connection().prepare(sql).unwrap();
+                        statement.execute(["absent.md"]).unwrap();
+                        assert_eq!(
+                            statement.get_status(rusqlite::StatementStatus::FullscanStep),
+                            0,
+                            "cleanup must visit only the selected subject, before sealing"
+                        );
+                    }
+                    Ok::<_, StoreError>(())
+                })
+                .unwrap();
+        }
+    }
 
     #[test]
     fn an_unsealed_intake_declines_reads_without_opening_a_connection() {
