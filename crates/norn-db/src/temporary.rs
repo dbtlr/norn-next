@@ -182,7 +182,8 @@ pub fn temporary_store_parents(root: &Path) -> Result<Vec<PathBuf>, DbError> {
 
 impl TemporaryDatabase {
     /// Hand a disposable domain writer to the ordinary database machinery.
-    /// The returned owner must outlive every connection that uses this file.
+    /// The database retains the file until its connection closes; the returned
+    /// owner also permits reopening independently of that connection's lifetime.
     #[cfg(feature = "induced-failure")]
     pub fn into_database(self) -> Result<(crate::Database, Arc<TemporaryFile>), DbError> {
         let file = self.file.ok_or_else(|| DbError::Sql {
@@ -190,7 +191,8 @@ impl TemporaryDatabase {
             condition: None,
             message: "a reopenable source needs named scratch storage".into(),
         })?;
-        let database = crate::Database::adopt(self.connection, &file.path)?;
+        let mut database = crate::Database::adopt(self.connection, &file.path)?;
+        database.temporary_file = Some(Arc::clone(&file));
         Ok((database, file))
     }
     /// Allocate an exclusive name inside a configured disposable-storage directory.

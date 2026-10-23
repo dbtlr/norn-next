@@ -3,6 +3,56 @@
 use norn_db::{TemporaryDatabase, connect, sweep_temporary_directory};
 
 #[test]
+#[cfg(feature = "induced-failure")]
+#[allow(clippy::disallowed_methods)] // Observe disposable-file lifetime at SQLite's close boundary.
+fn a_snapshot_keeps_its_file_until_its_connection_closes() {
+    use norn_db::rusqlite::trace::{TraceEvent, TraceEventCodes};
+    std::thread_local! {
+        static FILE_AT_CLOSE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+    fn closing(event: TraceEvent<'_>) {
+        if let TraceEvent::Close(connection) = event {
+            FILE_AT_CLOSE.set(Some(
+                std::path::Path::new(connection.db_filename().unwrap()).exists(),
+            ));
+        }
+    }
+
+    let scratch = norn_testkit::scratch::Scratch::new("snapshot-file-owner");
+    let path = scratch.join("snapshot.sqlite3");
+    let writer = TemporaryDatabase::create(&path, 64, None).unwrap();
+    for statement in norn_db::meta::statements() {
+        writer.connection().execute_batch(&statement).unwrap();
+    }
+    norn_db::meta::put_meta(writer.connection(), norn_db::meta::STORE_EPOCH, "trial").unwrap();
+    let file = writer.shared_file().unwrap();
+    drop(writer);
+    let mut snapshot = file.open_snapshot().unwrap();
+    snapshot
+        .connection()
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_CLOSE, Some(closing));
+    drop(file);
+
+    assert!(
+        path.exists(),
+        "an open snapshot retains its file without a caller owner"
+    );
+    snapshot.open_snapshot().unwrap();
+    assert_eq!(snapshot.epoch(), "trial");
+    snapshot.close_snapshot().unwrap();
+    drop(snapshot);
+    assert_eq!(
+        FILE_AT_CLOSE.get(),
+        Some(true),
+        "the file still exists when SQLite closes"
+    );
+    assert!(
+        !path.exists(),
+        "closing the final connection releases its file"
+    );
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // The substrate suite arranges an external SQLite writer.
 fn an_immutable_result_reader_refuses_external_lock_contention_without_waiting() {
     let scratch = norn_testkit::scratch::Scratch::new("locked-result-reader");

@@ -32,7 +32,8 @@ impl IntakeReader {
             .transpose()
     }
     fn retire(&self) {
-        if let Some(reader) = self.reader.lock().expect("intake reader poisoned").take() {
+        let reader = self.reader.lock().expect("intake reader poisoned").take();
+        if let Some(reader) = reader {
             reader.retire_intake();
         }
     }
