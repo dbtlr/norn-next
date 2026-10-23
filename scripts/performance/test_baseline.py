@@ -208,6 +208,19 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not shut down cleanly"):
                 worker.close()
 
+    def test_a_checkpoint_after_the_last_query_cannot_pass_shutdown_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "worker"
+            binary.write_text("#!/usr/bin/env python3\nimport sys\n"
+                              "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                              "sys.stdin.readline()\n"
+                              "print('NORN_PERFORMANCE {\"startup_stage\":\"get\"}', flush=True)\n")
+            binary.chmod(0o700)
+            worker = Current(binary, root / "late-stage")
+            with self.assertRaisesRegex(RuntimeError, "checkpoint arrived after readiness"):
+                worker.close()
+
     def test_cleanup_stops_descendants_after_the_leader_exits(self):
         code = "import os,signal,time\npid=os.fork()\nif pid==0:\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n print(os.getpid(),flush=True)\n time.sleep(60)\nelse:\n time.sleep(0.1)\n"
         process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,

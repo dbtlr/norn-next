@@ -25,8 +25,9 @@ def main():
     output = args.output.resolve()
     if output.exists() or any(output.is_relative_to(root) for root in (source, baseline_source)):
         parser.error("use a new output directory outside both checkouts")
-    if args.repetitions < 1 or args.samples < 1 or args.warmups < 0 or len(args.sizes) != len(set(args.sizes)):
-        parser.error("positive repetitions/samples, nonnegative warmups and unique sizes required")
+    if (args.repetitions < 1 or args.samples < 1 or args.warmups < 0
+            or len(args.sizes) != len(set(args.sizes)) or len(args.modes) != len(set(args.modes))):
+        parser.error("positive repetitions/samples, nonnegative warmups, unique sizes and unique modes required")
     sys.path.insert(0, str(source / "scripts/performance"))
     from baseline import prepare, run_worker, write_json
     from provenance import sha256, source_tree_digest, verify_build

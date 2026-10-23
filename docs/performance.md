@@ -311,7 +311,8 @@ python3 scripts/performance/loading.py \
   --build "$PERF_HOME/startup-build.json" \
   --fixtures "$PERF_HOME/run-001/fixtures" \
   --output "$PERF_HOME/loading-001" \
-  --sizes 300 2000 10000 --repetitions 2
+  --sizes 300 2000 10000 --repetitions 2 \
+  --modes baseline layered layered-silent facts-once facts-once-silent
 ```
 
 This is an isolated loading-cost experiment, not a production admission policy.
@@ -356,3 +357,20 @@ measurements qualify the resulting warm index separately from first-load clocks.
 Resource samples include Linux process I/O counters. `write_bytes` is storage
 traffic charged to the process; `wchar` and `syscw` count write-call traffic.
 These counters describe work, not device latency or physical-media durability.
+
+For the warm comparison, supply the source checkouts corresponding to both build
+receipts. The baseline must be a standard build; the candidate and audit worker
+must include `induced-failure`:
+
+```sh
+python3 scripts/performance/loading_warm.py \
+  --candidate-source "$CANDIDATE_SOURCE" \
+  --candidate-build "$PERF_HOME/startup-build.json" \
+  --baseline-source "$BASELINE_SOURCE" \
+  --baseline-build "$PERF_HOME/baseline-build.json" \
+  --audit-build "$PERF_HOME/startup-build.json" \
+  --fixtures "$PERF_HOME/run-001/fixtures" \
+  --output "$PERF_HOME/loading-warm-001" \
+  --sizes 300 2000 10000 --repetitions 2 --warmups 5 --samples 25 \
+  --modes layered-silent facts-once-silent
+```

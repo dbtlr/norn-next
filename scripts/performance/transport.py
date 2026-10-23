@@ -98,6 +98,7 @@ class Current:
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
+        self.late_stage = False
         self.process = subprocess.Popen(
             [str(binary), "serve"],
             cwd=root, env=env, stdin=subprocess.PIPE,
@@ -123,11 +124,16 @@ class Current:
             raise
 
     def _read(self):
+        ready_seen = False
         for line in self.process.stdout:
             self.raw.write(line)
             self.raw.flush()
             if PREFIX in line:
-                self.messages.put(json.loads(line.split(PREFIX, 1)[1]))
+                message = json.loads(line.split(PREFIX, 1)[1])
+                if ready_seen and "startup_stage" in message:
+                    self.late_stage = True
+                ready_seen |= message.get("ready") is True
+                self.messages.put(message)
         self.messages.put(None)
 
     def receive(self):
@@ -158,6 +164,9 @@ class Current:
         self.stderr.close()
         self.process.stdin.close()
         self.process.stdout.close()
+        # Check the whole stream, including a checkpoint arriving after the final query.
+        if self.late_stage and sys.exc_info()[0] is None:
+            raise RuntimeError("startup checkpoint arrived after readiness; inspect worker logs")
         # Preserve the request failure that run.json records when cleanup follows it.
         if self.process.returncode != 0 and sys.exc_info()[0] is None:
             raise RuntimeError("current worker did not shut down cleanly; inspect worker logs")
