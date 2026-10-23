@@ -365,3 +365,120 @@ fn load_fact(
     }
     Ok(())
 }
+
+/// Independent of loading order and health mode; supplied only by a harness.
+/// Diagnostic reads must run separately from accepted timing samples.
+pub struct InitialImportCache {
+    size: norn_store::startup_experiment::WriterCacheSize,
+    diagnostics: bool,
+    started: AtomicBool,
+    receipt: std::sync::Mutex<Option<InitialImportCacheReceipt>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InitialImportCacheReceipt {
+    pub writer: norn_store::startup_experiment::WriterCacheReceipt,
+    pub import_succeeded: bool,
+}
+
+impl InitialImportCache {
+    pub fn new(kib: u32, diagnostics: bool) -> Result<Arc<Self>, norn_store::StoreError> {
+        Ok(Arc::new(Self {
+            size: norn_store::startup_experiment::WriterCacheSize::new(kib)?,
+            diagnostics,
+            started: AtomicBool::new(false),
+            receipt: std::sync::Mutex::new(None),
+        }))
+    }
+
+    pub fn receipt(&self) -> Option<InitialImportCacheReceipt> {
+        *self
+            .receipt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Own the not-yet-attached store so every failed restore closes its writer.
+/// This runs only in attach, never in warm heals, requests or recovery.
+pub(super) fn initial_heal(
+    mut attachment: ProductionAttachment,
+    cache: Option<&InitialImportCache>,
+    heal: impl FnOnce(&mut ProductionAttachment) -> Result<(), JobFailure>,
+) -> Result<(ProductionAttachment, Result<(), JobFailure>), JobFailure> {
+    let Some(cache) = cache.filter(|cache| {
+        !matches!(
+            attachment.store.open_outcome(),
+            norn_store::OpenOutcome::Reused
+        ) && !cache.started.swap(true, Ordering::SeqCst)
+    }) else {
+        let result = heal(&mut attachment);
+        return Ok((attachment, result));
+    };
+    let order = attachment.store.path_order();
+    if !attachment
+        .store
+        .begin_request()
+        .stored_documents_after_ordered(None, 1, order)
+        .map_err(store_effect)?
+        .is_empty()
+    {
+        let result = heal(&mut attachment);
+        return Ok((attachment, result));
+    }
+    let window = attachment
+        .store
+        .begin_request()
+        .start_initial_import_cache(cache.size, cache.diagnostics)
+        .map_err(store_effect)?;
+    let mut guarded = InitialCacheGuard {
+        attachment: Some(attachment),
+        window: Some(window),
+        cache,
+    };
+    let result = heal(guarded.attachment.as_mut().expect("unpublished attachment"));
+    guarded.restore(result.is_ok()).map_err(store_effect)?;
+    Ok((
+        guarded.attachment.take().expect("restored attachment"),
+        result,
+    ))
+}
+
+struct InitialCacheGuard<'a> {
+    attachment: Option<ProductionAttachment>,
+    window: Option<norn_store::startup_experiment::WriterCacheWindow>,
+    cache: &'a InitialImportCache,
+}
+
+impl InitialCacheGuard<'_> {
+    fn restore(&mut self, import_succeeded: bool) -> Result<(), norn_store::StoreError> {
+        if let Some(window) = &self.window {
+            let writer = self
+                .attachment
+                .as_mut()
+                .expect("unpublished attachment")
+                .store
+                .begin_request()
+                .restore_initial_import_cache(window)?;
+            *self
+                .cache
+                .receipt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(InitialImportCacheReceipt {
+                    writer,
+                    import_succeeded,
+                });
+            self.window = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for InitialCacheGuard<'_> {
+    fn drop(&mut self) {
+        // Unwinding cannot publish this owned attachment. A failed restoration
+        // still closes the writer when the attachment below drops.
+        let _ = self.restore(false);
+    }
+}

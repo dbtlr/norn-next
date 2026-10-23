@@ -190,6 +190,8 @@ impl std::error::Error for ProductionPolicyError {}
 pub struct ProductionEntryOps {
     #[cfg(feature = "induced-failure")]
     startup_experiment: Option<Arc<startup_experiment::Experiment>>,
+    #[cfg(feature = "induced-failure")]
+    initial_import_cache: Option<Arc<startup_experiment::InitialImportCache>>,
     cleanup_error: Mutex<Option<String>>,
     readers: Arc<norn_store::ReadBudget>,
     dirs: ConfigDirs,
@@ -638,6 +640,8 @@ impl ProductionEntryOps {
         let ops = Self {
             #[cfg(feature = "induced-failure")]
             startup_experiment: None,
+            #[cfg(feature = "induced-failure")]
+            initial_import_cache: None,
             cleanup_error: Mutex::new(None),
             readers: norn_store::ReadBudget::new(policy.read_budget),
             dirs,
@@ -661,6 +665,16 @@ impl ProductionEntryOps {
         experiment: Arc<startup_experiment::Experiment>,
     ) -> Self {
         self.startup_experiment = Some(experiment);
+        self
+    }
+
+    /// Give an isolated worker one cache window on its first empty import.
+    #[cfg(feature = "induced-failure")]
+    pub fn with_initial_import_cache(
+        mut self,
+        cache: Arc<startup_experiment::InitialImportCache>,
+    ) -> Self {
+        self.initial_import_cache = Some(cache);
         self
     }
 
@@ -1726,7 +1740,15 @@ impl EntryOps for ProductionEntryOps {
         // rather than being reported, because an attach that reported it would
         // be answered by another attach that opened the same file and met the
         // same page.
-        let mut attached = match self.heal_under_coverage(&mut attachment, progress) {
+        #[cfg(feature = "induced-failure")]
+        let (attachment, healed) = startup_experiment::initial_heal(
+            attachment,
+            self.initial_import_cache.as_deref(),
+            |attachment| self.heal_under_coverage(attachment, progress),
+        )?;
+        #[cfg(not(feature = "induced-failure"))]
+        let healed = self.heal_under_coverage(&mut attachment, progress);
+        let mut attached = match healed {
             Ok(()) => Ok(attachment),
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),

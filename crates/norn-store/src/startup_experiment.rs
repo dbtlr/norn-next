@@ -118,3 +118,39 @@ impl Catalogue {
         Ok(Some(CatalogueCandidates { paths, total }))
     }
 }
+
+/// A first-import cache budget, capped at the experiment's 8 MiB starting point.
+#[derive(Clone, Copy, Debug)]
+pub struct WriterCacheSize(pub(crate) u32);
+
+impl WriterCacheSize {
+    pub fn new(kib: u32) -> Result<Self, StoreError> {
+        if kib == 0 || kib > 8192 {
+            return Err(StoreError::Bound {
+                what: "initial-import writer cache KiB (minimum 1)",
+                limit: 8192,
+                given: kib as usize,
+            });
+        }
+        Ok(Self(kib))
+    }
+}
+
+/// Saved state belongs to this live writer; never substitute SQLite defaults.
+pub struct WriterCacheWindow {
+    pub(crate) before: i64,
+    pub(crate) during: Option<i64>,
+    pub(crate) retained_cache_budget_kib: Option<u64>,
+}
+
+/// Extra live reads are diagnostic-only. A restored budget does not evict pages.
+#[derive(Clone, Copy, Debug)]
+pub struct WriterCacheReceipt {
+    pub before: i64,
+    pub during: Option<i64>,
+    pub after: Option<i64>,
+    /// Conservatively charge the larger configured budget until writer closure.
+    /// This is a page-cache budget, not a measurement or bound of process RSS.
+    pub retained_cache_budget_kib: Option<u64>,
+    pub reclamation_verified: bool,
+}

@@ -16,7 +16,8 @@ TIMEOUT = 300
 PREFIX = "NORN_PERFORMANCE "
 
 
-def environment(root: Path, token: str) -> dict:
+def environment(root: Path, token: str, *, initial_cache_kib: int | None = None,
+                cache_diagnostics: bool = False) -> dict:
     env = {key: value for key, value in os.environ.items() if not key.startswith("NORN_")}
     for kind in ("CACHE", "STATE", "CONFIG", "DATA"):
         path = root / kind.lower()
@@ -24,6 +25,10 @@ def environment(root: Path, token: str) -> dict:
         env[f"XDG_{kind}_HOME"] = str(path)
     env.update(NORN_CACHE_CHANNEL="dev", NORN_PERFORMANCE_ROOT=str(root),
                NORN_PERFORMANCE_TOKEN=token)
+    if initial_cache_kib is not None:
+        env["NORN_PERFORMANCE_INITIAL_CACHE_KIB"] = str(initial_cache_kib)
+    if cache_diagnostics:
+        env["NORN_PERFORMANCE_CACHE_DIAGNOSTICS"] = "1"
     return env
 
 
@@ -88,9 +93,11 @@ def resources(pid: int) -> dict:
 
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
-                 loading: str | None = None, stage_handler=None):
+                 loading: str | None = None, stage_handler=None,
+                 initial_cache_kib: int | None = None, cache_diagnostics: bool = False):
         token = issue_root(root)
-        env = environment(root, token)
+        env = environment(root, token, initial_cache_kib=initial_cache_kib,
+                          cache_diagnostics=cache_diagnostics)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
         if loading is not None:

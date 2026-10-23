@@ -24,7 +24,9 @@ struct Probe {
     stages: Mutex<Vec<Stage>>,
 }
 
-struct Interrupt;
+struct Interrupt {
+    unwind: bool,
+}
 
 struct Quiet;
 
@@ -53,28 +55,61 @@ impl Observer for Interrupt {
         _reader: Arc<SnapshotReader>,
         _model: Arc<ContentModel>,
     ) -> Result<(), String> {
+        assert!(
+            !self.unwind,
+            "unwind the experiment after its first document"
+        );
         Err("stop the experiment after the first document".into())
     }
 }
 
 #[test]
 fn an_interrupted_partial_store_is_not_adopted_as_a_warm_index() {
-    let scratch = norn_testkit::scratch::Scratch::new("norn-startup-interrupted");
+    check_interruption(false, false);
+}
+
+#[test]
+fn failed_cache_import_restores_the_writer_and_refuses_partial_restart() {
+    check_interruption(true, false);
+}
+
+#[test]
+fn unwound_cache_import_restores_or_closes_before_any_warm_attachment() {
+    check_interruption(true, true);
+}
+
+fn check_interruption(cache_enabled: bool, unwind: bool) {
+    let scratch = norn_testkit::scratch::Scratch::under(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "norn-startup-interrupted",
+    )
+    .unwrap();
     let root = scratch.join("vault");
     std::fs::create_dir_all(root.join(".norn")).unwrap();
     std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
     std::fs::write(root.join("first.md"), "[[later]]\n").unwrap();
     std::fs::write(root.join("later.md"), "# Later\n").unwrap();
     let vault = attach::Vault::adopt(scratch.root());
-    let host = vault.host_with_startup_experiment(
+    let cache = cache_enabled
+        .then(|| norn_host::startup_experiment::InitialImportCache::new(8192, true).unwrap());
+    let host = vault.host_with_loading_options(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::new("first", Arc::new(Interrupt)),
+        Some(Experiment::new("first", Arc::new(Interrupt { unwind }))),
+        cache.clone(),
     );
     let demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while host.state(vault.name()).is_ok() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));
+    }
+    if let Some(cache) = cache {
+        let receipt = cache
+            .receipt()
+            .expect("the failed or unwound writer was restored");
+        assert!(!receipt.import_succeeded);
+        assert_eq!(receipt.writer.during, Some(-8192));
+        assert_eq!(receipt.writer.after, Some(receipt.writer.before));
     }
     drop(demand);
     drop(host);
@@ -257,20 +292,27 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
     std::os::unix::fs::symlink("target.md", root.join("alias.md")).unwrap();
     let vault = attach::Vault::adopt(scratch.root());
     let mut results = Vec::new();
-    for mode in ["ordinary", "staged", "facts-once"] {
-        let machine = vault.beside(&scratch.join(mode));
-        let host = if mode != "ordinary" {
-            machine.host_with_startup_experiment(
-                norn_host::ProductionPolicy::new(1, 1).unwrap(),
-                if mode == "facts-once" {
-                    Experiment::facts_once("first", Arc::new(Quiet))
-                } else {
-                    Experiment::new("first", Arc::new(Quiet))
-                },
-            )
-        } else {
-            machine.host_with_policy(norn_host::ProductionPolicy::new(1, 1).unwrap())
+    for (mode, cached) in [
+        ("ordinary", false),
+        ("staged", false),
+        ("facts-once", false),
+        ("ordinary", true),
+        ("staged", true),
+        ("facts-once", true),
+    ] {
+        let machine = vault.beside(&scratch.join(format!("{mode}-{cached}")));
+        let experiment = match mode {
+            "ordinary" => None,
+            "facts-once" => Some(Experiment::facts_once("first", Arc::new(Quiet))),
+            _ => Some(Experiment::new("first", Arc::new(Quiet))),
         };
+        let cache = cached
+            .then(|| norn_host::startup_experiment::InitialImportCache::new(8192, true).unwrap());
+        let host = machine.host_with_loading_options(
+            norn_host::ProductionPolicy::new(128, 128).unwrap(),
+            experiment,
+            cache.clone(),
+        );
         let demand = host.demand(machine.name()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         while host.state(machine.name()).unwrap() != norn_wire::TrustState::Ready
@@ -280,17 +322,42 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
             std::thread::sleep(Duration::from_millis(1));
         }
         let advisories = host.inspect(machine.name()).unwrap().advisories;
+        if let Some(cache) = cache {
+            let receipt = cache.receipt().unwrap();
+            assert!(receipt.import_succeeded);
+            assert_eq!(receipt.writer.during, Some(-8192));
+            assert_eq!(receipt.writer.after, Some(receipt.writer.before));
+        }
+        let address = VaultAddress::name(machine.name().clone());
+        let get = norn_wire::GetParams::new(
+            address.clone(),
+            norn_wire::ResolutionTarget::new("first").unwrap(),
+        )
+        .with_columns([
+            Column::path(),
+            Column::body(),
+            Column::fields(),
+            Column::links(),
+        ]);
+        let find = FindParams::new(address).with_predicates([Predicate::equal_to("kind", "task")]);
+        let mut answers = serde_json::json!({"get":host.get(&get).unwrap().answer,"find":host.find(&find).unwrap().answer});
+        // Independent stores have independent epochs; loader passes also spend generations.
+        for answer in answers.as_object_mut().unwrap().values_mut() {
+            assert_eq!(answer["reading"]["trust"]["state"], "ready");
+            answer.as_object_mut().unwrap().remove("reading");
+        }
         drop(demand);
         drop(host);
         machine.store().verify_integrity().unwrap();
         let audit =
             norn_store::startup_audit::audit(&machine.database(), |_, _, _| Ok(())).unwrap();
-        results.push((audit, advisories));
+        results.push((audit, advisories, answers));
     }
     for result in &results[1..] {
         assert_eq!(results[0].0["semantic_sha256"], result.0["semantic_sha256"]);
         assert_eq!(results[0].0["counts"], result.0["counts"]);
         assert_eq!(results[0].1, result.1);
+        assert_eq!(results[0].2, result.2);
     }
     assert_eq!(
         results[0].1.len(),
@@ -352,5 +419,113 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
         base_boundaries
             .iter()
             .all(|value| *value == base_boundaries[0])
+    );
+}
+
+#[test]
+fn ordinary_initial_cache_is_restored_before_ready_and_skipped_on_nonempty_restart() {
+    use norn_host::startup_experiment::InitialImportCache;
+    let scratch = norn_testkit::scratch::Scratch::under(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "cache-ordinary",
+    )
+    .unwrap();
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    for i in 0..260 {
+        std::fs::write(
+            root.join(format!("note-{i:03}.md")),
+            "---\nstatus: active\n---\n[[missing]]\n",
+        )
+        .unwrap();
+    }
+    let vault = attach::Vault::adopt(scratch.root());
+    let policy = norn_host::ProductionPolicy::new(128, 128).unwrap();
+    let cache = InitialImportCache::new(8192, true).unwrap();
+    let host = vault.host_with_loading_options(policy, None, Some(cache.clone()));
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state(vault.name()).unwrap() != norn_wire::TrustState::Ready {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let receipt = cache.receipt().expect("restoration precedes Ready");
+    assert!(receipt.import_succeeded);
+    assert_eq!(receipt.writer.during, Some(-8192));
+    assert_eq!(receipt.writer.after, Some(receipt.writer.before));
+    assert!(receipt.writer.retained_cache_budget_kib.unwrap() >= 8192);
+    assert!(!receipt.writer.reclamation_verified);
+    let params = FindParams::new(VaultAddress::name(vault.name().clone()))
+        .with_predicates([Predicate::equal_to("status", "active")]);
+    let first_answer = serde_json::to_value(host.find(&params).unwrap().answer).unwrap();
+    drop(demand);
+    drop(host);
+    let mut store = vault.store();
+    store.verify_integrity().unwrap();
+    let before = store.begin_request().write_generation().unwrap();
+    let epoch = store.epoch().to_string();
+    drop(store);
+    let cache = InitialImportCache::new(8192, true).unwrap();
+    let host = vault.host_with_loading_options(policy, None, Some(cache.clone()));
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while host.state(vault.name()).unwrap() != norn_wire::TrustState::Ready {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        cache.receipt().is_none(),
+        "a reused store must not enter the cache window"
+    );
+    assert_eq!(
+        serde_json::to_value(host.find(&params).unwrap().answer).unwrap(),
+        first_answer
+    );
+    drop(demand);
+    drop(host);
+    let mut store = vault.store();
+    assert_eq!(store.epoch(), epoch);
+    assert_eq!(store.begin_request().write_generation().unwrap(), before);
+    store.verify_integrity().unwrap();
+}
+
+#[path = "performance/cache.rs"]
+mod cache_options;
+
+#[test]
+fn worker_cache_parameter_is_explicit_and_rejects_invalid_values() {
+    use std::ffi::OsStr;
+    let options = cache_options::CacheOptions::parse(None, None).unwrap();
+    assert!(options.cache.is_none());
+    assert!(!options.diagnostics);
+    for value in ["", "0", "-1", "8193", "4294967296", "eight", " 8192"] {
+        assert!(
+            cache_options::CacheOptions::parse(Some(OsStr::new(value)), None).is_err(),
+            "{value:?}"
+        );
+    }
+    assert!(cache_options::CacheOptions::parse(None, Some(OsStr::new("1"))).is_err());
+    assert!(
+        cache_options::CacheOptions::parse(Some(OsStr::new("8192")), Some(OsStr::new("yes")))
+            .is_err()
+    );
+    let options =
+        cache_options::CacheOptions::parse(Some(OsStr::new("8192")), Some(OsStr::new("1")))
+            .unwrap();
+    assert!(options.cache.is_some());
+    assert!(options.diagnostics);
+    assert_eq!(options.kib, Some(8192));
+    assert!(options.receipt().is_null());
+}
+
+#[test]
+fn diagnostic_receipts_cannot_carry_accepted_worker_clocks() {
+    let mut row = serde_json::json!({"ready":true,"attach_ns":1,"startup_complete_ns":2,
+        "query_host_ns":3,"timings":{"entries":[{"elapsed_ns":4}]},"writer_cache":{"after":37}});
+    cache_options::suppress_clocks(&mut row);
+    assert_eq!(
+        row,
+        serde_json::json!({"ready":true,"diagnostic_only":true,"writer_cache":{"after":37}})
     );
 }

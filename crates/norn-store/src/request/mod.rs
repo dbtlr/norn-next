@@ -89,6 +89,9 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
 use crate::write_path::WriteStatement;
 
+#[cfg(feature = "induced-failure")]
+use crate::startup_experiment::{WriterCacheReceipt, WriterCacheSize, WriterCacheWindow};
+
 mod instrument;
 mod inventory;
 pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
@@ -660,6 +663,85 @@ impl<'a> Request<'a> {
             )
             .map_err(|error| error::sql("completing an experimental import", error))?;
         Ok(())
+    }
+
+    /// Only the initial attach may enter this window. On restoration failure,
+    /// the caller must close the writer rather than publish an attachment.
+    #[cfg(feature = "induced-failure")]
+    pub fn start_initial_import_cache(
+        &mut self,
+        size: WriterCacheSize,
+        diagnostics: bool,
+    ) -> Result<WriterCacheWindow, StoreError> {
+        let connection = self.store.connection();
+        let before: i64 = connection
+            .pragma_query_value(Some("main"), "cache_size", |row| row.get(0))
+            .map_err(|error| error::sql("reading the live writer cache", error))?;
+        let retained_cache_budget_kib = if diagnostics {
+            let page_size: u64 = connection
+                .pragma_query_value(Some("main"), "page_size", |row| row.get(0))
+                .map_err(|error| error::sql("reading the writer page size", error))?;
+            let original_kib = if before < 0 {
+                before.unsigned_abs()
+            } else {
+                (before as u64 * page_size).div_ceil(1024)
+            };
+            Some(original_kib.max(u64::from(size.0)))
+        } else {
+            None
+        };
+        connection
+            .pragma_update(Some("main"), "cache_size", -i64::from(size.0))
+            .map_err(|error| error::sql("setting the initial-import writer cache", error))?;
+        let mut window = WriterCacheWindow {
+            before,
+            during: None,
+            retained_cache_budget_kib,
+        };
+        if diagnostics {
+            match connection.pragma_query_value(Some("main"), "cache_size", |row| row.get(0)) {
+                Ok(during) => window.during = Some(during),
+                Err(error) => {
+                    self.restore_initial_import_cache(&window)?;
+                    return Err(error::sql("reading the import writer cache", error));
+                }
+            }
+        }
+        Ok(window)
+    }
+
+    /// Restore before ordinary readiness, including an import that returned an error.
+    #[cfg(feature = "induced-failure")]
+    pub fn restore_initial_import_cache(
+        &mut self,
+        window: &WriterCacheWindow,
+    ) -> Result<WriterCacheReceipt, StoreError> {
+        let connection = self.store.connection();
+        connection
+            .pragma_update(Some("main"), "cache_size", window.before)
+            .map_err(|error| error::sql("restoring the initial-import writer cache", error))?;
+        let after = if window.during.is_some() {
+            let after = connection
+                .pragma_query_value(Some("main"), "cache_size", |row| row.get(0))
+                .map_err(|error| error::sql("checking the restored writer cache", error))?;
+            if after != window.before {
+                return Err(StoreError::Sql {
+                    operation: "checking the restored writer cache",
+                    condition: None,
+                    message: "the writer did not restore its original cache size".into(),
+                });
+            }
+            Some(after)
+        } else {
+            None
+        };
+        Ok(WriterCacheReceipt {
+            before: window.before,
+            during: window.during,
+            after,
+            retained_cache_budget_kib: window.retained_cache_budget_kib,
+            reclamation_verified: false,
+        })
     }
 
     /// The next bounded page of document rows in `order`.

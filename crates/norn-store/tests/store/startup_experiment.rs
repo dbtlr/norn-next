@@ -130,3 +130,44 @@ fn catalogue_includes_vault_files_in_document_ambiguity() {
         2
     );
 }
+
+#[test]
+fn initial_cache_restores_the_live_writer_setting_including_its_sign() {
+    use norn_store::startup_experiment::WriterCacheSize;
+    let scratch = norn_testkit::scratch::Scratch::under(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "cache-live-writer",
+    )
+    .unwrap();
+    let mut store = norn_store::Store::open(
+        scratch.join("store.sqlite3"),
+        norn_store::StoredPathOrder::Sensitive,
+        crate::common::DERIVATION,
+    )
+    .unwrap();
+    // A positive page count proves restoration does not assume a KiB default.
+    norn_store::induced_failure::execute_out_of_band(&mut store, "PRAGMA main.cache_size=37")
+        .unwrap();
+    let window = store
+        .begin_request()
+        .start_initial_import_cache(WriterCacheSize::new(8192).unwrap(), true)
+        .unwrap();
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(derived("note.md", "[[missing]]"))],
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+    let receipt = store
+        .begin_request()
+        .restore_initial_import_cache(&window)
+        .unwrap();
+    assert_eq!(receipt.before, 37);
+    assert_eq!(receipt.during, Some(-8192));
+    assert_eq!(receipt.after, Some(37));
+    assert!(!receipt.reclamation_verified);
+    store.verify_integrity().unwrap();
+}

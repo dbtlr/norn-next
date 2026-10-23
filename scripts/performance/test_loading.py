@@ -3,11 +3,25 @@ import copy
 import unittest
 import subprocess
 import sys
+import os
+from unittest.mock import patch
+from transport import environment
 from pathlib import Path
 from loading import validate_stage
 
 
 class LoadingChecks(unittest.TestCase):
+    def test_cache_options_are_explicit_even_when_ambient_options_are_present(self):
+        ambient = {"NORN_PERFORMANCE_INITIAL_CACHE_KIB": "123", "NORN_PERFORMANCE_CACHE_DIAGNOSTICS": "1"}
+        with patch.dict(os.environ, ambient), patch.object(Path, "mkdir"):
+            ordinary = environment(Path("/isolated/run"), "token")
+            self.assertNotIn("NORN_PERFORMANCE_INITIAL_CACHE_KIB", ordinary)
+            self.assertNotIn("NORN_PERFORMANCE_CACHE_DIAGNOSTICS", ordinary)
+            explicit = environment(Path("/isolated/run"), "token", initial_cache_kib=8192,
+                                   cache_diagnostics=True)
+        self.assertEqual(explicit["NORN_PERFORMANCE_INITIAL_CACHE_KIB"], "8192")
+        self.assertEqual(explicit["NORN_PERFORMANCE_CACHE_DIAGNOSTICS"], "1")
+
     def test_coverage_count_rejects_a_correct_looking_partial_population(self):
         manifest = {"document_count": 3, "active_paths": ["a.md"]}
         stage = {"startup_stage": "frontmatter", "probe": "document_count", "global_ready": False,

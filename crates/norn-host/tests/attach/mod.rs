@@ -331,8 +331,24 @@ impl Vault {
         policy: ProductionPolicy,
         experiment: Arc<norn_host::startup_experiment::Experiment>,
     ) -> ServingHost {
-        self.serve_with_policy([self.name.clone()], None, policy, |ops| {
-            ops.with_startup_experiment(experiment)
+        self.host_with_loading_options(policy, Some(experiment), None)
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn host_with_loading_options(
+        &self,
+        policy: ProductionPolicy,
+        experiment: Option<Arc<norn_host::startup_experiment::Experiment>>,
+        cache: Option<Arc<norn_host::startup_experiment::InitialImportCache>>,
+    ) -> ServingHost {
+        self.serve_with_policy([self.name.clone()], None, policy, |mut ops| {
+            if let Some(experiment) = experiment {
+                ops = ops.with_startup_experiment(experiment);
+            }
+            if let Some(cache) = cache {
+                ops = ops.with_initial_import_cache(cache);
+            }
+            ops
         })
     }
 

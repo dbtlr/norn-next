@@ -5,8 +5,13 @@
 
 mod attach;
 #[cfg(feature = "induced-failure")]
+#[path = "performance/cache.rs"]
+mod cache;
+#[cfg(feature = "induced-failure")]
 #[path = "performance/staged.rs"]
 mod staged;
+#[cfg(feature = "induced-failure")]
+static CACHE_DIAGNOSTICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -22,6 +27,14 @@ use serde_json::{Value, json};
 
 #[allow(clippy::disallowed_macros)] // Machine-consumed measurement protocol, not product rendering.
 fn emit(value: Value) {
+    #[cfg(feature = "induced-failure")]
+    let value = {
+        let mut value = value;
+        if CACHE_DIAGNOSTICS.load(std::sync::atomic::Ordering::Relaxed) {
+            cache::suppress_clocks(&mut value);
+        }
+        value
+    };
     println!("NORN_PERFORMANCE {value}");
     std::io::stdout().flush().expect("flush a measurement");
 }
@@ -81,6 +94,23 @@ fn performance_verify() {
 
 fn performance_worker() {
     let root = root();
+    #[cfg(feature = "induced-failure")]
+    let cache_options = cache::CacheOptions::parse(
+        std::env::var_os("NORN_PERFORMANCE_INITIAL_CACHE_KIB").as_deref(),
+        std::env::var_os("NORN_PERFORMANCE_CACHE_DIAGNOSTICS").as_deref(),
+    )
+    .expect("valid explicit initial-cache options");
+    #[cfg(feature = "induced-failure")]
+    CACHE_DIAGNOSTICS.store(
+        cache_options.diagnostics,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    #[cfg(not(feature = "induced-failure"))]
+    assert!(
+        std::env::var_os("NORN_PERFORMANCE_INITIAL_CACHE_KIB").is_none()
+            && std::env::var_os("NORN_PERFORMANCE_CACHE_DIAGNOSTICS").is_none(),
+        "initial cache options require the induced-failure build feature"
+    );
     let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
         value.parse().expect("an integer changeset size")
     });
@@ -136,7 +166,7 @@ fn performance_worker() {
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
     #[cfg(feature = "induced-failure")]
-    let host = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+    let experiment = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok(mode @ ("layered" | "layered-silent" | "facts-once" | "facts-once-silent")) => {
             let reporter = std::sync::Arc::new(staged::Reporter::new(
                 began,
@@ -148,11 +178,13 @@ fn performance_worker() {
             } else {
                 norn_host::startup_experiment::Experiment::new("small", reporter)
             };
-            vault.host_with_startup_experiment(policy, experiment)
+            Some(experiment)
         }
-        Err(_) => vault.host_with_policy(policy),
+        Err(_) => None,
         Ok(mode) => panic!("unknown startup experiment {mode}"),
     };
+    #[cfg(feature = "induced-failure")]
+    let host = vault.host_with_loading_options(policy, experiment, cache_options.cache.clone());
     #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
@@ -199,8 +231,16 @@ fn performance_worker() {
     };
     #[cfg(not(feature = "induced-failure"))]
     let (timings, evidence): (Option<Value>, Value) = (None, Value::Null);
+    #[cfg(feature = "induced-failure")]
+    let cache_receipt = cache_options.receipt();
+    #[cfg(not(feature = "induced-failure"))]
+    let cache_receipt = Value::Null;
+    #[cfg(feature = "induced-failure")]
+    let cache_kib = cache_options.kib;
+    #[cfg(not(feature = "induced-failure"))]
+    let cache_kib: Option<u32> = None;
     emit(
-        json!({"ready": true, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
+        json!({"ready": true, "initial_import_cache_kib":cache_kib,"writer_cache":cache_receipt, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
                 "observed_ready_ns": ready_ns, "host_setup_ns": host_setup.as_nanos(),
                 "store_page_size": policy.store_page_size, "changeset_size": policy.changeset_size,
                 "timings": timings, "job_evidence": evidence}),
