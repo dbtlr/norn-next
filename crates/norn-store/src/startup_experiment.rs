@@ -250,3 +250,61 @@ impl Catalogue {
         Ok(true)
     }
 }
+
+/// Write depth for isolated experiments; metadata rows never belong to a durable store.
+#[derive(Clone, Copy, PartialEq)]
+pub enum WriteMode {
+    Ordinary,
+    DeferredHealth,
+    Metadata,
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use crate::{
+        Change, ContentModel, DerivationVersion, DocumentFacts, DocumentPath, Store,
+        StoredPathOrder,
+    };
+
+    #[test]
+    fn metadata_omits_payload_after_validating_real_source_lengths() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-storage");
+        let mut store = Store::open_throwaway(
+            scratch.join("metadata.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        let path = DocumentPath::new("document.md").unwrap();
+        let model = ContentModel::none();
+        let facts = DocumentFacts::new(path.clone(), "real-source-hash", "uniquebodytoken", 99);
+        assert!(
+            store
+                .begin_request()
+                .apply_intake_increment([Change::Upsert(facts.clone())], &[], &model)
+                .is_err(),
+            "an inconsistent real length must still fail"
+        );
+        let mut facts = facts;
+        facts.byte_length = 15;
+        store
+            .begin_request()
+            .apply_intake_increment([Change::Upsert(facts)], &[], &model)
+            .unwrap();
+        let stored = store.begin_request().stored_facts(&path).unwrap().unwrap();
+        assert_eq!(stored.document.content_hash, "real-source-hash");
+        assert_eq!(stored.document.byte_length, 15);
+        assert!(stored.body.is_empty());
+        let matches: u64 = store
+            .database
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM documents_fts WHERE documents_fts MATCH 'uniquebodytoken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(matches, 0);
+        store.close().unwrap();
+    }
+}

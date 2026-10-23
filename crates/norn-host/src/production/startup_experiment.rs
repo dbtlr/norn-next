@@ -22,6 +22,18 @@ pub enum Stage {
 
 /// Store reads at a checkpoint prove query cost without claiming host admission.
 pub trait Observer: Send + Sync {
+    /// Ordinary writer counters exclude every disposable phase.
+    fn canonical_work(
+        &self,
+        _work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Called only after the complete metadata pass. Observers may retain the
+    /// bounded reader during ordinary construction; it retires before final publication.
+    fn intake(&self, _reader: Arc<IntakeReader>) -> Result<(), String> {
+        Ok(())
+    }
     fn declined(&self, _reason: &str) -> Result<(), String> {
         Ok(())
     }
@@ -41,6 +53,7 @@ pub struct Experiment {
     started: AtomicBool,
     separate_frontmatter: bool,
     canonical: bool,
+    intake: bool,
 }
 
 impl Experiment {
@@ -51,6 +64,7 @@ impl Experiment {
             started: AtomicBool::new(false),
             separate_frontmatter: true,
             canonical: false,
+            intake: false,
         })
     }
 
@@ -61,6 +75,7 @@ impl Experiment {
             started: AtomicBool::new(false),
             separate_frontmatter: false,
             canonical: false,
+            intake: false,
         })
     }
 
@@ -75,6 +90,22 @@ impl Experiment {
             started: AtomicBool::new(false),
             separate_frontmatter: false,
             canonical: true,
+            intake: false,
+        })
+    }
+
+    /// Frozen-copy demand plus complete metadata projection before ordinary heal.
+    pub fn canonical_intake(
+        get_target: impl Into<String>,
+        observer: Arc<dyn Observer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: true,
+            intake: true,
         })
     }
 
@@ -191,8 +222,8 @@ pub(super) fn run(
             exclusions,
             &mut account,
         )?;
-        load_fact(&mut pending, fact, true, true)?;
-        pending.flush_for_mode(true)?;
+        load_fact(&mut pending, fact, Depth::Base, true)?;
+        pending.flush_for_mode(norn_store::startup_experiment::WriteMode::DeferredHealth)?;
     }
     notify(experiment, Stage::RequestedDocument, &reader, &model)?;
     if experiment.separate_frontmatter {
@@ -307,23 +338,36 @@ fn replay_phase(
         }
         for (_, record) in &page {
             let fact = inventory.replay(record).map_err(effect)?;
-            load_fact(&mut pending, fact, base, files)?;
+            load_fact(
+                &mut pending,
+                fact,
+                if base { Depth::Base } else { Depth::Rich },
+                files,
+            )?;
             processed += 1;
             if pending.is_full() {
-                pending.flush_for_mode(true)?;
+                pending
+                    .flush_for_mode(norn_store::startup_experiment::WriteMode::DeferredHealth)?;
             }
         }
-        pending.flush_for_mode(true)?;
+        pending.flush_for_mode(norn_store::startup_experiment::WriteMode::DeferredHealth)?;
         after = page.last().map(|(key, _)| key.clone());
         progress.report(processed, None);
     }
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Depth {
+    Rich,
+    Base,
+    Metadata,
+}
+
 fn load_fact(
     pending: &mut Pending<'_>,
     fact: norn_fs::WalkFact,
-    base: bool,
+    depth: Depth,
     files: bool,
 ) -> Result<Option<String>, JobFailure> {
     match fact {
@@ -366,7 +410,7 @@ fn load_fact(
             };
             let hash = read.content_hash().to_string();
             count_document_derived();
-            let plan = if base {
+            let mut plan = if depth != Depth::Rich {
                 plan_base_document(
                     &path,
                     spelling,
@@ -387,6 +431,15 @@ fn load_fact(
                     pending.store.path_order().glob_case(),
                 )
             };
+            if depth == Depth::Metadata {
+                plan.findings.retain(|finding| {
+                    matches!(
+                        finding.cause,
+                        crate::derivation::Cause::Undecodable(_)
+                            | crate::derivation::Cause::UnreadBlock(_)
+                    )
+                });
+            }
             pending.record_plan(plan, hash.clone());
             return Ok(Some(hash));
         }
@@ -542,3 +595,6 @@ impl Drop for InitialCacheGuard<'_> {
 }
 
 mod canonical;
+
+mod intake;
+pub use intake::{IntakeReader, IntakeRefusal, IntakeSnapshot};

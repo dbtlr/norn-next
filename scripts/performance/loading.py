@@ -2,6 +2,8 @@
 """Compare ordinary loading with real query checkpoints in a disposable staged import."""
 
 import argparse
+import base64
+import copy
 import json
 import os
 import shutil
@@ -34,10 +36,84 @@ CANONICAL_SILENT_EXPECTED = {(stage, "boundary") for stage in
                              ("catalogue", "canonical-demand", "canonical-health")}
 
 
+INTAKE_PROBES = {(stage, probe) for stage in ("canonical-intake", "canonical-final-intake") for probe in
+                 ("active_page", "document_count", "active_count", "sparse_page", "zero_page", "unknown_field", "field_page")}
+
+
+def expected_checkpoints(mode):
+    """One protocol definition shared by cold and warm controllers."""
+    if mode == "baseline":
+        return set()
+    if mode in ("canonical-intake", "canonical-intake-silent"):
+        return (CANONICAL_SILENT_EXPECTED | {("canonical-intake", "boundary")}
+                if mode.endswith("-silent") else CANONICAL_EXPECTED | INTAKE_PROBES)
+    if mode in ("canonical-demand", "canonical-demand-silent"):
+        return CANONICAL_SILENT_EXPECTED if mode.endswith("-silent") else CANONICAL_EXPECTED
+    if mode in ("layered", "layered-silent", "facts-once", "facts-once-silent"):
+        return SILENT_EXPECTED if mode.endswith("-silent") else EXPECTED
+    raise ValueError(f"unknown loading mode: {mode}")
+
+
+def metadata_answer(stage):
+    """Normalize only verified projection identity; preserve query content and cursor keys."""
+    answer = copy.deepcopy(stage["answer"])
+    report = answer["report"]
+
+    def check(reading):
+        if (reading["epoch"] != stage["projection_epoch"]
+                or reading["generation"] != stage["projection_generation"]):
+            raise ValueError("metadata projection provenance disagrees with its answer")
+
+    if "counted_at" in report:
+        check(report["counted_at"])
+        report["counted_at"].pop("epoch")
+        report["counted_at"].pop("generation")
+    page = report.get("page", report)
+    if page.get("next") is not None:
+        encoded = page["next"]
+        cursor = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        check(cursor["snapshot"])
+        cursor["snapshot"].pop("epoch")
+        cursor["snapshot"].pop("generation")
+        page["next"] = cursor
+    return answer
+
+
+def validate_metadata(stage, manifest):
+    if stage.get("simulation") != "paused":
+        raise ValueError("metadata checkpoint must identify its paused simulation")
+    answer = metadata_answer(stage)
+    report = answer["report"]
+    probe = stage["probe"]
+    if stage["command"]["op"] == "count":
+        expected = len(manifest["active_paths"]) if probe == "active_count" else manifest["document_count"]
+        if (answer["unsatisfied"] or answer["advisories"] or report["next"] is not None
+                or report["rows"] != [{"group": [], "count": expected}]):
+            raise ValueError("metadata count differs from the complete corpus")
+        return
+    if probe == "unknown_field":
+        parts = answer["unsatisfied"]
+        if (len(parts) != 1 or parts[0].get("part") != "unknown_predicate_key"
+                or parts[0].get("key") != "profilenonexistentkey"):
+            raise ValueError("metadata query lost the unknown-key diagnostic")
+    elif answer["unsatisfied"]:
+        raise ValueError("metadata query was partially satisfied")
+    expected = (manifest["active_paths"] if probe == "active_page" else
+                manifest["filtered_paths"] if probe in ("sparse_page", "field_page") else [])
+    fold = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    expected = sorted(expected, key=lambda path: (path.translate(fold), path), reverse=probe == "field_page")
+    page = report["page"]
+    if (answer["advisories"] or page["moved"] or [row["path"] for row in page["rows"]] != expected[:25]
+            or (page["next"] is not None) != (len(expected) > 25)):
+        raise ValueError("metadata page differs from the complete ordered match")
+    if probe == "field_page" and any(row.get("fields", {}).get("perf_bucket", {}).get("raw") != "probe" for row in page["rows"]):
+        raise ValueError("metadata field projection differs from the fixture")
+
+
 def validate_stage(stage, manifest):
     """Check each capability against authored fixture answers, including complete coverage."""
     key = stage["startup_stage"], stage["probe"]
-    if key not in EXPECTED | CANONICAL_EXPECTED or stage["global_ready"] is not False:
+    if key not in EXPECTED | CANONICAL_EXPECTED | INTAKE_PROBES or stage["global_ready"] is not False:
         raise ValueError("unexpected or incorrectly published startup checkpoint")
     if key == ("catalogue", "names"):
         answers = {row["target"]: row for row in stage["candidates"]}
@@ -47,6 +123,9 @@ def validate_stage(stage, manifest):
             raise ValueError("catalogue did not preserve the complete ambiguity class")
         if answers["profilenonexistentdocument"]["total"] != 0:
             raise ValueError("catalogue invented a missing name")
+        return
+    if key in INTAKE_PROBES:
+        validate_metadata(stage, manifest)
         return
     command = stage["command"]
     if key[0] in ("canonical-demand", "canonical-health"):
@@ -81,15 +160,14 @@ def run_one(binary, root, manifest, mode):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
     began = time.perf_counter_ns()
     keys = []
-    canonical = mode.startswith("canonical-demand")
-    silent_expected = CANONICAL_SILENT_EXPECTED if canonical else SILENT_EXPECTED
-    query_expected = CANONICAL_EXPECTED if canonical else EXPECTED
+    canonical = mode.startswith("canonical-")
+    expected = expected_checkpoints(mode)
     root.mkdir(parents=True, exist_ok=True)
 
     def on_stage(stage):
         key = stage["startup_stage"], stage["probe"]
         if mode.endswith("-silent"):
-            if key not in silent_expected or stage.get("queries_executed") is not False:
+            if key not in expected or stage.get("queries_executed") is not False:
                 raise ValueError("a silent control emitted a query claim")
         else:
             validate_stage(stage, manifest)
@@ -110,16 +188,23 @@ def run_one(binary, root, manifest, mode):
             answer, elapsed = worker.call(command)
             validate_read("current", command, answer, manifest)
             checked.append({"name": name, "round_trip_ns": elapsed, "host_ns": answer["host_ns"]})
-        expected = set() if mode == "baseline" else silent_expected if mode.endswith("-silent") else query_expected
         if set(keys) != expected:
             raise ValueError("startup checkpoint coverage differs from the requested mode")
         if canonical and not mode.endswith("-silent"):
             early = next(s for s in worker.stages if s["startup_stage"] == "canonical-demand")
             final = next(s for s in worker.stages if s["startup_stage"] == "canonical-health")
-            # The benchmark subject has no findings, so this fixture can compare
-            # exact reports, without erasing projection-local finding handles.
+            # This controller deliberately requires the authored no-findings fixture.
+            # Rich fixtures need the separate whole-get oracle's handle checks.
+            if any(row["answer"]["report"]["document"]["findings"]["total"] != 0 for row in (early, final)):
+                raise ValueError("cold controller whole-get comparison requires a fixture with no findings")
             if early["answer"] != final["answer"]:
                 raise ValueError("demand whole-record answer differs from ordinary final answer")
+        if mode == "canonical-intake":
+            early_rows = {s["probe"]: s for s in worker.stages if s["startup_stage"] == "canonical-intake"}
+            final_rows = {s["probe"]: s for s in worker.stages if s["startup_stage"] == "canonical-final-intake"}
+            for probe, early in early_rows.items():
+                if metadata_answer(early) != metadata_answer(final_rows[probe]):
+                    raise ValueError(f"metadata answer differs from ordinary final answer: {probe}")
         milestones = {}
         for stage in worker.stages:
             name = stage["startup_stage"]
@@ -178,7 +263,7 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
     if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):

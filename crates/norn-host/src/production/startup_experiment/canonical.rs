@@ -92,12 +92,25 @@ pub(super) fn run(
         {
             let reader = Arc::new(projection.reader_pool(&attachment.readers));
             let _retire = RetireReader(reader.clone());
-            notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
+            if requested_class_exists(&reader, &model, &experiment.get_target)? {
+                notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
+            } else {
+                experiment.observer.declined("empty eligible class needs the global suggestion universe; wait for ordinary readiness")
+                    .map_err(JobFailure::Environmental)?;
+            }
         } else {
             experiment.observer.declined("closure exceeds the bound, request is unsupported, or source movement was observed; wait for ordinary readiness").map_err(JobFailure::Environmental)?;
         }
         projection.close().map_err(store_effect)?;
     }
+    let intake = if experiment.intake {
+        Some(super::intake::prepare(
+            attachment, exclusions, policy, experiment, &model,
+        )?)
+    } else {
+        None
+    };
+    let before = crate::evidence::startup_writer_work();
     {
         let _timing = norn_store::profiling::span("startup.canonical_heal");
         // No priority writes, alternate packing, health deferral, or pragma
@@ -109,6 +122,19 @@ pub(super) fn run(
             policy,
             progress,
         )?;
+    }
+    let work = crate::evidence::startup_writer_work()
+        .into_iter()
+        .map(|(key, value)| (key, value - before[key]))
+        .collect();
+    experiment
+        .observer
+        .canonical_work(&work)
+        .map_err(JobFailure::Environmental)?;
+    // Close new acquisitions before the host can publish its ordinary reader.
+    // Existing snapshots retain their normal connection/descriptor lifetime.
+    if let Some(intake) = intake {
+        intake.close()?;
     }
     let reader = Arc::new(attachment.store.reader_pool(&attachment.readers));
     let _retire = RetireReader(reader.clone());
@@ -136,6 +162,10 @@ fn prepare(
     else {
         return Ok(false);
     };
+    // A missing get's suggestion universe is global, outside this closure.
+    if demanded.is_empty() {
+        return Ok(false);
+    }
     let demanded: BTreeSet<_> = demanded.into_iter().collect();
     let mut remaining = demanded.clone();
     let mut observed = BTreeMap::new();
@@ -154,7 +184,7 @@ fn prepare(
         let hash = {
             let mut pending =
                 Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
-            let hash = load_fact(&mut pending, fact, false, true)?;
+            let hash = load_fact(&mut pending, fact, Depth::Rich, true)?;
             pending.flush()?;
             hash
         };
@@ -222,4 +252,40 @@ fn prepare(
         }
     }
     Ok(true)
+}
+
+// Catalogue neighborhoods over-approximate eligibility: every name may be
+// quarantined, ignored, or outside the requested suffix. The ordinary builder
+// decides this too; an empty result cannot carry global missing-get suggestions.
+fn requested_class_exists(
+    reader: &Arc<SnapshotReader>,
+    model: &ContentModel,
+    target: &str,
+) -> Result<bool, JobFailure> {
+    use norn_wire::{Column, GetParams, ResolutionTarget, VaultAddress, VaultName};
+    let _timing = norn_store::profiling::span("startup.canonical_demand");
+    let Ok(target) = ResolutionTarget::new(target) else {
+        return Ok(false);
+    };
+    let turn = reader
+        .acquire(
+            norn_store::ReadNeed::Source,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .map_err(store_effect)?
+        .ok_or_else(|| JobFailure::Environmental("demand reader unavailable".into()))?;
+    let snapshot = turn.establish().map_err(store_effect)?;
+    // Store builders use the attached database, not the wire vault address.
+    let params = GetParams::new(
+        VaultAddress::name(VaultName::new("experiment").unwrap()),
+        target,
+    )
+    .with_columns([Column::path()]);
+    match get(&snapshot, &params, model) {
+        Ok(_) | Err(norn_store::PageRefusal::AmbiguousTarget(_)) => Ok(true),
+        Err(norn_store::PageRefusal::UnknownTarget { .. }) => Ok(false),
+        Err(refusal) => Err(JobFailure::Environmental(format!(
+            "demand eligibility: {refusal:?}"
+        ))),
+    }
 }

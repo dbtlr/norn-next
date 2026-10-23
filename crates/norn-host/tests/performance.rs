@@ -155,6 +155,7 @@ fn performance_worker() {
             "store.finding_metadata",
             "startup.catalogue",
             "startup.canonical_demand",
+            "startup.canonical_intake",
             "startup.canonical_heal",
             "startup.requested_document",
             "startup.base",
@@ -175,14 +176,18 @@ fn performance_worker() {
             | "facts-once"
             | "facts-once-silent"
             | "canonical-demand"
-            | "canonical-demand-silent"),
+            | "canonical-demand-silent"
+            | "canonical-intake"
+            | "canonical-intake-silent"),
         ) => {
             let reporter = std::sync::Arc::new(staged::Reporter::new(
                 began,
                 vault.name().clone(),
                 mode.ends_with("-silent"),
             ));
-            let experiment = if mode.starts_with("canonical-demand") {
+            let experiment = if mode.starts_with("canonical-intake") {
+                norn_host::startup_experiment::Experiment::canonical_intake("small", reporter)
+            } else if mode.starts_with("canonical-demand") {
                 norn_host::startup_experiment::Experiment::canonical_demand("small", reporter)
             } else if mode.starts_with("facts-once") {
                 norn_host::startup_experiment::Experiment::facts_once("small", reporter)

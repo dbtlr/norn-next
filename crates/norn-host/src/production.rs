@@ -4509,13 +4509,13 @@ impl<'s> Pending<'s> {
     fn flush(&mut self) -> Result<(), JobFailure> {
         self.flush_for_mode(
             #[cfg(feature = "induced-failure")]
-            false,
+            norn_store::startup_experiment::WriteMode::Ordinary,
         )
     }
 
     fn flush_for_mode(
         &mut self,
-        #[cfg(feature = "induced-failure")] defer_health: bool,
+        #[cfg(feature = "induced-failure")] mode: norn_store::startup_experiment::WriteMode,
     ) -> Result<(), JobFailure> {
         let findings = self.recordable()?;
         if self.changes.is_empty() && findings.is_empty() {
@@ -4527,7 +4527,13 @@ impl<'s> Pending<'s> {
         }
         let mut request = self.store.begin_request();
         #[cfg(feature = "induced-failure")]
-        let outcome = if defer_health {
+        let outcome = if mode == norn_store::startup_experiment::WriteMode::Metadata {
+            request.apply_intake_increment(
+                self.changes.drain(..),
+                &findings,
+                self.declared.model.content_model(),
+            )
+        } else if mode == norn_store::startup_experiment::WriteMode::DeferredHealth {
             request.apply_startup_increment(
                 self.changes.drain(..),
                 &findings,

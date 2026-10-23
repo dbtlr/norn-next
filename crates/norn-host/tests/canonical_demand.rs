@@ -74,7 +74,7 @@ fn canonical_default_get_has_links_anchors_and_schema_findings() {
     });
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::canonical_demand("first", probe.clone()),
+        Experiment::canonical_intake("first", probe.clone()),
     );
     let demand = host.demand(vault.name()).unwrap();
     wait_ready(&host, vault.name());
@@ -196,6 +196,30 @@ fn canonical_demand_uses_eligible_candidates_and_exact_ambiguity() {
 
 #[test]
 fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
+    struct WorkProbe {
+        probe: Probe,
+        work: Mutex<Option<std::collections::BTreeMap<&'static str, u64>>>,
+    }
+    impl Observer for WorkProbe {
+        fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
+            self.probe.catalogue(catalogue, model)
+        }
+        fn indexed(
+            &self,
+            stage: Stage,
+            reader: Arc<SnapshotReader>,
+            model: Arc<ContentModel>,
+        ) -> Result<(), String> {
+            self.probe.indexed(stage, reader, model)
+        }
+        fn canonical_work(
+            &self,
+            work: &std::collections::BTreeMap<&'static str, u64>,
+        ) -> Result<(), String> {
+            *self.work.lock().unwrap() = Some(work.clone());
+            Ok(())
+        }
+    }
     let scratch = norn_testkit::scratch::Scratch::new("canonical-demand-final");
     let root = scratch.join("vault");
     std::fs::create_dir_all(root.join(".norn")).unwrap();
@@ -215,25 +239,33 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
     std::fs::write(root.join("last.md"), "[[note-0269#Heading]] [[missing]]").unwrap();
     let vault = attach::Vault::adopt(scratch.root());
     let mut audits = vec![];
-    for (name, canonical, cached) in [
-        ("ordinary", false, false),
-        ("ordinary-cached", false, true),
-        ("canonical", true, false),
-        ("canonical-cached", true, true),
+    let mut works = vec![];
+    for (mode, cached) in [
+        ("ordinary", false),
+        ("ordinary", true),
+        ("canonical-demand", false),
+        ("canonical-demand", true),
+        ("canonical-intake", false),
+        ("canonical-intake", true),
     ] {
-        let machine = vault.beside(&scratch.join(name));
-        let probe = Arc::new(Probe {
-            target: "note-0269".into(),
-            answers: Mutex::new(vec![]),
+        let machine = vault.beside(&scratch.join(format!("{mode}-{cached}")));
+        let probe = Arc::new(WorkProbe {
+            probe: Probe {
+                target: "note-0269".into(),
+                answers: Mutex::new(vec![]),
+            },
+            work: Mutex::new(None),
         });
         let policy = norn_host::ProductionPolicy::new(128, 128).unwrap();
+        let experiment = match mode {
+            "ordinary" => None,
+            "canonical-demand" => Some(Experiment::canonical_demand("note-0269", probe.clone())),
+            "canonical-intake" => Some(Experiment::canonical_intake("note-0269", probe.clone())),
+            _ => unreachable!(),
+        };
         let cache = cached
             .then(|| norn_host::startup_experiment::InitialImportCache::new(8192, true).unwrap());
-        let host = machine.host_with_loading_options(
-            policy,
-            canonical.then(|| Experiment::canonical_demand("note-0269", probe)),
-            cache.clone(),
-        );
+        let host = machine.host_with_loading_options(policy, experiment, cache.clone());
         let demand = host.demand(machine.name()).unwrap();
         wait_ready(&host, machine.name());
         if let Some(cache) = cache {
@@ -242,11 +274,64 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
             assert_eq!(receipt.writer.during, Some(-8192));
             assert_eq!(receipt.writer.after, Some(receipt.writer.before));
         }
+        if mode == "ordinary" {
+            let e = host.evidence();
+            works.push(std::collections::BTreeMap::from([
+                ("documents_derived", e.documents_derived),
+                ("changesets_applied", e.changesets_applied),
+                ("documents_upserted", e.documents_upserted),
+                ("documents_deleted", e.documents_deleted),
+                ("tombstones_recorded", e.tombstones_recorded),
+                ("findings_written", e.findings_written),
+                ("findings_discarded", e.findings_discarded),
+                ("links_redecided", e.links_redecided),
+                ("link_health_keys_resolved", e.link_health_keys_resolved),
+                ("link_health_candidates_read", e.link_health_candidates_read),
+                ("changeset_read_steps", e.changeset_read_steps),
+            ]));
+        } else {
+            works.push(
+                probe
+                    .work
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("ordinary work checkpoint"),
+            );
+        }
         drop(demand);
         drop(host);
         machine.store().verify_integrity().unwrap();
         audits
             .push(norn_store::startup_audit::audit(&machine.database(), |_, _, _| Ok(())).unwrap());
+        if mode == "canonical-intake" {
+            let before = probe.probe.answers.lock().unwrap().len();
+            let host = machine.host_with_startup_experiment(
+                policy,
+                Experiment::canonical_intake("note-0269", probe.clone()),
+            );
+            let demand = host.demand(machine.name()).unwrap();
+            wait_ready(&host, machine.name());
+            assert_eq!(host.evidence().documents_derived, 0);
+            assert_eq!(
+                probe.probe.answers.lock().unwrap().len(),
+                before,
+                "restart entered the initial experiment"
+            );
+            drop(demand);
+            drop(host);
+            let restarted =
+                norn_store::startup_audit::audit(&machine.database(), |_, _, _| Ok(())).unwrap();
+            for key in [
+                "store_epoch",
+                "write_generation",
+                "semantic_sha256",
+                "canonical_identity_sha256",
+                "page_map_sha256",
+            ] {
+                assert_eq!(audits.last().unwrap()[key], restarted[key], "restart {key}");
+            }
+        }
     }
     for key in [
         "semantic_sha256",
@@ -260,6 +345,8 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
             assert_eq!(audits[0][key], audit[key], "{key}");
         }
     }
+    assert_eq!(works[0], works[1]);
+    assert_eq!(works[0], works[2]);
 }
 
 struct MoveCandidate {
@@ -376,18 +463,23 @@ fn a_candidate_head_larger_than_the_closure_bound_declines_instead_of_guessing()
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("same.md"), "Document").unwrap();
     }
+    std::fs::write(root.join("invalid.md"), [0xff]).unwrap();
+    std::fs::write(root.join("miss.md"), "Present outside the requested suffix").unwrap();
     let vault = attach::Vault::adopt(scratch.root());
-    let observer = Arc::new(Decline(Mutex::new(false)));
-    let host = vault.host_with_startup_experiment(
-        norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::canonical_demand("same", observer.clone()),
-    );
-    let demand = host.demand(vault.name()).unwrap();
-    wait_ready(&host, vault.name());
-    assert!(*observer.0.lock().unwrap());
-    drop(demand);
-    drop(host);
-    vault.store().verify_integrity().unwrap();
+    for target in ["same", "absent", "invalid", "absent/miss"] {
+        let vault = vault.beside(&scratch.join(target));
+        let observer = Arc::new(Decline(Mutex::new(false)));
+        let host = vault.host_with_startup_experiment(
+            norn_host::ProductionPolicy::new(128, 128).unwrap(),
+            Experiment::canonical_intake(target, observer.clone()),
+        );
+        let demand = host.demand(vault.name()).unwrap();
+        wait_ready(&host, vault.name());
+        assert!(*observer.0.lock().unwrap());
+        drop(demand);
+        drop(host);
+        vault.store().verify_integrity().unwrap();
+    }
 }
 
 #[test]
@@ -457,8 +549,19 @@ fn assert_no_projection_files(root: &std::path::Path) {
     for entry in std::fs::read_dir(root).unwrap() {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_dir() {
-            if entry.file_name() == "canonical-demand" {
-                assert_eq!(std::fs::read_dir(entry.path()).unwrap().count(), 0);
+            if entry.file_name() == "canonical-demand" || entry.file_name() == "canonical-intake" {
+                fn no_files(path: &std::path::Path) {
+                    for child in std::fs::read_dir(path).unwrap() {
+                        let child = child.unwrap();
+                        assert!(
+                            child.file_type().unwrap().is_dir(),
+                            "projection residue: {:?}",
+                            child.path()
+                        );
+                        no_files(&child.path());
+                    }
+                }
+                no_files(&entry.path());
             } else {
                 assert_no_projection_files(&entry.path());
             }
@@ -470,6 +573,12 @@ fn assert_no_projection_files(root: &std::path::Path) {
 fn an_observer_failure_removes_projection_files_and_leaves_an_ordinary_recoverable_store() {
     struct Fail;
     impl Observer for Fail {
+        fn intake(
+            &self,
+            _: Arc<norn_host::startup_experiment::IntakeReader>,
+        ) -> Result<(), String> {
+            Err("induced intake observer failure".into())
+        }
         fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
             Ok(())
         }
@@ -480,7 +589,7 @@ fn an_observer_failure_removes_projection_files_and_leaves_an_ordinary_recoverab
             _: Arc<ContentModel>,
         ) -> Result<(), String> {
             assert_eq!(stage, Stage::CanonicalDemand);
-            Err("induced observer failure".into())
+            Ok(())
         }
     }
     let scratch = norn_testkit::scratch::Scratch::new("canonical-demand-failure");
@@ -491,7 +600,7 @@ fn an_observer_failure_removes_projection_files_and_leaves_an_ordinary_recoverab
     let vault = attach::Vault::adopt(scratch.root());
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::canonical_demand("first", Arc::new(Fail)),
+        Experiment::canonical_intake("first", Arc::new(Fail)),
     );
     let demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -508,4 +617,305 @@ fn an_observer_failure_removes_projection_files_and_leaves_an_ordinary_recoverab
     drop(demand);
     drop(host);
     vault.store().verify_integrity().unwrap();
+}
+
+#[test]
+fn intake_answers_sparse_zero_and_unknown_fields_before_ordinary_heal() {
+    struct IntakeProbe {
+        answers: Mutex<Vec<serde_json::Value>>,
+        drains: Mutex<Vec<serde_json::Value>>,
+        retired: Mutex<Option<Arc<norn_host::startup_experiment::IntakeReader>>>,
+        held: Mutex<
+            Option<(
+                Arc<norn_host::startup_experiment::IntakeReader>,
+                norn_host::startup_experiment::IntakeSnapshot,
+            )>,
+        >,
+    }
+    fn requests() -> Vec<norn_wire::FindParams> {
+        [
+            norn_wire::Predicate::equal_to("bucket", "rare"),
+            norn_wire::Predicate::equal_to("bucket", "absent"),
+            norn_wire::Predicate::equal_to("unknown", "absent"),
+        ]
+        .into_iter()
+        .map(|predicate| {
+            norn_wire::FindParams::new(VaultAddress::name(VaultName::new("notes").unwrap()))
+                .with_predicates([predicate])
+                .with_columns([norn_wire::Column::fields()])
+        })
+        .collect()
+    }
+    impl Observer for IntakeProbe {
+        fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+            Ok(())
+        }
+        fn intake(
+            &self,
+            reader: Arc<norn_host::startup_experiment::IntakeReader>,
+        ) -> Result<(), String> {
+            let snapshot = reader
+                .snapshot(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let address = VaultAddress::name(VaultName::new("notes").unwrap());
+            for predicate in [
+                norn_wire::Predicate::matches("Last"),
+                norn_wire::Predicate::tag("tag"),
+                norn_wire::Predicate::links_to(ResolutionTarget::new("first").unwrap()),
+                norn_wire::Predicate::resolves(ResolutionTarget::new("first").unwrap()),
+                norn_wire::Predicate::has_finding(norn_wire::FindingKind::Broken),
+            ] {
+                assert!(
+                    snapshot
+                        .find(
+                            &norn_wire::FindParams::new(address.clone())
+                                .with_predicates([predicate.clone()])
+                        )
+                        .is_err(),
+                    "incomplete predicate must decline: {predicate:?}"
+                );
+                assert!(
+                    snapshot
+                        .count(
+                            &norn_wire::CountParams::new(address.clone())
+                                .with_predicates([predicate])
+                        )
+                        .is_err()
+                );
+            }
+            for column in [
+                norn_wire::Column::body(),
+                norn_wire::Column::links(),
+                norn_wire::Column::headings(),
+                norn_wire::Column::blocks(),
+                norn_wire::Column::tags(),
+                norn_wire::Column::findings(),
+            ] {
+                assert!(
+                    snapshot
+                        .find(
+                            &norn_wire::FindParams::new(address.clone())
+                                .with_columns([column.clone()])
+                        )
+                        .is_err(),
+                    "incomplete column must decline: {column:?}"
+                );
+            }
+            assert!(
+                snapshot
+                    .count(
+                        &norn_wire::CountParams::new(address).with_by([norn_wire::GroupKey::tag()])
+                    )
+                    .is_err()
+            );
+            let answers = requests()
+                .iter()
+                .map(|params| {
+                    serde_json::to_value(snapshot.find(params).unwrap().into_report()).unwrap()
+                })
+                .collect();
+            *self.answers.lock().unwrap() = answers;
+            *self.drains.lock().unwrap() = metadata_drains(
+                |params| snapshot.find(params).unwrap(),
+                |params| snapshot.count(params).unwrap(),
+                snapshot.reading(),
+            );
+            *self.held.lock().unwrap() = Some((reader, snapshot));
+            Ok(())
+        }
+        fn indexed(
+            &self,
+            stage: Stage,
+            reader: Arc<SnapshotReader>,
+            model: Arc<ContentModel>,
+        ) -> Result<(), String> {
+            if stage == Stage::CanonicalHealth {
+                let turn = reader
+                    .acquire(
+                        ReadNeed::SourceAndScratch,
+                        Instant::now() + Duration::from_secs(5),
+                    )
+                    .unwrap()
+                    .unwrap();
+                let snapshot = turn.establish().unwrap();
+                let (retired, active) = self.held.lock().unwrap().take().unwrap();
+                *self.retired.lock().unwrap() = Some(retired.clone());
+                assert!(
+                    retired
+                        .snapshot(Instant::now() + Duration::from_secs(5))
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(
+                    *self.drains.lock().unwrap(),
+                    metadata_drains(
+                        |params| active.find(params).unwrap(),
+                        |params| active.count(params).unwrap(),
+                        active.reading()
+                    )
+                );
+                assert_eq!(
+                    *self.drains.lock().unwrap(),
+                    metadata_drains(
+                        |params| snapshot.find(params, &model).unwrap(),
+                        |params| snapshot.count(params, &model).unwrap(),
+                        snapshot.reading()
+                    )
+                );
+                let answers = self.answers.lock().unwrap();
+                assert_eq!(
+                    answers.len(),
+                    3,
+                    "metadata checkpoint must precede ordinary completion"
+                );
+                for (params, early) in requests().iter().zip(answers.iter()) {
+                    assert_eq!(
+                        *early,
+                        serde_json::to_value(snapshot.find(params, &model).unwrap().into_report())
+                            .unwrap()
+                    );
+                }
+                assert_eq!(answers[0][2]["page"]["rows"].as_array().unwrap().len(), 1);
+                assert_eq!(answers[1][2]["page"]["rows"].as_array().unwrap().len(), 0);
+            }
+            Ok(())
+        }
+    }
+    let scratch = norn_testkit::scratch::Scratch::new("canonical-intake-fields");
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(
+        root.join(".norn/schema.yaml"),
+        "version: 1\nfields:\n  rank: { type: number }\n  due: { type: date }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("first.md"),
+        "---\nbucket: common\n---\n[[missing]]",
+    )
+    .unwrap();
+    std::fs::write(root.join("last.md"), "---\nbucket: rare\n---\nLast").unwrap();
+    std::fs::write(root.join("invalid.md"), [0xff]).unwrap();
+    for (name, text) in [
+        (
+            "A.md",
+            "rank: 2\nlabels: [red, blue]\ndue: 2026-01-01\nnothing: null",
+        ),
+        ("b.md", "rank: 10\nlabels: [blue, blue]\ndue: nope"),
+        ("c.md", "rank: null\nlabels: []"),
+        ("d.md", "rank: nope\nlabels: [null, red]"),
+        ("e.md", "labels: red\nlate_only: yes"),
+        ("malformed.md", "value: ["),
+    ] {
+        std::fs::write(
+            root.join(name),
+            format!("---\n{text}\n---\n# tag #bodytag [[missing]]"),
+        )
+        .unwrap();
+    }
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(IntakeProbe {
+        answers: Mutex::new(vec![]),
+        drains: Mutex::new(vec![]),
+        retired: Mutex::new(None),
+        held: Mutex::new(None),
+    });
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(2, 2).unwrap(),
+        Experiment::canonical_intake("first", probe.clone()),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, vault.name());
+    assert_eq!(probe.answers.lock().unwrap().len(), 3);
+    drop(demand);
+    drop(host);
+    assert_no_projection_files(scratch.root());
+    vault.store().verify_integrity().unwrap();
+}
+
+// Drain through each store's own cursors. Compare cursor keys and every answer
+// field, checking local provenance before excluding epoch/generation/retention IDs.
+fn metadata_drains(
+    find: impl Fn(&norn_wire::FindParams) -> norn_store::Found,
+    count: impl Fn(&norn_wire::CountParams) -> norn_store::Counted,
+    reading: &norn_store::StoreReading,
+) -> Vec<serde_json::Value> {
+    use norn_wire::{
+        Column, CountParams, Direction, FindParams, GroupKey, Predicate, Sort, SortKey,
+    };
+    let address = VaultAddress::name(VaultName::new("notes").unwrap());
+    let mut selections = vec![FindParams::new(address.clone())];
+    for predicate in [
+        Predicate::has("nothing"),
+        Predicate::missing("nothing"),
+        Predicate::in_any("labels", ["red".into(), "blue".into()]),
+        Predicate::not_equal_to("labels", "red"),
+        Predicate::before("rank", "5"),
+        Predicate::after("due", "2025-01-01"),
+        Predicate::before("labels", "z"),
+        Predicate::path("*.md"),
+        Predicate::has("late_only"),
+    ] {
+        selections.push(FindParams::new(address.clone()).with_predicates([predicate]));
+    }
+    for key in [
+        SortKey::path(),
+        SortKey::field("rank"),
+        SortKey::field("labels"),
+        SortKey::field("unknown"),
+    ] {
+        for direction in [Direction::Ascending, Direction::Descending] {
+            selections.push(
+                FindParams::new(address.clone()).with_sort(Sort::new(key.clone(), direction)),
+            );
+        }
+    }
+    let mut answers = Vec::new();
+    for mut params in selections {
+        params.limit = Some(2);
+        params.columns = vec![Column::path(), Column::field("rank"), Column::fields()];
+        for page in 0..20 {
+            let (unsatisfied, advisories, report) = find(&params).into_report();
+            assert!(report.page.moved.is_empty());
+            if let Some(next) = &report.page.next {
+                assert_eq!(next.snapshot().epoch, reading.epoch());
+                assert_eq!(
+                    next.snapshot().generation as i64,
+                    reading.write_generation()
+                );
+            }
+            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.page.rows,"next_key": report.page.next.as_ref().map(|c| c.key()), "rules":report.rule_sets}));
+            params.after = report.page.next;
+            if params.after.is_none() {
+                break;
+            }
+            assert!(page < 19, "find did not terminate");
+        }
+    }
+    for by in [
+        vec![],
+        vec![GroupKey::field("labels")],
+        vec![GroupKey::field("rank")],
+        vec![GroupKey::field("unknown")],
+        vec![GroupKey::field("labels"), GroupKey::field("rank")],
+    ] {
+        let mut params = CountParams::new(address.clone()).with_by(by).with_limit(2);
+        for page in 0..20 {
+            let (unsatisfied, advisories, report) = count(&params).into_report();
+            assert_eq!(report.counted_at.epoch, reading.epoch());
+            assert_eq!(
+                report.counted_at.generation as i64,
+                reading.write_generation()
+            );
+            assert!(report.moved.is_empty());
+            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.rows,"next_key":report.next.as_ref().map(|c| c.key())}));
+            params.after = report.next;
+            if params.after.is_none() {
+                break;
+            }
+            assert!(page < 19, "count did not terminate");
+        }
+    }
+    answers
 }

@@ -732,6 +732,29 @@ pub(crate) fn count_increment_work(counters: &DerivationCounters, read_steps: u6
     });
 }
 
+/// Read without draining the job account so the isolated prototype can separate
+/// unchanged ordinary writer work from its disposable derivations.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn startup_writer_work() -> std::collections::BTreeMap<&'static str, u64> {
+    let tally = CHANGESETS.with(Cell::get);
+    std::collections::BTreeMap::from([
+        ("documents_derived", DOCUMENTS_DERIVED.with(Cell::get)),
+        ("changesets_applied", tally.applied),
+        ("documents_upserted", tally.documents_upserted),
+        ("documents_deleted", tally.documents_deleted),
+        ("tombstones_recorded", tally.tombstones_recorded),
+        ("findings_written", tally.findings_written),
+        ("findings_discarded", tally.findings_discarded),
+        ("links_redecided", tally.links_redecided),
+        ("link_health_keys_resolved", tally.link_health_keys_resolved),
+        (
+            "link_health_candidates_read",
+            tally.link_health_candidates_read,
+        ),
+        ("changeset_read_steps", tally.read_steps),
+    ])
+}
+
 fn take_changeset_tally() -> ChangesetTally {
     CHANGESETS.with(|cell| cell.replace(ChangesetTally::default()))
 }

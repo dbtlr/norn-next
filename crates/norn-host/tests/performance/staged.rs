@@ -8,7 +8,7 @@ use norn_wire::{
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub struct Reporter {
@@ -16,6 +16,7 @@ pub struct Reporter {
     address: VaultAddress,
     checkpoint: AtomicU64,
     silent: bool,
+    intake: AtomicBool,
 }
 
 impl Reporter {
@@ -25,6 +26,7 @@ impl Reporter {
             address: VaultAddress::name(name),
             checkpoint: AtomicU64::new(0),
             silent,
+            intake: AtomicBool::new(false),
         }
     }
 
@@ -60,10 +62,7 @@ impl Reporter {
                 json!({"report":report,"unsatisfied":unsatisfied,"advisories":[]})
             }
             "find" => {
-                let params = FindParams::new(self.address.clone())
-                    .with_limit(25)
-                    .with_predicates([Predicate::equal_to("perf_bucket", "active")])
-                    .with_columns([Column::path()]);
+                let params = find_params(&self.address, &command);
                 let (unsatisfied, advisories, report) = snapshot
                     .find(&params, model)
                     .map_err(|error| format!("{error:?}"))?
@@ -83,13 +82,7 @@ impl Reporter {
                 json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
             }
             "count" => {
-                let mut params = CountParams::new(self.address.clone());
-                if command["active"] == true {
-                    params = params.with_predicates([Predicate::equal_to("perf_bucket", "active")]);
-                }
-                if let Some(text) = command["matches"].as_str() {
-                    params = params.with_predicates([Predicate::matches(text)]);
-                }
+                let params = count_params(&self.address, &command);
                 let (unsatisfied, advisories, report) = snapshot
                     .count(&params, model)
                     .map_err(|error| format!("{error:?}"))?
@@ -117,6 +110,49 @@ impl Reporter {
 }
 
 impl Observer for Reporter {
+    fn intake(
+        &self,
+        reader: Arc<norn_host::startup_experiment::IntakeReader>,
+    ) -> Result<(), String> {
+        self.intake.store(true, Ordering::Relaxed);
+        let boundary = self.began.elapsed().as_nanos();
+        if self.silent {
+            super::emit(
+                json!({"startup_stage":"canonical-intake", "probe":"boundary",
+                "stage_boundary_ns":boundary,"query_host_ns":0,"queries_executed":false,
+                "simulation":"paused","global_ready":false}),
+            );
+            return Ok(());
+        }
+        for (probe, command) in intake_probes() {
+            let requested = self.began.elapsed().as_nanos();
+            let started = Instant::now();
+            let snapshot = reader
+                .snapshot(Instant::now() + Duration::from_secs(5))
+                .map_err(|e| e.to_string())?
+                .ok_or("intake reader unavailable")?;
+            let answer = if command["op"] == "find" {
+                let (unsatisfied, advisories, report) = snapshot
+                    .find(&find_params(&self.address, &command))
+                    .map_err(|e| format!("{e:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            } else {
+                let (unsatisfied, advisories, report) = snapshot
+                    .count(&count_params(&self.address, &command))
+                    .map_err(|e| format!("{e:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            };
+            super::emit(json!({"startup_stage":"canonical-intake","probe":probe,
+                "stage_boundary_ns":boundary,"query_host_ns":started.elapsed().as_nanos(),
+                "query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
+                "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),
+                "projection_generation":snapshot.reading().write_generation(),"simulation":"paused","global_ready":false}));
+        }
+        Ok(())
+    }
+
     fn declined(&self, reason: &str) -> Result<(), String> {
         super::emit(
             json!({"startup_stage":"canonical-demand", "probe":"declined", "reason":reason, "simulation":"paused","global_ready":false}),
@@ -202,6 +238,11 @@ impl Reporter {
                     model,
                     json!({"op":"get","target":"small","whole":true}),
                 )?;
+                if self.intake.load(Ordering::Relaxed) {
+                    for (probe, command) in intake_probes() {
+                        self.query("canonical-final-intake", probe, reader, model, command)?;
+                    }
+                }
                 self.probes(Stage::Frontmatter, reader, model)?;
                 self.probes(Stage::RichFacts, reader, model)?;
                 self.probes(Stage::LinkHealth, reader, model)
@@ -287,4 +328,53 @@ impl Reporter {
             }
         }
     }
+}
+
+fn find_params(address: &VaultAddress, command: &Value) -> FindParams {
+    let key = command["key"].as_str().unwrap_or("perf_bucket");
+    let value = command["value"].as_str().unwrap_or("active");
+    let mut params = FindParams::new(address.clone())
+        .with_limit(25)
+        .with_predicates([Predicate::equal_to(key, value)]);
+    if command["field_sort"] == true {
+        params = params
+            .with_sort(norn_wire::Sort::new(
+                norn_wire::SortKey::field("perf_bucket"),
+                norn_wire::Direction::Descending,
+            ))
+            .with_columns([Column::path(), Column::field("perf_bucket")]);
+    }
+    params
+}
+
+fn count_params(address: &VaultAddress, command: &Value) -> CountParams {
+    let mut params = CountParams::new(address.clone());
+    if command["active"] == true {
+        params = params.with_predicates([Predicate::equal_to("perf_bucket", "active")]);
+    }
+    if let Some(text) = command["matches"].as_str() {
+        params = params.with_predicates([Predicate::matches(text)]);
+    }
+    params
+}
+
+fn intake_probes() -> [(&'static str, Value); 7] {
+    [
+        ("active_page", json!({"op":"find"})),
+        ("document_count", json!({"op":"count"})),
+        ("active_count", json!({"op":"count","active":true})),
+        ("sparse_page", json!({"op":"find","value":"probe"})),
+        (
+            "zero_page",
+            json!({"op":"find","value":"profilenonexistentvalue"}),
+        ),
+        (
+            "unknown_field",
+            json!({"op":"find","key":"profilenonexistentkey"}),
+        ),
+        (
+            "field_page",
+            json!({"op":"find","value":"probe","field_sort":true}),
+        ),
+    ]
 }

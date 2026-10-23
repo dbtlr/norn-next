@@ -34,6 +34,42 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(tree_digest(root), manifest["tree_sha256"])
 
 
+class LoadingProtocolTests(unittest.TestCase):
+    def test_warm_controller_checks_the_requested_modes_checkpoint_set(self):
+        from baseline import run_worker
+        from types import SimpleNamespace
+        import io
+
+        class Accepted(Exception):
+            pass
+
+        class Worker:
+            def __init__(self, stages):
+                self.stages = [{"startup_stage": stage, "probe": "boundary"} for stage in stages]
+            def call(self, _command):
+                raise Accepted()
+            def close(self):
+                pass
+
+        for mode, stages in [
+            ("canonical-demand-silent", ["catalogue", "canonical-demand", "canonical-health"]),
+            ("canonical-intake-silent", ["catalogue", "canonical-demand", "canonical-intake", "canonical-health"]),
+            ("layered-silent", ["catalogue", "get", "frontmatter", "lexical", "rich", "health"]),
+        ]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture = root / "fixture"
+                (fixture / "vault").mkdir(parents=True)
+                manifest = {"tree_sha256": tree_digest(fixture / "vault"), "document_count": 0, "probe_bodies": {}}
+                args = SimpleNamespace(output=root, current="unused", loading=mode)
+                with patch("baseline.Current", return_value=Worker(stages)):
+                    with self.assertRaises(Accepted):
+                        run_worker(args, "current", 0, 0, fixture, manifest, io.StringIO())
+                with patch("baseline.Current", return_value=Worker(["catalogue"])):
+                    with self.assertRaisesRegex(ValueError, "requested loading mode"):
+                        run_worker(args, "current", 0, 1, fixture, manifest, io.StringIO())
+
+
 class AnswerTests(unittest.TestCase):
     def test_a_successful_cached_read_does_not_prove_the_field_was_written(self):
         before = b"---\nstatus: draft\nperf_bucket: probe\n---\nKeep the body.\n"

@@ -42,6 +42,62 @@ class LoadingChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "whole-record"):
             validate_stage(stage, manifest)
 
+    def test_intake_sparse_and_zero_results_require_complete_exact_rows(self):
+        manifest = {"filtered_paths": ["a.md", "b.md"], "active_paths": [], "document_count": 2}
+        stage = {"startup_stage": "canonical-intake", "probe": "sparse_page", "global_ready": False,
+                 "simulation": "paused", "projection_epoch": "early", "projection_generation": 2,
+                 "command": {"op": "find", "value": "probe"}, "answer": {"unsatisfied": [], "advisories": [],
+                 "report": {"page": {"rows": [{"path": "a.md"}, {"path": "b.md"}], "next": None, "moved": []}, "rule_sets": []}}}
+        validate_stage(stage, manifest)
+        stage["answer"]["report"]["page"]["rows"].pop()
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            validate_stage(stage, manifest)
+        stage["probe"] = "zero_page"
+        stage["command"]["value"] = "profilenonexistentvalue"
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            validate_stage(stage, manifest)
+        stage["answer"]["report"]["page"]["rows"] = []
+        validate_stage(stage, manifest)
+
+    def test_metadata_field_sort_keeps_descending_path_ties(self):
+        manifest = {"filtered_paths": ["a.md", "b.md"]}
+        stage = {"startup_stage": "canonical-intake", "probe": "field_page", "global_ready": False,
+                 "simulation": "paused", "projection_epoch": "early", "projection_generation": 2,
+                 "command": {"op": "find", "value": "probe", "field_sort": True},
+                 "answer": {"unsatisfied": [], "advisories": [], "report": {"page": {
+                     "rows": [{"path": path, "fields": {"perf_bucket": {"raw": "probe"}}} for path in ["b.md", "a.md"]],
+                     "next": None, "moved": []}}}}
+        validate_stage(stage, manifest)
+        stage["answer"]["report"]["page"]["rows"].reverse()
+        with self.assertRaisesRegex(ValueError, "ordered match"):
+            validate_stage(stage, manifest)
+
+    def test_metadata_normalization_checks_provenance_before_removing_identity(self):
+        from loading import metadata_answer
+        stage = {"projection_epoch": "early", "projection_generation": 2,
+                 "answer": {"report": {"counted_at": {"epoch": "early", "generation": 2}, "next": None}}}
+        self.assertNotIn("epoch", metadata_answer(stage)["report"]["counted_at"])
+        stage["answer"]["report"]["counted_at"]["epoch"] = "unrelated"
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            metadata_answer(stage)
+
+    def test_metadata_cursor_normalization_preserves_key_and_schema(self):
+        import base64
+        import json
+        from loading import metadata_answer
+        cursor = {"snapshot": {"epoch": "early", "generation": 2, "schema_fingerprint": "schema", "sidecar_revision": None},
+                  "key": {"kind": "document", "path": "b.md", "sort": "probe"}}
+        encode = lambda: base64.urlsafe_b64encode(json.dumps(cursor).encode()).decode().rstrip("=")
+        stage = {"projection_epoch": "early", "projection_generation": 2,
+                 "answer": {"report": {"page": {"next": encode()}}}}
+        normalized = metadata_answer(stage)["report"]["page"]["next"]
+        self.assertEqual(normalized["key"], cursor["key"])
+        self.assertEqual(normalized["snapshot"]["schema_fingerprint"], "schema")
+        cursor["snapshot"]["generation"] = 99
+        stage["answer"]["report"]["page"]["next"] = encode()
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            metadata_answer(stage)
+
     def test_warm_runner_rejects_duplicate_modes_before_opening_builds(self):
         command = [sys.executable, str(Path(__file__).with_name("loading_warm.py"))]
         for argument in ("candidate-source", "candidate-build", "baseline-source", "baseline-build", "audit-build", "fixtures", "output"):

@@ -242,7 +242,7 @@ pub(crate) fn apply(
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
-    #[cfg(feature = "induced-failure")] defer_health: bool,
+    #[cfg(feature = "induced-failure")] mode: crate::startup_experiment::WriteMode,
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
@@ -354,6 +354,10 @@ pub(crate) fn apply(
                                 facts,
                                 admitting,
                                 &mut tally,
+                                #[cfg(feature = "induced-failure")]
+                                {
+                                    mode == crate::startup_experiment::WriteMode::Metadata
+                                },
                             )
                         },
                     )
@@ -421,7 +425,7 @@ pub(crate) fn apply(
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
     #[cfg(feature = "induced-failure")]
-    let run_health = !defer_health;
+    let run_health = mode == crate::startup_experiment::WriteMode::Ordinary;
     #[cfg(not(feature = "induced-failure"))]
     let run_health = true;
     let redecided = match generation.filter(|_| run_health) {
@@ -728,10 +732,16 @@ fn upsert(
     facts: &DocumentFacts,
     admitting: usize,
     tally: &mut Tally,
+    #[cfg(feature = "induced-failure")] metadata: bool,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.upsert");
     refuse_a_document_that_does_not_add_up(facts)?;
+    let body = facts.body.as_str();
+    // Validate the real bytes above, then omit only the disposable payload.
+    // Byte length and source hash keep their ordinary authority.
+    #[cfg(feature = "induced-failure")]
+    let body = if metadata { "" } else { body };
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
@@ -756,8 +766,8 @@ fn upsert(
                     i64::try_from(admitting).expect("a segment count fits i64"),
                     facts.content_hash,
                     facts.byte_length,
-                    facts.body,
-                    hash::sub_fingerprint(&facts.body),
+                    body,
+                    hash::sub_fingerprint(body),
                     facts.body_offset,
                     projection,
                     projection_hash,
