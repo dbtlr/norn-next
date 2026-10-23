@@ -1221,11 +1221,9 @@ pub struct ReadReading {
     /// Rounds of the entry gate acquisitions took after a settle wait,
     /// recorded where each acquisition leaves.
     ///
-    /// **Counted apart from [`ReadReading::gate_rounds_after_the_first`]**, so
-    /// that reading remains separate from [`ReadReading::reader_waits`]: every
-    /// wait for the connection is followed by one round, and every settle
-    /// wait by one round here. So this equals `settle_waits` over any
-    /// window in which no acquisition is still waiting.
+    /// Counted separately from retakes after resource acquisition. A settle
+    /// wait whose deadline prevents a retake contributes to `settle_waits`
+    /// without contributing a round here.
     pub settle_rounds: u64,
     /// Acquisitions refused because the entry was still taking in its change
     /// when their settle bound ran out: each is a
@@ -1513,17 +1511,9 @@ impl ReadEvidence {
 
     /// Record an outside-gate acquisition before it waits or opens.
     ///
-    /// **This is called where the wait begins and not where the read leaves**:
-    /// the acquisition has given the entry gate back and found the connection
-    /// taken, and it waits out another read whichever answer it goes on to get.
-    /// The wait returns only with the connection, so every wait counted here
-    /// ends, and the re-validation that decides the answer runs after both.
-    /// Counting it here lets a reading taken while reads contend name the
-    /// acquisitions that are waiting, before any of them is let through.
-    ///
-    /// The wait is the host's own count rather than a number the establishment
-    /// reports: the acquisition is what waited, and the establishment it
-    /// eventually ran waited for nothing.
+    /// Counts capacity waits and cold opens, including failure and retirement.
+    /// Recording the start exposes acquisitions still in progress. A successful
+    /// gate retake later rechecks identity and stance before establishment.
     pub(crate) fn count_reader_wait(&self) {
         self.reader_waits.fetch_add(1, Ordering::Relaxed);
     }
