@@ -455,6 +455,17 @@ fn check_measurement_reporter(mode: &str) {
             .find(|row| row["startup_stage"] == "canonical-health")
             .unwrap();
         assert_eq!(early["answer"], final_answer["answer"]);
+        assert_eq!(
+            final_answer["canonical_work"].as_object().unwrap().len(),
+            11
+        );
+        assert!(
+            final_answer["canonical_work"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value.as_u64().unwrap() > 0)
+        );
         assert_eq!(early["answer"]["report"]["document"]["links"]["total"], 0);
         assert_eq!(
             early["answer"]["report"]["document"]["findings"]["total"],

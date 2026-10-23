@@ -11,6 +11,41 @@ from loading import validate_stage
 
 
 class LoadingChecks(unittest.TestCase):
+    def test_cold_run_can_disable_worker_profiling(self):
+        from loading import run_one
+        with patch.object(Path, "mkdir"), patch("loading.Current", side_effect=RuntimeError("worker started")) as worker:
+            with self.assertRaisesRegex(RuntimeError, "worker started"):
+                run_one(Path("worker"), Path("run"), {}, "baseline", profiling=False)
+        self.assertFalse(worker.call_args.kwargs["profiling"])
+
+    def test_whole_get_comparison_preserves_content_and_checks_finding_handles(self):
+        from loading import whole_get_answer
+        document = {"path": "note.md", "fields": {}, "body": {"text": "Body", "byte_length": 4}}
+        for name in ("links", "headings", "blocks", "tags"):
+            document[name] = {"items": [], "total": 0}
+        document["findings"] = {"items": [{"id": 7, "generation": 3,
+            "kind": "broken_link", "target": "missing"}], "total": 1}
+        stage = {"projection_epoch": "early", "projection_generation": 3,
+                 "answer": {"report": {"shape": "record", "document": document, "rule_sets": []},
+                            "unsatisfied": [], "advisories": []}}
+        later = copy.deepcopy(stage)
+        later["projection_epoch"], later["projection_generation"] = "final", 100
+        later["answer"]["report"]["document"]["findings"]["items"][0].update(id=81, generation=90)
+        self.assertEqual(whole_get_answer(stage), whole_get_answer(later))
+        later["answer"]["report"]["document"]["findings"]["items"][0]["target"] = "different"
+        self.assertNotEqual(whole_get_answer(stage), whole_get_answer(later))
+        stage["answer"]["report"]["document"]["findings"]["items"][0]["generation"] = 4
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            whole_get_answer(stage)
+
+    def test_whole_get_comparison_rejects_an_omitted_collection(self):
+        from loading import whole_get_answer
+        stage = {"projection_epoch": "early", "projection_generation": 3,
+                 "answer": {"report": {"shape": "record", "document": {"path": "note.md"}},
+                            "unsatisfied": [], "advisories": []}}
+        with self.assertRaisesRegex(ValueError, "whole-record"):
+            whole_get_answer(stage)
+
     def test_cache_options_are_explicit_even_when_ambient_options_are_present(self):
         ambient = {"NORN_PERFORMANCE_INITIAL_CACHE_KIB": "123", "NORN_PERFORMANCE_CACHE_DIAGNOSTICS": "1"}
         with patch.dict(os.environ, ambient), patch.object(Path, "mkdir"):

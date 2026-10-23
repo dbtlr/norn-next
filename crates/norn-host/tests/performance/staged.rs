@@ -7,8 +7,8 @@ use norn_wire::{
     VaultAddress, VaultName,
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct Reporter {
@@ -17,6 +17,7 @@ pub struct Reporter {
     checkpoint: AtomicU64,
     silent: bool,
     intake: AtomicBool,
+    canonical_work: Mutex<Option<std::collections::BTreeMap<&'static str, u64>>>,
 }
 
 impl Reporter {
@@ -27,6 +28,7 @@ impl Reporter {
             checkpoint: AtomicU64::new(0),
             silent,
             intake: AtomicBool::new(false),
+            canonical_work: Mutex::new(None),
         }
     }
 
@@ -100,16 +102,26 @@ impl Reporter {
             other => return Err(format!("unknown checkpoint operation {other}")),
         };
         let elapsed = started.elapsed().as_nanos();
-        super::emit(
-            json!({"startup_stage":stage,"probe":probe,"stage_boundary_ns":boundary,
+        let mut record = json!({"startup_stage":stage,"probe":probe,"stage_boundary_ns":boundary,
             "query_host_ns":elapsed,"query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
-            "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),"projection_generation":snapshot.reading().write_generation(),"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"simulation":"paused","global_ready":false}),
-        );
+            "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),"projection_generation":snapshot.reading().write_generation(),"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"simulation":"paused","global_ready":false});
+        if stage == "canonical-health" {
+            record["canonical_work"] = json!(*self.canonical_work.lock().unwrap());
+        }
+        super::emit(record);
         Ok(())
     }
 }
 
 impl Observer for Reporter {
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        *self.canonical_work.lock().unwrap() = Some(work.clone());
+        Ok(())
+    }
+
     fn intake(
         &self,
         reader: Arc<norn_host::startup_experiment::IntakeReader>,
@@ -204,10 +216,12 @@ impl Observer for Reporter {
                 Stage::LinkHealth => &["health"],
             };
             for name in names {
-                super::emit(
-                    json!({"startup_stage":name,"probe":"boundary","stage_boundary_ns":boundary,
-                    "query_host_ns":0,"queries_executed":false,"simulation":"paused","global_ready":false}),
-                );
+                let mut record = json!({"startup_stage":name,"probe":"boundary","stage_boundary_ns":boundary,
+                    "query_host_ns":0,"queries_executed":false,"simulation":"paused","global_ready":false});
+                if stage == Stage::CanonicalHealth {
+                    record["canonical_work"] = json!(*self.canonical_work.lock().unwrap());
+                }
+                super::emit(record);
             }
             return Ok(());
         }

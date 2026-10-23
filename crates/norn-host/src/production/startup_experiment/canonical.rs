@@ -95,7 +95,9 @@ pub(super) fn run(
             if requested_class_exists(&reader, &model, &experiment.get_target)? {
                 notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
             } else {
-                experiment.observer.declined("empty eligible class needs the global suggestion universe; wait for ordinary readiness")
+                experiment
+                    .observer
+                    .declined("this prototype leaves empty eligible classes to ordinary readiness")
                     .map_err(JobFailure::Environmental)?;
             }
         } else {
@@ -125,8 +127,15 @@ pub(super) fn run(
     }
     let work = crate::evidence::startup_writer_work()
         .into_iter()
-        .map(|(key, value)| (key, value - before[key]))
-        .collect();
+        .map(|(key, value)| {
+            value
+                .checked_sub(before[key])
+                .map(|delta| (key, delta))
+                .ok_or_else(|| {
+                    JobFailure::Environmental(format!("ordinary writer counter decreased: {key}"))
+                })
+        })
+        .collect::<Result<_, _>>()?;
     experiment
         .observer
         .canonical_work(&work)
@@ -162,7 +171,7 @@ fn prepare(
     else {
         return Ok(false);
     };
-    // A missing get's suggestion universe is global, outside this closure.
+    // This prototype serves existing records; missing gets wait for ordinary readiness.
     if demanded.is_empty() {
         return Ok(false);
     }
@@ -256,7 +265,7 @@ fn prepare(
 
 // Catalogue neighborhoods over-approximate eligibility: every name may be
 // quarantined, ignored, or outside the requested suffix. The ordinary builder
-// decides this too; an empty result cannot carry global missing-get suggestions.
+// decides this too. This prototype conservatively leaves empty classes to readiness.
 fn requested_class_exists(
     reader: &Arc<SnapshotReader>,
     model: &ContentModel,

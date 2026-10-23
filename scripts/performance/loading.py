@@ -54,6 +54,30 @@ def expected_checkpoints(mode):
     raise ValueError(f"unknown loading mode: {mode}")
 
 
+def whole_get_answer(stage):
+    """Keep the complete record while comparing finding content across store epochs."""
+    answer = copy.deepcopy(stage["answer"])
+    report = answer["report"]
+    document = report.get("document", {})
+    required = {"path", "body", "fields", "headings", "blocks", "tags", "links", "findings"}
+    if report.get("shape") != "record" or not required <= document.keys():
+        raise ValueError("whole-record comparison cannot omit requested collections")
+    epoch, generation = stage.get("projection_epoch"), stage.get("projection_generation")
+    if not isinstance(epoch, str) or not epoch or type(generation) is not int or generation < 0:
+        raise ValueError("whole-record projection provenance is missing or invalid")
+    findings = document["findings"]
+    if findings["total"] < len(findings["items"]):
+        raise ValueError("whole-record finding total is below its returned head")
+    for finding in findings["items"]:
+        if (type(finding.get("id")) is not int or finding["id"] <= 0
+                or type(finding.get("generation")) is not int
+                or not 0 <= finding["generation"] <= generation):
+            raise ValueError("whole-record finding provenance is outside its projection")
+        finding.pop("id")
+        finding.pop("generation")
+    return answer
+
+
 def metadata_answer(stage):
     """Normalize only verified projection identity; preserve query content and cursor keys."""
     answer = copy.deepcopy(stage["answer"])
@@ -156,7 +180,7 @@ def validate_stage(stage, manifest):
             raise ValueError("final health did not answer a summary")
 
 
-def run_one(binary, root, manifest, mode):
+def run_one(binary, root, manifest, mode, *, profiling=True):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
     began = time.perf_counter_ns()
     keys = []
@@ -179,7 +203,7 @@ def run_one(binary, root, manifest, mode):
         with (root / "stages.jsonl").open("a") as log:
             append(log, stage)
 
-    worker = Current(binary, root, profiling=True,
+    worker = Current(binary, root, profiling=profiling,
                      loading=None if mode == "baseline" else mode, stage_handler=on_stage)
     try:
         ready_observed = time.perf_counter_ns() - began
@@ -193,11 +217,7 @@ def run_one(binary, root, manifest, mode):
         if canonical and not mode.endswith("-silent"):
             early = next(s for s in worker.stages if s["startup_stage"] == "canonical-demand")
             final = next(s for s in worker.stages if s["startup_stage"] == "canonical-health")
-            # This controller deliberately requires the authored no-findings fixture.
-            # Rich fixtures need the separate whole-get oracle's handle checks.
-            if any(row["answer"]["report"]["document"]["findings"]["total"] != 0 for row in (early, final)):
-                raise ValueError("cold controller whole-get comparison requires a fixture with no findings")
-            if early["answer"] != final["answer"]:
+            if whole_get_answer(early) != whole_get_answer(final):
                 raise ValueError("demand whole-record answer differs from ordinary final answer")
         if mode == "canonical-intake":
             early_rows = {s["probe"]: s for s in worker.stages if s["startup_stage"] == "canonical-intake"}
@@ -237,7 +257,7 @@ def run_one(binary, root, manifest, mode):
             raise ValueError("the health checkpoint preceded its complete findings")
     for stream in ("stdout", "stderr"):
         shutil.copy2(root / f"worker.{stream}.log", root / f"fresh.{stream}.log")
-    restart = Current(binary, root, profiling=True, loading=None if mode == "baseline" else mode)
+    restart = Current(binary, root, profiling=profiling, loading=None if mode == "baseline" else mode)
     try:
         if restart.stages:
             raise ValueError("unchanged restart entered the initial loading experiment")
@@ -265,6 +285,7 @@ def main():
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
     parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
+    parser.add_argument("--no-profile", action="store_true", help="disable optional profiling spans in measured workers")
     args = parser.parse_args()
     if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
         parser.error("include one baseline and use unique modes and sizes")
@@ -284,6 +305,7 @@ def main():
         shutil.copy2(path, runner / path.name)
     metadata = {"completed": False, "build": receipt, "source_sha256": source_tree_digest(repo),
                 "sizes": args.sizes, "modes": args.modes, "repetitions": args.repetitions,
+                "profiling": not args.no_profile,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "load_start": os.getloadavg()}
     write_json(args.output / "run.json", metadata)
@@ -312,7 +334,7 @@ def main():
                         shutil.copytree(frozen / "vault", root / "vault")
                         if tree_digest(root / "vault") != manifest["tree_sha256"]:
                             raise ValueError("copied fixture changed")
-                        result = run_one(binary, root, manifest, mode)
+                        result = run_one(binary, root, manifest, mode, profiling=not args.no_profile)
                         digest = result["store"]["semantic_sha256"]
                         if references.setdefault(size, digest) != digest:
                             raise ValueError("staging changed the final index")
