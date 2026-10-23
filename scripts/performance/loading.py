@@ -14,7 +14,7 @@ from baseline import READS, append, write_json
 from fixture import tree_digest
 from provenance import sha256, source_tree_digest, verify_build
 from results import validate_read
-from startup import storage_bytes
+from startup import storage_bytes, validate_work
 from startup_audit import audit_store
 from transport import Current, PREFIX, environment, resources
 
@@ -74,7 +74,7 @@ def run_one(binary, root, manifest, mode):
 
     def on_stage(stage):
         key = stage["startup_stage"], stage["probe"]
-        if mode == "layered-silent":
+        if mode.endswith("-silent"):
             if key not in SILENT_EXPECTED or stage.get("queries_executed") is not False:
                 raise ValueError("a silent control emitted a query claim")
         else:
@@ -96,7 +96,7 @@ def run_one(binary, root, manifest, mode):
             answer, elapsed = worker.call(command)
             validate_read("current", command, answer, manifest)
             checked.append({"name": name, "round_trip_ns": elapsed, "host_ns": answer["host_ns"]})
-        expected = set() if mode == "baseline" else SILENT_EXPECTED if mode == "layered-silent" else EXPECTED
+        expected = set() if mode == "baseline" else SILENT_EXPECTED if mode.endswith("-silent") else EXPECTED
         if set(keys) != expected:
             raise ValueError("startup checkpoint coverage differs from the requested mode")
         milestones = {}
@@ -124,11 +124,29 @@ def run_one(binary, root, manifest, mode):
         raise ValueError("integrity worker did not confirm its check")
     result["integrity_verified"] = True
     result["store"] = audit_store(binary, root, manifest)
-    if mode not in ("baseline", "layered-silent"):
+    if mode != "baseline" and not mode.endswith("-silent"):
         summary = next(s for s in result["stages"] if s["startup_stage"] == "health")
         total = sum(row["count"] for row in summary["answer"]["report"]["by_kind"])
         if total != result["store"]["counts"]["findings"]:
             raise ValueError("the health checkpoint preceded its complete findings")
+    for stream in ("stdout", "stderr"):
+        shutil.copy2(root / f"worker.{stream}.log", root / f"fresh.{stream}.log")
+    restart = Current(binary, root, profiling=True, loading=None if mode == "baseline" else mode)
+    try:
+        if restart.stages:
+            raise ValueError("unchanged restart entered the initial loading experiment")
+        validate_work(restart.ready["job_evidence"], "restart", manifest["document_count"], 128)
+        for _, command in READS:
+            answer, _ = restart.call(command)
+            validate_read("current", command, answer, manifest)
+        result["restart"] = {"ready": restart.ready, "resources": resources(restart.process.pid)}
+    finally:
+        restart.close()
+    restarted = audit_store(binary, root, manifest)
+    for key in ("store_epoch", "write_generation", "semantic_sha256"):
+        if restarted[key] != result["store"][key]:
+            raise ValueError("unchanged restart rebuilt or changed the final index")
+    result["restart"]["verified"] = True
     result["verified"] = True
     return result
 
@@ -139,7 +157,7 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
     if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):

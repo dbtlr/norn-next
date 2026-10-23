@@ -12,6 +12,7 @@ pub enum Stage {
     RequestedDocument,
     Frontmatter,
     RichFacts,
+    AllFacts,
     LinkHealth,
 }
 
@@ -31,6 +32,7 @@ pub struct Experiment {
     pub get_target: String,
     pub observer: Arc<dyn Observer>,
     started: AtomicBool,
+    separate_frontmatter: bool,
 }
 
 impl Experiment {
@@ -39,6 +41,16 @@ impl Experiment {
             get_target: get_target.into(),
             observer,
             started: AtomicBool::new(false),
+            separate_frontmatter: true,
+        })
+    }
+
+    pub fn facts_once(get_target: impl Into<String>, observer: Arc<dyn Observer>) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
         })
     }
 
@@ -151,19 +163,22 @@ pub(super) fn run(
         pending.flush_for_mode(true)?;
     }
     notify(experiment, Stage::RequestedDocument, &reader, &model)?;
-    let base_timing = norn_store::profiling::span("startup.base");
-    replay_phase(
-        store,
-        &inventory,
-        &root,
-        exclusions,
-        policy,
-        &mut account,
-        true,
-        progress,
-    )?;
-    drop(base_timing);
-    notify(experiment, Stage::Frontmatter, &reader, &model)?;
+    if experiment.separate_frontmatter {
+        let base_timing = norn_store::profiling::span("startup.base");
+        replay_phase(
+            store,
+            &inventory,
+            &root,
+            exclusions,
+            policy,
+            &mut account,
+            true,
+            true,
+            progress,
+        )?;
+        drop(base_timing);
+        notify(experiment, Stage::Frontmatter, &reader, &model)?;
+    }
     let rich_timing = norn_store::profiling::span("startup.rich");
     replay_phase(
         store,
@@ -173,10 +188,20 @@ pub(super) fn run(
         policy,
         &mut account,
         false,
+        !experiment.separate_frontmatter,
         progress,
     )?;
     drop(rich_timing);
-    notify(experiment, Stage::RichFacts, &reader, &model)?;
+    notify(
+        experiment,
+        if experiment.separate_frontmatter {
+            Stage::RichFacts
+        } else {
+            Stage::AllFacts
+        },
+        &reader,
+        &model,
+    )?;
     let health_timing = norn_store::profiling::span("startup.final_health");
     account.walked(HealScope::Vault, store.path_order());
     close_job(store, &root, exclusions, policy, &mut account)?;
@@ -233,6 +258,7 @@ fn replay_phase(
     policy: ProductionPolicy,
     account: &mut Account,
     base: bool,
+    files: bool,
     progress: &Healing<'_, ProductionAttachment>,
 ) -> Result<(), JobFailure> {
     let mut after: Option<Vec<u8>> = None;
@@ -248,7 +274,7 @@ fn replay_phase(
         let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
         for (_, record) in &page {
             let fact = inventory.replay(record).map_err(effect)?;
-            load_fact(&mut pending, fact, base, base)?;
+            load_fact(&mut pending, fact, base, files)?;
             processed += 1;
             if pending.is_full() {
                 pending.flush_for_mode(true)?;

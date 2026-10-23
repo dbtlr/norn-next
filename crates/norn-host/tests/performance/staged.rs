@@ -156,6 +156,7 @@ impl Observer for Reporter {
                 Stage::RequestedDocument => &["get"],
                 Stage::Frontmatter => &["frontmatter", "lexical"],
                 Stage::RichFacts => &["rich"],
+                Stage::AllFacts => &["frontmatter", "lexical", "rich"],
                 Stage::LinkHealth => &["health"],
             };
             for name in names {
@@ -166,86 +167,97 @@ impl Observer for Reporter {
             }
             return Ok(());
         }
+        self.probes(stage, &reader, &model)
+    }
+}
+
+impl Reporter {
+    fn probes(
+        &self,
+        stage: Stage,
+        reader: &Arc<SnapshotReader>,
+        model: &ContentModel,
+    ) -> Result<(), String> {
         match stage {
+            Stage::AllFacts => {
+                self.probes(Stage::Frontmatter, reader, model)?;
+                self.probes(Stage::RichFacts, reader, model)
+            }
             Stage::RequestedDocument => self.query(
                 "get",
                 "slug",
-                &reader,
-                &model,
+                reader,
+                model,
                 json!({"op":"get","target":"small"}),
             ),
             Stage::Frontmatter => {
                 self.query(
                     "frontmatter",
                     "active_page",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"find"}),
                 )?;
                 self.query(
                     "frontmatter",
                     "document_count",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"count"}),
                 )?;
                 self.query(
                     "frontmatter",
                     "active_count",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"count","active":true}),
                 )?;
                 self.query(
                     "lexical",
                     "common",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"search","query":"profilecommonword"}),
                 )?;
                 self.query(
                     "lexical",
                     "rare",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"search","query":"profileraresignal"}),
                 )?;
                 self.query(
                     "lexical",
                     "missing",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"search","query":"profilenonexistenttoken"}),
                 )?;
                 self.query(
                     "lexical",
                     "filtered",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"search","query":"profilecommonword","path":"bench/**"}),
                 )?;
                 self.query(
                     "lexical",
                     "coverage",
-                    &reader,
-                    &model,
+                    reader,
+                    model,
                     json!({"op":"count","matches":"profilecommonword"}),
                 )
             }
             Stage::RichFacts => self.query(
                 "rich",
                 "section",
-                &reader,
-                &model,
+                reader,
+                model,
                 json!({"op":"get","target":"bench/large.md#Details"}),
             ),
-            Stage::LinkHealth => self.query(
-                "health",
-                "summary",
-                &reader,
-                &model,
-                json!({"op":"validate"}),
-            ),
+            Stage::LinkHealth => {
+                self.query("health", "summary", reader, model, json!({"op":"validate"}))
+            }
         }
     }
 }

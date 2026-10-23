@@ -11,7 +11,7 @@ use crate::find::{compose_class_head, compose_class_total};
 use crate::resolve::TargetClass;
 use crate::{AmbiguityIgnore, DocumentPath, StoreError};
 
-/// A bounded head and exact count of names matching the production resolver.
+/// A bounded head and exact count of provisional Markdown names, using production SQL.
 pub struct CatalogueCandidates {
     pub paths: Vec<String>,
     pub total: u64,

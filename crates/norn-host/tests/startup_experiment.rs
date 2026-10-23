@@ -134,9 +134,12 @@ impl Observer for Probe {
         };
         assert_eq!(document.path.as_str(), "first.md");
         assert_eq!(document.body.unwrap().text(), "[[later]] #first\n");
-        let expected_links = u64::from(matches!(stage, Stage::RichFacts | Stage::LinkHealth));
+        let expected_links = u64::from(matches!(
+            stage,
+            Stage::RichFacts | Stage::AllFacts | Stage::LinkHealth
+        ));
         assert_eq!(document.links.unwrap().total, expected_links);
-        if stage == Stage::Frontmatter {
+        if matches!(stage, Stage::Frontmatter | Stage::AllFacts) {
             let params = FindParams::new(VaultAddress::name(VaultName::new("notes").unwrap()))
                 .with_predicates([Predicate::equal_to("status", "active")])
                 .with_columns([Column::path()]);
@@ -154,6 +157,15 @@ impl Observer for Probe {
 
 #[test]
 fn staged_queries_precede_the_same_final_healthy_index() {
+    check_staged_queries(false);
+}
+
+#[test]
+fn one_facts_pass_exposes_complete_queries_before_health() {
+    check_staged_queries(true);
+}
+
+fn check_staged_queries(once: bool) {
     let scratch = norn_testkit::scratch::Scratch::new("norn-startup-stages");
     let root = scratch.join("vault");
     std::fs::create_dir_all(root.join(".norn")).unwrap();
@@ -172,7 +184,11 @@ fn staged_queries_precede_the_same_final_healthy_index() {
     let probe = Arc::new(Probe::default());
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::new("first", probe.clone()),
+        if once {
+            Experiment::facts_once("first", probe.clone())
+        } else {
+            Experiment::new("first", probe.clone())
+        },
     );
     let _demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -182,12 +198,16 @@ fn staged_queries_precede_the_same_final_healthy_index() {
     }
     assert_eq!(
         *probe.stages.lock().unwrap(),
-        [
-            Stage::RequestedDocument,
-            Stage::Frontmatter,
-            Stage::RichFacts,
-            Stage::LinkHealth
-        ]
+        if once {
+            vec![Stage::RequestedDocument, Stage::AllFacts, Stage::LinkHealth]
+        } else {
+            vec![
+                Stage::RequestedDocument,
+                Stage::Frontmatter,
+                Stage::RichFacts,
+                Stage::LinkHealth,
+            ]
+        }
     );
     drop(_demand);
     drop(host);
@@ -235,12 +255,16 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
     std::os::unix::fs::symlink("target.md", root.join("alias.md")).unwrap();
     let vault = attach::Vault::adopt(scratch.root());
     let mut results = Vec::new();
-    for staged in [false, true] {
-        let machine = vault.beside(&scratch.join(if staged { "staged" } else { "ordinary" }));
-        let host = if staged {
+    for mode in ["ordinary", "staged", "facts-once"] {
+        let machine = vault.beside(&scratch.join(mode));
+        let host = if mode != "ordinary" {
             machine.host_with_startup_experiment(
                 norn_host::ProductionPolicy::new(2, 2).unwrap(),
-                Experiment::new("first", Arc::new(Quiet)),
+                if mode == "facts-once" {
+                    Experiment::facts_once("first", Arc::new(Quiet))
+                } else {
+                    Experiment::new("first", Arc::new(Quiet))
+                },
             )
         } else {
             machine.host_with_policy(norn_host::ProductionPolicy::new(2, 2).unwrap())
@@ -261,12 +285,11 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
             norn_store::startup_audit::audit(&machine.database(), |_, _, _| Ok(())).unwrap();
         results.push((audit, advisories));
     }
-    assert_eq!(
-        results[0].0["semantic_sha256"],
-        results[1].0["semantic_sha256"]
-    );
-    assert_eq!(results[0].0["counts"], results[1].0["counts"]);
-    assert_eq!(results[0].1, results[1].1);
+    for result in &results[1..] {
+        assert_eq!(results[0].0["semantic_sha256"], result.0["semantic_sha256"]);
+        assert_eq!(results[0].0["counts"], result.0["counts"]);
+        assert_eq!(results[0].1, result.1);
+    }
     assert_eq!(
         results[0].1.len(),
         1,

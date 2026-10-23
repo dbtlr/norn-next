@@ -337,3 +337,17 @@ changeset semantics or an accepted architectural decision. It intentionally obse
 partial projections and defers health outside the ordinary per-changeset contract.
 Semantic model loading and inference are not measured: this checkout has only the
 deterministic stub embedder, and the measurement worker composes no semantic engine.
+
+The `facts-once` and `facts-once-silent` controls keep the catalogue and requested
+slug get, then derive all facts in one pass before calculating link health.
+Frontmatter, lexical and rich queries share that pass's completion boundary.
+Compare them with `layered` to distinguish earlier frontmatter availability from
+the extra read and write pass. Every completed mode also reopens its unchanged
+store: the checks require no derivation, no experiment callbacks, unchanged epoch
+and generation, and the same final contents.
+
+`scripts/performance/loading_warm.py` reuses the verified warm workload after
+ordinary and staged imports. It compares a standard baseline build, the candidate
+in ordinary mode, and the requested silent loading modes. It retains all read and
+write checks, final source equality, and normalized derived-store equality. These
+measurements qualify the resulting warm index separately from first-load clocks.

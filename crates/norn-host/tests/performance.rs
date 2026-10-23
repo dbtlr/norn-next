@@ -136,23 +136,22 @@ fn performance_worker() {
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
     #[cfg(feature = "induced-failure")]
-    let host = if std::env::var("NORN_PERFORMANCE_LOADING")
-        .is_ok_and(|mode| mode.starts_with("layered"))
-    {
-        vault.host_with_startup_experiment(
-            policy,
-            norn_host::startup_experiment::Experiment::new(
-                "small",
-                std::sync::Arc::new(staged::Reporter::new(
-                    began,
-                    vault.name().clone(),
-                    std::env::var("NORN_PERFORMANCE_LOADING")
-                        .is_ok_and(|mode| mode == "layered-silent"),
-                )),
-            ),
-        )
-    } else {
-        vault.host_with_policy(policy)
+    let host = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+        Ok(mode @ ("layered" | "layered-silent" | "facts-once" | "facts-once-silent")) => {
+            let reporter = std::sync::Arc::new(staged::Reporter::new(
+                began,
+                vault.name().clone(),
+                mode.ends_with("-silent"),
+            ));
+            let experiment = if mode.starts_with("facts-once") {
+                norn_host::startup_experiment::Experiment::facts_once("small", reporter)
+            } else {
+                norn_host::startup_experiment::Experiment::new("small", reporter)
+            };
+            vault.host_with_startup_experiment(policy, experiment)
+        }
+        Err(_) => vault.host_with_policy(policy),
+        Ok(mode) => panic!("unknown startup experiment {mode}"),
     };
     #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);

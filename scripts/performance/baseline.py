@@ -114,8 +114,16 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     state = {name: {"path": name, "body": body, "fields": {"status": "draft", "perf_bucket": "probe"}}
              for name, body in manifest["probe_bodies"].items()}
     began = time.perf_counter_ns()
-    worker = cls(binary, root)
+    loading = getattr(args, "loading", None)
+    if loading and engine != "current":
+        raise ValueError("staged loading is only supported by the current worker")
+    worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
     try:
+        if loading:
+            from loading import SILENT_EXPECTED
+            if {(row["startup_stage"], row["probe"]) for row in worker.stages} != SILENT_EXPECTED:
+                raise ValueError("warm comparison did not execute the requested loading mode")
+            write_json(root / "loading-checkpoints.json", worker.stages)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
         first, _ = worker.call({"op": "search", "query": COMMON})
         validate_read(engine, {"op": "search", "query": COMMON}, first, manifest)
