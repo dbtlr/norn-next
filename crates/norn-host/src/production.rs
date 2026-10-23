@@ -1232,6 +1232,10 @@ impl ProductionEntryOps {
         #[cfg(feature = "induced-failure")]
         if let Some(experiment) = &self.startup_experiment
             && experiment.take_initial_attempt()
+            && !matches!(
+                attachment.store.open_outcome(),
+                norn_store::OpenOutcome::Reused
+            )
         {
             let order = attachment.store.path_order();
             if HealScope::Vault

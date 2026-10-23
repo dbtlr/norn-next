@@ -56,6 +56,7 @@ pub fn get(
     snapshot.get(params, model, &crate::text::TextLayer)
 }
 
+use super::HealScope;
 use super::{
     Account, Declaration, JobFailure, Pending, ProductionAttachment, ProductionPolicy, close_job,
     count_document_derived, count_increment_work, document_path, effect, is_markdown,
@@ -75,10 +76,15 @@ pub(super) fn run(
     progress: &Healing<'_, ProductionAttachment>,
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
+    let catalogue_timing = norn_store::profiling::span("startup.catalogue");
     let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
     let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
     let store = &mut attachment.store;
+    let temp_settings = store
+        .begin_request()
+        .start_startup_experiment()
+        .map_err(store_effect)?;
     let declared = Declaration::read(store)?;
     let model = Arc::clone(declared.model.shared_content_model());
     let directory = attachment.shadows.directory().join("startup-catalogue");
@@ -109,11 +115,16 @@ pub(super) fn run(
         }
     }
     catalogue.finish_inventory().map_err(store_effect)?;
-    experiment
-        .observer
-        .catalogue(&catalogue, &model)
-        .map_err(JobFailure::Environmental)?;
+    drop(catalogue_timing);
+    {
+        let _probe = norn_store::profiling::span("startup.probes");
+        experiment
+            .observer
+            .catalogue(&catalogue, &model)
+            .map_err(JobFailure::Environmental)?;
+    }
     let reader = Arc::new(store.reader_pool(&attachment.readers));
+    let _retire_on_exit = RetireReader(Arc::clone(&reader));
     let mut account = Account::default();
     let candidates = catalogue
         .candidates(&experiment.get_target, model.ambiguity_ignore())
@@ -125,6 +136,7 @@ pub(super) fn run(
         ));
     }
     {
+        let _timing = norn_store::profiling::span("startup.requested_document");
         let fact = source
             .fact(Path::new(&candidates.paths[0]))
             .map_err(effect)?;
@@ -139,6 +151,7 @@ pub(super) fn run(
         pending.flush_for_mode(true)?;
     }
     notify(experiment, Stage::RequestedDocument, &reader, &model)?;
+    let base_timing = norn_store::profiling::span("startup.base");
     replay_phase(
         store,
         &inventory,
@@ -149,7 +162,9 @@ pub(super) fn run(
         true,
         progress,
     )?;
+    drop(base_timing);
     notify(experiment, Stage::Frontmatter, &reader, &model)?;
+    let rich_timing = norn_store::profiling::span("startup.rich");
     replay_phase(
         store,
         &inventory,
@@ -160,7 +175,10 @@ pub(super) fn run(
         false,
         progress,
     )?;
+    drop(rich_timing);
     notify(experiment, Stage::RichFacts, &reader, &model)?;
+    let health_timing = norn_store::profiling::span("startup.final_health");
+    account.walked(HealScope::Vault, store.path_order());
     close_job(store, &root, exclusions, policy, &mut account)?;
     {
         let mut request = store.begin_request();
@@ -169,14 +187,28 @@ pub(super) fn run(
             .map_err(store_effect)?;
         count_increment_work(request.counters(), request.read_steps());
     }
+    drop(health_timing);
     notify(experiment, Stage::LinkHealth, &reader, &model)?;
+    let _finalize = norn_store::profiling::span("startup.finalize");
     reader.retire();
     store
         .begin_request()
         .reset_inventory()
         .map_err(store_effect)?;
+    store
+        .begin_request()
+        .complete_startup_experiment(temp_settings)
+        .map_err(store_effect)?;
     attachment.skipped_links = account.links;
     Ok(())
+}
+
+struct RetireReader(Arc<SnapshotReader>);
+
+impl Drop for RetireReader {
+    fn drop(&mut self) {
+        self.0.retire();
+    }
 }
 
 fn notify(
@@ -185,6 +217,7 @@ fn notify(
     reader: &Arc<SnapshotReader>,
     model: &Arc<ContentModel>,
 ) -> Result<(), JobFailure> {
+    let _probe = norn_store::profiling::span("startup.probes");
     experiment
         .observer
         .indexed(stage, Arc::clone(reader), Arc::clone(model))
@@ -236,7 +269,11 @@ fn load_fact(
 ) -> Result<(), JobFailure> {
     match fact {
         norn_fs::WalkFact::Skipped(skip) => {
-            pending.passed_over(skip.path().as_path(), skip.reason())
+            if files {
+                pending.passed_over(skip.path().as_path(), skip.reason());
+            } else if !skip.reason().stands() {
+                pending.account.withheld.absorb(skip.path().as_path());
+            }
         }
         norn_fs::WalkFact::File(file) if !is_markdown(file.path().as_path()) => {
             if files

@@ -8,18 +8,23 @@ use norn_wire::{
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub struct Reporter {
     began: Instant,
     address: VaultAddress,
+    checkpoint: AtomicU64,
+    silent: bool,
 }
 
 impl Reporter {
-    pub fn new(began: Instant, name: VaultName) -> Self {
+    pub fn new(began: Instant, name: VaultName, silent: bool) -> Self {
         Self {
             began,
             address: VaultAddress::name(name),
+            checkpoint: AtomicU64::new(0),
+            silent,
         }
     }
 
@@ -31,7 +36,8 @@ impl Reporter {
         model: &ContentModel,
         command: Value,
     ) -> Result<(), String> {
-        let boundary = self.began.elapsed().as_nanos();
+        let boundary = self.checkpoint.load(Ordering::Relaxed);
+        let requested = self.began.elapsed().as_nanos();
         let started = Instant::now();
         let turn = reader
             .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
@@ -40,11 +46,13 @@ impl Reporter {
         let snapshot = turn.establish().map_err(|error| error.to_string())?;
         let answer = match command["op"].as_str().expect("probe operation") {
             "get" => {
-                let params = GetParams::new(
-                    self.address.clone(),
-                    ResolutionTarget::new(command["target"].as_str().unwrap()).unwrap(),
-                )
-                .with_columns([Column::path(), Column::body(), Column::fields()]);
+                let target = command["target"].as_str().unwrap();
+                let mut params =
+                    GetParams::new(self.address.clone(), ResolutionTarget::new(target).unwrap());
+                if !target.contains('#') {
+                    params =
+                        params.with_columns([Column::path(), Column::body(), Column::fields()]);
+                }
                 let (unsatisfied, report) =
                     norn_host::startup_experiment::get(&snapshot, &params, model)
                         .map_err(|error| format!("{error:?}"))?
@@ -101,7 +109,7 @@ impl Reporter {
         let elapsed = started.elapsed().as_nanos();
         super::emit(
             json!({"startup_stage":stage,"probe":probe,"stage_boundary_ns":boundary,
-            "query_host_ns":elapsed,"query_finished_ns":self.began.elapsed().as_nanos(),
+            "query_host_ns":elapsed,"query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
             "command":command,"answer":answer,"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"global_ready":false}),
         );
         Ok(())
@@ -111,6 +119,13 @@ impl Reporter {
 impl Observer for Reporter {
     fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
         let boundary = self.began.elapsed().as_nanos();
+        if self.silent {
+            super::emit(
+                json!({"startup_stage":"catalogue","probe":"boundary","stage_boundary_ns":boundary,
+                "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+            );
+            return Ok(());
+        }
         let began = Instant::now();
         let mut answers = Vec::new();
         for target in ["small", "roadmap", "profilenonexistentdocument"] {
@@ -134,6 +149,23 @@ impl Observer for Reporter {
         reader: Arc<SnapshotReader>,
         model: Arc<ContentModel>,
     ) -> Result<(), String> {
+        let boundary = self.began.elapsed().as_nanos() as u64;
+        self.checkpoint.store(boundary, Ordering::Relaxed);
+        if self.silent {
+            let names: &[&str] = match stage {
+                Stage::RequestedDocument => &["get"],
+                Stage::Frontmatter => &["frontmatter", "lexical"],
+                Stage::RichFacts => &["rich"],
+                Stage::LinkHealth => &["health"],
+            };
+            for name in names {
+                super::emit(
+                    json!({"startup_stage":name,"probe":"boundary","stage_boundary_ns":boundary,
+                    "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+                );
+            }
+            return Ok(());
+        }
         match stage {
             Stage::RequestedDocument => self.query(
                 "get",

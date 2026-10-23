@@ -122,10 +122,10 @@ class Current:
 
     def _read(self):
         for line in self.process.stdout:
+            self.raw.write(line)
+            self.raw.flush()
             if PREFIX in line:
                 self.messages.put(json.loads(line.split(PREFIX, 1)[1]))
-            else:
-                self.raw.write(line)
         self.messages.put(None)
 
     def receive(self):

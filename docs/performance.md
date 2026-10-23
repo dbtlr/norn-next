@@ -319,8 +319,17 @@ The normal host remains warming until all stages and watcher reconciliation fini
 Checkpoint probes currently pause the loading worker while they read. Their costs
 remain inside total completion time, and ordinary warm requests use the normal host
 after completion. Continuous request traffic during loading needs its own measurement.
-Failed experimental stores are disposable and must not be reused. No crash-resume
-or live-vault migration claim is made.
+The `layered-silent` control records boundaries without running intermediate queries.
+Worker-clock checkpoint boundaries and loading spans are distinct from request,
+serialization, controller-validation and resource-sampling clocks. Frontmatter and
+lexical queries share a boundary in this first experiment. The frontmatter checkpoint
+admits field predicates, not the tag facet, which also depends on body tags.
+
+Failed experimental stores retain an incomplete marker. Every ordinary store open
+refuses that marker, including builds without experimental support. Completed imports
+remove it and restore the writer's original temporary-storage settings. No crash-resume
+or live-vault migration claim is made. Full-text rank-1 and store integrity checks run
+after shutdown, outside startup clocks.
 
 The experiment is compiled only with `induced-failure` and activated by the
 measurement worker's explicit loading selection. It does not change ordinary

@@ -1058,6 +1058,16 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
+        // An interrupted experiment may hold correct content hashes beside
+        // incomplete projections. Ordinary healing must never adopt those rows.
+        if meta::get_meta::<i64>(database.connection(), "startup_experiment_incomplete")?.is_some()
+        {
+            return Err(StoreError::Lifecycle {
+                operation: "opening an incomplete startup experiment",
+                path: path.to_path_buf(),
+                message: "discard this disposable experimental store before reusing it".to_string(),
+            });
+        }
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
             count_results: Arc::new(crate::count::CountResults::for_store(

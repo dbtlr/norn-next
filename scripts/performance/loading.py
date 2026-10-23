@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from provenance import sha256, source_tree_digest, verify_build
 from results import validate_read
 from startup import storage_bytes
 from startup_audit import audit_store
-from transport import Current, resources
+from transport import Current, PREFIX, environment, resources
 
 
 EXPECTED = {("catalogue", "names"), ("get", "slug"),
@@ -24,6 +25,8 @@ EXPECTED = {("catalogue", "names"), ("get", "slug"),
             ("lexical", "rare"), ("lexical", "missing"),
             ("lexical", "filtered"), ("lexical", "coverage"),
             ("rich", "section"), ("health", "summary")}
+SILENT_EXPECTED = {(stage, "boundary") for stage in
+                   ("catalogue", "get", "frontmatter", "lexical", "rich", "health")}
 
 
 def validate_stage(stage, manifest):
@@ -67,15 +70,22 @@ def run_one(binary, root, manifest, mode):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
     began = time.perf_counter_ns()
     keys = []
+    root.mkdir(parents=True, exist_ok=True)
 
     def on_stage(stage):
-        validate_stage(stage, manifest)
         key = stage["startup_stage"], stage["probe"]
+        if mode == "layered-silent":
+            if key not in SILENT_EXPECTED or stage.get("queries_executed") is not False:
+                raise ValueError("a silent control emitted a query claim")
+        else:
+            validate_stage(stage, manifest)
         if key in keys:
             raise ValueError("duplicate checkpoint")
         keys.append(key)
         stage["validated_after_launch_ns"] = time.perf_counter_ns() - began
         stage["verified"] = True
+        with (root / "stages.jsonl").open("a") as log:
+            append(log, stage)
 
     worker = Current(binary, root, profiling=True,
                      loading=None if mode == "baseline" else mode, stage_handler=on_stage)
@@ -86,9 +96,16 @@ def run_one(binary, root, manifest, mode):
             answer, elapsed = worker.call(command)
             validate_read("current", command, answer, manifest)
             checked.append({"name": name, "round_trip_ns": elapsed, "host_ns": answer["host_ns"]})
-        if mode == "baseline" and keys or mode != "baseline" and set(keys) != EXPECTED:
+        expected = set() if mode == "baseline" else SILENT_EXPECTED if mode == "layered-silent" else EXPECTED
+        if set(keys) != expected:
             raise ValueError("startup checkpoint coverage differs from the requested mode")
+        milestones = {}
+        for stage in worker.stages:
+            name = stage["startup_stage"]
+            milestones[name] = min(milestones.get(name, stage["stage_boundary_ns"]), stage["stage_boundary_ns"])
         result = {"mode": mode, "ready_observed_ns": ready_observed, "ready": worker.ready,
+                  "checkpoint_boundaries_ns": milestones,
+                  "probe_query_ns": sum(stage["query_host_ns"] for stage in worker.stages),
                   "stages": worker.stages, "checks": checked, "load_at_ready": os.getloadavg(),
                   "resources_at_ready": resources(worker.process.pid),
                   "storage_at_ready": storage_bytes(root)}
@@ -98,8 +115,16 @@ def run_one(binary, root, manifest, mode):
         closed = time.perf_counter_ns()
     result["shutdown_ns"] = closed - closing
     result["validated_lifecycle_ns"] = closed - began
+    verification = subprocess.run([str(binary), "verify"], cwd=root,
+        env=environment(root, (root / "performance-token").read_text()),
+        capture_output=True, text=True, timeout=300, check=True)
+    (root / "integrity.stdout.log").write_text(verification.stdout)
+    (root / "integrity.stderr.log").write_text(verification.stderr)
+    if verification.stdout.strip() != PREFIX + '{"integrity_verified":true}':
+        raise ValueError("integrity worker did not confirm its check")
+    result["integrity_verified"] = True
     result["store"] = audit_store(binary, root, manifest)
-    if mode != "baseline":
+    if mode not in ("baseline", "layered-silent"):
         summary = next(s for s in result["stages"] if s["startup_stage"] == "health")
         total = sum(row["count"] for row in summary["answer"]["report"]["by_kind"])
         if total != result["store"]["counts"]["findings"]:
@@ -114,9 +139,11 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered"], default=["baseline", "layered"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
+    if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
+        parser.error("include one baseline and use unique modes and sizes")
     repo = Path(__file__).resolve().parents[2]
     receipt = verify_build(args.build, repo)
     if "induced-failure" not in receipt["features"]:
@@ -167,9 +194,8 @@ def main():
                             raise ValueError("staging changed the final index")
                         append(samples, {"repetition": repetition, "background_documents": size,
                                          "document_count": manifest["document_count"], **result})
-                        milestones = {s["startup_stage"]: round(s["validated_after_launch_ns"] / 1e9, 4)
-                                      for s in result["stages"]}
-                        print(size, mode, round(result["ready_observed_ns"] / 1e9, 3), milestones, "verified", flush=True)
+                        milestones = {name: round(value / 1e9, 4) for name, value in result["checkpoint_boundaries_ns"].items()}
+                        print(size, mode, round(result["ready"]["startup_complete_ns"] / 1e9, 3), milestones, "verified", flush=True)
         if source_tree_digest(repo) != metadata["source_sha256"]:
             raise ValueError("source changed during measurement")
         metadata["completed"] = True

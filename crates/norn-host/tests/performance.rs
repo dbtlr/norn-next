@@ -68,6 +68,17 @@ fn performance_audit() {
     emit(json!({"summary": summary}));
 }
 
+#[cfg(feature = "induced-failure")]
+fn performance_verify() {
+    let root = root();
+    let vault = attach::Vault::adopt(&root);
+    vault
+        .store()
+        .verify_integrity()
+        .expect("verify the completed experimental store");
+    emit(json!({"integrity_verified":true}));
+}
+
 fn performance_worker() {
     let root = root();
     let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
@@ -112,18 +123,32 @@ fn performance_worker() {
             "health.anchors",
             "health.candidate_names",
             "store.finding_metadata",
+            "startup.catalogue",
+            "startup.requested_document",
+            "startup.base",
+            "startup.rich",
+            "startup.final_health",
+            "startup.probes",
+            "startup.finalize",
         ])
         .expect("start the isolated timing record")
     });
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
     #[cfg(feature = "induced-failure")]
-    let host = if std::env::var("NORN_PERFORMANCE_LOADING").is_ok_and(|mode| mode == "layered") {
+    let host = if std::env::var("NORN_PERFORMANCE_LOADING")
+        .is_ok_and(|mode| mode.starts_with("layered"))
+    {
         vault.host_with_startup_experiment(
             policy,
             norn_host::startup_experiment::Experiment::new(
                 "small",
-                std::sync::Arc::new(staged::Reporter::new(began, vault.name().clone())),
+                std::sync::Arc::new(staged::Reporter::new(
+                    began,
+                    vault.name().clone(),
+                    std::env::var("NORN_PERFORMANCE_LOADING")
+                        .is_ok_and(|mode| mode == "layered-silent"),
+                )),
             ),
         )
     } else {
@@ -311,6 +336,8 @@ fn main() {
         Some("serve") => performance_worker(),
         #[cfg(feature = "induced-failure")]
         Some("audit") => performance_audit(),
+        #[cfg(feature = "induced-failure")]
+        Some("verify") => performance_verify(),
         _ => panic!("the performance worker requires generate or serve from its external runner"),
     }
 }
