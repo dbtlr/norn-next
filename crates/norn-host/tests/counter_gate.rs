@@ -5618,6 +5618,16 @@ fn overlapping_reads(
     name: &VaultName,
     overlap: Overlap,
 ) -> ConcurrencyReadings {
+    // This workload configures two connections. Warm both, then occupy the
+    // spare outside the measured window so only actual capacity waits count.
+    let warm = (0..2)
+        .map(|_| host.begin_read(name).expect("warm reader capacity"))
+        .collect::<Vec<_>>();
+    drop(warm);
+    let _occupied = match overlap {
+        Overlap::Held => Some(host.begin_read(name).expect("occupy the spare slot")),
+        Overlap::Removed => None,
+    };
     let before = host.read_evidence();
     let run = norn_store::SnapshotReader::statements_run_on_this_thread;
     // Take a read's hold on the calling thread, reading SQLite's count of
@@ -5866,7 +5876,9 @@ fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_ga
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), "tiny");
 
     let overlapped = {
-        let host = vault.host();
+        let mut policy = norn_host::ProductionPolicy::new(128, 128).unwrap();
+        policy.read_budget = norn_store::ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap();
+        let host = vault.host_with_policy(policy);
         let _lease = attach::attach_and_wait(&host, vault.name());
         overlapping_reads(&host, vault.name(), Overlap::Held)
     };
@@ -5878,7 +5890,9 @@ fn overlapping_reads_on_one_entry_each_run_only_their_establishment_under_the_ga
     );
 
     let sequential = {
-        let host = vault.host();
+        let mut policy = norn_host::ProductionPolicy::new(128, 128).unwrap();
+        policy.read_budget = norn_store::ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap();
+        let host = vault.host_with_policy(policy);
         let _lease = attach::attach_and_wait(&host, vault.name());
         overlapping_reads(&host, vault.name(), Overlap::Removed)
     };

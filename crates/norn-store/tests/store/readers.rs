@@ -13,6 +13,298 @@ use std::time::{Duration, Instant};
 
 use crate::common::{Scratch, document, write_document};
 
+#[test]
+#[allow(clippy::disallowed_methods)] // Change only this fixture's private source filename.
+fn successful_warm_acquisition_clears_an_earlier_cold_open_diagnostic() {
+    let scratch = Scratch::new("warm-reader-diagnostic");
+    let store = scratch.open();
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.reader_pool(&budget));
+    let held = reader
+        .acquire(
+            norn_store::ReadNeed::Source,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap()
+        .unwrap()
+        .establish()
+        .unwrap();
+    let path = store.path();
+    let moved = path.with_extension("moved");
+    std::fs::rename(path, &moved).unwrap();
+    let refused = reader.acquire(
+        norn_store::ReadNeed::Source,
+        Instant::now() + Duration::from_secs(5),
+    );
+    std::fs::rename(&moved, path).unwrap();
+    assert!(refused.is_err());
+    assert!(reader.last_open_failure().is_some());
+    drop(held);
+    let warm = reader
+        .try_take_for(
+            norn_store::ReadNeed::Source,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap()
+        .establish()
+        .unwrap();
+    assert!(
+        reader.last_open_failure().is_none(),
+        "a pool serving from warm capacity is available"
+    );
+    drop(warm);
+}
+
+#[test]
+fn returning_an_unused_retired_turn_defers_connection_close_to_outside_gate_cleanup() {
+    let scratch = Scratch::new("unused-retired-turn");
+    let store = scratch.open();
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.reader_pool(&budget));
+    let turn = reader
+        .acquire(
+            norn_store::ReadNeed::Source,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap()
+        .unwrap();
+    reader.retire();
+    drop(turn);
+    assert_eq!(
+        budget.census().live_connections,
+        1,
+        "returning an unestablished turn may happen under an entry gate"
+    );
+    budget.trim(Instant::now());
+    assert_eq!(budget.census().live_connections, 0);
+}
+
+#[test]
+fn a_warm_turn_past_its_deadline_refuses_before_establishing_a_snapshot() {
+    let scratch = Scratch::new("warm-establishment-deadline");
+    let store = scratch.open();
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.reader_pool(&budget));
+    drop(
+        reader
+            .acquire(
+                norn_store::ReadNeed::Source,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let turn = reader
+        .try_take_for(norn_store::ReadNeed::Source, deadline)
+        .expect("warm turn");
+    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    let before = norn_store::SnapshotReader::statements_run_on_this_thread();
+    assert!(
+        turn.establish().is_err(),
+        "a zero busy timeout is not a deadline check"
+    );
+    assert_eq!(
+        norn_store::SnapshotReader::statements_run_on_this_thread(),
+        before
+    );
+    assert!(
+        reader
+            .acquire(
+                norn_store::ReadNeed::Source,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .is_ok(),
+        "refusal returns a reusable connection"
+    );
+}
+
+#[test]
+fn an_elastic_reader_mints_without_sql_and_serves_two_snapshots_at_once() {
+    let scratch = Scratch::new("elastic-readers");
+    let mut store = scratch.open();
+    let first_generation = write_one(&mut store, "notes/first.md");
+    let budget = norn_store::ReadBudget::new(
+        norn_store::ReadBudgetPolicy::new(4, Duration::from_secs(5)).unwrap(),
+    );
+    let before = norn_store::SnapshotReader::statements_run_on_this_thread();
+    let reader = Arc::new(store.reader_pool(&budget));
+    assert_eq!(
+        norn_store::SnapshotReader::statements_run_on_this_thread(),
+        before
+    );
+    let first = reader
+        .acquire(
+            norn_store::ReadNeed::Source,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .unwrap()
+        .establish()
+        .unwrap();
+    let newer = write_one(&mut store, "notes/second.md");
+    let second = reader
+        .acquire(
+            norn_store::ReadNeed::Source,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .unwrap()
+        .establish()
+        .unwrap();
+    assert_eq!(first.reading().write_generation(), first_generation);
+    assert_eq!(second.reading().write_generation(), newer);
+    assert_eq!(budget.census().live_connections, 2);
+    drop((first, second));
+    budget.trim(Instant::now() + Duration::from_secs(6));
+    assert_eq!(budget.census().live_connections, 0);
+}
+
+fn wait_for_readers(budget: &norn_store::ReadBudget, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while budget.census().waiting_reads != count {
+        assert!(
+            Instant::now() < deadline,
+            "reader admission did not reach {count} waiters: {:?}",
+            budget.census()
+        );
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn a_two_connection_read_waits_without_holding_a_partial_allocation() {
+    use norn_store::{ReadBudget, ReadBudgetPolicy, ReadNeed};
+    let scratch = Scratch::new("atomic-read-bundles");
+    let store = scratch.open();
+    let budget = ReadBudget::new(ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap());
+    assert!(ReadBudgetPolicy::new(1, Duration::from_secs(5)).is_err());
+    let reader = Arc::new(store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let one = take();
+    let two = take();
+    let waiting = Arc::clone(&reader);
+    let thread = thread::spawn(move || {
+        waiting
+            .acquire(
+                ReadNeed::SourceAndScratch,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    });
+    wait_for_readers(&budget, 1);
+    drop(one);
+    assert_eq!(budget.census().live_connections, 2);
+    assert_eq!(
+        budget.census().waiting_reads,
+        1,
+        "one returned source must not form a partial grant"
+    );
+    drop(two);
+    drop(thread.join().unwrap());
+    assert_eq!(budget.census().peak_connections, 2);
+}
+
+#[test]
+fn waiting_vaults_take_turns_and_new_reads_cannot_bypass_them() {
+    use norn_store::{ReadBudget, ReadBudgetPolicy, ReadNeed};
+    let first = Scratch::new("fair-reader-first");
+    let second = Scratch::new("fair-reader-second");
+    let first_store = first.open();
+    let second_store = second.open();
+    let budget = ReadBudget::new(ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap());
+    let a = Arc::new(first_store.reader_pool(&budget));
+    let b = Arc::new(second_store.reader_pool(&budget));
+    let take = |reader: &Arc<norn_store::SnapshotReader>| {
+        reader
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let one = take(&a);
+    let two = take(&a);
+    let (send, receive) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        let spawn = |reader: Arc<norn_store::SnapshotReader>, label| {
+            let send = send.clone();
+            scope.spawn(move || {
+                let held = reader
+                    .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap()
+                    .establish()
+                    .unwrap();
+                send.send(label).unwrap();
+                drop(held);
+            });
+        };
+        spawn(a.clone(), "a1");
+        wait_for_readers(&budget, 1);
+        spawn(b.clone(), "b1");
+        wait_for_readers(&budget, 2);
+        spawn(a.clone(), "a2");
+        wait_for_readers(&budget, 3);
+        assert!(a.try_take().is_none());
+        drop(one);
+        for expected in ["a1", "b1", "a2"] {
+            assert_eq!(
+                receive.recv_timeout(Duration::from_secs(5)).unwrap(),
+                expected
+            );
+        }
+    });
+    drop(two);
+    assert!(budget.census().peak_connections <= 2);
+}
+
+#[test]
+fn retirement_wakes_capacity_waiters_and_checked_out_reads_finish() {
+    use norn_store::{ReadBudget, ReadBudgetPolicy, ReadNeed};
+    let scratch = Scratch::new("retired-reader-waiters");
+    let store = scratch.open();
+    let budget = ReadBudget::new(ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap());
+    let reader = Arc::new(store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let one = take();
+    let two = take();
+    let waiting = reader.clone();
+    let thread = thread::spawn(move || {
+        waiting
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(30))
+            .unwrap()
+            .is_none()
+    });
+    wait_for_readers(&budget, 1);
+    reader.retire();
+    assert!(thread.join().unwrap());
+    assert_eq!(one.reading().epoch(), store.epoch());
+    drop((one, two));
+    budget.trim(Instant::now());
+    assert_eq!(budget.census().live_connections, 0);
+}
+
 /// The busy one-shot off this thread again, consumed or not.
 ///
 /// **It resets that arm and nothing else.** The seam's broad `disarm` would

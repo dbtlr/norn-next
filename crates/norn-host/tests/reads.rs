@@ -35,6 +35,54 @@ use norn_wire::{
 /// The generated profile every case here attaches.
 const PROFILE: &str = "tiny";
 
+#[test]
+#[allow(clippy::disallowed_methods)] // Move only this fixture's derived database, never vault files.
+fn an_environmental_cold_open_failure_does_not_rebuild_the_source() {
+    let (_sandbox, vault) = a_vault("cold-open-environment");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let store = vault.store();
+    let epoch = store.epoch().to_string();
+    let path = store.path().to_path_buf();
+    let moved = path.with_extension("moved");
+    drop(store);
+    std::fs::rename(&path, &moved).unwrap();
+    assert!(host.begin_read(vault.name()).is_err());
+    std::fs::rename(&moved, &path).unwrap();
+    let hold = host.begin_read(vault.name()).expect("environment restored");
+    assert_eq!(hold.reading().store().epoch(), epoch);
+    assert_eq!(
+        hold.reading().published(),
+        &Demand::State(TrustState::Ready)
+    );
+}
+
+#[test]
+fn damage_met_by_a_cold_reader_schedules_a_rebuild() {
+    let (_sandbox, vault) = a_vault("cold-open-damage");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let mut store = vault.store();
+    let old_epoch = store.epoch().to_string();
+    norn_store::induced_failure::execute_out_of_band(
+        &mut store,
+        "DELETE FROM meta WHERE key = 'store_epoch'",
+    )
+    .expect("arrange damaged derived metadata");
+    drop(store);
+    assert!(host.begin_read(vault.name()).is_err());
+    wait_until(
+        "cold-open damage to rebuild",
+        attach::read_budget(std::time::Duration::from_secs(3)),
+        || match host.begin_read(vault.name()) {
+            Ok(hold) if hold.reading().store().epoch() != old_epoch => Observed::Met(()),
+            Ok(_) => Observed::Pending("the old source is still installed".to_string()),
+            Err(error) => Observed::Pending(format!("{error:?}")),
+        },
+    )
+    .expect("cold-open damage must lead to a rebuilt source");
+}
+
 /// A sandbox and a vault generated inside it, named for the case.
 fn a_vault(label: &str) -> (Sandbox, attach::Vault) {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
@@ -139,6 +187,17 @@ fn reads_over_one_entry_each_run_only_their_establishment_under_the_gate() {
     let _lease = attach::attach_and_wait(&host, vault.name());
 
     let readers = 4;
+    let cold = host.read_evidence();
+    drop(
+        host.begin_read(vault.name())
+            .expect("a cold pool opens outside the gate"),
+    );
+    let cold = host.read_evidence().since(cold);
+    assert_eq!(
+        cold.reader_waits, 1,
+        "the cold open requires one acquisition outside the gate"
+    );
+    assert_eq!(cold.mint_statements_under_the_gate, 0);
     let before = host.read_evidence();
     for _ in 0..readers {
         drop(

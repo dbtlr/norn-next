@@ -134,9 +134,18 @@ where
         address: &norn_wire::VaultAddress,
         build: impl FnOnce(&VaultName, &ReadHold<O>) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
+        self.answer_read_on_hold_for(address, norn_store::ReadNeed::Source, build)
+    }
+
+    fn answer_read_on_hold_for<R, W>(
+        &self,
+        address: &norn_wire::VaultAddress,
+        need: norn_store::ReadNeed,
+        build: impl FnOnce(&VaultName, &ReadHold<O>) -> Result<Built<R, W>, BuildRefused>,
+    ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = address.registered_name();
         let hold = self
-            .begin_read(name)
+            .begin_read_for(name, need)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
         let built = match build(name, &hold) {
@@ -165,8 +174,17 @@ where
         &self,
         params: &CountParams,
     ) -> Result<Answered<CountReport, CountWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.count(params, declared)?.into())
+        let need = if params.by.len() > 1 {
+            if params.after.is_none() {
+                norn_store::ReadNeed::SourceAndOptionalScratch
+            } else {
+                norn_store::ReadNeed::SourceAndScratch
+            }
+        } else {
+            norn_store::ReadNeed::Source
+        };
+        self.answer_read_on_hold_for(&params.vault, need, |_, hold| {
+            Ok(hold.snapshot().count(params, hold.content_model())?.into())
         })
     }
 

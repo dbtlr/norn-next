@@ -47,12 +47,18 @@ use std::time::Instant;
 pub(super) trait Stanced {
     /// What a waiter is woken by a change of.
     type Stance: Copy + Eq;
+    /// Resources retired under the gate whose destructors run after unlocking.
+    type AfterHold: Default;
 
     /// The stance the state stands at.
     fn stance(&self) -> Self::Stance;
 
     /// Record what this hold left, as the hold ends.
     fn end_hold(&mut self);
+
+    fn take_after_hold(&mut self) -> Self::AfterHold {
+        Self::AfterHold::default()
+    }
 }
 
 /// The lock over one entry's state, counting each time it is taken.
@@ -114,6 +120,8 @@ pub(super) struct GateHold<'g, T: Stanced> {
     /// Declared after the guard, so it drops once the gate is back. Nothing
     /// reads it: its drop is its whole work.
     _freed: FreedOnDrop<'g>,
+    // Rust drops fields in declaration order: the guard and notification go first.
+    after_hold: T::AfterHold,
 }
 
 /// What wakes the takers waiting for a gate by a deadline, as a hold's last
@@ -168,6 +176,7 @@ impl<T: Stanced> Drop for GateHold<'_, T> {
             drop(generation);
             self.moved.notify_all();
         }
+        self.after_hold = self.guard.take_after_hold();
     }
 }
 
@@ -398,6 +407,7 @@ impl<T: Stanced> EntryGate<T> {
                 release: &self.release,
                 freed: &self.freed,
             },
+            after_hold: T::AfterHold::default(),
         };
         if self.has_deferred.load(Ordering::Acquire) {
             let work = {
@@ -428,6 +438,7 @@ mod tests {
 
     impl Stanced for Dial {
         type Stance = u8;
+        type AfterHold = ();
 
         fn stance(&self) -> u8 {
             self.stance

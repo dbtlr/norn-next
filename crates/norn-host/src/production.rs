@@ -2,9 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 
+#[cfg(test)]
+mod reader_tests;
 mod rolling;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use norn_config::registry::{Entry as Registration, PollBackend};
@@ -106,6 +108,8 @@ pub const READ_SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
+    /// Host-wide actual-connection cap and idle retention for read bursts.
+    pub read_budget: norn_store::ReadBudgetPolicy,
     /// Bounds for immutable multi-key count results shared by the store's readers.
     pub count_retention: norn_store::CountRetentionPolicy,
     /// Maximum stored rows read at once during an ordered heal merge.
@@ -129,6 +133,7 @@ impl ProductionPolicy {
             return Err(ProductionPolicyError::ChangesetSize(changeset_size));
         }
         Ok(Self {
+            read_budget: norn_store::ReadBudgetPolicy::default(),
             count_retention: norn_store::CountRetentionPolicy::default(),
             store_page_size,
             changeset_size,
@@ -180,6 +185,8 @@ impl std::error::Error for ProductionPolicyError {}
 /// and recoveries that follow read. Nothing here can name a vault the host does
 /// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
+    cleanup_error: Mutex<Option<String>>,
+    readers: Arc<norn_store::ReadBudget>,
     dirs: ConfigDirs,
     policy: ProductionPolicy,
     /// What this host's jobs have spent and done, kept rather than discarded.
@@ -198,6 +205,7 @@ pub struct ProductionEntryOps {
 }
 
 pub struct ProductionAttachment {
+    readers: Arc<norn_store::ReadBudget>,
     /// The declared registration. Its root remains the name a later recovery
     /// resolves; operational filesystem work uses `covered_root`.
     registration: Registration,
@@ -536,7 +544,10 @@ impl SnapshotSource for ProductionAttachment {
     /// open is the store's act, and a number this seam declared for it would
     /// stop being true the moment that open changed.
     fn open_reader(&self) -> MintedReader<Self::Reader> {
-        minted_reader(&self.store)
+        MintedReader {
+            reader: Ok(self.store.reader_pool(&self.readers)),
+            statements: 0,
+        }
     }
 }
 
@@ -551,6 +562,27 @@ fn minted_reader(store: &Store) -> MintedReader<norn_store::SnapshotReader> {
 }
 
 impl ReadSource for norn_store::SnapshotReader {
+    fn try_take_for(
+        self: &Arc<Self>,
+        need: norn_store::ReadNeed,
+        deadline: Instant,
+    ) -> Option<Self::Turn> {
+        norn_store::SnapshotReader::try_take_for(self, need, deadline)
+    }
+    fn acquire_for(
+        self: &Arc<Self>,
+        need: norn_store::ReadNeed,
+        deadline: Instant,
+    ) -> Result<Option<Self::Turn>, ReaderUnavailable> {
+        self.acquire(need, deadline)
+            .map_err(|error| reader_unavailable(&error))
+    }
+    fn retire(&self) {
+        norn_store::SnapshotReader::retire(self);
+    }
+    fn last_open_failure(&self) -> Option<ReaderUnavailable> {
+        norn_store::SnapshotReader::last_open_failure(self).map(|error| reader_unavailable(&error))
+    }
     type Snapshot = norn_store::Snapshot;
     type Turn = norn_store::ConnectionTurn;
 
@@ -588,18 +620,68 @@ impl ReadSource for norn_store::SnapshotReader {
 /// inspection and into a read's refusal detail, both of which answer a caller
 /// holding no hold.
 fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
-    ReaderUnavailable::new(crate::refusal::store_refusal_told(error))
+    let detail = crate::refusal::store_refusal_told(error);
+    if error.damage().is_some() {
+        ReaderUnavailable::damaged(detail)
+    } else {
+        ReaderUnavailable::new(detail)
+    }
 }
 
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
-        Self {
+        let ops = Self {
+            cleanup_error: Mutex::new(None),
+            readers: norn_store::ReadBudget::new(policy.read_budget),
             dirs,
             policy,
             evidence: Arc::new(JobEvidence::default()),
             engine_config_receivers: Vec::new(),
             semantic: None,
+        };
+        if let Err(error) = ops.sweep_count_orphans() {
+            *ops.cleanup_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
         }
+        ops
+    }
+
+    /// The most recent residue-cleanup failure. Cleanup failure does not take
+    /// source reads out of service; fresh counts retain their fallback.
+    pub fn last_reader_cleanup_error(&self) -> Option<String> {
+        self.cleanup_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn read_budget_census(&self) -> norn_store::ReadBudgetCensus {
+        self.readers.census()
+    }
+
+    fn sweep_count_orphans(&self) -> Result<(), String> {
+        let stores = Store::count_residue_stores(&self.dirs.vaults_dir(), STORE_FILE)
+            .map_err(|error| error.to_string())?;
+        let mut last_error = None;
+        for directory in stores {
+            let swept = (|| {
+                let source = directory.join(STORE_FILE);
+                match try_acquire(&directory.join(MAINTAINER_LOCK_FILE))
+                    .map_err(|error| error.to_string())?
+                {
+                    Acquisition::Acquired(_guard) => {
+                        Store::sweep_count_residue(&source).map_err(|error| error.to_string())?;
+                    }
+                    Acquisition::Contended { .. } => {}
+                }
+                Ok(())
+            })();
+            if let Err(error) = swept {
+                last_error = Some(error);
+            }
+        }
+        last_error.map_or(Ok(()), Err)
     }
 
     /// Adds one engine boundary to the config dispatch set.
@@ -774,6 +856,12 @@ impl ProductionEntryOps {
             ),
         )
         .map_err(effect)?;
+        if let Err(error) = attachment.store.sweep_count_results() {
+            *self
+                .cleanup_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+        }
         attachment.rolling.reset_after_rebuild();
         // The first point a recovery holds both the order its new coverage
         // proved and the store it will derive into, and the judgment is taken
@@ -1450,6 +1538,9 @@ fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey 
 }
 
 impl EntryOps for ProductionEntryOps {
+    fn trim_readers(&self, now: Instant) {
+        self.readers.trim(now);
+    }
     type Attachment = ProductionAttachment;
 
     fn attach(
@@ -1528,6 +1619,12 @@ impl EntryOps for ProductionEntryOps {
         store
             .set_count_retention(self.policy.count_retention)
             .map_err(store_effect)?;
+        if let Err(error) = store.sweep_count_results() {
+            *self
+                .cleanup_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+        }
         {
             #[cfg(feature = "induced-failure")]
             let _timing = norn_store::profiling::span("host.watch_sync_wait");
@@ -1543,6 +1640,7 @@ impl EntryOps for ProductionEntryOps {
             self.policy.rolling_period(),
         );
         let mut attachment = ProductionAttachment {
+            readers: Arc::clone(&self.readers),
             registration: registration.clone(),
             covered_root,
             root_identity,
@@ -6217,14 +6315,10 @@ mod tests {
         assert_eq!(values, [Some(1), Some(2)]);
     }
 
-    /// **The attach's reader mint is in the job account.** The attach mints
-    /// the entry's handle over the store it opened, in the gate hold that
-    /// publishes it, and the store's read-only open reports two statements:
-    /// the journal-mode read and the store-epoch read. A read over the handle
-    /// that mint left is the control: it mints nothing, and neither account's
-    /// mint reading moves for it.
+    /// Pool creation and cold source acquisition run no database statements
+    /// under the entry gate. The cold open belongs outside publication.
     #[test]
-    fn an_attach_accounts_the_stores_reader_mint_to_the_job_account() {
+    fn an_attach_and_cold_read_mint_no_database_under_the_gate() {
         let f = Fixture::new("leg-mint-account");
         let ops = fixture_ops(&f);
         let evidence = Arc::clone(&ops.evidence);
@@ -6232,8 +6326,8 @@ mod tests {
 
         assert_eq!(
             evidence.read().mint_statements_under_the_gate,
-            2,
-            "the attach's mint is missing from the job account"
+            0,
+            "pool creation ran SQL under the gate"
         );
         let before = evidence.read();
         drop(
@@ -6539,6 +6633,10 @@ mod tests {
         fs::create_dir_all(f.vault().join("wave")).unwrap();
         fs::write(f.vault().join("wave/a.md"), "---\nwave: flip\n---\n").unwrap();
         let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+        drop(
+            host.begin_read(&name)
+                .expect("warm the source before the query hook"),
+        );
         let held = host.hold_the_gate_once_a_read_lets_go(&name);
 
         let started = std::time::Instant::now();
@@ -6852,8 +6950,12 @@ mod tests {
         );
         let reader = Arc::new(attachment.open_reader().reader.expect("a reader"));
         let snapshot = reader
-            .try_take()
-            .expect("an idle reader")
+            .acquire(
+                norn_store::ReadNeed::Source,
+                Instant::now() + READ_SETTLE_BOUND,
+            )
+            .expect("a source reader opens")
+            .expect("reader capacity")
             .establish()
             .expect("a snapshot");
         let params = norn_wire::CountParams::new(norn_wire::VaultAddress::name(
@@ -11771,8 +11873,12 @@ mod tests {
             norn_wire::ResolutionTarget::new("Foo").unwrap(),
         )]);
         let snapshot = reader
-            .try_take()
-            .expect("an idle reader")
+            .acquire(
+                norn_store::ReadNeed::Source,
+                Instant::now() + READ_SETTLE_BOUND,
+            )
+            .expect("a source reader opens")
+            .expect("reader capacity")
             .establish()
             .expect("a snapshot");
         assert_eq!(

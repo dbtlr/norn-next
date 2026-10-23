@@ -211,22 +211,9 @@ pub struct EvidenceReading {
     /// overflow itself, which is otherwise readable only as a trust state that
     /// stands for the length of the reconcile clearing it.
     pub watcher_rescans_reported: u64,
-    /// Statements the job legs' reader mints ran against a database while the
-    /// entry gate was held.
-    ///
-    /// A leg that installs, swaps or parks coverage mints the handle that
-    /// coverage serves reads from in the gate hold that publishes it, and the
-    /// mint reads the database: the journal-mode read of the read-only open,
-    /// and the store-epoch read that binds the connection to its file. Every
-    /// other holder of that entry waits behind those statements, so this is
-    /// what the legs' publications held the gate for. A read's own mint is not
-    /// here: it is the read account's, and neither account moves for the
-    /// other's work.
-    ///
-    /// **A mint that refused counts what it ran before it refused**, because
-    /// the gate was held for those statements too. A leg that minted nothing,
-    /// because it installed no coverage or parked coverage over a handle that
-    /// was already standing, adds nothing.
+    /// Statements a job leg's reader-pool mint ran under the entry gate.
+    /// Production pool creation is zero-I/O and contributes zero. The separate
+    /// account detects an adapter that moves database work into publication.
     pub mint_statements_under_the_gate: u64,
     /// Statements the apply jobs' reader mints ran against a database, inside
     /// the entry's claim and outside its gate.
@@ -1054,7 +1041,7 @@ mod tests {
 /// derived, and a read derives nothing by construction. What this counts is
 /// the read path's own shape: how many reads were served, what each ran while
 /// it held the entry gate, and what concurrent reads of one entry paid for
-/// sharing the one connection that entry holds.
+/// sharing the entry's bounded reader budget.
 ///
 /// **What an establishment ran under the gate is the gate holder's reading of
 /// SQLite's own count.** A handle's connection counts every statement SQLite
@@ -1158,19 +1145,9 @@ pub struct ReadReading {
     /// folding the two would leave the per-read reading unable to say which of
     /// them moved it.
     pub statements_under_the_gate: u64,
-    /// Statements the read path's own mints ran against a database while the
-    /// entry gate was held.
-    ///
-    /// A read that meets a serving entry with an empty handle slot mints that
-    /// handle again under its gate hold, before it establishes anything, and
-    /// the mint reads the database: the journal-mode read of the read-only
-    /// open, and the store-epoch read that binds the connection to its file.
-    /// This is the repair's own cost, so **zero is a host whose reads all
-    /// found a handle standing** and any other number is read-traffic healing.
-    ///
-    /// It counts what a mint ran whichever way that mint ended, and whichever
-    /// way the read that paid for it left: a mint that refused held the gate
-    /// for the statements it ran before it refused.
+    /// Statements a read-path reader-pool mint ran under the entry gate.
+    /// Production repairs only metadata and contributes zero. Cold connection
+    /// opens run outside the gate and do not contribute to this reading.
     pub mint_statements_under_the_gate: u64,
     /// Statements SQLite ran under the entry gate for establishments that
     /// refused.
@@ -1328,7 +1305,7 @@ pub struct ReadsSince {
     /// gate was held.
     pub refused_establishment_statements_under_the_gate: u64,
     /// Acquisitions in this window that gave the entry gate back and waited
-    /// for the one connection their entry holds, served and refused alike.
+    /// for reader acquisition outside the gate, served and refused alike.
     pub reader_waits: u64,
     /// Times an entry gate was taken again inside this window's establishing
     /// holds.

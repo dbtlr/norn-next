@@ -83,6 +83,17 @@ use crate::store::Store;
 /// process either does not survive them or clears them by name.
 #[doc(hidden)]
 pub mod induced_failure {
+    pub fn fail_next_result_page_as_busy() {
+        super::RESULT_PAGE_BUSY.with(|armed| armed.set(true));
+    }
+    /// Arrange one interleaving after the next retained-result reader is acquired.
+    pub fn before_next_result_page(hook: impl FnOnce() + 'static) {
+        super::RESULT_PAGE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+    /// Arrange one interleaving after claiming a population, before its source SQL.
+    pub fn before_next_result_population(hook: impl FnOnce() + 'static) {
+        super::RESULT_POPULATION_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
     use std::sync::atomic::Ordering;
 
     use norn_db::EmittedPlan;
@@ -474,6 +485,34 @@ pub mod induced_failure {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         TEAR_AFTER_COMMIT.store(DISARMED, Ordering::SeqCst);
         TEAR_AT_CHUNK_BOUNDARY.store(DISARMED, Ordering::SeqCst);
+    }
+}
+
+thread_local! {
+    static RESULT_PAGE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RESULT_PAGE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static RESULT_POPULATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn result_page_failure() -> Option<rusqlite::Error> {
+    RESULT_PAGE_BUSY
+        .with(|armed| armed.replace(false))
+        .then(|| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            )
+        })
+}
+pub(crate) fn before_result_page() {
+    let hook = RESULT_PAGE_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+pub(crate) fn before_result_population() {
+    let hook = RESULT_POPULATION_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 

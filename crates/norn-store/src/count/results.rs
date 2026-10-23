@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use norn_db::TemporaryDatabase;
 use norn_db::rusqlite::{self, Row, params_from_iter, types::Value};
+use norn_db::{TemporaryDatabase, TemporaryFile};
 use norn_wire::{
     AnswerAdvisory, CountParams, Cursor, CursorKey, Moved, PagedRows, Snapshot as Reading, Tally,
     Unsatisfied, fold_tag,
@@ -110,14 +110,79 @@ pub(super) struct TallyPage {
 }
 
 pub(crate) struct CountResults {
+    directory: Option<std::path::PathBuf>,
     state: Mutex<Registry>,
     policy: CountRetentionPolicy,
 }
 #[derive(Default)]
 struct Registry {
+    populations: BTreeMap<String, Arc<Population>>,
     entries: BTreeMap<String, Arc<Retained>>,
     occupied: u64,
     slots: usize,
+}
+
+#[derive(Default)]
+struct Population {
+    value: Mutex<Option<Result<Arc<Retained>, PageRefusal>>>,
+    changed: Condvar,
+}
+impl Population {
+    fn wait(&self, deadline: Instant) -> Result<Arc<Retained>, PageRefusal> {
+        let mut value = self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(value) = &*value {
+                return value.clone();
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PageRefusal::CountResultBusy);
+            }
+            value = self
+                .changed
+                .wait_timeout(value, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+/// Unwind releases the build claim and wakes followers as well as ordinary errors.
+struct PopulationClaim {
+    owner: Arc<CountResults>,
+    key: String,
+    population: Arc<Population>,
+}
+impl Drop for PopulationClaim {
+    fn drop(&mut self) {
+        {
+            let mut value = self
+                .population
+                .value
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if value.is_none() {
+                *value = Some(Err(failed(
+                    "the result population ended before publication",
+                )));
+            }
+        }
+        self.population.changed.notify_all();
+        let mut state = self
+            .owner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .populations
+            .get(&self.key)
+            .is_some_and(|population| Arc::ptr_eq(population, &self.population))
+        {
+            state.populations.remove(&self.key);
+        }
+    }
 }
 impl Default for CountResults {
     fn default() -> Self {
@@ -129,20 +194,46 @@ impl std::fmt::Debug for CountResults {
         f.debug_struct("CountResults").finish_non_exhaustive()
     }
 }
+impl Drop for CountResults {
+    fn drop(&mut self) {
+        for result in self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .values()
+        {
+            result.retire();
+        }
+    }
+}
 impl CountResults {
     pub(crate) fn new(policy: CountRetentionPolicy) -> Self {
         Self {
+            directory: None,
             state: Mutex::new(Registry::default()),
             policy,
+        }
+    }
+    pub(crate) fn for_store(policy: CountRetentionPolicy, path: &std::path::Path) -> Self {
+        let mut results = Self::new(policy);
+        results.directory = Some(path.with_extension("count-results"));
+        results
+    }
+    pub(crate) fn sweep(&self) -> Result<usize, crate::StoreError> {
+        match &self.directory {
+            Some(directory) => norn_db::sweep_temporary_directory(directory).map_err(Into::into),
+            None => Ok(0),
         }
     }
     pub(crate) fn policy(&self) -> CountRetentionPolicy {
         self.policy
     }
     fn lock(&self) -> Result<MutexGuard<'_, Registry>, PageRefusal> {
-        self.state
-            .try_lock()
-            .map_err(|_| PageRefusal::CountResultBusy)
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
     fn prune(&self, now: Instant) -> Result<(), PageRefusal> {
         let retired = {
@@ -161,6 +252,9 @@ impl CountResults {
                 .collect::<Vec<_>>()
         };
         // Closing disposable files can perform I/O; never do it under the registry lock.
+        for result in &retired {
+            result.retire();
+        }
         drop(retired);
         Ok(())
     }
@@ -243,6 +337,8 @@ impl Reservation {
             state.occupied = state.occupied - self.bytes + built.bytes;
         }
         self.active = false;
+        let file = built.database.shared_file();
+        drop(built.database);
         Arc::new(Retained {
             id: built.id,
             digest: selection_digest(&request),
@@ -253,7 +349,8 @@ impl Reservation {
             deadline,
             bytes: built.bytes,
             healthy: AtomicBool::new(true),
-            database: Mutex::new(Some(built.database)),
+            file,
+            pools: Mutex::new(Vec::new()),
             owner: Arc::downgrade(&self.owner),
         })
     }
@@ -286,17 +383,14 @@ struct Retained {
     deadline: Instant,
     bytes: u64,
     healthy: AtomicBool,
-    database: Mutex<Option<TemporaryDatabase>>,
+    file: Option<Arc<TemporaryFile>>,
+    pools: Mutex<Vec<crate::read_budget::Pool>>,
     owner: Weak<CountResults>,
 }
 impl Drop for Retained {
     fn drop(&mut self) {
-        let database = self
-            .database
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        drop(database);
+        self.retire();
+        drop(self.file.take());
         if let Some(owner) = self.owner.upgrade() {
             let mut state = owner
                 .state
@@ -423,17 +517,58 @@ fn result_rows<T>(
     work: &mut CountWork,
     read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
 ) -> Result<Vec<T>, PageRefusal> {
+    result_rows_checked(db, name, sql, values, lookups, work, read, None)
+}
+
+#[allow(clippy::too_many_arguments)] // A page's health verdict belongs beside its driver error.
+fn result_rows_checked<T>(
+    db: &TemporaryDatabase,
+    name: CountResultStatement,
+    sql: String,
+    values: Vec<Value>,
+    lookups: &mut Lookups,
+    work: &mut CountWork,
+    read: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    health: Option<&AtomicBool>,
+) -> Result<Vec<T>, PageRefusal> {
+    let failure = |error: rusqlite::Error| {
+        use rusqlite::ErrorCode;
+        let transient = matches!(
+            error.sqlite_error_code(),
+            Some(
+                ErrorCode::DatabaseBusy
+                    | ErrorCode::DatabaseLocked
+                    | ErrorCode::OutOfMemory
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::DiskFull
+                    | ErrorCode::OperationInterrupted
+                    | ErrorCode::PermissionDenied
+                    | ErrorCode::ReadOnly
+            )
+        );
+        if !transient && let Some(health) = health {
+            health.store(false, Ordering::Release);
+        }
+        scratch_error(error)
+    };
     let mut ran = record_run(db, name, sql, values, lookups.capture_results)?;
-    let mut statement = db.connection().prepare(ran.sql()).map_err(scratch_error)?;
+    #[cfg(feature = "induced-failure")]
+    if name == CountResultStatement::Page
+        && let Some(error) = crate::faults::result_page_failure()
+    {
+        return Err(failure(error));
+    }
+    let mut statement = db.connection().prepare(ran.sql()).map_err(&failure)?;
     let rows = statement
         .query_map(params_from_iter(ran.values().iter()), read)
-        .map_err(scratch_error)?
+        .map_err(&failure)?
         .collect::<rusqlite::Result<Vec<T>>>();
     ran.stepped = Stepped::of(&statement);
     work.statements += 1;
     work.stepped(ran.stepped);
     lookups.ran.push(ran);
-    rows.map_err(scratch_error)
+    rows.map_err(failure)
 }
 fn control(
     db: &TemporaryDatabase,
@@ -538,11 +673,23 @@ impl Snapshot {
                 result_id: None,
             });
         }
+        if self
+            .grant
+            .borrow()
+            .as_ref()
+            .is_some_and(|grant| grant.scratch.is_none())
+        {
+            return Err(PageRefusal::CountResultCapacity {
+                retry_after_millis: None,
+            });
+        }
         let request = binding(params);
         let schema = declared.schema().map(str::to_string);
-        let reused = {
-            let state = owner.lock()?;
-            state
+        let key = serde_json::to_string(&(&request, &origin.snapshot, &schema))
+            .expect("typed count identity serializes");
+        let (reused, population, leader) = {
+            let mut state = owner.lock()?;
+            let reused = state
                 .entries
                 .values()
                 .find(|entry| {
@@ -551,35 +698,66 @@ impl Snapshot {
                         && entry.source_schema == schema
                         && time.now() + owner.policy.lifetime / 2 <= entry.deadline
                 })
-                .cloned()
+                .cloned();
+            if reused.is_some() {
+                (reused, None, false)
+            } else if let Some(population) = state.populations.get(&key) {
+                (None, Some(Arc::clone(population)), false)
+            } else {
+                let population = Arc::new(Population::default());
+                state
+                    .populations
+                    .insert(key.clone(), Arc::clone(&population));
+                (None, Some(population), true)
+            }
         };
+        let _claim = leader.then(|| PopulationClaim {
+            owner: Arc::clone(owner),
+            key,
+            population: Arc::clone(population.as_ref().expect("leader population")),
+        });
         let retained = match reused {
             Some(retained) => retained,
-            None => {
-                let reservation = owner.reserve(time)?;
-                let built = self.populate_count_result(
-                    CountSource {
-                        members,
-                        conjunction,
-                        declared,
-                    },
-                    &reservation,
-                    lookups,
-                    work,
-                )?;
-                let orders = members
-                    .iter()
-                    .map(|member| Order::of(member, declared))
-                    .collect();
-                reservation.commit(
-                    built,
-                    request,
-                    origin,
-                    orders,
-                    schema,
-                    time.now() + owner.policy.lifetime,
-                )
+            None if leader => {
+                #[cfg(feature = "induced-failure")]
+                crate::faults::before_result_population();
+                let populated = (|| {
+                    let reservation = owner.reserve(time)?;
+                    let built = self.populate_count_result(
+                        CountSource {
+                            members,
+                            conjunction,
+                            declared,
+                        },
+                        &reservation,
+                        lookups,
+                        work,
+                    )?;
+                    let orders = members
+                        .iter()
+                        .map(|member| Order::of(member, declared))
+                        .collect();
+                    Ok(reservation.commit(
+                        built,
+                        request,
+                        origin,
+                        orders,
+                        schema,
+                        time.now() + owner.policy.lifetime,
+                    ))
+                })();
+                let population = population.as_ref().expect("leader population");
+                *population
+                    .value
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(populated.clone());
+                population.changed.notify_all();
+                populated?
             }
+            None => population
+                .as_ref()
+                .expect("following population")
+                .wait(self.deadline)?,
         };
         let page = self.result_page(&retained, limit, after, lookups, work, time)?;
         if page.next.is_some() && !lookups.capture_results {
@@ -590,6 +768,11 @@ impl Snapshot {
                 .or_insert_with(|| Arc::clone(&retained));
         }
         let id = page.next.as_ref().map(|_| retained.id.clone());
+        if (lookups.capture_results || page.next.is_none())
+            && !owner.lock()?.entries.contains_key(&retained.id)
+        {
+            retained.retire();
+        }
         Ok(TallyPage {
             rows: page.rows,
             next: page.next,
@@ -599,7 +782,7 @@ impl Snapshot {
 
     fn result_page(
         &self,
-        retained: &Retained,
+        retained: &Arc<Retained>,
         limit: usize,
         after: Option<&[Option<String>]>,
         lookups: &mut Lookups,
@@ -609,42 +792,118 @@ impl Snapshot {
         if time.now() >= retained.deadline || !retained.healthy.load(Ordering::Acquire) {
             return Err(PageRefusal::CountCursorExpired);
         }
-        let guard = retained
-            .database
-            .try_lock()
-            .map_err(|_| PageRefusal::CountResultBusy)?;
-        let db = guard.as_ref().expect("live result");
-        let labels = (0..retained.orders.len())
-            .map(|at| format!("label{at}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let key = after
-            .map(|tuple| tuple_key(tuple.iter().cloned()))
-            .unwrap_or_default();
-        let rows = result_rows(
-            db,
-            CountResultStatement::Page,
-            format!("SELECT {labels}, count FROM result WHERE tuple > ?1 ORDER BY tuple LIMIT ?2"),
-            vec![Value::Blob(key), Value::Integer((limit + 1) as i64)],
-            lookups,
-            work,
-            |row| {
-                let group = (0..retained.orders.len())
-                    .map(|at| row.get(at))
-                    .collect::<rusqlite::Result<Vec<Option<String>>>>()?;
-                Ok(Tally::new(group, row.get::<_, u64>(retained.orders.len())?))
-            },
-        )
-        .inspect_err(|_| {
-            // Disposable corruption cannot condemn lane-1. Retire this identity
-            // so later requests restart rather than replaying a broken relation.
+        self.with_result_reader(retained, |db| {
+            #[cfg(feature = "induced-failure")]
+            crate::faults::before_result_page();
+            let labels = (0..retained.orders.len())
+                .map(|at| format!("label{at}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let key = after
+                .map(|tuple| tuple_key(tuple.iter().cloned()))
+                .unwrap_or_default();
+            let rows = result_rows_checked(
+                db,
+                CountResultStatement::Page,
+                format!(
+                    "SELECT {labels}, count FROM result WHERE tuple > ?1 ORDER BY tuple LIMIT ?2"
+                ),
+                vec![Value::Blob(key), Value::Integer((limit + 1) as i64)],
+                lookups,
+                work,
+                |row| {
+                    let group = (0..retained.orders.len())
+                        .map(|at| row.get(at))
+                        .collect::<rusqlite::Result<Vec<Option<String>>>>()?;
+                    Ok(Tally::new(group, row.get::<_, u64>(retained.orders.len())?))
+                },
+                Some(&retained.healthy),
+            )?;
+            work.tallies_read += rows.len() as u64;
+            if time.now() >= retained.deadline {
+                return Err(PageRefusal::CountCursorExpired);
+            }
+            Ok(KeysetPage::cut(rows, limit, Stepped::default()))
+        })
+    }
+
+    fn with_result_reader<T>(
+        &self,
+        retained: &Arc<Retained>,
+        read: impl FnOnce(&TemporaryDatabase) -> Result<T, PageRefusal>,
+    ) -> Result<T, PageRefusal> {
+        let file = retained.file.as_ref().ok_or_else(|| {
             retained.healthy.store(false, Ordering::Release);
+            failed("the result has no reopenable storage")
         })?;
-        work.tallies_read += rows.len() as u64;
-        if time.now() >= retained.deadline {
-            return Err(PageRefusal::CountCursorExpired);
+        let open = || {
+            file.open_reader().map_err(|error| match &error {
+                norn_db::DbError::Lifecycle {
+                    operation: "checking disposable result identity",
+                    ..
+                } => {
+                    retained.healthy.store(false, Ordering::Release);
+                    PageRefusal::CountCursorExpired
+                }
+                norn_db::DbError::Damaged { .. } => {
+                    retained.healthy.store(false, Ordering::Release);
+                    failed(error)
+                }
+                _ => failed(error),
+            })
+        };
+        let mut grant = self.grant.borrow_mut();
+        let Some(grant) = grant.as_mut() else {
+            return read(&open()?);
+        };
+        let group = grant.group.clone();
+        let resource = grant
+            .scratch
+            .as_mut()
+            .ok_or(PageRefusal::CountResultCapacity {
+                retry_after_millis: None,
+            })?;
+        let budget = resource
+            .budget()
+            .ok_or_else(|| failed("the read budget has ended"))?;
+        let pool = {
+            let mut pools = retained
+                .pools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pools.retain(|pool| pool.is_live());
+            if let Some(pool) = pools
+                .iter()
+                .find(|pool| pool.budget.ptr_eq(&Arc::downgrade(&budget)))
+            {
+                pool.clone()
+            } else {
+                let pool = budget.pool(group, crate::read_budget::Kind::Scratch);
+                pools.push(pool.clone());
+                pool
+            }
+        };
+        if resource.pool != pool.id {
+            if let Some(warm) = budget.take_idle(pool.id) {
+                let previous = std::mem::replace(resource, warm);
+                budget.put(previous);
+            } else {
+                drop(resource.item.take());
+                resource.pool = pool.id;
+            }
         }
-        Ok(KeysetPage::cut(rows, limit, Stepped::default()))
+        if resource.item.is_none() {
+            let database = open()?;
+            budget.opened();
+            resource.item = Some(crate::read_budget::Cached::Scratch {
+                database,
+                _owner: retained.clone(),
+            });
+        }
+        match resource.item.as_ref().expect("result reader acquired") {
+            crate::read_budget::Cached::Scratch { database, .. } => read(database),
+            _ => unreachable!("scratch allowance contains a scratch reader"),
+        }
     }
 
     fn populate_count_result(
@@ -660,7 +919,32 @@ impl Snapshot {
             declared,
         } = source;
         let budget = reservation.limit;
-        let db = TemporaryDatabase::open(64, budget).map_err(failed)?;
+        {
+            let mut grant = self.grant.borrow_mut();
+            if let Some(grant) = grant.as_mut() {
+                let resource = grant
+                    .scratch
+                    .as_mut()
+                    .ok_or(PageRefusal::CountResultCapacity {
+                        retry_after_millis: None,
+                    })?;
+                drop(resource.item.take());
+            }
+        }
+        let db = match &self.count_results().directory {
+            Some(directory) => {
+                TemporaryDatabase::create_in(directory, 64, budget).map_err(failed)?
+            }
+            None => return Err(failed("the result directory is not configured")),
+        };
+        if let Some(budget) = self
+            .grant
+            .borrow()
+            .as_ref()
+            .and_then(|grant| grant.source.budget())
+        {
+            budget.opened();
+        }
         for setup in db.opening() {
             let mut ran = record_run(
                 &db,
@@ -846,6 +1130,19 @@ impl Snapshot {
     }
 }
 impl Retained {
+    fn retire(&self) {
+        let pools = self
+            .pools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for pool in pools {
+            pool.retire();
+            if let Some(budget) = pool.budget.upgrade() {
+                budget.drain();
+            }
+        }
+    }
     fn answer(&self, page: KeysetPage<Tally>, moved: Vec<Moved>, work: CountWork) -> Counted {
         let next = page.next.map(|last| {
             Cursor::retained_count(
@@ -1093,31 +1390,5 @@ mod tests {
         );
         drop(result);
         assert_eq!(owner.lock().unwrap().slots, 0);
-    }
-
-    #[test]
-    fn a_busy_registry_keeps_a_first_page_answerable() {
-        let scratch = Scratch::new("count-busy-registry");
-        let store = Store::open(
-            scratch.join("store.sqlite3"),
-            StoredPathOrder::Sensitive,
-            DerivationVersion::new(1),
-        )
-        .unwrap();
-        let reader = Arc::new(store.open_reader().reader.unwrap());
-        let snapshot = reader.try_take().unwrap().establish().unwrap();
-        let params = CountParams::new(VaultAddress::name(VaultName::new("test").unwrap()))
-            .with_by([GroupKey::field("one"), GroupKey::field("two")]);
-        let guard = snapshot.count_results().state.lock().unwrap();
-        assert!(snapshot.count(&params, &ContentModel::none()).is_ok());
-        let cursor = Cursor::new(
-            Reading::new("epoch", 0, None, None),
-            CursorKey::tally([None, None]),
-        );
-        assert!(matches!(
-            snapshot.count(&params.with_after(cursor), &ContentModel::none()),
-            Err(PageRefusal::CountResultBusy)
-        ));
-        drop(guard);
     }
 }

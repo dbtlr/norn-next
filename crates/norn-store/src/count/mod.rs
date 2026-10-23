@@ -64,13 +64,14 @@
 //! costs the smallest keeping filter's seek, or a document walk without one.
 //!
 //! Multi-key aggregation cannot stream arbitrary tuple order from a per-key
-//! index. It runs once and streams complete tallies into an anonymous SQLite
+//! index. It runs once and streams complete tallies into a disposable SQLite
 //! result relation with a normalized tuple primary key. Subsequent pages seek
 //! that relation; neither its source snapshot nor a demand lease is retained.
 //! Native memory stays bounded while result bytes spill to disk. Active result
 //! count and absolute lifetime are bounded by [`CountRetentionPolicy`]; disk
-//! quotas are optional. Fresh first pages fall back to the source page path
-//! on capacity, quota or coordination contention. Continuations refuse those
+//! quotas are optional. Independent read-only connections can page one saved
+//! result concurrently. Fresh first pages fall back to source paging on
+//! connection capacity, retention capacity or scratch failure. Continuations refuse those
 //! conditions explicitly rather than silently recomputing an expired result.
 //!
 //! A retained continuation keeps the original counts, typed normalizers,

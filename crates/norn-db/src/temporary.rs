@@ -2,6 +2,7 @@
 
 use rusqlite::trace::TraceEventCodes;
 use rusqlite::{Connection, OpenFlags, Params, StatementStatus};
+#[allow(clippy::disallowed_types)] // norn-db owns disposable SQLite files, not vault handles.
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -21,7 +22,7 @@ pub struct TemporarySetup {
     pub vm_steps: u64,
 }
 
-/// An anonymous disk-backed database, removed by SQLite when it closes.
+/// Disposable disk-backed storage, either anonymous or privately named.
 ///
 /// This is disposable scratch state, not a durable domain database. It has no
 /// epoch or migration ceremony, and never attaches a source database.
@@ -52,6 +53,11 @@ impl TemporaryFile {
         )
         .map_err(|error| error::sql("opening disposable results read-only", error))?;
         self.verify_identity()?;
+        // Published results have no writer. Contention is external and retryable,
+        // so it must not start another busy-wait interval after source acquisition.
+        connection
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(|error| error::sql("refusing result reader contention", error))?;
         connection
             .pragma_update(None, "cache_size", -64)
             .map_err(|error| error::sql("bounding the result reader cache", error))?;
@@ -108,6 +114,51 @@ fn file_error(operation: &'static str, path: &Path, error: std::io::Error) -> Db
     }
 }
 
+/// Discover stores with disposable storage without opening a source database.
+#[allow(clippy::disallowed_methods)] // Derived SQLite-file lifecycle belongs to this substrate.
+pub fn temporary_store_parents(
+    root: &Path,
+    directory_name: &std::ffi::OsStr,
+) -> Result<Vec<PathBuf>, DbError> {
+    let mut components = Path::new(directory_name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(DbError::Lifecycle {
+            operation: "discovering disposable storage",
+            path: root.to_path_buf(),
+            message: "the storage directory must be one file name".to_string(),
+        });
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(file_error("discovering disposable storage", root, error)),
+    };
+    let mut parents = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| file_error("listing derived stores", root, error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| file_error("checking derived store", &entry.path(), error))?
+            .is_dir()
+        {
+            continue;
+        }
+        let directory = entry.path().join(directory_name);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => parents.push(entry.path()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(file_error("checking disposable storage", &directory, error));
+            }
+        }
+    }
+    parents.sort();
+    Ok(parents)
+}
+
 impl TemporaryDatabase {
     /// Allocate an exclusive name inside a configured disposable-storage directory.
     pub fn create_in(
@@ -128,7 +179,7 @@ impl TemporaryDatabase {
         )
     }
     /// Create private disposable storage without overwriting an existing name.
-    #[allow(clippy::disallowed_methods)] // The substrate owns disposable files and opens.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The substrate owns disposable SQLite files and opens.
     pub fn create(path: &Path, cache_kib: u32, max_bytes: Option<u64>) -> Result<Self, DbError> {
         if let Some(parent) = path.parent() {
             let mut builder = fs::DirBuilder::new();

@@ -29,7 +29,11 @@ fn params() -> CountParams {
 }
 fn snapshot(reader: &Arc<SnapshotReader>) -> norn_store::Snapshot {
     reader
-        .try_take()
+        .acquire(
+            norn_store::ReadNeed::SourceAndScratch,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect("reader acquisition")
         .expect("no competing read")
         .establish()
         .expect("snapshot")
@@ -73,7 +77,8 @@ fn child(path: &Path, size: usize) {
     let initial = open_fd_count().unwrap();
     let store = Store::open(path, StoredPathOrder::Sensitive, DerivationVersion::new(1))
         .expect("source store");
-    let reader = Arc::new(store.open_reader().reader.expect("reader"));
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.reader_pool(&budget));
     drop(snapshot(&reader));
     let base = open_fd_count().unwrap();
     let at = Instant::now();
@@ -85,7 +90,7 @@ fn child(path: &Path, size: usize) {
     let retained_fds = open_fd_count().unwrap() - base;
     assert_eq!(
         retained_fds, 1,
-        "one spilled immutable result owns one descriptor"
+        "one warm result reader owns one descriptor"
     );
     let mut rows = 0;
     let mut vm_steps = 0;
@@ -115,6 +120,7 @@ fn child(path: &Path, size: usize) {
         "observing expiry closes result storage"
     );
     drop(reader);
+    budget.trim(Instant::now());
     drop(store);
     assert_eq!(
         open_fd_count().unwrap(),

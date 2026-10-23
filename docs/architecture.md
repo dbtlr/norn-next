@@ -1066,8 +1066,8 @@ applies, and at each continuation the plan bars resume, no statement a count run
 compilation probe — reads a document's body, its frontmatter or the full-text body column,
 judged on the columns the plan handout reports each statement reads.
 
-Multi-key counts stream one complete source aggregation into an anonymous, disk-backed
-SQLite result relation. Its normalized tuple primary key orders nulls, typed sort keys,
+Multi-key counts stream one complete source aggregation into a private named SQLite
+result relation under the store's derived data directory. Its normalized tuple primary key orders nulls, typed sort keys,
 folded tags and raw UTF-8 bytes; complete labels and distinct-document counts remain the
 source composer's responsibility. `norn-db` owns the disposable open and driver recording;
 `norn-store` owns result SQL. The result has no migration, epoch or permanent projection.
@@ -1080,20 +1080,39 @@ bulk insertions keep one record with an execution count instead of growing the r
 with the result. Snapshot counters count source work; `CountWork` and the host's statement
 trace also count disposable-result work. Payload bars cover both connections.
 
-Results are store-owned and shared by readers, including readers minted by schema reload.
-The production defaults retain at most 32 results for ten minutes each, with a 64 KiB
-SQLite page cache apiece and at most one spilled result-file descriptor per result.
-Disk follows the relation's bytes unless operator per-result or total quotas are set;
-source sorter spill is ordinary query working storage outside those quotas. Registry
-reservations include work in flight, and release disk accounting only after its connection
-closes. Native process RSS and descriptor pairs in `count_memory` bar bounded working
-memory across result sizes and release when a count observes expiry and at teardown.
-Expired files are reclaimed on the next multi-key count or when the store and its readers
-close; retention runs no background timer. Inspection does not
-publish a result whose report is discarded. No source snapshot or read demand survives a
-request. Coordination tries short locks, never waits for SQL under the registry lock,
-and closes expired files outside that lock. Scratch failure discards that result identity
-and never marks the source damaged.
+Results are store-owned and shared by reader pools, including pools installed by schema
+reload. The production defaults retain at most 32 results for ten minutes each.
+Independent sealed read-only connections page the same immutable result concurrently;
+no application lock spans result SQL. Each open result reader has a 64 KiB SQLite cache
+and participates in the host-wide connection budget. Idle readers are reused across a
+burst and can close without losing the result file. Disk follows the relation's bytes
+unless operator per-result or total quotas are set; source sorter spill remains ordinary
+query working storage outside those quotas. Registry reservations include populations
+in flight and charge disk until the last reader of retired storage closes.
+
+Identical selections against the same store epoch, write generation and schema pin
+share an in-progress population. Followers keep their own complete source-and-scratch
+grant and snapshot while waiting under their acquisition deadline. The leader never
+waits for another connection. The short registry lock spans no SQL, open or close.
+Pruning precedes retention admission, retires expired results' idle readers immediately,
+and closes resources outside the registry lock. Active readers keep their storage and
+quota charge until close. Result readers never busy-wait: an immutable result has no legitimate writer, so
+external lock contention refuses transiently. A transient result failure keeps a healthy result retryable;
+actual result damage retires only that result. No source snapshot or read demand
+survives a request. Inspection publishes no result whose report is discarded.
+
+`norn-db` exclusively creates named files with private directory and file modes and
+checks identity when reopening or removing them. Normal last-reader release removes
+storage. Host construction finishes its startup sweep before attaching stores. Startup,
+attach and rebuild sweeps hold the derived store's maintainer lock and remove only
+recognized result names; another active maintainer's files are untouched. A newly
+acquired maintainer may unlink files of a retired store instance even if old reads
+still own them. Already-open handles finish; reopening a lost name expires the result.
+Cleanup failures remain diagnostics and do not withdraw source trust. A crash can
+leave files until a successful sweep. Sweeps open no source database and read no vault
+file. There is no background result-expiry timer. Native process RSS and descriptor
+pairs in `count_memory` cover working memory across result sizes and release at
+observed expiry and teardown.
 
 A retained count's rows, typed orders, reports and advisories stay fixed at `counted_at`.
 The outer answer reading describes current trust and acquisition. A continuation of that
@@ -1107,7 +1126,7 @@ tuple-only cursor; this includes inability to create scratch storage. Continuati
 report the scratch failure with guidance to restore temporary storage or process resources
 and retry. Changed selections are detected by their digest before result lookup
 and follow normal tuple-position checks even after expiry. Reuse never renews the absolute
-deadline and requires at least half the configured lifetime to remain. ADR 0041 records
+deadline and requires at least half the configured lifetime to remain. ADR 0042 records
 the retained-continuation exception to source freshness and restates the reader contract.
 
 **The findings-for-path shape has a builder** too: the validate builder reads the findings
@@ -1936,7 +1955,7 @@ membership rule binds.
 | Site | Effect |
 |---|---|
 | `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock. Plus the per-registration mechanism files it owns, keyed by data base, channel and vault name — the maintainer lock file under the norn data root (created once, never unlinked) and the shadow home (created, staged into, swept, and discarded under the lock when its maintainership ends), which is under the data root too unless the vault is on another filesystem. This is the rule's home, not a carve-out. Its own suites carry allows besides, for the trees and states a case arranges and judges |
-| `norn-db` | The parts of a database file's lifecycle the driver does not cover: deleting the file and the sidecars a journal leaves beside it, and preparing its parent directory. Its ceremony suite carries allows too — the scratch directory a case's database lives in, and the foreign bytes a case writes where a database would stand |
+| `norn-db` | The parts of a database file's lifecycle the driver does not cover: deleting the file and the sidecars a journal leaves beside it, and preparing its parent directory. Disposable-result storage additionally uses exclusive file creation, private file and directory modes, identity checks before reopening or deleting, derived-directory discovery and recognized-name orphan sweeps. Its ceremony suite carries allows too — the scratch directory a case's database lives in, and the foreign bytes a case writes where a database would stand |
 | `norn-store` | Behind the induced-failure feature, the record file a fired arm appends to — the rest of the derived database's file lifecycle is `norn-db`'s, and the rungs and modes that decide when it happens reach it through that API. Its suites carry allows too — the directory a case's store lives in, the bytes a case damages, and the sidecar a torn changeset left |
 | `norn-semantic` | Its suites' scaffolding only: the scratch directories a case's store and sidecar live in. The sidecar file's own lifecycle is `norn-db`'s, reached through that API |
 | `norn-config` | Config-directory bytes, and the whole protocol around them: the registry file and the token file, the `0700` creation of the config directory, the `.lock` file each data file is guarded by, the temporary file every write lands in and the sweep that clears a dead writer's, and the directory fsync that makes a rename durable. Its suites carry allows for what they arrange outside that protocol: modes the API never writes, links planted at a name, and residue a dead writer left |
@@ -2201,22 +2220,50 @@ shed at the `norn-mcp` boundary); the host resolves the vault entry; a `norn-sto
 emits SQL; SQLite answers; rows become a wire report. No repository tier, no domain-object
 hydration. Warm requests assert zero derivation counters.
 
-**The production attachment mints a reader, and reads reach the database through it.** Reads
-reach the database independently of orchestration, on a read-only snapshot handle `norn-store`
-mints from the live `Store` — a second connection beside the writer, opened with the read-only
-flag, which is what refuses every write to the database it names and to anything attached to
-it, with `query_only` and a statement authorizer on top of it so the connection cannot relax
-its own settings and cannot compose transaction control, which the authorizer admits only
-while the store itself opens or closes a snapshot, and whose verdict judges a statement while
-its plan and the columns it reads are taken — held in entry state beside the
-attachment, never inside it, so a read
-proceeds while a warm lifecycle job holds the store. The snapshot is established under the
-entry gate lock in the same critical section that reads trust — established by a read
-statement, since a bare deferred `BEGIN` takes no snapshot — so the trust label and the
-snapshot describe the same instant, and the read runs outside the lock: it sees the last
-committed increment, never blocks the writer (checkpointing stays passive — an aggressive
-checkpoint mode would trade that guarantee away), and may trail in-flight derivation.
-Concurrent reads serialize against each other on the one reader per entry. The one exception
+**The production attachment mints a reader pool without database I/O.** `norn-store`
+binds a zero-I/O pool handle to a live `Store` and its epoch. Entry state holds that
+handle beside the attachment, so reads proceed while a lifecycle job holds the store.
+The host composes one `norn-store::ReadBudget` across its registrations through the
+validated `ProductionPolicy.read_budget`. Its default is four actual connections and
+a five-second idle grace; capacity must be at least two. Layer 6's serving composition
+owns persisted operator settings through `norn-config` as machine-local state, never
+vault config. There is no serving configuration parser today.
+
+Source connections open lazily outside the entry gate with the read-only flag,
+`query_only`, and a statement authorizer. The authorizer refuses settings changes,
+writes and caller transaction control. Only the store establishes and ends snapshots.
+Each read establishes its WAL snapshot under the entry gate in the same critical
+section that samples trust. A read statement establishes the snapshot; deferred
+`BEGIN` alone does not. SQL runs outside that gate on independent connections. It sees
+the last committed increment, never blocks the writer, and may trail in-flight
+derivation. Checkpointing remains passive.
+
+A plain read reserves one connection. A multi-key continuation reserves source and
+scratch connections together before establishing. A fresh multi-key first page
+prefers that pair, reclaiming idle connections first. If only one slot is available
+because the rest are active, it takes a complete source-only grant and answers through
+the tuple-only fallback. No request holds a partial grant while waiting for another
+slot. Warm source and result readers count in the grant and remain reusable.
+Waiting derived stores take round-robin turns, with FIFO requests within each store.
+The fairness key is the derived database path: separate registrations over one root
+have separate turns. A mandatory pair at the head waits for both slots; later reads
+cannot bypass it, even if one slot sits unused. Running reads are never preempted.
+Idle capacity can be reclaimed immediately under pressure and otherwise shrinks to
+zero after the grace, including through the dispatcher tick without new requests.
+Opening, active, idle and retired-but-not-closed connections remain charged until
+close. Private apply readers and source writers have separate worker and lifecycle
+bounds.
+
+Each active snapshot pins the WAL. Under sustained edits, overlapping snapshots can
+prevent reset and grow WAL bytes until a gap permits progress. One population can
+occupy a capacity of two, or two populations the default four; other reads can then
+expire as reader-unavailable. Rotating across more active stores than the cap forces
+cold opens. Increasing the cap trades memory and descriptors for concurrency.
+SQLite's Unix backend may retain a closed reader's main-file descriptor while the
+writer still locks that file, so idle shrinking does not promise zero extra process
+descriptors across attached stores.
+
+The one exception
 is an apply job that matches a `where` target or reads its plan's links: it reads on a read
 handle the store mints for the job alone — its own connection, never the entry's reader — so
 no read waits behind it and it waits behind no read. The job mints that handle inside the
@@ -2228,27 +2275,20 @@ intake. So the snapshot pins the write-ahead log across the apply's own file wor
 across a commit, a pin inside the price
 [ADR 0029](decisions/0029-a-read-waits-for-the-facts-it-met.md) restates from ADR 0028 — a held
 snapshot pinning the log against a passive checkpoint, here for as long as the plan's own
-staging and publication take. **No acquisition
-waits for the entry's reader while it holds the entry gate**: a lock held across a wait for a
-connection that only another holder of the same lock can give back hangs the entry rather than
-slowing it. Under the gate an acquisition tries for the entry's connection without blocking,
-and establishes its snapshot there where the connection is free. Where another read holds it,
-the acquisition gives the gate back and waits outside it — the demand it has already recorded
-holds the entry across that wait — then takes the gate again and reads the published demand
-afresh before it establishes, because the instant it first read is not the instant it answers
-under; an entry that has stopped serving, or whose reader is no longer the one the acquisition
-waited for, takes the connection back, and the read then waits where the entry settles,
-acquires the reader the entry serves now where it serves another, and refuses with what the
-entry publishes where it neither settles nor serves. The wait for the connection ends when the
-connection comes back or when the read's bound runs out, whichever is first — so a holder that
-never ends, or a teardown that wakes no waiter, holds a read no longer than its bound — and a
-read that finds the connection still held past its bound refuses as reader-unavailable. The
-retake of the gate after that wait ends at the same bound: a gate another holder keeps past it,
-a mint's open among them, refuses the read as reader-unavailable, and the demand the read
-recorded goes back with the next hold of the gate rather than holding the read until the gate
-is free.
-The priced cost of contention is that second reading, and measured contention is still what
-mints more readers through the carved pool seam. The reader is torn down before the store
+staging and publication take. **No acquisition waits for capacity or opens a connection under the entry gate.**
+Under the gate it tries for a warm complete grant without blocking. Otherwise it
+releases the gate, acquires and opens outside it, then retakes the gate under the
+original deadline. It rechecks the pool identity and current stance before establishing.
+A replaced pool gives its grant back; the read acquires the current pool under the
+same deadline. Capacity waits, cold-open SQLite waits, snapshot-establishment waits
+and gate retakes all consume that deadline. Before `BEGIN` and the first read, every
+borrower resets the connection's busy timeout to the remaining bound. An exhausted
+bound refuses before establishment. Synchronous filesystem calls cannot be cancelled;
+a late open is refused and stays charged until it closes. The entry gate can take the
+budget lock for bookkeeping; budget and result-registry code never takes an entry
+gate. Metadata locks span no SQL, open or close.
+
+The pool is retired before the store
 closes on every closing path, and a read's hold is demand on the entry: it holds the entry's
 demand for as long as the read runs, restarts the idle interval when it ends, and withdraws an
 idle detach that is scheduled and not yet in flight — so **an idle teardown neither runs under
@@ -2258,7 +2298,7 @@ without consulting a read, and a read in flight stops none of them. Through such
 read keeps answering from the handle it holds until it completes, and nothing promises the
 database file outlives the teardown for it: that is the contract the read path states, and its
 price is the accepted one: a read holds no coverage, so no teardown waits on it. [ADR
-0041](decisions/0041-snapshot-readers-and-retained-count-results.md) records the rationale
+0042](decisions/0042-elastic-readers-and-concurrent-retained-results.md) records the rationale
 and the priced costs.
 
 **Hold acquisition is the read path's one adjudication, and the handle is its proof.** A
@@ -2288,7 +2328,7 @@ A park keeps its own code. Where the demand is serving, the refusal is reader-un
 which is an entry serving every surface but this one.
 
 **A read that meets a change waits for it, as [ADR
-0041](decisions/0041-snapshot-readers-and-retained-count-results.md) rules.** Warming splits
+0042](decisions/0042-elastic-readers-and-concurrent-retained-results.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
 turn, a schema reload — settles, and every other state refuses at once with its reason,
@@ -2300,7 +2340,7 @@ derived the facts it took in. The bound runs from the read's first take of the e
 covers the waits the read takes to establish its snapshot or to refuse: that first take, the
 wait for the connection and the wait for the change together, and the retake of the gate after
 each. **After those, a read never waits for the entry gate**, so a gate another holder keeps —
-a mint's open under it among them — holds a read no longer than its bound. What a read needs
+snapshot establishment under it included — holds a read no longer than its bound. What a read needs
 of the entry beside its snapshot it reads under the hold that establishes the snapshot, which
 carries it: the content model the store pins, and the ground a preview plans on. Each later take
 tries the gate once and otherwise leaves its work for the next hold, which runs it before its
@@ -2326,8 +2366,8 @@ answer carries what the entry then publishes, so a read answered while later fac
 being derived says so: its trust is the healing that stands, and its generation is the store's
 committed write generation. So a vault edited faster than one reconcile turn still answers, the
 wait never runs until the vault falls quiet, and no read answers from the state before the
-change it met. A schema reload closes the reader for its length, so a read it settles answers
-once it mints another with `Ready`, and from that reader; the read refuses only where the
+change it met. A schema reload retires the pool for its length, so a read it settles answers
+once it installs another with `Ready`, and from that pool; the read refuses only where the
 entry is no longer settling or serving. Past a bound, a lifecycle policy value whose
 production value is the 5-second settle ceiling, it refuses as `host/entry-not-ready` with the
 message "this vault is still indexing a change". A teardown's publication moves the stance and
@@ -2366,7 +2406,7 @@ entry is free to run it, the read's demand also schedules the work the entry owe
 chain: the attach where the entry holds no coverage, and under that the rebuild it owes, the
 recovery beneath that, and the reconcile where it owes neither. **A read's demand neither
 raises nor schedules a recovery only a change to the vault can answer while nothing has
-changed**, as [ADR 0041](decisions/0041-snapshot-readers-and-retained-count-results.md)
+changed**, as [ADR 0042](decisions/0042-elastic-readers-and-concurrent-retained-results.md)
 rules. A cause is held back when re-reading the vault's own bytes reaches the same verdict
 and the change that heals it is a fact the watcher reports; every other cause retries. That
 recovery is the one owed where the entry's own declaration withholds trust — a vault schema
@@ -2392,127 +2432,35 @@ the park's own code, a refused identity and a duplicate root alike with a conten
 maintainer, and schedules nothing. A refused acquisition records its demand the way a served
 one does.
 
-The attachment mints the reader under the gate hold that publishes the trust label beside
-it, as one move at one epoch, so the handle an entry holds belongs to the coverage that
-entry holds. The mint is fallible and cannot panic — an unwind under that gate poisons it —
-and its blocking open lengthens a hold every other holder of the entry waits behind. That
-cost is measured: the statements a leg's mint runs there are counted in the host's account of
-its jobs where the mint returns, whichever way the mint ended. A mint that fails changes no
-trust label and publishes no refusal of its own: the reason is retained beside the entry's
-published demand, the way a reload's diagnostic and an engine's are, and a read refuses
-with it as reader-unavailable's detail. The host tells a refusal met in the store, in the
-semantic engine's sidecar, or in its own data directory without a path: a store or sidecar
-refusal — a read's refusal, a job leg's failure as the entry's untrusted reason or a
-reload's failure — is told from the refusal's typed facts and never from the driver's words,
-which can name the database file, and a refusal met where the maintainer lock and the shadow
-home sit beside the database is told without the directory. So no refusal hands a caller a
-path to the derived database to open its own connection by. A refusal about the vault's own
-files — a schema or config it could not read, a walk or a read the filesystem refused, a
-watcher that lost the root — names the vault path the caller registered. The vault status
-verb reports it beside trust and engine state; that verb is not built, and what the host
-retains for it today is the trust label, the active fingerprints and the last reload error.
-A mint may fail at a publication that is not serving, and then the read renders that demand
-and leaves the retained fact unsaid; the fact stands until the next publication mints again
-and re-derives it.
+The attachment installs the zero-I/O pool under the gate hold that publishes trust,
+binding the handle to that coverage and epoch. Pool creation does not run SQL.
+Cold-open failures remain diagnostics beside the current pool and can be retried by
+a later read. Environmental open failures, memory exhaustion, descriptor exhaustion
+and busy failures refuse as reader-unavailable without scheduling a rebuild. Damage
+met at source open or snapshot establishment follows the existing read-damage judgment,
+including carrying the verdict to a running claim. Only that lifecycle path rebuilds;
+the reader itself never runs a heal rung.
 
-**A read is the other occasion that mints.** A read that meets a serving entry with an empty
-slot asks for the mint again over the coverage that entry is already holding, so a read seam
-that failed on the environment heals under read traffic rather than waiting for a teardown
-the read's own demand keeps withdrawing. That mint opens the database file, and it opens it
-under the entry gate, so it costs what the publication's mint costs: every other holder
-of that entry — its state, its inspection, its demand, its reap, and every other read of it
-— waits behind the open. **The bound is the read-only open's busy timeout, five seconds, and
-it is per statement rather than per open**: the open sets that timeout and then runs two
-statements that read the database — the journal-mode read that refuses a database not in
-write-ahead logging, and the store-epoch read that binds the connection to its file — so a
-mint that met a busy at each stalls the gate for a multiple of five seconds rather than for
-five. A reader in write-ahead logging is almost never the one that takes a busy, which is
-what makes the multiple a ceiling rather than a cost. That ceiling is accepted on the read
-path rather than shortened for it. The read that pays
-it is a read that would otherwise be refused, the entry it stalls is one whose read seam is
-already down, and the reads queued behind it get the healed handle instead of the refusal
-they were headed for; a shorter bound would buy a faster refusal by trading the heal away,
-and it would make the read path a second spelling of an open the substrate has one spelling
-of. A read pays it at most once: one open per read that meets an empty slot, no retry inside
-it, and a mint that fails there leaves the reason that read refuses with.
+The host renders source and sidecar failures from typed facts, excluding driver words
+that may contain derived database paths. Data-directory cleanup diagnostics also do
+not expose the directory through read refusals. Vault-file failures can name the
+registered vault paths. This keeps database connections inside their owning domain.
 
-**The read account reports what an acquisition runs under the gate act by act, and reports it
-whichever way the acquisition left.** The host keeps three readings: the statements SQLite ran
-to establish the snapshots of the reads it served, which are exactly two each, the deferred
-`BEGIN` that reads no row and the one establishing statement, and are what the structural bar
-on gate-held query work is stated against; the statements the read path's mints ran, which are
-the repair's own cost and are zero on a host whose reads all found a handle standing; and the
-statements establishments ran before refusing, which served no read and held the gate all the
-same. The refusals are in the account for the same reason the answers are — a mint or an
-establishment that met a busy database held the gate for the statement it waited on, which is
-precisely the case a ceiling exists to catch — and they are kept apart from the served reading
-so that reading stays exactly the reads it served. **What an establishment ran under the gate
-is the gate holder's own reading of SQLite's count**, not a count the establishment reports or
-the code beside each statement keeps: a handle's connection counts every statement SQLite's
-statement trace reports as it begins on it, transaction control included, on the thread that
-begins it, from the moment the mint makes it a handle, so the mint's own statements stay the
-mint's report. The trace reports the statements FTS5 runs inside a full-text match as
-statements of their own; it does not report an `EXPLAIN`, which compiles its query and does
-not run it, or the reading of its schema SQLite runs when it loads the schema again. The
-acquisition reads its thread's count as each round takes the gate and again as the
-establishing round gives it back, carrying a round that let the gate go into the next and
-leaving the wait between them out. The connection's turn is taken under the gate and a
-connection runs on one thread at a time, so every statement SQLite runs on the read's
-connection under the gate is in the difference however it was composed, and an establishing
-statement moved before or after the hold is not. The entry gate counts every time it is taken,
-inside the lock and in the gate's own takes, which every holder goes through, and the acquisition reads
-that count at the same two points: a continuous hold reads no retake, and a hold that let the
-gate go and took it back around the establishment reads one. Beside them the account keeps the
-widest reading any one acquisition produced, its mint and its establishment together, which is
-the number a ceiling over one read is stated against. Beside the three the account also keeps
-the contention it measured: the acquisitions that gave the gate back and waited for the
-entry's one connection. That wait is counted where it begins, once the acquisition has given
-the gate back and found the connection taken: the wait returns only with the connection, so
-every wait counted ends, and a reading taken while reads contend already names each one
-waiting. An acquisition refused after it waited is in the contention reading and not in the
-served one; those are the paths contention is most likely to be interesting on, and a reading
-of served reads alone would under-report exactly there. A contended acquisition takes the gate
-again after its wait and reads the published demand afresh in that round; the round, a hold of
-the gate taken again, is the cost of contention, and the demand read inside it is an in-memory
-read under that hold. Each acquisition counts its own rounds and records them once, where it
-leaves, so the account keeps the rounds after each acquisition's first and the widest number
-of them any one acquisition took. A contended acquisition takes exactly one: it holds the
-connection from its second round on, so that round cannot contend again. **No act an
-acquisition runs is reported by no reading, whichever way the acquisition left**: the mint is
-accounted where the mint returns, the establishment where the hold it ran under gives the gate
-back, the wait where the wait begins, and the rounds of the gate where the acquisition leaves,
-on every way out.
+**Read evidence separates gate-held establishment from outside-gate acquisition.**
+SQLite's statement trace counts statements actually begun on each thread, including
+transaction control. A served establishment runs exactly two statements under the
+gate: deferred `BEGIN` and the first read. Refused establishments have a separate
+account. Zero-I/O pool minting contributes zero statements. Cold opens occur outside
+the gate and stay out of the gate-held statement delta. The read account records
+outside-gate acquisitions and gate retakes, including refused paths; a cold open and
+a capacity wait can both require a retake. Budget census separately reports cumulative
+opens, live and idle connections, waiting requests and the peak allocation.
 
-**The read-concurrency bar holds these readings under contention, over a production
-attachment.** The full-regression counter lane runs the overlapping-reads-on-one-entry
-workload:
-several reads start while one more holds the entry's one connection, and the hold is let go
-only once the reader-wait reading names every one of them as waiting. Each read served runs
-exactly its establishment's two statements under the gate by the holder's own reading, with
-the establishments' own reports checked apart, and no establishing hold reads a retake of the
-gate; the reader-wait reading is every overlapping read; and the rounds after the first equal
-the waits, with no one acquisition past a ceiling authored in `norn-host`'s baselines under
-the `read-` prefix. The same reads run one after another are the control, and the bar fails
-them on contention alone.
-
-A leg's publication runs the same mint as a read's repair, and its statements land in the
-host's account of its jobs rather than in the read account, so neither account moves for the
-other's work. A leg's mint is counted where it returns rather than with what the job spent
-while it ran, because the publication runs after the leg's own call into the ops has
-returned. A mint that refused is counted there for the reason it is here, and a leg that
-minted nothing, because it installed no coverage or parked coverage over a handle already
-standing, adds nothing.
-
-The read account also keeps what each preview spent judging its plan's links on the
-store's resolution door: every judgment its planning and the applier's check of it ran — a
-cascade's backlink pass and spelling probe, a delete's naming of its `rewrite_to`, a wikilink
-rewrite's naming of its two ends, the change set, and the change set computed again — with
-what each judgment reported and the statements and steps its snapshot counted while it ran,
-added where the preview answers, whatever it answered. The move-cascade bar, the delete bar
-and the wikilink-rewrite bar read these, so what they hold to size independence is what a
-preview really ran: the delete bar a hub's delete refused for its in-links, the same delete
-leaving them broken, and a delete no link names; the wikilink-rewrite bar a rewrite of a
-hub's name retargeting its in-links.
+The host reads suite exercises warm acquisitions without a retake, cold acquisitions
+with no mint SQL under the gate, and bounded waits while capacity is occupied. Store
+reader tests exercise independent snapshots, atomic pair grants, per-store fairness,
+retirement and idle shrinking. Count tests exercise concurrent pages of one result,
+shared populations, source-only fallback, transient result failures and burst reuse.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
@@ -2526,7 +2474,7 @@ judges under, so a read and a derivation read one declaration out of one set of 
 leg that pins a schema records the model in the hold that publishes it, and no read is served
 between the pin and that hold, so a request is never compiled against a declaration its
 snapshot does not pin.
-The guarantee is one of transaction ownership: the reader is a second connection beside the
+The guarantee is one of transaction ownership: each source reader is an independent connection beside the
 writer, so no write consumes the snapshot a request read and no later write executes inside
 the request's snapshot transaction; and the snapshot is ended by the handle that opened it,
 since a `COMMIT` or `ROLLBACK` composed over the connection is refused at preparation. A
@@ -2912,7 +2860,7 @@ maintained inside the document's changeset beside the value they type; and their
 invalidation key is the standing schema pin held in `meta`. **The typed column joins what a
 re-pin discards**: the pin's own transaction clears every typed value, its least-value
 marker and its offset spelling beside the findings it discards, and the walk that follows
-refills them. That is safe because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
+refills them. That is safe because a schema reload retires the entry's pool and publishes `Warming` in its `Healing`
 phase until the heal converges, so no read observes a column the walk has half refilled.
 The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
 or a key declared `tags` — its `#` marker dropped and the tag fold applied, or the link a
@@ -2940,7 +2888,7 @@ and its invalidation key is the standing schema pin. **A re-pin does not discard
 pin's transaction leaves the column standing, and the heal that follows converges it by
 deriving every row below the pin again, so until that heal reaches a row, the row holds the
 count the old ignore set gave it. No read observes that window, because a schema reload
-closes the entry's reader until the heal converges. A re-decision inside the heal's own
+retires the entry's pool until the heal converges. A re-decision inside the heal's own
 changesets may read an old count, but a class is re-decided by every changeset that writes
 one of its members, and the last of them runs after every member is derived under the new
 set.
@@ -4003,7 +3951,7 @@ reply rides in the job. The seam holds these invariants; which gate hold carries
 bound by the applier's lifecycle tests.
 
 - **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
-  raises, under ADR 0041's chain, and refuses at once with the code a read would carry where
+  raises, under ADR 0042's chain, and refuses at once with the code a read would carry where
   the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
   unknown vault, or a registration change holding the entry. Over an entry that serves reads
   with no reader standing, it asks for the reader again as a read does, and refuses with

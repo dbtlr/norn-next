@@ -29,6 +29,320 @@ use norn_wire::{
 // ---- fixtures ----
 
 #[test]
+fn a_source_only_first_page_does_not_wait_for_an_identical_population() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("source-only-population", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let take = |need| {
+        reader
+            .acquire(need, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let leader = take(norn_store::ReadNeed::SourceAndScratch);
+    let unrelated = take(norn_store::ReadNeed::Source);
+    let source_only = take(norn_store::ReadNeed::SourceAndOptionalScratch);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (answered_tx, answered_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let request = params.clone();
+        let held = scope.spawn(move || {
+            induced_failure::before_next_result_population(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            leader.count(&request, &declared())
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("population claimed");
+        scope.spawn(move || {
+            answered_tx
+                .send(source_only.count(&params, &declared()))
+                .unwrap()
+        });
+        let independent = answered_rx.recv_timeout(Duration::from_secs(1));
+        release_tx.send(()).unwrap();
+        held.join().unwrap().unwrap();
+        let independent = independent
+            .expect("source-only fallback cannot wait for retention")
+            .unwrap();
+        assert_eq!(independent.tallies.len(), 3);
+        assert!(independent.next.unwrap().retained_count_id().is_none());
+    });
+    drop(unrelated);
+}
+
+#[test]
+fn a_fresh_count_uses_source_fallback_when_only_one_connection_is_available() {
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("count-budget-fallback", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let held = (0..3)
+        .map(|_| {
+            reader
+                .acquire(
+                    norn_store::ReadNeed::Source,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap()
+                .unwrap()
+                .establish()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let source = reader
+        .acquire(
+            norn_store::ReadNeed::SourceAndOptionalScratch,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap()
+        .expect("one source connection is sufficient for a fresh fallback")
+        .establish()
+        .unwrap();
+    let answer = source
+        .count(&params, &declared())
+        .expect("retention pressure cannot refuse a fresh source page");
+    assert_eq!(answer.tallies.len(), 3);
+    assert!(answer.next.unwrap().retained_count_id().is_none());
+    assert_eq!(budget.census().live_connections, 4);
+    drop((source, held));
+}
+
+#[test]
+fn a_fresh_count_reclaims_idle_capacity_before_using_source_fallback() {
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("count-reclaim-before-fallback", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let warm = (0..4)
+        .map(|_| {
+            reader
+                .acquire(
+                    norn_store::ReadNeed::Source,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap()
+                .unwrap()
+                .establish()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(warm);
+    let count = reader
+        .acquire(
+            norn_store::ReadNeed::SourceAndOptionalScratch,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap()
+        .unwrap()
+        .establish()
+        .unwrap();
+    let answer = count.count(&params, &declared()).unwrap();
+    assert!(
+        answer.next.unwrap().retained_count_id().is_some(),
+        "idle cache pressure does not discard aggregate-once retention"
+    );
+}
+
+#[test]
+fn a_transient_result_page_failure_preserves_the_saved_result() {
+    let store = Counting::with_bulk("transient-result-page", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let first = store.count(&params);
+    let continuation = params.with_after(first.next.unwrap());
+    induced_failure::fail_next_result_page_as_busy();
+    assert!(store.snapshot().count(&continuation, &declared()).is_err());
+    let retried = store
+        .snapshot()
+        .count(&continuation, &declared())
+        .expect("retry uses the still-healthy result");
+    assert_eq!(retried.tallies.len(), 3);
+}
+
+#[test]
+fn a_count_burst_reuses_connections_and_idle_shrink_keeps_the_result() {
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("count-burst-reuse", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(
+        norn_store::ReadBudgetPolicy::new(2, Duration::from_secs(5)).unwrap(),
+    );
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(
+                norn_store::ReadNeed::SourceAndScratch,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let first = take().count(&params, &declared()).unwrap();
+    let id = first.next.unwrap();
+    let opened = budget.census().connections_opened;
+    assert_eq!(
+        opened, 3,
+        "one source, one builder, then one sealed result reader"
+    );
+    for _ in 0..10 {
+        let repeated = take().count(&params, &declared()).unwrap();
+        assert_eq!(
+            repeated.next.as_ref().unwrap().retained_count_id(),
+            id.retained_count_id()
+        );
+        assert!(
+            repeated.work.tallies_read < 32,
+            "a repeated page does not aggregate again"
+        );
+    }
+    assert_eq!(
+        budget.census().connections_opened,
+        opened,
+        "a burst reopens no connection"
+    );
+    budget.trim(Instant::now() + Duration::from_secs(6));
+    assert_eq!(budget.census().live_connections, 0);
+    let after_idle = take().count(&params, &declared()).unwrap();
+    assert_eq!(
+        after_idle.next.as_ref().unwrap().retained_count_id(),
+        id.retained_count_id()
+    );
+    assert!(
+        after_idle.work.tallies_read < 32,
+        "idle shrinking preserves aggregate-once storage"
+    );
+    assert_eq!(
+        budget.census().connections_opened,
+        opened + 2,
+        "reopen only the source and completed result"
+    );
+}
+
+#[test]
+fn branches_of_one_retained_count_read_independently() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("parallel-count-branches", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(
+                norn_store::ReadNeed::SourceAndScratch,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let first = take().count(&params, &declared()).unwrap();
+    let continuation = params.with_after(first.next.unwrap());
+    let one = take();
+    let two = take();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let params = continuation.clone();
+        let held = scope.spawn(move || {
+            induced_failure::before_next_result_page(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            one.count(&params, &declared())
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first page entered");
+        let independent = two.count(&continuation, &declared());
+        release_tx.send(()).unwrap();
+        let held = held.join().unwrap().unwrap();
+        let independent =
+            independent.expect("another branch must not refuse because the first is reading");
+        assert_eq!(held.tallies, independent.tallies);
+        assert_eq!(held.snapshot, independent.snapshot);
+    });
+    assert!(budget.census().peak_connections <= 4);
+}
+
+#[test]
+fn concurrent_identical_first_pages_share_one_population() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let store = Counting::with_bulk("parallel-count-population", 32);
+    let params = counting(vec![field("status"), field("n")])
+        .with_predicates([Predicate::tag("bulk")])
+        .with_limit(3);
+    let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+    let reader = Arc::new(store.store.reader_pool(&budget));
+    let take = || {
+        reader
+            .acquire(
+                norn_store::ReadNeed::SourceAndScratch,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap()
+    };
+    let one = take();
+    let two = take();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let request = params.clone();
+        let held = scope.spawn(move || {
+            induced_failure::before_next_result_page(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            one.count(&request, &declared())
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first population completed");
+        let other = two.count(&params, &declared());
+        release_tx.send(()).unwrap();
+        let held = held.join().unwrap().unwrap();
+        let other = other.unwrap();
+        assert_eq!(
+            held.next.as_ref().unwrap().retained_count_id(),
+            other.next.as_ref().unwrap().retained_count_id()
+        );
+        assert!(
+            other.work.tallies_read < 32,
+            "a follower must read its page, not aggregate the source again"
+        );
+    });
+}
+
+#[test]
 fn a_retained_count_keeps_its_source_view_after_writes_and_schema_reload() {
     let mut store = Counting::with_bulk("count-frozen-view", 32);
     let params = counting(vec![field("status"), field("n")])

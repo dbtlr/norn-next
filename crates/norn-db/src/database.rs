@@ -334,6 +334,18 @@ impl Database {
             .map_err(|error| error::sql("opening a read snapshot", error))
     }
 
+    /// Replace a previous borrower's timeout before acquiring any SQLite lock.
+    /// Installing the driver busy handler executes no SQL.
+    pub fn bound_busy_waits_until(&self, deadline: std::time::Instant) -> Result<(), DbError> {
+        self.connection
+            .busy_timeout(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(BUSY_TIMEOUT),
+            )
+            .map_err(|error| error::sql("bounding snapshot acquisition waits", error))
+    }
+
     /// End the snapshot [`Database::open_snapshot`] opened, by rolling it
     /// back.
     ///
@@ -887,6 +899,31 @@ mod tests {
     use norn_testkit::scratch::Scratch;
 
     use super::*;
+
+    #[test]
+    fn a_reused_connection_replaces_its_previous_busy_wait_budget() {
+        let (_scratch, database) = sealed_database("reused-busy-budget", "trial", "value");
+        database
+            .bound_busy_waits_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        database
+            .bound_busy_waits_until(
+                std::time::Instant::now() + std::time::Duration::from_millis(30),
+            )
+            .unwrap();
+        database
+            .connection
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        let milliseconds: u64 = database
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            milliseconds <= 30,
+            "a reused connection kept an earlier request's timeout: {milliseconds}"
+        );
+    }
 
     /// A sealed, single-table database a case can hand to
     /// [`Database::recording_reads`] directly. `table` and `column` are the
