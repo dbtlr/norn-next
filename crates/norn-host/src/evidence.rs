@@ -211,22 +211,9 @@ pub struct EvidenceReading {
     /// overflow itself, which is otherwise readable only as a trust state that
     /// stands for the length of the reconcile clearing it.
     pub watcher_rescans_reported: u64,
-    /// Statements the job legs' reader mints ran against a database while the
-    /// entry gate was held.
-    ///
-    /// A leg that installs, swaps or parks coverage mints the handle that
-    /// coverage serves reads from in the gate hold that publishes it, and the
-    /// mint reads the database: the journal-mode read of the read-only open,
-    /// and the store-epoch read that binds the connection to its file. Every
-    /// other holder of that entry waits behind those statements, so this is
-    /// what the legs' publications held the gate for. A read's own mint is not
-    /// here: it is the read account's, and neither account moves for the
-    /// other's work.
-    ///
-    /// **A mint that refused counts what it ran before it refused**, because
-    /// the gate was held for those statements too. A leg that minted nothing,
-    /// because it installed no coverage or parked coverage over a handle that
-    /// was already standing, adds nothing.
+    /// Statements a job leg's reader-pool mint ran under the entry gate.
+    /// Production pool creation is zero-I/O and contributes zero. The separate
+    /// account detects an adapter that moves database work into publication.
     pub mint_statements_under_the_gate: u64,
     /// Statements the apply jobs' reader mints ran against a database, inside
     /// the entry's claim and outside its gate.
@@ -1054,7 +1041,7 @@ mod tests {
 /// derived, and a read derives nothing by construction. What this counts is
 /// the read path's own shape: how many reads were served, what each ran while
 /// it held the entry gate, and what concurrent reads of one entry paid for
-/// sharing the one connection that entry holds.
+/// sharing the entry's bounded reader budget.
 ///
 /// **What an establishment ran under the gate is the gate holder's reading of
 /// SQLite's own count.** A handle's connection counts every statement SQLite
@@ -1158,19 +1145,9 @@ pub struct ReadReading {
     /// folding the two would leave the per-read reading unable to say which of
     /// them moved it.
     pub statements_under_the_gate: u64,
-    /// Statements the read path's own mints ran against a database while the
-    /// entry gate was held.
-    ///
-    /// A read that meets a serving entry with an empty handle slot mints that
-    /// handle again under its gate hold, before it establishes anything, and
-    /// the mint reads the database: the journal-mode read of the read-only
-    /// open, and the store-epoch read that binds the connection to its file.
-    /// This is the repair's own cost, so **zero is a host whose reads all
-    /// found a handle standing** and any other number is read-traffic healing.
-    ///
-    /// It counts what a mint ran whichever way that mint ended, and whichever
-    /// way the read that paid for it left: a mint that refused held the gate
-    /// for the statements it ran before it refused.
+    /// Statements a read-path reader-pool mint ran under the entry gate.
+    /// Production repairs only metadata and contributes zero. Cold connection
+    /// opens run outside the gate and do not contribute to this reading.
     pub mint_statements_under_the_gate: u64,
     /// Statements SQLite ran under the entry gate for establishments that
     /// refused.
@@ -1206,42 +1183,15 @@ pub struct ReadReading {
     /// the lock however many statements the count across it reads. Served and
     /// refused establishments alike are in it.
     pub gate_retakes_within_establishing_holds: u64,
-    /// Acquisitions that gave the entry gate back and waited for the one
-    /// connection their entry holds. Nonzero is reader contention, measured
-    /// rather than assumed.
-    ///
-    /// **Counted where the wait begins, whichever way the acquisition
-    /// leaves.** The count moves while the acquisition is still waiting, so a
-    /// reading taken during contention already names every acquisition that
-    /// found the connection taken. A wait that begins returns only with the
-    /// connection, so each one counted here also ends. An acquisition that
-    /// waited and was then refused, because its entry stopped serving or
-    /// because its handle was replaced while it waited, paid the whole of that
-    /// wait, so it is one of these and is not among `reads_served`. Those are
-    /// the paths contention is most likely to be interesting on, and a reading
-    /// that held only served reads would under-report exactly there.
-    ///
-    /// It is a wait for the reader's connection and not for a gate: no
-    /// acquisition waits for that connection while it holds the entry gate,
-    /// and nothing here counts a wait for the gate itself.
+    /// Outside-gate acquisitions started, including cold opens, capacity waits,
+    /// failures and retired-pool outcomes. Counted before acquisition begins.
+    /// This counter alone does not distinguish a cold open from contention.
     pub reader_waits: u64,
-    /// Rounds of the entry gate acquisitions took after their first, summed
-    /// over acquisitions.
-    ///
-    /// **One per wait for the connection, served or refused.** Every
-    /// acquisition takes a first round of the gate. One that found the
-    /// connection taken gives the gate back, waits, and takes another round,
-    /// in which it reads afresh the stance its entry stands at, because the
-    /// instant it read before is not the instant it answers under. That round
-    /// is the cost of contention: a hold of the gate taken again. The stance
-    /// read inside it is an in-memory read under that hold, so the round is
-    /// what is counted, and a round is the one way an acquisition reads the
-    /// stance again. Each acquisition counts its own rounds and records them
-    /// once, where it leaves. So this equals [`ReadReading::reader_waits`],
-    /// and a count below it is a contended acquisition that answered under
-    /// the stance it read before it waited. The rounds after a settle wait
-    /// are [`ReadReading::settle_rounds`], which is what keeps that
-    /// equality whole.
+    /// Successful entry-gate retakes after outside-gate acquisition, summed
+    /// over served and refused requests. Each retake rechecks the current
+    /// pool identity and stance. A request whose deadline prevents a retake
+    /// contributes an acquisition but no retake. Settle retakes are counted
+    /// separately in [`ReadReading::settle_rounds`].
     pub gate_rounds_after_the_first: u64,
     /// The most rounds of the entry gate any one acquisition took after its
     /// first.
@@ -1271,11 +1221,9 @@ pub struct ReadReading {
     /// Rounds of the entry gate acquisitions took after a settle wait,
     /// recorded where each acquisition leaves.
     ///
-    /// **Counted apart from [`ReadReading::gate_rounds_after_the_first`]**, so
-    /// that reading goes on equalling [`ReadReading::reader_waits`]: every
-    /// wait for the connection is followed by one round, and every settle
-    /// wait by one round here. So this equals `settle_waits` over any
-    /// window in which no acquisition is still waiting.
+    /// Counted separately from retakes after resource acquisition. A settle
+    /// wait whose deadline prevents a retake contributes to `settle_waits`
+    /// without contributing a round here.
     pub settle_rounds: u64,
     /// Acquisitions refused because the entry was still taking in its change
     /// when their settle bound ran out: each is a
@@ -1328,7 +1276,7 @@ pub struct ReadsSince {
     /// gate was held.
     pub refused_establishment_statements_under_the_gate: u64,
     /// Acquisitions in this window that gave the entry gate back and waited
-    /// for the one connection their entry holds, served and refused alike.
+    /// for reader acquisition outside the gate, served and refused alike.
     pub reader_waits: u64,
     /// Times an entry gate was taken again inside this window's establishing
     /// holds.
@@ -1561,19 +1509,11 @@ impl ReadEvidence {
         );
     }
 
-    /// Record that one acquisition waited for its entry's connection.
+    /// Record an outside-gate acquisition before it waits or opens.
     ///
-    /// **This is called where the wait begins and not where the read leaves**:
-    /// the acquisition has given the entry gate back and found the connection
-    /// taken, and it waits out another read whichever answer it goes on to get.
-    /// The wait returns only with the connection, so every wait counted here
-    /// ends, and the re-validation that decides the answer runs after both.
-    /// Counting it here lets a reading taken while reads contend name the
-    /// acquisitions that are waiting, before any of them is let through.
-    ///
-    /// The wait is the host's own count rather than a number the establishment
-    /// reports: the acquisition is what waited, and the establishment it
-    /// eventually ran waited for nothing.
+    /// Counts capacity waits and cold opens, including failure and retirement.
+    /// Recording the start exposes acquisitions still in progress. A successful
+    /// gate retake later rechecks identity and stance before establishment.
     pub(crate) fn count_reader_wait(&self) {
         self.reader_waits.fetch_add(1, Ordering::Relaxed);
     }

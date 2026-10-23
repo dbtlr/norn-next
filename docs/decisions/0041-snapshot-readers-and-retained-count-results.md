@@ -1,9 +1,11 @@
 ---
-status: accepted
+status: superseded
 date: 2026-10-20
 ---
 
 # 0041 — wire reads run on store-minted snapshot readers, a read's hold is demand, a read does not restart a recovery only a change to the vault can answer, a read waits for the facts it met, and teardown never waits for one, and retained count results have a bounded lifetime
+
+Superseded by [ADR 0042](0042-elastic-readers-and-concurrent-retained-results.md).
 
 Supersedes [ADR 0030](0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md).
 Its reader, demand lease, recovery restraint, stance, acquisition bound, teardown

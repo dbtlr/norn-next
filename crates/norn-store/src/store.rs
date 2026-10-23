@@ -6,9 +6,8 @@
 //! A store holds exactly one connection, and every operation runs through a
 //! request that borrows the store mutably. That is the whole of "one writer per
 //! *store*": on the writer's side there is no pool, no internal lock and no
-//! second connection to serialize against. The reader this module mints beside
-//! it is a second connection with a lock of its own, and it writes nothing —
-//! see below.
+//! second writer connection to serialize against. Reader pools beside it
+//! acquire independent read-only connections under a shared resource budget.
 //!
 //! It is **not** one writer per database file. Two `Store` values on one path are
 //! two connections and two writers, serialized by SQLite's own locking rather
@@ -16,8 +15,8 @@
 //! same vault entry gets interleaving, not a refusal. The missing half is the
 //! maintainer file lock taken outside the store, in the derived directory the
 //! store's file sits in, which is what makes "one writer" a property of the
-//! derived store rather than of the handle; it is carved and not built
-//! (NORN-33).
+//! derived store rather than of the handle. The host holds that lock for
+//! the attachment's lifetime.
 //!
 //! **Reads belong on a separate handle, not on this connection.** That is
 //! recorded here because it is the other half of the writer discipline: a wire
@@ -26,10 +25,9 @@
 //! stays what a writer takes. A shared borrow of the store itself cannot serve
 //! reads, because the store lives inside an attachment that lifecycle jobs hold
 //! mutably for their whole duration (ADR 0015). [`SnapshotReader`] is that
-//! handle's type and [`Store::open_reader`] is its one mint: every request in
-//! this crate is `&mut` against the one connection, and a reader is a second
-//! connection over the same file that is opened read-only and so can only
-//! read.
+//! handle's type. [`Store::reader_pool`] creates host-request pools without
+//! I/O. [`Store::open_reader`] opens an eager private job reader. Both use
+//! read-only source connections and leave the writer exclusively borrowed.
 //!
 //! # What the substrate owns, and what is decided here
 //!
@@ -76,11 +74,11 @@
 //! database destroys work to fix nothing. One policy decides which is which —
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -100,29 +98,20 @@ use crate::request::Request;
 
 /// The read-only snapshot handle wire reads run on.
 ///
-/// One handle per attached entry, and one connection inside it: a read takes
-/// that connection for the length of its snapshot and gives it back when the
-/// snapshot ends, so **concurrent reads of one entry serialize against each
-/// other here** rather than opening a connection each.
+/// Host requests use [`Store::reader_pool`], a zero-I/O handle whose independent
+/// connections share a [`crate::ReadBudget`]. A private job can instead use the
+/// eager single-connection [`Store::open_reader`].
 ///
-/// **Taking the connection and establishing on it are two acts**, because the
-/// caller holds a lock across the second and may not hold it across the first:
-/// [`SnapshotReader::try_take`] answers at once with the connection or with
-/// nothing, and [`SnapshotReader::wait_for_the_connection_until`] waits for it
-/// up to a deadline. Either way what a caller takes is a [`ConnectionTurn`], and
-/// [`ConnectionTurn::establish`] is the one way a snapshot is made. A turn
-/// that establishes nothing gives the connection back when it drops, an
-/// unwind included.
+/// Acquisition and establishment are separate because the caller samples trust
+/// under its entry gate. [`SnapshotReader::try_take_for`] tries warm capacity
+/// without waiting. [`SnapshotReader::acquire`] waits and opens outside that gate
+/// under the same deadline. [`ConnectionTurn::establish`] begins the snapshot
+/// after the caller has rechecked identity and trust. A turn that establishes
+/// nothing returns its resources on drop, including during an unwind.
 ///
-/// A handle is made from a live [`Store`] by [`Store::open_reader`], which is
-/// what binds its lifetime: it reads the file that store is holding, and the
-/// usable `-shm` a read-only write-ahead-log open needs is there because the
-/// writer has it open. The connection comes from the substrate seam opened
-/// **read-only** — the open flag, which no statement run on the connection can
-/// withdraw, is what refuses every write, and `query_only` and the statement
-/// authorizer stand on top of it — so no rung is concluded through a reader,
-/// and a warm read's zero derivation counters are structural rather than a
-/// rule the read paths keep.
+/// Source connections are read-only with `query_only` and a statement authorizer.
+/// A reader can never derive or rebuild the source. Open failures report typed
+/// damage separately from environmental failure for the host's lifecycle judgment.
 ///
 /// The handle outlives the entry that minted it where a read is still running
 /// against it: the entry lets its own hold go at the teardown window, and the
@@ -147,8 +136,11 @@ use crate::request::Request;
 /// }
 /// ```
 pub struct SnapshotReader {
+    budget: Option<Arc<crate::ReadBudget>>,
+    pool: Option<crate::read_budget::Pool>,
+    source: Option<std::path::PathBuf>,
     count_results: Arc<crate::count::CountResults>,
-    /// The one connection reads answer from, held here between reads and taken
+    /// The eager private reader connection, held here between reads and taken
     /// by the read that is answering.
     ///
     /// Absent means a read holds it. A read that finds it absent waits on
@@ -183,16 +175,111 @@ impl fmt::Debug for SnapshotReader {
 }
 
 impl SnapshotReader {
-    /// Take this handle's connection where no read holds it. **Never waits.**
-    ///
-    /// This is the spelling a caller holding a lock takes: the answer is the
-    /// turn or nothing, and nothing is another read holding the connection
-    /// rather than a fault.
-    ///
-    /// The handle is taken by [`Arc`] because the turn keeps it, and the
-    /// snapshot after it keeps it too: a read runs after the caller that
-    /// established it has let its own hold go.
+    /// Only warm source connections can be acquired while an entry gate is held.
+    pub fn try_take_for(
+        self: &Arc<Self>,
+        need: crate::ReadNeed,
+        deadline: Instant,
+    ) -> Option<ConnectionTurn> {
+        if let (Some(budget), Some(pool)) = (&self.budget, &self.pool) {
+            let grant = budget.try_grant(pool, need)?;
+            return Some(self.ready_turn(grant, deadline));
+        }
+        self.take_standalone()
+    }
+
+    fn ready_turn(
+        self: &Arc<Self>,
+        mut grant: crate::read_budget::Grant,
+        deadline: Instant,
+    ) -> ConnectionTurn {
+        let database = match grant.source.item.take() {
+            Some(crate::read_budget::Cached::Source(database)) => database,
+            _ => unreachable!("a warm source grant contains a source connection"),
+        };
+        if let Some(pool) = &self.pool {
+            pool.failure(None);
+        }
+        ConnectionTurn {
+            reader: Arc::clone(self),
+            database: Some(database),
+            grant: Some(grant),
+            deadline,
+        }
+    }
+
+    /// Reserve the complete request before opening any cold connection. Never
+    /// called under the lifecycle gate.
+    pub fn acquire(
+        self: &Arc<Self>,
+        need: crate::ReadNeed,
+        deadline: Instant,
+    ) -> Result<Option<ConnectionTurn>, StoreError> {
+        let (Some(budget), Some(pool)) = (&self.budget, &self.pool) else {
+            return Ok(self.wait_for_the_connection_until(deadline));
+        };
+        let Some(mut grant) = budget.grant(pool, need, deadline) else {
+            return Ok(None);
+        };
+        if grant.source.item.is_none() {
+            let result = (|| {
+                let database = norn_db::open_read_only_until(
+                    self.source.as_ref().expect("pooled source"),
+                    deadline,
+                )
+                .adopted?;
+                if database.epoch() != self.epoch {
+                    return Err(StoreError::Sql {
+                        operation: "opening a snapshot reader",
+                        condition: None,
+                        message: "the source database was replaced while opening a reader".into(),
+                    });
+                }
+                crate::read::register_functions(database.connection())?;
+                crate::resolve::register_functions(database.connection())?;
+                database.count_statements_begun();
+                Ok::<_, StoreError>(database)
+            })();
+            match result {
+                Ok(database) => {
+                    budget.opened();
+                    grant.source.item = Some(crate::read_budget::Cached::Source(database));
+                    pool.failure(None);
+                }
+                Err(error) => {
+                    pool.failure(Some(error.clone()));
+                    return Err(error);
+                }
+            }
+        }
+        if Instant::now() >= deadline || !pool.is_live() {
+            return Ok(None);
+        }
+        Ok(Some(self.ready_turn(grant, deadline)))
+    }
+
+    /// Retire admission without closing files under the caller's entry gate.
+    pub fn retire(&self) {
+        if let Some(pool) = &self.pool {
+            pool.retire();
+        }
+    }
+    pub fn last_open_failure(&self) -> Option<StoreError> {
+        self.pool.as_ref()?.last_failure()
+    }
+
+    /// Try for a source-only warm grant without waiting or opening a database.
+    /// A cold pool returns nothing even when the shared budget has capacity;
+    /// [`SnapshotReader::acquire`] can open it outside the caller's gate.
+    /// The turn keeps this handle alive through establishment and query work.
     pub fn try_take(self: &Arc<Self>) -> Option<ConnectionTurn> {
+        self.try_take_for(
+            crate::ReadNeed::Source,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+    }
+
+    fn take_standalone(self: &Arc<Self>) -> Option<ConnectionTurn> {
         let mut held = self
             .connection
             .lock()
@@ -200,6 +287,8 @@ impl SnapshotReader {
         held.take().map(|database| ConnectionTurn {
             reader: Arc::clone(self),
             database: Some(database),
+            grant: None,
+            deadline: Instant::now() + std::time::Duration::from_secs(5),
         })
     }
 
@@ -221,6 +310,12 @@ impl SnapshotReader {
         self: &Arc<Self>,
         deadline: Instant,
     ) -> Option<ConnectionTurn> {
+        if self.pool.is_some() {
+            return self
+                .acquire(crate::ReadNeed::Source, deadline)
+                .ok()
+                .flatten();
+        }
         let mut held = self
             .connection
             .lock()
@@ -241,6 +336,8 @@ impl SnapshotReader {
         Some(ConnectionTurn {
             reader: Arc::clone(self),
             database: Some(database),
+            grant: None,
+            deadline,
         })
     }
 
@@ -298,13 +395,14 @@ impl SnapshotReader {
     }
 }
 
-/// A minted read handle, and what minting it ran against the database.
-///
-/// The mint is a second open of the file a live store is holding, and it is
-/// paid for under whatever lock its caller took: the count is what that caller
-/// reports about the lock it held. It is carried on both answers because both
-/// cost the same lock — a refusal that waited out a busy timeout and then
-/// failed cost what a handle cost.
+impl Drop for SnapshotReader {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+
+/// An eager private reader and the statements its source open ran.
+/// Host requests instead use the zero-I/O [`Store::reader_pool`] path.
 #[derive(Debug)]
 pub struct ReaderMint {
     /// The handle this store's reads run on, or why the store has none.
@@ -324,6 +422,8 @@ pub struct ReaderMint {
 /// that changed its mind, and an unwind alike — so a handle is never left
 /// empty by a read that never happened.
 pub struct ConnectionTurn {
+    grant: Option<crate::read_budget::Grant>,
+    deadline: Instant,
     reader: Arc<SnapshotReader>,
     /// The connection, taken out by [`ConnectionTurn::establish`] so the
     /// snapshot owns the give-back from there on.
@@ -351,9 +451,9 @@ impl ConnectionTurn {
     /// published demand is read gets a demand and a snapshot describing one
     /// instant, and pays one read of the database for both.
     ///
-    /// **This waits for nothing.** The connection is already this turn's, so
-    /// the act is the transaction and the statement and no acquisition, which
-    /// is what makes it safe to run under a caller's lock.
+    /// The connection is already reserved. Establishment performs no resource
+    /// acquisition. Any SQLite busy wait uses the remaining original deadline;
+    /// an expired turn refuses before running SQL.
     ///
     /// **The connection stays in the turn until the snapshot takes it**, so
     /// the turn's drop is what gives it back from every way out before that:
@@ -383,11 +483,13 @@ impl ConnectionTurn {
             .database
             .as_mut()
             .expect("a turn holds the connection until it establishes or drops");
-        let reading = establish_on(database, &reader, &mut counters)?;
+        let reading = establish_on(database, &reader, &mut counters, self.deadline)?;
         Ok(Snapshot {
             order: reader.order,
             reader,
             database: self.database.take(),
+            grant: RefCell::new(self.grant.take()),
+            deadline: self.deadline,
             reading,
             counters: Cell::new(counters),
         })
@@ -404,7 +506,11 @@ impl Drop for ConnectionTurn {
     fn drop(&mut self) {
         if let Some(mut database) = self.database.take() {
             let _ = database.close_snapshot();
-            self.reader.give_the_connection_back(database);
+            if let Some(grant) = self.grant.take() {
+                grant.finish(database);
+            } else {
+                self.reader.give_the_connection_back(database);
+            }
         }
     }
 }
@@ -435,13 +541,30 @@ fn establish_on(
     database: &mut Database,
     reader: &SnapshotReader,
     counters: &mut SnapshotCounters,
+    deadline: Instant,
 ) -> Result<StoreReading, StoreError> {
+    let check_deadline = || {
+        if Instant::now() >= deadline {
+            Err(StoreError::Sql {
+                operation: "establishing a read snapshot",
+                condition: None,
+                message: "the read acquisition deadline has elapsed".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    check_deadline()?;
+    database.bound_busy_waits_until(deadline)?;
     database.open_snapshot()?;
     #[cfg(feature = "induced-failure")]
     crate::faults::unwind_if_the_snapshot_open_is_armed();
     counters.count_snapshot();
     counters.count_statement();
+    check_deadline()?;
+    database.bound_busy_waits_until(deadline)?;
     let write_generation = last_write_generation(database.connection())?;
+    check_deadline()?;
     Ok(StoreReading {
         epoch: reader.epoch.clone(),
         write_generation,
@@ -474,7 +597,7 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
 /// the one route to a snapshot is a turn taken from a handle a caller already
 /// holds. An accessor added here would let a caller clone the handle out of a
 /// snapshot, end the read that adjudicated it, and go on establishing
-/// snapshots on the entry's one connection that no adjudication ever saw — so
+/// snapshots through the pool that no adjudication ever saw — so
 /// the absence is pinned:
 ///
 /// ```compile_fail,E0599
@@ -486,6 +609,8 @@ pub(crate) fn last_write_generation(connection: &Connection) -> Result<i64, Stor
 /// }
 /// ```
 pub struct Snapshot {
+    pub(crate) grant: RefCell<Option<crate::read_budget::Grant>>,
+    pub(crate) deadline: Instant,
     reader: Arc<SnapshotReader>,
     /// The connection this snapshot is open on, taken out to be given back to
     /// the reader at the drop that ends the snapshot.
@@ -770,7 +895,15 @@ impl Drop for Snapshot {
         // unwind: a handle left empty is an entry no later read reaches.
         if let Some(mut database) = self.database.take() {
             let _ = database.close_snapshot();
-            self.reader.give_the_connection_back(database);
+            if let Some(grant) = self.grant.get_mut().take() {
+                let budget = grant.source.budget();
+                grant.finish(database);
+                if let Some(budget) = budget {
+                    budget.drain();
+                }
+            } else {
+                self.reader.give_the_connection_back(database);
+            }
         }
     }
 }
@@ -858,6 +991,23 @@ pub struct Store {
 }
 
 impl Store {
+    /// Mint a zero-I/O handle. Layer 6 callers share one host-owned budget;
+    /// private writer jobs continue to use the eager standalone mint.
+    pub fn reader_pool(&self, budget: &Arc<crate::ReadBudget>) -> SnapshotReader {
+        SnapshotReader {
+            budget: Some(Arc::clone(budget)),
+            pool: Some(budget.pool(
+                self.database.path().to_path_buf(),
+                crate::read_budget::Kind::Source,
+            )),
+            source: Some(self.database.path().to_path_buf()),
+            count_results: Arc::clone(&self.count_results),
+            epoch: self.epoch().to_string(),
+            order: self.order,
+            connection: Mutex::new(None),
+            returned: Condvar::new(),
+        }
+    }
     /// Open, or create, the durable store at `path` for a vault root proven to
     /// have `order`'s case behaviour, whose rows `derivation` writes.
     ///
@@ -910,7 +1060,10 @@ impl Store {
         let database = Database::adopt(connection, path)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
-            count_results: Arc::new(crate::count::CountResults::default()),
+            count_results: Arc::new(crate::count::CountResults::for_store(
+                crate::CountRetentionPolicy::default(),
+                path,
+            )),
             database,
             mode,
             order,
@@ -930,8 +1083,23 @@ impl Store {
             condition: None,
             message: "configure retention before minting readers".to_string(),
         })?;
-        *results = crate::count::CountResults::new(policy);
+        *results = crate::count::CountResults::for_store(policy, self.database.path());
         Ok(())
+    }
+
+    /// Called only while the host holds this store's maintainer lock.
+    pub fn sweep_count_results(&self) -> Result<usize, StoreError> {
+        self.count_results.sweep()
+    }
+
+    /// Sweep residue without opening the source; exclusive maintainership is required.
+    pub fn sweep_count_residue(path: &Path) -> Result<usize, StoreError> {
+        crate::count::CountResults::for_store(crate::CountRetentionPolicy::default(), path).sweep()
+    }
+
+    /// List candidate stores; maintainership must precede inspection of their storage.
+    pub fn count_residue_stores(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
+        norn_db::temporary_store_parents(root).map_err(StoreError::from)
     }
 
     /// The database file this store is holding.
@@ -1081,6 +1249,9 @@ impl Store {
                 Ok(database)
             })
             .map(|database| SnapshotReader {
+                budget: None,
+                pool: None,
+                source: None,
                 count_results: Arc::clone(&self.count_results),
                 epoch: database.epoch().to_string(),
                 order: self.order,
