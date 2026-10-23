@@ -28,13 +28,12 @@ impl Catalogue {
         let database = TemporaryDatabase::create_in(directory, 256, None)?;
         // The resolver sees the same key columns and SQL as the final store,
         // without paying for bodies, fact indexes, or content eligibility here.
+        // The secondary indexes wait for `finish_inventory`, so insertion keeps
+        // only the rowid table and the UNIQUE path constraint.
         for table in ["documents", "vault_files"] {
             database.connection().execute_batch(&format!(
                 "CREATE TABLE {table} (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
-                 suffix_key TEXT NOT NULL, path_key TEXT NOT NULL, admitting_segments INTEGER NOT NULL);
-                 CREATE INDEX {table}_suffix_key ON {table}(suffix_key, path);
-                 CREATE INDEX {table}_admitted ON {table}(admitting_segments, suffix_key, path);
-                 CREATE INDEX {table}_path_key ON {table}(path_key);"
+                 suffix_key TEXT NOT NULL, path_key TEXT NOT NULL, admitting_segments INTEGER NOT NULL);"
             )).map_err(|error| error::sql("creating experimental catalogue", error))?;
         }
         database
@@ -79,10 +78,21 @@ impl Catalogue {
     }
 
     /// Publish names only after enumeration completes, so absence is not guessed.
+    /// The secondary indexes are built here, in the construction transaction, so
+    /// SQLite sorts each one instead of maintaining it row by row during insertion.
     pub fn finish_inventory(&mut self) -> Result<(), StoreError> {
+        let mut indexes = String::new();
+        for table in ["documents", "vault_files"] {
+            indexes.push_str(&format!(
+                "CREATE INDEX {table}_suffix_key ON {table}(suffix_key, path);
+                 CREATE INDEX {table}_admitted ON {table}(admitting_segments, suffix_key, path);
+                 CREATE INDEX {table}_path_key ON {table}(path_key);"
+            ));
+        }
+        indexes.push_str("COMMIT");
         self.database
             .connection()
-            .execute_batch("COMMIT")
+            .execute_batch(&indexes)
             .map_err(|error| error::sql("completing experimental catalogue", error))?;
         self.complete = true;
         Ok(())
