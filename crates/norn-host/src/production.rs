@@ -1230,6 +1230,13 @@ impl ProductionEntryOps {
             &attachment.covered_root,
         );
         #[cfg(feature = "induced-failure")]
+        if self.startup_experiment.is_some() {
+            attachment
+                .store
+                .ensure_startup_complete()
+                .map_err(store_effect)?;
+        }
+        #[cfg(feature = "induced-failure")]
         if let Some(experiment) = &self.startup_experiment
             && experiment.take_initial_attempt()
             && !matches!(
@@ -5092,6 +5099,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn recovery_refuses_a_retained_partial_startup_experiment() {
+        struct Stop;
+        impl startup_experiment::Observer for Stop {
+            fn catalogue(
+                &self,
+                _: &norn_store::startup_experiment::Catalogue,
+                _: &ContentModel,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn indexed(
+                &self,
+                stage: startup_experiment::Stage,
+                _: Arc<norn_store::SnapshotReader>,
+                _: Arc<ContentModel>,
+            ) -> Result<(), String> {
+                if stage == startup_experiment::Stage::Frontmatter {
+                    Err("interrupted after base facts".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let f = Fixture::new("startup-retained-recovery");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        fs::write(f.vault().join("first.md"), "[[missing]] #tag\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let ops = ops
+            .with_startup_experiment(startup_experiment::Experiment::new("first", Arc::new(Stop)));
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        assert!(ops.recover(&name, &mut attachment, &progress).is_err());
+        assert!(
+            ops.recover(&name, &mut attachment, &progress).is_err(),
+            "ordinary recovery accepted partial derivation"
+        );
+        ops.detach(&name, attachment);
     }
 
     /// **An attach refused in the host's own data directory reaches a caller

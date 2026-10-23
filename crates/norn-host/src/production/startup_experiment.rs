@@ -110,12 +110,17 @@ pub(super) fn run(
         for record in page.records {
             if let norn_fs::WalkFact::File(file) =
                 inventory.replay(&record.value).map_err(effect)?
-                && is_markdown(file.path().as_path())
                 && let Ok(path) = document_path(file.path().as_path())
             {
-                catalogue
-                    .record_document(&path, model.ambiguity_ignore())
-                    .map_err(store_effect)?;
+                if is_markdown(file.path().as_path()) {
+                    catalogue
+                        .record_document(&path, model.ambiguity_ignore())
+                        .map_err(store_effect)?;
+                } else if path.is_vault_file() {
+                    catalogue
+                        .record_file(&path, model.ambiguity_ignore())
+                        .map_err(store_effect)?;
+                }
             }
             store
                 .begin_request()
@@ -142,7 +147,7 @@ pub(super) fn run(
         .candidates(&experiment.get_target, model.ambiguity_ignore())
         .map_err(store_effect)?
         .expect("completed catalogue");
-    if candidates.total != 1 {
+    if candidates.total != 1 || !is_markdown(Path::new(&candidates.paths[0])) {
         return Err(JobFailure::Environmental(
             "the experiment's requested slug is not a unique catalogue candidate".into(),
         ));
@@ -263,15 +268,16 @@ fn replay_phase(
 ) -> Result<(), JobFailure> {
     let mut after: Option<Vec<u8>> = None;
     let mut processed = 0;
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
     loop {
-        let page = store
+        let page = pending
+            .store
             .begin_request()
             .inventory_after(after.as_deref(), policy.store_page_size)
             .map_err(store_effect)?;
         if page.is_empty() {
             break;
         }
-        let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, account)?;
         for (_, record) in &page {
             let fact = inventory.replay(record).map_err(effect)?;
             load_fact(&mut pending, fact, base, files)?;

@@ -243,6 +243,8 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
         ("malformed.md", "---\nvalue: [\n---\nBody\n"),
         ("unclosed.md", "---\nvalue: unfinished\n"),
         ("bad\nname.md", "Refused path\n"),
+        ("collision\\name.md", "First refused spelling\n"),
+        ("collision\u{7}name.md", "Second refused spelling\n"),
     ] {
         std::fs::write(root.join(path), body).unwrap();
     }
@@ -259,7 +261,7 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
         let machine = vault.beside(&scratch.join(mode));
         let host = if mode != "ordinary" {
             machine.host_with_startup_experiment(
-                norn_host::ProductionPolicy::new(2, 2).unwrap(),
+                norn_host::ProductionPolicy::new(1, 1).unwrap(),
                 if mode == "facts-once" {
                     Experiment::facts_once("first", Arc::new(Quiet))
                 } else {
@@ -267,7 +269,7 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
                 },
             )
         } else {
-            machine.host_with_policy(norn_host::ProductionPolicy::new(2, 2).unwrap())
+            machine.host_with_policy(norn_host::ProductionPolicy::new(1, 1).unwrap())
         };
         let demand = host.demand(machine.name()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -314,7 +316,7 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
     REPORTED.lock().unwrap().clear();
     let reporter = staged::Reporter::new(Instant::now(), vault.name().clone(), false);
     let host = vault.host_with_startup_experiment(
-        norn_host::ProductionPolicy::new(2, 2).unwrap(),
+        norn_host::ProductionPolicy::new(1, 1).unwrap(),
         Experiment::new("small", Arc::new(reporter)),
     );
     let _demand = host.demand(vault.name()).unwrap();

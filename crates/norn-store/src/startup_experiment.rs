@@ -11,7 +11,7 @@ use crate::find::{compose_class_head, compose_class_total};
 use crate::resolve::TargetClass;
 use crate::{AmbiguityIgnore, DocumentPath, StoreError};
 
-/// A bounded head and exact count of provisional Markdown names, using production SQL.
+/// A bounded head and exact count of provisional file and document names, using production SQL.
 pub struct CatalogueCandidates {
     pub paths: Vec<String>,
     pub total: u64,
@@ -47,14 +47,31 @@ impl Catalogue {
         })
     }
 
+    pub fn record_file(
+        &mut self,
+        path: &DocumentPath,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<(), StoreError> {
+        self.record_name("vault_files", path, ignore)
+    }
+
     pub fn record_document(
         &mut self,
         path: &DocumentPath,
         ignore: &AmbiguityIgnore,
     ) -> Result<(), StoreError> {
+        self.record_name("documents", path, ignore)
+    }
+
+    fn record_name(
+        &mut self,
+        table: &str,
+        path: &DocumentPath,
+        ignore: &AmbiguityIgnore,
+    ) -> Result<(), StoreError> {
         assert!(!self.complete, "a completed catalogue is immutable");
         self.database.connection().prepare_cached(
-            "INSERT INTO documents(path, suffix_key, path_key, admitting_segments) VALUES (?1, ?2, ?3, ?4)"
+            &format!("INSERT INTO {table}(path, suffix_key, path_key, admitting_segments) VALUES (?1, ?2, ?3, ?4)")
         ).and_then(|mut statement| statement.execute(params![path.as_str(), path.suffix_key(),
             path.path_key(), ignore.admitting_segments(path.as_str()) as i64]))
             .map_err(|error| error::sql("recording experimental catalogue", error))?;

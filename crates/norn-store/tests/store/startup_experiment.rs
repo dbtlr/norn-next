@@ -109,3 +109,24 @@ fn metadata_catalogue_respects_exact_paths_and_ambiguous_slugs() {
         0
     );
 }
+
+#[test]
+fn catalogue_includes_vault_files_in_document_ambiguity() {
+    use norn_store::{AmbiguityIgnore, startup_experiment::Catalogue};
+    let scratch = Scratch::new("startup-catalogue-files");
+    let mut catalogue = Catalogue::open(scratch.database().parent().unwrap()).unwrap();
+    let ignore = AmbiguityIgnore::none();
+    catalogue
+        .record_document(&path("photo.png.md"), &ignore)
+        .unwrap();
+    catalogue.record_file(&path("photo.png"), &ignore).unwrap();
+    catalogue.finish_inventory().unwrap();
+    assert_eq!(
+        catalogue
+            .candidates("photo.png", &ignore)
+            .unwrap()
+            .unwrap()
+            .total,
+        2
+    );
+}

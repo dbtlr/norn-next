@@ -1058,16 +1058,7 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
-        // An interrupted experiment may hold correct content hashes beside
-        // incomplete projections. Ordinary healing must never adopt those rows.
-        if meta::get_meta::<i64>(database.connection(), "startup_experiment_incomplete")?.is_some()
-        {
-            return Err(StoreError::Lifecycle {
-                operation: "opening an incomplete startup experiment",
-                path: path.to_path_buf(),
-                message: "discard this disposable experimental store before reusing it".to_string(),
-            });
-        }
+        refuse_incomplete_startup(&database)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
             count_results: Arc::new(crate::count::CountResults::for_store(
@@ -1110,6 +1101,12 @@ impl Store {
     /// List candidate stores; maintainership must precede inspection of their storage.
     pub fn count_residue_stores(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
         norn_db::temporary_store_parents(root).map_err(StoreError::from)
+    }
+
+    /// Reject an interrupted experiment retained by recovery without reopening.
+    #[cfg(feature = "induced-failure")]
+    pub fn ensure_startup_complete(&self) -> Result<(), StoreError> {
+        refuse_incomplete_startup(&self.database)
     }
 
     /// The database file this store is holding.
@@ -2058,6 +2055,18 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+// Content hashes alone cannot establish that experimental projections are complete.
+fn refuse_incomplete_startup(database: &Database) -> Result<(), StoreError> {
+    if meta::get_meta::<i64>(database.connection(), "startup_experiment_incomplete")?.is_some() {
+        return Err(StoreError::Lifecycle {
+            operation: "using an incomplete startup experiment",
+            path: database.path().to_path_buf(),
+            message: "discard this disposable experimental store before reusing it".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
