@@ -32,6 +32,16 @@ class LoadingChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "whole corpus"):
             validate_stage(stage, manifest)
 
+    def test_canonical_demand_requires_whole_record_collections(self):
+        manifest = {"small_body": "Body", "small_fields": {}}
+        # Whole-record validation must reject a projected body/fields result
+        # before generic fixture validation can call it a successful get.
+        stage = {"startup_stage": "canonical-demand", "probe": "whole_slug", "global_ready": False,
+                 "simulation": "paused", "command": {"op": "get", "target": "small", "whole": True},
+                 "answer": {"unsatisfied": [], "advisories": [], "report": {"shape": "record", "document": {"path": "bench/small.md"}}}}
+        with self.assertRaisesRegex(ValueError, "whole-record"):
+            validate_stage(stage, manifest)
+
     def test_warm_runner_rejects_duplicate_modes_before_opening_builds(self):
         command = [sys.executable, str(Path(__file__).with_name("loading_warm.py"))]
         for argument in ("candidate-source", "candidate-build", "baseline-source", "baseline-build", "audit-build", "fixtures", "output"):

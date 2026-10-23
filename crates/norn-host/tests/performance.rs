@@ -154,6 +154,8 @@ fn performance_worker() {
             "health.candidate_names",
             "store.finding_metadata",
             "startup.catalogue",
+            "startup.canonical_demand",
+            "startup.canonical_heal",
             "startup.requested_document",
             "startup.base",
             "startup.rich",
@@ -167,13 +169,22 @@ fn performance_worker() {
     let vault = attach::Vault::adopt(&root);
     #[cfg(feature = "induced-failure")]
     let experiment = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
-        Ok(mode @ ("layered" | "layered-silent" | "facts-once" | "facts-once-silent")) => {
+        Ok(
+            mode @ ("layered"
+            | "layered-silent"
+            | "facts-once"
+            | "facts-once-silent"
+            | "canonical-demand"
+            | "canonical-demand-silent"),
+        ) => {
             let reporter = std::sync::Arc::new(staged::Reporter::new(
                 began,
                 vault.name().clone(),
                 mode.ends_with("-silent"),
             ));
-            let experiment = if mode.starts_with("facts-once") {
+            let experiment = if mode.starts_with("canonical-demand") {
+                norn_host::startup_experiment::Experiment::canonical_demand("small", reporter)
+            } else if mode.starts_with("facts-once") {
                 norn_host::startup_experiment::Experiment::facts_once("small", reporter)
             } else {
                 norn_host::startup_experiment::Experiment::new("small", reporter)

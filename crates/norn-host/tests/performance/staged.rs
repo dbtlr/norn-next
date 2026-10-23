@@ -49,7 +49,7 @@ impl Reporter {
                 let target = command["target"].as_str().unwrap();
                 let mut params =
                     GetParams::new(self.address.clone(), ResolutionTarget::new(target).unwrap());
-                if !target.contains('#') {
+                if !target.contains('#') && command["whole"] != true {
                     params =
                         params.with_columns([Column::path(), Column::body(), Column::fields()]);
                 }
@@ -110,19 +110,25 @@ impl Reporter {
         super::emit(
             json!({"startup_stage":stage,"probe":probe,"stage_boundary_ns":boundary,
             "query_host_ns":elapsed,"query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
-            "command":command,"answer":answer,"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"global_ready":false}),
+            "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),"projection_generation":snapshot.reading().write_generation(),"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"simulation":"paused","global_ready":false}),
         );
         Ok(())
     }
 }
 
 impl Observer for Reporter {
+    fn declined(&self, reason: &str) -> Result<(), String> {
+        super::emit(
+            json!({"startup_stage":"canonical-demand", "probe":"declined", "reason":reason, "simulation":"paused","global_ready":false}),
+        );
+        Ok(())
+    }
     fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
         let boundary = self.began.elapsed().as_nanos();
         if self.silent {
             super::emit(
                 json!({"startup_stage":"catalogue","probe":"boundary","stage_boundary_ns":boundary,
-                "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+                "query_host_ns":0,"queries_executed":false,"simulation":"paused","global_ready":false}),
             );
             return Ok(());
         }
@@ -138,7 +144,7 @@ impl Observer for Reporter {
         super::emit(
             json!({"startup_stage":"catalogue","probe":"names","stage_boundary_ns":boundary,
             "query_host_ns":began.elapsed().as_nanos(),"query_finished_ns":self.began.elapsed().as_nanos(),
-            "candidates":answers,"global_ready":false}),
+            "candidates":answers,"simulation":"paused","global_ready":false}),
         );
         Ok(())
     }
@@ -153,6 +159,8 @@ impl Observer for Reporter {
         self.checkpoint.store(boundary, Ordering::Relaxed);
         if self.silent {
             let names: &[&str] = match stage {
+                Stage::CanonicalDemand => &["canonical-demand"],
+                Stage::CanonicalHealth => &["canonical-health"],
                 Stage::RequestedDocument => &["get"],
                 Stage::Frontmatter => &["frontmatter", "lexical"],
                 Stage::RichFacts => &["rich"],
@@ -162,7 +170,7 @@ impl Observer for Reporter {
             for name in names {
                 super::emit(
                     json!({"startup_stage":name,"probe":"boundary","stage_boundary_ns":boundary,
-                    "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+                    "query_host_ns":0,"queries_executed":false,"simulation":"paused","global_ready":false}),
                 );
             }
             return Ok(());
@@ -179,6 +187,25 @@ impl Reporter {
         model: &ContentModel,
     ) -> Result<(), String> {
         match stage {
+            Stage::CanonicalDemand => self.query(
+                "canonical-demand",
+                "whole_slug",
+                reader,
+                model,
+                json!({"op":"get","target":"small","whole":true}),
+            ),
+            Stage::CanonicalHealth => {
+                self.query(
+                    "canonical-health",
+                    "whole_slug",
+                    reader,
+                    model,
+                    json!({"op":"get","target":"small","whole":true}),
+                )?;
+                self.probes(Stage::Frontmatter, reader, model)?;
+                self.probes(Stage::RichFacts, reader, model)?;
+                self.probes(Stage::LinkHealth, reader, model)
+            }
             Stage::AllFacts => {
                 self.probes(Stage::Frontmatter, reader, model)?;
                 self.probes(Stage::RichFacts, reader, model)

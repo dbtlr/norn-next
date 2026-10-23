@@ -10,6 +10,10 @@ use norn_store::{ContentModel, SnapshotReader, startup_experiment::Catalogue};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
     RequestedDocument,
+    /// Complete requested record from a disposable dependency closure; paused simulation.
+    CanonicalDemand,
+    /// Ordinary heal and transactional health have completed.
+    CanonicalHealth,
     Frontmatter,
     RichFacts,
     AllFacts,
@@ -18,6 +22,9 @@ pub enum Stage {
 
 /// Store reads at a checkpoint prove query cost without claiming host admission.
 pub trait Observer: Send + Sync {
+    fn declined(&self, _reason: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String>;
     fn indexed(
         &self,
@@ -33,6 +40,7 @@ pub struct Experiment {
     pub observer: Arc<dyn Observer>,
     started: AtomicBool,
     separate_frontmatter: bool,
+    canonical: bool,
 }
 
 impl Experiment {
@@ -42,6 +50,7 @@ impl Experiment {
             observer,
             started: AtomicBool::new(false),
             separate_frontmatter: true,
+            canonical: false,
         })
     }
 
@@ -51,6 +60,21 @@ impl Experiment {
             observer,
             started: AtomicBool::new(false),
             separate_frontmatter: false,
+            canonical: false,
+        })
+    }
+
+    /// Frozen-copy simulation only. The disposable store never becomes the lasting store.
+    pub fn canonical_demand(
+        get_target: impl Into<String>,
+        observer: Arc<dyn Observer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: true,
         })
     }
 
@@ -88,6 +112,9 @@ pub(super) fn run(
     progress: &Healing<'_, ProductionAttachment>,
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
+    if experiment.canonical {
+        return canonical::run(attachment, exclusions, policy, progress, experiment);
+    }
     let catalogue_timing = norn_store::profiling::span("startup.catalogue");
     let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
@@ -298,7 +325,7 @@ fn load_fact(
     fact: norn_fs::WalkFact,
     base: bool,
     files: bool,
-) -> Result<(), JobFailure> {
+) -> Result<Option<String>, JobFailure> {
     match fact {
         norn_fs::WalkFact::Skipped(skip) => {
             if files {
@@ -321,11 +348,11 @@ fn load_fact(
                 if let Err(quarantine) = document_path(&path) {
                     pending.quarantine(&path, quarantine);
                 }
-                return Ok(());
+                return Ok(None);
             };
             let Some(read) = file.read_optional().map_err(effect)? else {
                 pending.withhold_entry(&path);
-                return Ok(());
+                return Ok(None);
             };
             pending.account.bytes_read += read.bytes().len() as u64;
             let stored = match document_path(&path) {
@@ -360,10 +387,11 @@ fn load_fact(
                     pending.store.path_order().glob_case(),
                 )
             };
-            pending.record_plan(plan, hash);
+            pending.record_plan(plan, hash.clone());
+            return Ok(Some(hash));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Harness-only, induced-failure cache option, independent of loading order and
@@ -512,3 +540,5 @@ impl Drop for InitialCacheGuard<'_> {
         let _ = self.restore(false);
     }
 }
+
+mod canonical;

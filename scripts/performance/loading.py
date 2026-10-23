@@ -28,11 +28,16 @@ EXPECTED = {("catalogue", "names"), ("get", "slug"),
 SILENT_EXPECTED = {(stage, "boundary") for stage in
                    ("catalogue", "get", "frontmatter", "lexical", "rich", "health")}
 
+CANONICAL_EXPECTED = (EXPECTED - {("get", "slug")}) | {
+    ("canonical-demand", "whole_slug"), ("canonical-health", "whole_slug")}
+CANONICAL_SILENT_EXPECTED = {(stage, "boundary") for stage in
+                             ("catalogue", "canonical-demand", "canonical-health")}
+
 
 def validate_stage(stage, manifest):
     """Check each capability against authored fixture answers, including complete coverage."""
     key = stage["startup_stage"], stage["probe"]
-    if key not in EXPECTED or stage["global_ready"] is not False:
+    if key not in EXPECTED | CANONICAL_EXPECTED or stage["global_ready"] is not False:
         raise ValueError("unexpected or incorrectly published startup checkpoint")
     if key == ("catalogue", "names"):
         answers = {row["target"]: row for row in stage["candidates"]}
@@ -44,9 +49,15 @@ def validate_stage(stage, manifest):
             raise ValueError("catalogue invented a missing name")
         return
     command = stage["command"]
+    if key[0] in ("canonical-demand", "canonical-health"):
+        document = stage["answer"]["report"].get("document", {})
+        if (command.get("whole") is not True or stage.get("simulation") != "paused"
+                or any(column not in document for column in ("body", "fields", "headings", "blocks", "tags", "links", "findings"))):
+            raise ValueError("canonical-demand must answer a whole-record get in a paused simulation")
+
     if command["op"] in ("get", "find", "search"):
         expected_command = command
-        if key == ("get", "slug"):
+        if key == ("get", "slug") or key[0] in ("canonical-demand", "canonical-health"):
             if command["target"] != "small":
                 raise ValueError("the first get did not use a slug")
             expected_command = {"op": "get", "target": "bench/small.md"}
@@ -70,12 +81,15 @@ def run_one(binary, root, manifest, mode):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
     began = time.perf_counter_ns()
     keys = []
+    canonical = mode.startswith("canonical-demand")
+    silent_expected = CANONICAL_SILENT_EXPECTED if canonical else SILENT_EXPECTED
+    query_expected = CANONICAL_EXPECTED if canonical else EXPECTED
     root.mkdir(parents=True, exist_ok=True)
 
     def on_stage(stage):
         key = stage["startup_stage"], stage["probe"]
         if mode.endswith("-silent"):
-            if key not in SILENT_EXPECTED or stage.get("queries_executed") is not False:
+            if key not in silent_expected or stage.get("queries_executed") is not False:
                 raise ValueError("a silent control emitted a query claim")
         else:
             validate_stage(stage, manifest)
@@ -96,9 +110,16 @@ def run_one(binary, root, manifest, mode):
             answer, elapsed = worker.call(command)
             validate_read("current", command, answer, manifest)
             checked.append({"name": name, "round_trip_ns": elapsed, "host_ns": answer["host_ns"]})
-        expected = set() if mode == "baseline" else SILENT_EXPECTED if mode.endswith("-silent") else EXPECTED
+        expected = set() if mode == "baseline" else silent_expected if mode.endswith("-silent") else query_expected
         if set(keys) != expected:
             raise ValueError("startup checkpoint coverage differs from the requested mode")
+        if canonical and not mode.endswith("-silent"):
+            early = next(s for s in worker.stages if s["startup_stage"] == "canonical-demand")
+            final = next(s for s in worker.stages if s["startup_stage"] == "canonical-health")
+            # The benchmark subject has no findings, so this fixture can compare
+            # exact reports, without erasing projection-local finding handles.
+            if early["answer"] != final["answer"]:
+                raise ValueError("demand whole-record answer differs from ordinary final answer")
         milestones = {}
         for stage in worker.stages:
             name = stage["startup_stage"]
@@ -157,7 +178,7 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
     args = parser.parse_args()
     if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):

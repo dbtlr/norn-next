@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--samples", type=int, default=25)
-    parser.add_argument("--modes", nargs="+", choices=["layered-silent", "facts-once-silent"], default=["layered-silent", "facts-once-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["layered-silent", "facts-once-silent", "canonical-demand-silent"], default=["layered-silent", "facts-once-silent"])
     args = parser.parse_args()
     source = args.candidate_source.resolve()
     baseline_source = args.baseline_source.resolve()

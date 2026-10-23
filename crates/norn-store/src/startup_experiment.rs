@@ -158,3 +158,85 @@ pub struct WriterCacheReceipt {
     pub retained_cache_budget_kib: Option<u64>,
     pub reclamation_verified: bool,
 }
+
+impl Catalogue {
+    /// Conservative eligibility superset, including exact-name fallback and the
+    /// neighboring names needed for minimal disambiguating suffixes. This is
+    /// not resolution: only the ordinary reader over derived bytes resolves.
+    /// None means incomplete inventory or a class exceeding the explicit bound.
+    pub fn demand_names(
+        &self,
+        target: &str,
+        bound: usize,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        if !self.complete {
+            return Ok(None);
+        }
+        let class = match TargetClass::compile(target, &AmbiguityIgnore::none()) {
+            Ok(class) => class,
+            Err(StoreError::Path { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut names = std::collections::BTreeSet::new();
+        for (lower, _) in class.probe().ranges() {
+            if !self.add_leaf_names(lower, bound, &mut names)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(names.into_iter().collect()))
+    }
+
+    /// Outgoing dependency names use the same addressing and path expansion as
+    /// the writer. The superset deliberately precedes content eligibility and
+    /// exact-path precedence; invalid exact documents cannot hide suffixes.
+    pub fn demand_link_names(
+        &self,
+        link: &crate::LinkFact,
+        holder: &DocumentPath,
+        bound: usize,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        use crate::link::Addressing;
+        match Addressing::of(link, holder) {
+            Addressing::Elsewhere => Ok(Some(Vec::new())),
+            Addressing::Suffix(target) => self.demand_names(&target, bound),
+            Addressing::Paths(paths) => {
+                let mut names = std::collections::BTreeSet::new();
+                for path in paths {
+                    let path = DocumentPath::new(&path)?;
+                    if !self.add_leaf_names(path.suffix_key(), bound, &mut names)? {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(names.into_iter().collect()))
+            }
+        }
+    }
+
+    fn add_leaf_names(
+        &self,
+        key: &str,
+        bound: usize,
+        names: &mut std::collections::BTreeSet<String>,
+    ) -> Result<bool, StoreError> {
+        let leaf = format!("{}/", key.split('/').next().expect("a suffix has a leaf"));
+        let upper = crate::path::prefix_successor(&leaf);
+        // Indexed eligibility harvesting, not a second resolver. Include ignored
+        // names too: deeper spellings may admit them when naming candidates.
+        let mut statement = self.database.connection().prepare_cached(
+            "SELECT path FROM documents WHERE suffix_key >= ?1 AND suffix_key < ?2
+             UNION SELECT path FROM vault_files WHERE suffix_key >= ?1 AND suffix_key < ?2 LIMIT ?3"
+        ).map_err(|e| error::sql("preparing demand names", e))?;
+        let rows = statement
+            .query_map(params![leaf, upper, (bound + 1) as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| error::sql("reading demand names", e))?;
+        for row in rows {
+            names.insert(row.map_err(|e| error::sql("reading demand name", e))?);
+            if names.len() > bound {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}

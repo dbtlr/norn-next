@@ -368,6 +368,12 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
 
 #[test]
 fn measurement_reporter_runs_every_query_including_the_section_shape() {
+    for canonical in [false, true] {
+        check_measurement_reporter(canonical);
+    }
+}
+
+fn check_measurement_reporter(canonical: bool) {
     let scratch = norn_testkit::scratch::Scratch::new("norn-startup-reporter");
     let root = scratch.join("vault");
     std::fs::create_dir_all(root.join(".norn")).unwrap();
@@ -383,8 +389,12 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
     REPORTED.lock().unwrap().clear();
     let reporter = staged::Reporter::new(Instant::now(), vault.name().clone(), false);
     let host = vault.host_with_startup_experiment(
-        norn_host::ProductionPolicy::new(1, 1).unwrap(),
-        Experiment::new("small", Arc::new(reporter)),
+        norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        if canonical {
+            Experiment::canonical_demand("small", Arc::new(reporter))
+        } else {
+            Experiment::new("small", Arc::new(reporter))
+        },
     );
     let _demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -393,7 +403,25 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let reports = REPORTED.lock().unwrap();
-    assert_eq!(reports.len(), 12);
+    assert_eq!(reports.len(), if canonical { 13 } else { 12 });
+    if canonical {
+        let early = reports
+            .iter()
+            .find(|row| row["startup_stage"] == "canonical-demand")
+            .unwrap();
+        let final_answer = reports
+            .iter()
+            .find(|row| row["startup_stage"] == "canonical-health")
+            .unwrap();
+        assert_eq!(early["answer"], final_answer["answer"]);
+        assert_eq!(early["answer"]["report"]["document"]["links"]["total"], 0);
+        assert_eq!(
+            early["answer"]["report"]["document"]["findings"]["total"],
+            0
+        );
+        assert_ne!(early["projection_epoch"], final_answer["projection_epoch"]);
+        assert_eq!(early["simulation"], "paused");
+    }
     for report in reports.iter().filter(|row| row.get("answer").is_some()) {
         assert_eq!(report["answer"]["unsatisfied"], serde_json::json!([]));
     }

@@ -167,7 +167,40 @@ pub fn audit(
         [],
         |row| row.get(0),
     ))?;
-    let result = json!({"semantic_sha256": hex(&overall.finalize()), "tables": tables,
+    // Additional construction diagnostics retain identities and generations;
+    // normalized equality alone deliberately cannot establish these properties.
+    // Runtime caches and warm latency are not represented by either digest.
+    let mut identity = Sha256::new();
+    for &(table, _) in COLUMNS {
+        if table == "documents_fts" {
+            continue;
+        }
+        let fields: Vec<_> = columns(table)
+            .filter(|column| !matches!(*column, "derived_at" | "recorded_at" | "applied_at"))
+            .collect();
+        let filter = if table == "meta" {
+            " WHERE key != 'store_epoch'"
+        } else {
+            ""
+        };
+        let order = (1..=fields.len())
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let (digest, rows) = digest_query(
+            connection,
+            &format!(
+                "SELECT {} FROM {table}{filter} ORDER BY {order}",
+                fields.join(",")
+            ),
+        )?;
+        hash_row(&mut identity, &json!([table, digest, rows]));
+    }
+    let (page_map, _) = digest_query(
+        connection,
+        "SELECT name,path,pageno,pagetype,ncell,payload,unused,mx_payload,pgsize FROM dbstat ORDER BY name,path,pageno",
+    )?;
+    let result = json!({"canonical_identity_sha256": hex(&identity.finalize()), "page_map_sha256": page_map, "semantic_sha256": hex(&overall.finalize()), "tables": tables,
         "counts": counts, "store_epoch": epoch, "write_generation": generation, "schema_version": 3});
     database.close_snapshot()?;
     Ok(result)
