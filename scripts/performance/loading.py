@@ -68,11 +68,15 @@ def whole_get_answer(stage):
     findings = document["findings"]
     if findings["total"] < len(findings["items"]):
         raise ValueError("whole-record finding total is below its returned head")
+    finding_ids = set()
     for finding in findings["items"]:
         if (type(finding.get("id")) is not int or finding["id"] <= 0
                 or type(finding.get("generation")) is not int
                 or not 0 <= finding["generation"] <= generation):
             raise ValueError("whole-record finding provenance is outside its projection")
+        if finding["id"] in finding_ids:
+            raise ValueError("whole-record finding handles contain a duplicate")
+        finding_ids.add(finding["id"])
         finding.pop("id")
         finding.pop("generation")
     return answer

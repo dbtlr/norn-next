@@ -34,6 +34,12 @@ class LoadingChecks(unittest.TestCase):
         self.assertEqual(whole_get_answer(stage), whole_get_answer(later))
         later["answer"]["report"]["document"]["findings"]["items"][0]["target"] = "different"
         self.assertNotEqual(whole_get_answer(stage), whole_get_answer(later))
+        duplicate = copy.deepcopy(stage)
+        duplicate["answer"]["report"]["document"]["findings"]["items"].append(
+            {"id": 7, "generation": 3, "kind": "broken_link", "target": "another"})
+        duplicate["answer"]["report"]["document"]["findings"]["total"] = 2
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            whole_get_answer(duplicate)
         stage["answer"]["report"]["document"]["findings"]["items"][0]["generation"] = 4
         with self.assertRaisesRegex(ValueError, "provenance"):
             whole_get_answer(stage)
