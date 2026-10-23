@@ -81,18 +81,24 @@ def resources(pid: int) -> dict:
     result["open_fds"] = len(list((proc / "fd").iterdir()))
     fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
     result["cpu_seconds"] = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    result["process_io"] = {name: int(value) for line in (proc / "io").read_text().splitlines()
+                            for name, value in [line.split(":", 1)]}
     return result
 
 
 class Current:
-    def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False):
+    def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
+                 loading: str | None = None, stage_handler=None):
         token = issue_root(root)
         env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
+        if loading is not None:
+            env["NORN_PERFORMANCE_LOADING"] = loading
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
+        self.late_stage = False
         self.process = subprocess.Popen(
             [str(binary), "serve"],
             cwd=root, env=env, stdin=subprocess.PIPE,
@@ -101,8 +107,16 @@ class Current:
         )
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
+        self.stages = []
         try:
             self.ready = self.receive()
+            while "startup_stage" in self.ready:
+                stage = self.ready
+                if stage_handler is not None:
+                    stage_handler(stage)
+                stage["resources_when_observed"] = resources(self.process.pid)
+                self.stages.append(stage)
+                self.ready = self.receive()
             if not self.ready.get("ready"):
                 raise ValueError(f"current worker did not become ready: {self.ready}")
         except BaseException:
@@ -110,11 +124,16 @@ class Current:
             raise
 
     def _read(self):
+        ready_seen = False
         for line in self.process.stdout:
+            self.raw.write(line)
+            self.raw.flush()
             if PREFIX in line:
-                self.messages.put(json.loads(line.split(PREFIX, 1)[1]))
-            else:
-                self.raw.write(line)
+                message = json.loads(line.split(PREFIX, 1)[1])
+                if ready_seen and "startup_stage" in message:
+                    self.late_stage = True
+                ready_seen |= message.get("ready") is True
+                self.messages.put(message)
         self.messages.put(None)
 
     def receive(self):
@@ -145,6 +164,9 @@ class Current:
         self.stderr.close()
         self.process.stdin.close()
         self.process.stdout.close()
+        # Check the whole stream, including a checkpoint arriving after the final query.
+        if self.late_stage and sys.exc_info()[0] is None:
+            raise RuntimeError("startup checkpoint arrived after readiness; inspect worker logs")
         # Preserve the request failure that run.json records when cleanup follows it.
         if self.process.returncode != 0 and sys.exc_info()[0] is None:
             raise RuntimeError("current worker did not shut down cleanly; inspect worker logs")

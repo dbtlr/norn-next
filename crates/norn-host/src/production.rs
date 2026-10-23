@@ -47,6 +47,9 @@ use crate::{
 /// The derived database's file, inside the vault's derived directory.
 const STORE_FILE: &str = "store.sqlite3";
 
+#[cfg(feature = "induced-failure")]
+pub mod startup_experiment;
+
 /// The maintainer lock's file, inside the vault's derived directory. It is
 /// never removed: see [`norn_fs::Maintainership`].
 const MAINTAINER_LOCK_FILE: &str = "maintainer.lock";
@@ -185,6 +188,8 @@ impl std::error::Error for ProductionPolicyError {}
 /// and recoveries that follow read. Nothing here can name a vault the host does
 /// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
+    #[cfg(feature = "induced-failure")]
+    startup_experiment: Option<Arc<startup_experiment::Experiment>>,
     cleanup_error: Mutex<Option<String>>,
     readers: Arc<norn_store::ReadBudget>,
     dirs: ConfigDirs,
@@ -631,6 +636,8 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
         let ops = Self {
+            #[cfg(feature = "induced-failure")]
+            startup_experiment: None,
             cleanup_error: Mutex::new(None),
             readers: norn_store::ReadBudget::new(policy.read_budget),
             dirs,
@@ -645,6 +652,16 @@ impl ProductionEntryOps {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
         }
         ops
+    }
+
+    /// Attach a disposable loading experiment to a harness-created host.
+    #[cfg(feature = "induced-failure")]
+    pub fn with_startup_experiment(
+        mut self,
+        experiment: Arc<startup_experiment::Experiment>,
+    ) -> Self {
+        self.startup_experiment = Some(experiment);
+        self
     }
 
     /// The most recent residue-cleanup failure. Cleanup failure does not take
@@ -1212,6 +1229,35 @@ impl ProductionEntryOps {
             &attachment.shadows,
             &attachment.covered_root,
         );
+        #[cfg(feature = "induced-failure")]
+        if self.startup_experiment.is_some() {
+            attachment
+                .store
+                .ensure_startup_complete()
+                .map_err(store_effect)?;
+        }
+        #[cfg(feature = "induced-failure")]
+        if let Some(experiment) = &self.startup_experiment
+            && experiment.take_initial_attempt()
+            && !matches!(
+                attachment.store.open_outcome(),
+                norn_store::OpenOutcome::Reused
+            )
+        {
+            let order = attachment.store.path_order();
+            if HealScope::Vault
+                .page(&mut attachment.store, None, self.policy, order)?
+                .is_empty()
+            {
+                return startup_experiment::run(
+                    attachment,
+                    &exclusions,
+                    self.policy,
+                    &healing,
+                    experiment,
+                );
+            }
+        }
         // The caller pins the candidate before this walk, so every finding
         // below records the active schema fingerprint and every document is
         // judged under the declaration that fingerprint names.
@@ -4234,11 +4280,7 @@ impl<'s> Pending<'s> {
     ) {
         count_document_derived();
         let judged = hash.clone();
-        let Plan {
-            change,
-            findings,
-            rule_work,
-        } = plan_document(
+        let plan = plan_document(
             path,
             spelling,
             bytes,
@@ -4247,6 +4289,15 @@ impl<'s> Pending<'s> {
             &self.declared.model,
             self.store.path_order().glob_case(),
         );
+        self.record_plan(plan, judged);
+    }
+
+    fn record_plan(&mut self, plan: Plan, judged: String) {
+        let Plan {
+            change,
+            findings,
+            rule_work,
+        } = plan;
         count_rule_work(rule_work);
         if let Some(change) = change {
             self.push(change);
@@ -4433,6 +4484,16 @@ impl<'s> Pending<'s> {
     /// reading here would be a reading per flush of an answer that does not
     /// change.
     fn flush(&mut self) -> Result<(), JobFailure> {
+        self.flush_for_mode(
+            #[cfg(feature = "induced-failure")]
+            false,
+        )
+    }
+
+    fn flush_for_mode(
+        &mut self,
+        #[cfg(feature = "induced-failure")] defer_health: bool,
+    ) -> Result<(), JobFailure> {
         let findings = self.recordable()?;
         if self.changes.is_empty() && findings.is_empty() {
             return Ok(());
@@ -4442,6 +4503,23 @@ impl<'s> Pending<'s> {
             self.account.freed.absorb(&self.changes);
         }
         let mut request = self.store.begin_request();
+        #[cfg(feature = "induced-failure")]
+        let outcome = if defer_health {
+            request.apply_startup_increment(
+                self.changes.drain(..),
+                &findings,
+                self.declared.model.content_model(),
+            )
+        } else {
+            request.apply_increment(
+                self.provenance,
+                self.changes.drain(..),
+                &findings,
+                self.declared.model.content_model(),
+            )
+        }
+        .map_err(store_effect)?;
+        #[cfg(not(feature = "induced-failure"))]
         let outcome = request
             .apply_increment(
                 self.provenance,
@@ -5021,6 +5099,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn recovery_refuses_a_retained_partial_startup_experiment() {
+        struct Stop;
+        impl startup_experiment::Observer for Stop {
+            fn catalogue(
+                &self,
+                _: &norn_store::startup_experiment::Catalogue,
+                _: &ContentModel,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn indexed(
+                &self,
+                stage: startup_experiment::Stage,
+                _: Arc<norn_store::SnapshotReader>,
+                _: Arc<ContentModel>,
+            ) -> Result<(), String> {
+                if stage == startup_experiment::Stage::Frontmatter {
+                    Err("interrupted after base facts".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let f = Fixture::new("startup-retained-recovery");
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
+        fs::write(f.vault().join("first.md"), "[[missing]] #tag\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let ops = ops
+            .with_startup_experiment(startup_experiment::Experiment::new("first", Arc::new(Stop)));
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        assert!(ops.recover(&name, &mut attachment, &progress).is_err());
+        assert!(
+            ops.recover(&name, &mut attachment, &progress).is_err(),
+            "ordinary recovery accepted partial derivation"
+        );
+        ops.detach(&name, attachment);
     }
 
     /// **An attach refused in the host's own data directory reaches a caller

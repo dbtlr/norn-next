@@ -325,6 +325,17 @@ impl Vault {
         self.serve_with_policy([self.name.clone()], None, policy, |ops| ops)
     }
 
+    #[cfg(feature = "induced-failure")]
+    pub fn host_with_startup_experiment(
+        &self,
+        policy: ProductionPolicy,
+        experiment: Arc<norn_host::startup_experiment::Experiment>,
+    ) -> ServingHost {
+        self.serve_with_policy([self.name.clone()], None, policy, |ops| {
+            ops.with_startup_experiment(experiment)
+        })
+    }
+
     /// A host serving this vault's root under each of `names`, holding the
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.

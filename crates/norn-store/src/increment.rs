@@ -242,6 +242,7 @@ pub(crate) fn apply(
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
+    #[cfg(feature = "induced-failure")] defer_health: bool,
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
@@ -419,7 +420,11 @@ pub(crate) fn apply(
     // path and the path discard every finding keyed by a path this changeset
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
-    let redecided = match generation {
+    #[cfg(feature = "induced-failure")]
+    let run_health = !defer_health;
+    #[cfg(not(feature = "induced-failure"))]
+    let run_health = true;
+    let redecided = match generation.filter(|_| run_health) {
         Some(generation) => {
             #[cfg(feature = "induced-failure")]
             let _timing = norn_db::profiling::span("store.link_health");
@@ -484,6 +489,66 @@ pub(crate) fn apply(
             typed_values_discarded: 0,
         },
     })
+}
+
+/// Reuse the ordinary written-document judgment over a completed experimental
+/// import. A generation contains at most the importer's bounded changeset.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn finish_startup_health(
+    store: &mut Store,
+    counters: &mut DerivationCounters,
+    work: &ReadWork,
+    declared: &ContentModel,
+) -> Result<(), StoreError> {
+    {
+        let transaction = store
+            .database
+            .immediate_transaction("resetting experimental health")?;
+        let pinned: Option<String> =
+            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+        refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
+        for kind in health::LINK_HEALTH_KINDS {
+            let removed = transaction
+                .execute("DELETE FROM findings WHERE kind = ?1", [kind.as_str()])
+                .map_err(|error| error::sql("resetting experimental health", error))?;
+            counters.add(Counter::FindingsDiscarded, removed as u64);
+        }
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing experimental health reset", error))?;
+    }
+    let mut after = 0_i64;
+    loop {
+        let generation: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT MIN(generation) FROM documents WHERE generation > ?1",
+                [after],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("paging experimental generations", error))?;
+        let Some(generation) = generation else { break };
+        let transaction = store
+            .database
+            .immediate_transaction("judging experimental health")?;
+        let judged = health::redecide(
+            &transaction,
+            work,
+            declared.ambiguity_ignore(),
+            generation,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing experimental health", error))?;
+        counters.add(Counter::FindingsWritten, judged.findings);
+        counters.add(Counter::LinksRedecided, judged.links);
+        counters.add(Counter::LinkHealthKeysResolved, judged.keys_resolved);
+        counters.add(Counter::LinkHealthCandidatesRead, judged.candidates_read);
+        after = generation;
+    }
+    Ok(())
 }
 
 /// What one changeset accumulated, to be reported and counted once it committed.

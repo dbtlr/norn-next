@@ -385,7 +385,35 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
+            #[cfg(feature = "induced-failure")]
+            false,
         )
+    }
+
+    /// Experimental import seam for isolated, disposable startup simulations.
+    /// Partial results must not be published as an ordinary ready store.
+    #[cfg(feature = "induced-failure")]
+    pub fn apply_startup_increment(
+        &mut self,
+        changes: impl IntoIterator<Item = Change>,
+        findings: &[DerivedFinding<'_>],
+        declared: &ContentModel,
+    ) -> Result<IncrementOutcome, StoreError> {
+        increment::apply(
+            self.store,
+            &mut self.counters,
+            &self.read_work,
+            changes,
+            findings,
+            declared,
+            true,
+        )
+    }
+
+    /// Complete the deferred findings of an isolated startup experiment.
+    #[cfg(feature = "induced-failure")]
+    pub fn finish_startup_health(&mut self, declared: &ContentModel) -> Result<(), StoreError> {
+        increment::finish_startup_health(self.store, &mut self.counters, &self.read_work, declared)
     }
 
     /// Record one finding, with the head of its candidates.
@@ -588,6 +616,50 @@ impl<'a> Request<'a> {
             |row| stored_document(row, 0),
             "reading a document row",
         )
+    }
+
+    /// A matching hash cannot certify rich facts that an experiment has not written.
+    #[cfg(feature = "induced-failure")]
+    pub fn start_startup_experiment(&mut self) -> Result<(i64, i64), StoreError> {
+        let temp_store = self
+            .store
+            .connection()
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .map_err(|error| error::sql("reading the original temporary-storage policy", error))?;
+        let temp_cache = self
+            .store
+            .connection()
+            .pragma_query_value(Some("temp"), "cache_size", |row| row.get(0))
+            .map_err(|error| error::sql("reading the original temporary-cache policy", error))?;
+        norn_db::meta::put_meta(
+            self.store.connection(),
+            "startup_experiment_incomplete",
+            1_i64,
+        )?;
+        Ok((temp_store, temp_cache))
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn complete_startup_experiment(
+        &mut self,
+        temp_settings: (i64, i64),
+    ) -> Result<(), StoreError> {
+        self.store
+            .connection()
+            .pragma_update(None, "temp_store", temp_settings.0)
+            .map_err(|error| error::sql("restoring temporary storage after import", error))?;
+        self.store
+            .connection()
+            .pragma_update(Some("temp"), "cache_size", temp_settings.1)
+            .map_err(|error| error::sql("restoring the temporary cache after import", error))?;
+        self.store
+            .connection()
+            .execute(
+                "DELETE FROM meta WHERE key = 'startup_experiment_incomplete'",
+                [],
+            )
+            .map_err(|error| error::sql("completing an experimental import", error))?;
+        Ok(())
     }
 
     /// The next bounded page of document rows in `order`.

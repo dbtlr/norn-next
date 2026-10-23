@@ -159,6 +159,8 @@ mod search;
 #[cfg(feature = "induced-failure")]
 #[doc(hidden)]
 pub mod startup_audit;
+#[cfg(feature = "induced-failure")]
+pub mod startup_experiment;
 mod store;
 mod validate;
 mod write_path;

@@ -4,6 +4,9 @@
 #![allow(clippy::disallowed_methods)] // Measurement harness: isolated trees and JSONL readings.
 
 mod attach;
+#[cfg(feature = "induced-failure")]
+#[path = "performance/staged.rs"]
+mod staged;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -65,6 +68,17 @@ fn performance_audit() {
     emit(json!({"summary": summary}));
 }
 
+#[cfg(feature = "induced-failure")]
+fn performance_verify() {
+    let root = root();
+    let vault = attach::Vault::adopt(&root);
+    vault
+        .store()
+        .verify_integrity()
+        .expect("verify the completed experimental store");
+    emit(json!({"integrity_verified":true}));
+}
+
 fn performance_worker() {
     let root = root();
     let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
@@ -109,11 +123,37 @@ fn performance_worker() {
             "health.anchors",
             "health.candidate_names",
             "store.finding_metadata",
+            "startup.catalogue",
+            "startup.requested_document",
+            "startup.base",
+            "startup.rich",
+            "startup.final_health",
+            "startup.probes",
+            "startup.finalize",
         ])
         .expect("start the isolated timing record")
     });
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
+    #[cfg(feature = "induced-failure")]
+    let host = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+        Ok(mode @ ("layered" | "layered-silent" | "facts-once" | "facts-once-silent")) => {
+            let reporter = std::sync::Arc::new(staged::Reporter::new(
+                began,
+                vault.name().clone(),
+                mode.ends_with("-silent"),
+            ));
+            let experiment = if mode.starts_with("facts-once") {
+                norn_host::startup_experiment::Experiment::facts_once("small", reporter)
+            } else {
+                norn_host::startup_experiment::Experiment::new("small", reporter)
+            };
+            vault.host_with_startup_experiment(policy, experiment)
+        }
+        Err(_) => vault.host_with_policy(policy),
+        Ok(mode) => panic!("unknown startup experiment {mode}"),
+    };
+    #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
@@ -295,6 +335,8 @@ fn main() {
         Some("serve") => performance_worker(),
         #[cfg(feature = "induced-failure")]
         Some("audit") => performance_audit(),
+        #[cfg(feature = "induced-failure")]
+        Some("verify") => performance_verify(),
         _ => panic!("the performance worker requires generate or serve from its external runner"),
     }
 }

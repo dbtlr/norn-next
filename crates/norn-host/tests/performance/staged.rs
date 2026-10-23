@@ -1,0 +1,263 @@
+//! Checkpoint requests use production SQL builders while ordinary readiness is closed.
+
+use norn_host::startup_experiment::{Observer, Stage};
+use norn_store::{ContentModel, ReadNeed, SnapshotReader, startup_experiment::Catalogue};
+use norn_wire::{
+    Column, CountParams, FindParams, GetParams, Predicate, ResolutionTarget, ValidateParams,
+    VaultAddress, VaultName,
+};
+use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+pub struct Reporter {
+    began: Instant,
+    address: VaultAddress,
+    checkpoint: AtomicU64,
+    silent: bool,
+}
+
+impl Reporter {
+    pub fn new(began: Instant, name: VaultName, silent: bool) -> Self {
+        Self {
+            began,
+            address: VaultAddress::name(name),
+            checkpoint: AtomicU64::new(0),
+            silent,
+        }
+    }
+
+    fn query(
+        &self,
+        stage: &str,
+        probe: &str,
+        reader: &Arc<SnapshotReader>,
+        model: &ContentModel,
+        command: Value,
+    ) -> Result<(), String> {
+        let boundary = self.checkpoint.load(Ordering::Relaxed);
+        let requested = self.began.elapsed().as_nanos();
+        let started = Instant::now();
+        let turn = reader
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+            .map_err(|error| error.to_string())?
+            .ok_or("checkpoint reader unavailable")?;
+        let snapshot = turn.establish().map_err(|error| error.to_string())?;
+        let answer = match command["op"].as_str().expect("probe operation") {
+            "get" => {
+                let target = command["target"].as_str().unwrap();
+                let mut params =
+                    GetParams::new(self.address.clone(), ResolutionTarget::new(target).unwrap());
+                if !target.contains('#') {
+                    params =
+                        params.with_columns([Column::path(), Column::body(), Column::fields()]);
+                }
+                let (unsatisfied, report) =
+                    norn_host::startup_experiment::get(&snapshot, &params, model)
+                        .map_err(|error| format!("{error:?}"))?
+                        .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":[]})
+            }
+            "find" => {
+                let params = FindParams::new(self.address.clone())
+                    .with_limit(25)
+                    .with_predicates([Predicate::equal_to("perf_bucket", "active")])
+                    .with_columns([Column::path()]);
+                let (unsatisfied, advisories, report) = snapshot
+                    .find(&params, model)
+                    .map_err(|error| format!("{error:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            }
+            "search" => {
+                let mut params = norn_store::LexicalQuery::new(command["query"].as_str().unwrap())
+                    .with_limit(25);
+                if let Some(path) = command["path"].as_str() {
+                    params = params.with_predicates([Predicate::path(path)]);
+                }
+                let (unsatisfied, advisories, report) = snapshot
+                    .search(&params, model)
+                    .map_err(|error| format!("{error:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            }
+            "count" => {
+                let mut params = CountParams::new(self.address.clone());
+                if command["active"] == true {
+                    params = params.with_predicates([Predicate::equal_to("perf_bucket", "active")]);
+                }
+                if let Some(text) = command["matches"].as_str() {
+                    params = params.with_predicates([Predicate::matches(text)]);
+                }
+                let (unsatisfied, advisories, report) = snapshot
+                    .count(&params, model)
+                    .map_err(|error| format!("{error:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            }
+            "validate" => {
+                let params = ValidateParams::new(self.address.clone()).summarized();
+                let (unsatisfied, advisories, report) = snapshot
+                    .validate(&params, model)
+                    .map_err(|error| format!("{error:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            }
+            other => return Err(format!("unknown checkpoint operation {other}")),
+        };
+        let elapsed = started.elapsed().as_nanos();
+        super::emit(
+            json!({"startup_stage":stage,"probe":probe,"stage_boundary_ns":boundary,
+            "query_host_ns":elapsed,"query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
+            "command":command,"answer":answer,"counters":snapshot.counters().readings().collect::<std::collections::BTreeMap<_,_>>(),"global_ready":false}),
+        );
+        Ok(())
+    }
+}
+
+impl Observer for Reporter {
+    fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
+        let boundary = self.began.elapsed().as_nanos();
+        if self.silent {
+            super::emit(
+                json!({"startup_stage":"catalogue","probe":"boundary","stage_boundary_ns":boundary,
+                "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+            );
+            return Ok(());
+        }
+        let began = Instant::now();
+        let mut answers = Vec::new();
+        for target in ["small", "roadmap", "profilenonexistentdocument"] {
+            let found = catalogue
+                .candidates(target, model.ambiguity_ignore())
+                .map_err(|error| error.to_string())?
+                .ok_or("catalogue incomplete")?;
+            answers.push(json!({"target":target,"paths":found.paths,"total":found.total}));
+        }
+        super::emit(
+            json!({"startup_stage":"catalogue","probe":"names","stage_boundary_ns":boundary,
+            "query_host_ns":began.elapsed().as_nanos(),"query_finished_ns":self.began.elapsed().as_nanos(),
+            "candidates":answers,"global_ready":false}),
+        );
+        Ok(())
+    }
+
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        let boundary = self.began.elapsed().as_nanos() as u64;
+        self.checkpoint.store(boundary, Ordering::Relaxed);
+        if self.silent {
+            let names: &[&str] = match stage {
+                Stage::RequestedDocument => &["get"],
+                Stage::Frontmatter => &["frontmatter", "lexical"],
+                Stage::RichFacts => &["rich"],
+                Stage::AllFacts => &["frontmatter", "lexical", "rich"],
+                Stage::LinkHealth => &["health"],
+            };
+            for name in names {
+                super::emit(
+                    json!({"startup_stage":name,"probe":"boundary","stage_boundary_ns":boundary,
+                    "query_host_ns":0,"queries_executed":false,"global_ready":false}),
+                );
+            }
+            return Ok(());
+        }
+        self.probes(stage, &reader, &model)
+    }
+}
+
+impl Reporter {
+    fn probes(
+        &self,
+        stage: Stage,
+        reader: &Arc<SnapshotReader>,
+        model: &ContentModel,
+    ) -> Result<(), String> {
+        match stage {
+            Stage::AllFacts => {
+                self.probes(Stage::Frontmatter, reader, model)?;
+                self.probes(Stage::RichFacts, reader, model)
+            }
+            Stage::RequestedDocument => self.query(
+                "get",
+                "slug",
+                reader,
+                model,
+                json!({"op":"get","target":"small"}),
+            ),
+            Stage::Frontmatter => {
+                self.query(
+                    "frontmatter",
+                    "active_page",
+                    reader,
+                    model,
+                    json!({"op":"find"}),
+                )?;
+                self.query(
+                    "frontmatter",
+                    "document_count",
+                    reader,
+                    model,
+                    json!({"op":"count"}),
+                )?;
+                self.query(
+                    "frontmatter",
+                    "active_count",
+                    reader,
+                    model,
+                    json!({"op":"count","active":true}),
+                )?;
+                self.query(
+                    "lexical",
+                    "common",
+                    reader,
+                    model,
+                    json!({"op":"search","query":"profilecommonword"}),
+                )?;
+                self.query(
+                    "lexical",
+                    "rare",
+                    reader,
+                    model,
+                    json!({"op":"search","query":"profileraresignal"}),
+                )?;
+                self.query(
+                    "lexical",
+                    "missing",
+                    reader,
+                    model,
+                    json!({"op":"search","query":"profilenonexistenttoken"}),
+                )?;
+                self.query(
+                    "lexical",
+                    "filtered",
+                    reader,
+                    model,
+                    json!({"op":"search","query":"profilecommonword","path":"bench/**"}),
+                )?;
+                self.query(
+                    "lexical",
+                    "coverage",
+                    reader,
+                    model,
+                    json!({"op":"count","matches":"profilecommonword"}),
+                )
+            }
+            Stage::RichFacts => self.query(
+                "rich",
+                "section",
+                reader,
+                model,
+                json!({"op":"get","target":"bench/large.md#Details"}),
+            ),
+            Stage::LinkHealth => {
+                self.query("health", "summary", reader, model, json!({"op":"validate"}))
+            }
+        }
+    }
+}
