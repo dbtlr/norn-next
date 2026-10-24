@@ -115,7 +115,7 @@ may not be added.
 
 **Rung 3 has four triggers, with different lifetimes.**
 
-- **A DDL change during development.** Store schema version is **2**, with one
+- **A DDL change during development.** Store schema version is **3**, with one
   normalized resolution key per key space. A fingerprint or version mismatch in
   the meta table is resolved by rebuilding from zero.
 - **A root proving a case behaviour the store was not derived under** — at any time. The
