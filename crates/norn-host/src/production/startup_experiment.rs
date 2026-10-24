@@ -426,12 +426,12 @@ fn run_health_once(
             Ok(())
         }
         Ok(Err(failure)) => {
-            if experiment.construction_group.is_some() {
-                if let Err(cleanup) = store.begin_request().abandon_startup_construction() {
-                    return Err(JobFailure::Environmental(format!(
-                        "{failure:?}; construction rollback: {cleanup}"
-                    )));
-                }
+            if experiment.construction_group.is_some()
+                && let Err(cleanup) = store.begin_request().abandon_startup_construction()
+            {
+                return Err(JobFailure::Environmental(format!(
+                    "{failure:?}; construction rollback: {cleanup}"
+                )));
             }
             Err(failure)
         }

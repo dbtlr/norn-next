@@ -158,8 +158,8 @@ def validate_receipts(mode, stages, ready, manifest, *, stored_links=None, const
 
 
 CONSTRUCTION_KEYS = ("group", "commit_attempts", "commits", "rollback_attempts", "rollbacks",
-    "automatic_rollbacks", "document_changesets", "health_resets", "health_generation_groups",
-    "drain_changesets", "commits_documents", "commits_health_reset", "commits_health_generation", "commits_drain")
+    "automatic_rollbacks", "document_changesets", "finding_units", "cleanup_units", "health_resets", "health_generation_groups",
+    "drain_changesets", "drain_cleanup_units", "drain_finding_units", "commits_documents", "commits_findings", "commits_cleanup", "commits_health_reset", "commits_health_generation", "commits_drain")
 
 
 def validate_construction_receipts(stages, ready, group):
@@ -177,9 +177,11 @@ def validate_construction_receipts(stages, ready, group):
             raise ValueError("construction group or successful commits disagree")
         if any(r[k] for k in ("rollback_attempts", "rollbacks", "automatic_rollbacks")):
             raise ValueError("completed construction contains a rollback")
-        if r["commits"] != sum(r["commits_" + p] for p in ("documents", "health_reset", "health_generation", "drain")):
+        if r["commits"] != sum(r["commits_" + p] for p in ("documents", "findings", "cleanup", "health_reset", "health_generation", "drain")):
             raise ValueError("construction phase commits disagree")
-        if index < 2 and r["drain_changesets"] + r["commits_drain"]:
+        if r["commits_drain"] != r["drain_changesets"] + r["drain_cleanup_units"] + r["drain_finding_units"]:
+            raise ValueError("ordinary drain units must commit individually")
+        if index < 2 and r["drain_changesets"] + r["drain_cleanup_units"] + r["drain_finding_units"] + r["commits_drain"]:
             raise ValueError("watcher drain preceded construction commit")
         if index == 0 and (r["health_resets"] or r["health_generation_groups"]):
             raise ValueError("final health preceded full facts")
@@ -188,7 +190,7 @@ def validate_construction_receipts(stages, ready, group):
         if index >= 1:
             if r["health_resets"] != 1 or not 0 < r["health_generation_groups"] <= r["document_changesets"]:
                 raise ValueError("final health generation account is missing")
-            units = r["document_changesets"] + r["health_resets"] + r["health_generation_groups"]
+            units = r["document_changesets"] + r["finding_units"] + r["cleanup_units"] + r["health_resets"] + r["health_generation_groups"]
             # Sanity-check independently recorded counts; norn-db tests also
             # reconcile successful commits against actual SQLite execution.
             expected_commits = 1 if expected_group == 0 else (units + expected_group - 1) // expected_group

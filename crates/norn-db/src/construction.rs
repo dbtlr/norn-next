@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-use crate::{Database, DbError, sql};
+use crate::{Database, DbError, require_transaction, sql};
 
 /// A commit is charged to the phase of its last completed unit. A group may
 /// cross phase boundaries; these are real commits, not per-phase estimates.
@@ -12,9 +12,13 @@ use crate::{Database, DbError, sql};
 pub enum Phase {
     #[default]
     Documents,
+    Findings,
+    Cleanup,
     HealthReset,
     HealthGeneration,
     Drain,
+    DrainCleanup,
+    DrainFindings,
 }
 
 /// Scalar-only diagnostics, separate from ordinary derivation counters.
@@ -27,10 +31,16 @@ pub struct Receipt {
     pub rollbacks: u64,
     pub automatic_rollbacks: u64,
     pub document_changesets: u64,
+    pub finding_units: u64,
+    pub cleanup_units: u64,
     pub health_resets: u64,
     pub health_generation_groups: u64,
     pub drain_changesets: u64,
+    pub drain_cleanup_units: u64,
+    pub drain_finding_units: u64,
     pub commits_documents: u64,
+    pub commits_findings: u64,
+    pub commits_cleanup: u64,
     pub commits_health_reset: u64,
     pub commits_health_generation: u64,
     pub commits_drain: u64,
@@ -38,7 +48,6 @@ pub struct Receipt {
 
 #[derive(Debug, Default)]
 pub(crate) struct Control {
-    pub(crate) used: bool,
     pub(crate) active: bool,
     pub(crate) failed: bool,
     recording: bool,
@@ -56,16 +65,18 @@ pub(crate) fn refusal(message: &str) -> DbError {
     }
 }
 
-use crate::require_transaction;
-
 impl Control {
     fn committed(&mut self, phase: Phase) {
         self.receipt.commits += 1;
         match phase {
             Phase::Documents => self.receipt.commits_documents += 1,
+            Phase::Findings => self.receipt.commits_findings += 1,
+            Phase::Cleanup => self.receipt.commits_cleanup += 1,
             Phase::HealthReset => self.receipt.commits_health_reset += 1,
             Phase::HealthGeneration => self.receipt.commits_health_generation += 1,
-            Phase::Drain => self.receipt.commits_drain += 1,
+            Phase::Drain | Phase::DrainCleanup | Phase::DrainFindings => {
+                self.receipt.commits_drain += 1
+            }
         }
         self.pending = 0;
     }
@@ -101,15 +112,21 @@ impl Database {
                 "construction group must be 1, 16, or unbounded (0)",
             ));
         }
-        if self.construction.used || !self.connection.is_autocommit() {
+        if self.construction.is_some() || !self.connection.is_autocommit() {
             return Err(refusal(
                 "construction requires a fresh first attempt in autocommit",
             ));
         }
-        self.construction.used = true;
-        self.construction.active = true;
-        self.construction.recording = true;
-        self.construction.receipt.group = group;
+        // Ordinary handles carry no lab control allocation or receipt state.
+        self.construction = Some(Box::new(Control {
+            active: true,
+            recording: true,
+            receipt: Receipt {
+                group,
+                ..Receipt::default()
+            },
+            ..Control::default()
+        }));
         // Open lazily at the first unit, never a speculative empty transaction.
         Ok(())
     }
@@ -122,12 +139,27 @@ impl Database {
         phase: Phase,
         operation: &'static str,
     ) -> Result<Unit<'_>, DbError> {
-        let control = &mut self.construction;
+        let Some(control) = self.construction.as_deref_mut() else {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| sql(operation, error))?;
+            return Ok(Unit {
+                transaction: Body::Ordinary(Some(transaction)),
+                control: None,
+                phase,
+                finished: false,
+            });
+        };
         if control.failed {
             return Err(refusal("construction was abandoned"));
         }
-        let phase = if control.used && !control.active {
-            Phase::Drain
+        let phase = if !control.active {
+            match phase {
+                Phase::Cleanup => Phase::DrainCleanup,
+                Phase::Findings => Phase::DrainFindings,
+                _ => Phase::Drain,
+            }
         } else {
             phase
         };
@@ -162,7 +194,7 @@ impl Database {
         };
         Ok(Unit {
             transaction,
-            control,
+            control: Some(control),
             phase,
             finished: false,
         })
@@ -171,33 +203,44 @@ impl Database {
     /// End before watcher reconciliation. A partial group commits here, charged
     /// to its last unit's phase. No new transaction is opened afterward.
     pub fn finish_construction(&mut self) -> Result<(), DbError> {
-        if !self.construction.active || self.construction.failed {
+        let control = self
+            .construction
+            .as_deref_mut()
+            .ok_or_else(|| refusal("no successful construction is active"))?;
+        if !control.active || control.failed {
             return Err(refusal("no successful construction is active"));
         }
-        if self.construction.pending > 0 {
+        if control.pending > 0 {
             if let Err(error) = require_transaction(&self.connection) {
-                self.construction.abandon(&self.connection)?;
+                control.abandon(&self.connection)?;
                 return Err(error);
             }
-            self.construction.receipt.commit_attempts += 1;
+            control.receipt.commit_attempts += 1;
             if let Err(error) = self.connection.execute_batch("COMMIT") {
-                self.construction.abandon(&self.connection)?;
+                control.abandon(&self.connection)?;
                 return Err(sql("committing final construction group", error));
             }
-            self.construction.committed(self.construction.last_phase);
+            control.committed(control.last_phase);
         }
-        self.construction.active = false;
+        control.active = false;
         self.ensure_construction_complete()
     }
 
     /// Explicit error cleanup also surfaces rollback failures retained by Drop.
     pub fn abandon_construction(&mut self) -> Result<(), DbError> {
-        self.construction.abandon(&self.connection)
+        self.construction
+            .as_deref_mut()
+            .ok_or_else(|| refusal("no construction was started"))?
+            .abandon(&self.connection)
     }
 
     /// Publication/marker removal cannot run inside any transaction or after failure.
     pub fn ensure_construction_complete(&self) -> Result<(), DbError> {
-        if self.construction.active || self.construction.failed || !self.connection.is_autocommit()
+        if self
+            .construction
+            .as_ref()
+            .is_some_and(|control| control.active || control.failed)
+            || !self.connection.is_autocommit()
         {
             return Err(refusal("construction is active or abandoned"));
         }
@@ -208,17 +251,29 @@ impl Database {
     /// boundary. Later warm units retain ordinary error and retry semantics.
     pub fn seal_construction_receipt(&mut self) -> Result<(), DbError> {
         self.ensure_construction_complete()?;
-        self.construction.recording = false;
+        if let Some(control) = self.construction.as_deref_mut() {
+            control.recording = false;
+        }
         Ok(())
     }
 
+    /// Domain cleanup joins construction while its private account stands;
+    /// after sealing, the domain retains its ordinary autocommit spelling.
+    pub fn construction_is_recording(&self) -> bool {
+        self.construction
+            .as_ref()
+            .is_some_and(|control| control.recording)
+    }
+
     pub fn construction_receipt(&self) -> Option<&Receipt> {
-        self.construction.used.then_some(&self.construction.receipt)
+        self.construction.as_deref().map(|control| &control.receipt)
     }
 
     pub fn refuse_unconverted_construction_writer(&mut self) -> Result<(), DbError> {
-        if self.construction.active || self.construction.failed {
-            self.construction.abandon(&self.connection)?;
+        if let Some(control) = self.construction.as_deref_mut()
+            && (control.active || control.failed)
+        {
+            control.abandon(&self.connection)?;
             return Err(refusal("unconverted writer during lab construction"));
         }
         Ok(())
@@ -233,7 +288,7 @@ enum Body<'a> {
 /// Transaction authority for exactly one existing bounded write unit.
 pub struct Unit<'a> {
     transaction: Body<'a>,
-    control: &'a mut Control,
+    control: Option<&'a mut Control>,
     phase: Phase,
     finished: bool,
 }
@@ -252,40 +307,45 @@ impl Deref for Unit<'_> {
 impl Unit<'_> {
     pub fn commit(mut self) -> Result<(), DbError> {
         require_transaction(&self)?;
-        let tracking = self.control.recording;
-        if tracking {
+        if let Some(control) = self.control.as_mut().filter(|control| control.recording) {
             match self.phase {
-                Phase::Documents => self.control.receipt.document_changesets += 1,
-                Phase::HealthReset => self.control.receipt.health_resets += 1,
-                Phase::HealthGeneration => self.control.receipt.health_generation_groups += 1,
-                Phase::Drain => self.control.receipt.drain_changesets += 1,
+                Phase::Documents => control.receipt.document_changesets += 1,
+                Phase::Findings => control.receipt.finding_units += 1,
+                Phase::Cleanup => control.receipt.cleanup_units += 1,
+                Phase::HealthReset => control.receipt.health_resets += 1,
+                Phase::HealthGeneration => control.receipt.health_generation_groups += 1,
+                Phase::Drain => control.receipt.drain_changesets += 1,
+                Phase::DrainCleanup => control.receipt.drain_cleanup_units += 1,
+                Phase::DrainFindings => control.receipt.drain_finding_units += 1,
             }
         }
         match &mut self.transaction {
             Body::Ordinary(transaction) => {
-                if tracking {
-                    self.control.receipt.commit_attempts += 1;
+                if let Some(control) = self.control.as_mut().filter(|control| control.recording) {
+                    control.receipt.commit_attempts += 1;
                 }
                 transaction
                     .as_ref()
                     .expect("live transaction")
                     .execute_batch("COMMIT")
                     .map_err(|error| sql("committing a write unit", error))?;
-                if tracking {
-                    self.control.committed(self.phase);
+                if let Some(control) = self.control.as_mut().filter(|control| control.recording) {
+                    control.committed(self.phase);
                 }
             }
             Body::Grouped(connection) => {
-                self.control.pending += 1;
-                self.control.last_phase = self.phase;
-                if self.control.receipt.group != 0
-                    && self.control.pending == self.control.receipt.group
-                {
-                    self.control.receipt.commit_attempts += 1;
+                let control = self
+                    .control
+                    .as_mut()
+                    .expect("grouped construction authority");
+                control.pending += 1;
+                control.last_phase = self.phase;
+                if control.receipt.group != 0 && control.pending == control.receipt.group {
+                    control.receipt.commit_attempts += 1;
                     connection
                         .execute_batch("COMMIT")
                         .map_err(|error| sql("committing a construction group", error))?;
-                    self.control.committed(self.phase);
+                    control.committed(self.phase);
                 }
             }
         }
@@ -303,46 +363,42 @@ impl Drop for Unit<'_> {
             Body::Ordinary(transaction) => {
                 // Keep rusqlite's rollback-on-Drop even on commit failure.
                 if let Some(transaction) = transaction.take() {
+                    let Some(control) = self.control.as_mut().filter(|control| control.recording)
+                    else {
+                        drop(transaction);
+                        return;
+                    };
                     if transaction.is_autocommit() {
-                        if self.control.recording {
-                            self.control.receipt.automatic_rollbacks += 1;
-                        }
+                        control.receipt.automatic_rollbacks += 1;
                         // SQLite already abandoned the unit. Transaction's own
                         // Drop sees autocommit and has no rollback left to run.
                         drop(transaction);
-                        if self.control.recording {
-                            self.control.failed = true;
-                            self.control.active = false;
-                        }
-                        return;
-                    }
-                    if self.control.recording {
-                        self.control.receipt.rollback_attempts += 1;
-                    }
-                    let result = transaction.rollback();
-                    if self.control.recording {
-                        match result {
-                            Ok(()) => self.control.receipt.rollbacks += 1,
+                    } else {
+                        control.receipt.rollback_attempts += 1;
+                        match transaction.rollback() {
+                            Ok(()) => control.receipt.rollbacks += 1,
                             Err(error) => {
-                                self.control.cleanup_error =
+                                control.cleanup_error =
                                     Some(sql("rolling back a write unit", error))
                             }
                         }
                     }
-                }
-                if self.control.recording {
-                    self.control.failed = true;
-                    self.control.active = false;
+                    control.failed = true;
+                    control.active = false;
                 }
             }
             Body::Grouped(connection) => {
                 // Drop cannot return errors; explicit host cleanup reports any
                 // rollback failure retained by abandon.
+                let control = self
+                    .control
+                    .as_mut()
+                    .expect("grouped construction authority");
                 if connection.is_autocommit() {
-                    self.control.receipt.automatic_rollbacks += 1;
-                    self.control.pending = 0;
+                    control.receipt.automatic_rollbacks += 1;
+                    control.pending = 0;
                 }
-                let _ = self.control.abandon(connection);
+                let _ = control.abandon(connection);
             }
         }
     }

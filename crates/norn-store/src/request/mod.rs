@@ -525,19 +525,34 @@ impl<'a> Request<'a> {
         scope: DiscardScope<'_>,
     ) -> Result<Invalidation, StoreError> {
         check_callers_discard(scope)?;
+        let discard = |connection: &rusqlite::Connection| {
+            connection
+                .execute(
+                    &subject_discard_sql(scope),
+                    params_from_iter(subject_discard_parameters(path, scope)),
+                )
+                .map(|discarded| discarded as u64)
+                .map_err(|error| error::sql("discarding a path's findings", error))
+        };
         #[cfg(feature = "induced-failure")]
-        self.store
-            .database
-            .refuse_unconverted_construction_writer()?;
-        let discarded = self
-            .store
-            .connection()
-            .execute(
-                &subject_discard_sql(scope),
-                params_from_iter(subject_discard_parameters(path, scope)),
-            )
-            .map_err(|error| error::sql("discarding a path's findings", error))?
-            as u64;
+        let discarded = if self.store.database.construction_is_recording() {
+            // A first heal may prune the other scope of a quarantined place.
+            // Preserve that standalone SQL unit rather than refusing the vault.
+            let unit = self.store.database.construction_unit(
+                norn_db::construction::Phase::Cleanup,
+                "opening a construction cleanup unit",
+            )?;
+            let discarded = discard(&unit)?;
+            unit.commit()?;
+            discarded
+        } else {
+            self.store
+                .database
+                .refuse_unconverted_construction_writer()?;
+            discard(self.store.connection())?
+        };
+        #[cfg(not(feature = "induced-failure"))]
+        let discarded = discard(self.store.connection())?;
         self.counters.add(Counter::FindingsDiscarded, discarded);
         Ok(Invalidation {
             findings_discarded: discarded,
@@ -734,13 +749,19 @@ impl<'a> Request<'a> {
             ("construction_rollbacks", r.rollbacks),
             ("construction_automatic_rollbacks", r.automatic_rollbacks),
             ("construction_document_changesets", r.document_changesets),
+            ("construction_finding_units", r.finding_units),
+            ("construction_cleanup_units", r.cleanup_units),
             ("construction_health_resets", r.health_resets),
             (
                 "construction_health_generation_groups",
                 r.health_generation_groups,
             ),
             ("construction_drain_changesets", r.drain_changesets),
+            ("construction_drain_cleanup_units", r.drain_cleanup_units),
+            ("construction_drain_finding_units", r.drain_finding_units),
             ("construction_commits_documents", r.commits_documents),
+            ("construction_commits_findings", r.commits_findings),
+            ("construction_commits_cleanup", r.commits_cleanup),
             ("construction_commits_health_reset", r.commits_health_reset),
             (
                 "construction_commits_health_generation",

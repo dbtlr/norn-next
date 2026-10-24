@@ -443,14 +443,14 @@ fn construction_groups_preserve_health_once_identity_work_and_rich_answers() {
     let (scratch, vault) = fixture("construction-groups-equivalence");
     for index in 0..35 {
         std::fs::write(
-            scratch.join(&format!("vault/note-{index:03}.md")),
+            scratch.join(format!("vault/note-{index:03}.md")),
             "[[first]] [[missing]]\n",
         )
         .unwrap();
     }
     let mut results = vec![];
     for group in [None, Some(1), Some(16), Some(0)] {
-        let machine = vault.beside(&scratch.join(&format!("arm-{group:?}")));
+        let machine = vault.beside(&scratch.join(format!("arm-{group:?}")));
         let probe = Arc::new(Probe::default());
         let experiment = match group {
             None => Experiment::health_once(probe.clone()),
@@ -509,15 +509,18 @@ fn construction_groups_preserve_health_once_identity_work_and_rich_answers() {
             assert_eq!(results[0].0[key], result.0[key], "{key}");
         }
         assert_eq!(results[0].1, result.1);
-        assert_eq!(
-            results[0].2, result.2,
-            "all existing work counters remain identical"
-        );
+        // Dispatcher polling is asynchronous; compare every writer-work field
+        // without requiring equal time-dependent poll counts between hosts.
+        let mut expected_work = results[0].2;
+        let mut actual_work = result.2;
+        expected_work.watcher_polls = 0;
+        actual_work.watcher_polls = 0;
+        assert_eq!(expected_work, actual_work, "writer work changed");
     }
 }
 
 #[test]
-fn source_changes_held_during_construction_drain_after_commit_and_equal_a_fresh_build() {
+fn held_source_changes_are_current_at_first_ready_and_equal_a_fresh_build() {
     struct ChangeDuringHeal {
         root: std::path::PathBuf,
         drain: Mutex<Option<BTreeMap<&'static str, u64>>>,
@@ -546,7 +549,7 @@ fn source_changes_held_during_construction_drain_after_commit_and_equal_a_fresh_
                 std::fs::write(self.root.join("arrived.md"), "# Present\n").unwrap();
                 // Keep the heal window open across the polling interval and
                 // coalescer's maximum batch age. The assertion below requires
-                // actual pre-publication drain commits, not eventual repair.
+                // application before first Ready, not eventual repair.
                 std::thread::sleep(Duration::from_secs(1));
             }
             Ok(())
@@ -556,7 +559,7 @@ fn source_changes_held_during_construction_drain_after_commit_and_equal_a_fresh_
             Ok(())
         }
     }
-    for group in [1, 16, 0] {
+    for group in [None, Some(1), Some(16), Some(0)] {
         let (scratch, vault) = fixture("construction-held-changes");
         let probe = Arc::new(ChangeDuringHeal {
             root: scratch.join("vault"),
@@ -564,19 +567,58 @@ fn source_changes_held_during_construction_drain_after_commit_and_equal_a_fresh_
         });
         let host = vault.host_with_startup_experiment(
             norn_host::ProductionPolicy::new(1, 1).unwrap(),
-            Experiment::health_once_construction(probe.clone(), group).unwrap(),
+            match group {
+                None => Experiment::health_once(probe.clone()),
+                Some(group) => Experiment::health_once_construction(probe.clone(), group).unwrap(),
+            },
         );
         let demand = host.demand(vault.name()).unwrap();
-        wait_ready(&host, &vault);
-        let receipt = probe.drain.lock().unwrap().clone().unwrap();
-        assert!(
-            receipt["construction_commits_drain"] > 0,
-            "changes were not drained before publication"
-        );
+        // Observe actual Host Ready without waiting for a later quiet turn.
+        // Both lifecycle application in legacy health-once and the new common
+        // pre-marker application boundary must already contain the held facts.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while host.state(vault.name()).unwrap() != TrustState::Ready {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let hold = host.begin_read(vault.name()).unwrap();
+        let get = |target| {
+            norn_host::startup_experiment::get(
+                hold.snapshot(),
+                &GetParams::new(
+                    VaultAddress::name(vault.name().clone()),
+                    ResolutionTarget::new(target).unwrap(),
+                ),
+                hold.content_model(),
+            )
+        };
+        let first = serde_json::to_value(get("first").unwrap().into_report().1).unwrap();
         assert_eq!(
-            receipt["construction_commits_drain"],
-            receipt["construction_drain_changesets"]
+            first["document"]["body"]["text"],
+            "[[arrived#Present]] [[gone]]\n"
         );
+        assert_eq!(first["document"]["links"]["total"], 2);
+        assert_eq!(first["document"]["findings"]["total"], 1);
+        let arrived = serde_json::to_value(get("arrived").unwrap().into_report().1).unwrap();
+        assert_eq!(arrived["document"]["body"]["text"], "# Present\n");
+        assert!(
+            get("later").is_err(),
+            "first Ready retained the renamed document"
+        );
+        drop(hold);
+        if group.is_some() {
+            let receipt = probe.drain.lock().unwrap().clone().unwrap();
+            assert!(receipt["construction_commits_drain"] > 0);
+            assert_eq!(
+                receipt["construction_commits_drain"],
+                receipt["construction_drain_changesets"]
+            );
+        } else {
+            assert!(
+                probe.drain.lock().unwrap().is_none(),
+                "legacy mode acquired a new receipt boundary"
+            );
+        }
         drop(demand);
         drop(host);
         let mut maintained_store = vault.store();
@@ -633,5 +675,138 @@ fn construction_experiment_is_first_attempt_only_even_on_a_second_created_store(
         assert_eq!(probe.0.lock().unwrap().len(), 2);
         drop(demand);
         drop(host);
+    }
+}
+
+#[test]
+fn first_build_quarantines_invalid_utf8_and_keeps_degraded_frontmatter_in_every_arm() {
+    use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid};
+    use norn_wire::FindingKind;
+    let scratch = norn_testkit::scratch::Scratch::new("construction-quarantine-and-degradation");
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join("valid.md"), "# Valid\n[[degraded#Retained]]\n").unwrap();
+    std::fs::write(root.join("quarantined.md"), [0xff, 0xfe]).unwrap();
+    std::fs::write(
+        root.join("degraded.md"),
+        "---\nvalue: [\n---\n# Retained\nBody.\n",
+    )
+    .unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    let mut reference = None;
+    let mut legacy_work = None;
+    for (arm, group) in [
+        ("ordinary", None),
+        ("legacy", None),
+        ("control", Some(1)),
+        ("bounded16", Some(16)),
+        ("unbounded", Some(0)),
+    ] {
+        let machine = vault.beside(&scratch.join(arm));
+        let probe = Arc::new(Probe::default());
+        let experiment = if arm == "ordinary" {
+            None
+        } else {
+            Some(match group {
+                None => Experiment::health_once(probe.clone()),
+                Some(group) => Experiment::health_once_construction(probe.clone(), group).unwrap(),
+            })
+        };
+        let host = machine.host_with_loading_options(
+            norn_host::ProductionPolicy::new(1, 1).unwrap(),
+            experiment,
+            None,
+        );
+        let demand = host.demand(machine.name()).unwrap();
+        wait_ready(&host, &machine);
+        let get = |target| {
+            host.get(&GetParams::new(
+                VaultAddress::name(machine.name().clone()),
+                ResolutionTarget::new(target).unwrap(),
+            ))
+        };
+        let valid = semantic_get(serde_json::to_value(get("valid").unwrap().answer).unwrap());
+        let degraded = semantic_get(serde_json::to_value(get("degraded").unwrap().answer).unwrap());
+        assert_eq!(valid["report"]["document"]["links"]["total"], 1);
+        assert_eq!(valid["report"]["document"]["findings"]["total"], 0);
+        assert_eq!(degraded["report"]["document"]["headings"]["total"], 1);
+        assert_eq!(degraded["report"]["document"]["findings"]["total"], 1);
+        assert!(
+            get("quarantined").is_err(),
+            "quarantined bytes became a document"
+        );
+        if arm != "ordinary" {
+            let work: Vec<_> = probe
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(finalized, work)| {
+                    (
+                        *finalized,
+                        work.iter()
+                            .filter(|(key, _)| !key.starts_with("construction_"))
+                            .map(|(key, value)| (*key, *value))
+                            .collect::<BTreeMap<_, _>>(),
+                    )
+                })
+                .collect();
+            if arm == "legacy" {
+                legacy_work = Some(work);
+            } else {
+                assert_eq!(
+                    &work,
+                    legacy_work.as_ref().unwrap(),
+                    "legacy writer-work receipts changed in {arm}"
+                );
+            }
+        }
+        if let Some(group) = group {
+            let stages = probe.0.lock().unwrap();
+            assert_eq!(stages[0].1["changesets_applied"], 2);
+            assert_eq!(stages[0].1["construction_document_changesets"], 2);
+            assert_eq!(stages[0].1["construction_finding_units"], 1);
+            assert_eq!(stages[0].1["construction_cleanup_units"], 1);
+            assert_eq!(stages[1].1["construction_health_generation_groups"], 2);
+            assert_eq!(
+                stages[1].1["construction_commits"],
+                if group == 1 { 7 } else { 1 }
+            );
+        }
+        drop(demand);
+        drop(host);
+        let mut store = machine.store();
+        assert_operationally_valid(&mut store, arm);
+        let request = store.begin_request();
+        let quarantined = norn_store::DocumentPath::new("quarantined.md").unwrap();
+        assert!(request.stored_document(&quarantined).unwrap().is_none());
+        assert!(
+            request
+                .content_quarantine_hash(&quarantined)
+                .unwrap()
+                .is_some()
+        );
+        let findings = request.stored_findings(&quarantined).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::BodyBytesNotUtf8.as_str());
+        let findings = request
+            .stored_findings(&norn_store::DocumentPath::new("degraded.md").unwrap())
+            .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].kind,
+            FindingKind::FrontmatterUnreadable.as_str()
+        );
+        let projection = StoreProjection::read(&mut store).unwrap();
+        assert_eq!(projection.documents().len(), 2);
+        assert_eq!(projection.findings().len(), 2);
+        if let Some((expected, expected_valid, expected_degraded)) = &reference {
+            projection.assert_equivalent(expected, arm);
+            assert_eq!(&valid, expected_valid);
+            assert_eq!(&degraded, expected_degraded);
+        } else {
+            reference = Some((projection, valid, degraded));
+        }
     }
 }

@@ -276,9 +276,10 @@ pub(crate) fn apply(
         }
     }
 
-    // The boundary between two acts: everything before this one has committed
-    // whole, and this one has taken no lock and opened no transaction. A build
-    // without the `induced-failure` feature carries no check here.
+    // Ordinary acts commit whole before this boundary. In grouped lab
+    // construction it is a logical unit boundary that may lie inside the
+    // current real transaction; a tear abandons its uncommitted group. Keep the same fault hook so its
+    // existing unit-based schedule continues to exercise both paths.
     #[cfg(feature = "induced-failure")]
     crate::faults::abort_if_the_chunk_boundary_is_torn();
 
@@ -297,7 +298,11 @@ pub(crate) fn apply(
     }
     #[cfg(feature = "induced-failure")]
     let transaction = store.database.construction_unit(
-        norn_db::construction::Phase::Documents,
+        if first.is_some() {
+            norn_db::construction::Phase::Documents
+        } else {
+            norn_db::construction::Phase::Findings
+        },
         "opening the increment transaction",
     )?;
     // The pin is read in the transaction every row is written in, so no pin
@@ -463,14 +468,16 @@ pub(crate) fn apply(
         transaction.commit()?;
     }
 
-    // The act is at rest, findings included. A process that ends here has lost
-    // nothing: what the transaction carried landed whole, and what it did not
-    // carry was never begun.
+    // Ordinary acts are committed here. Grouped lab construction has completed
+    // one logical unit, which may still belong to an uncommitted group. The
+    // existing fault hook remains unit-based; private construction receipts
+    // separately count successful real commits.
     #[cfg(feature = "induced-failure")]
     crate::faults::note_the_changeset_committed();
 
-    // Counters record what happened, so they move after the commit that made it
-    // happen.
+    // Ordinary counters follow the changeset commit. The lab reports completed
+    // logical units here and separately records real commits and rollbacks;
+    // failed unpublished construction never supplies accepted work receipts.
     counters.add(Counter::DocumentsUpserted, tally.documents_upserted);
     counters.add(Counter::DocumentsDeleted, tally.documents_deleted);
     counters.add(Counter::TombstonesRecorded, tally.tombstones_recorded);

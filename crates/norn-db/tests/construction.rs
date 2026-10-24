@@ -230,11 +230,11 @@ fn sqlite_interrupt_abandons_the_transaction_and_refuses_continuation() {
     let unit = db.construction_unit(Phase::Documents, "interrupt").unwrap();
     unit.execute("INSERT INTO units(id) VALUES (1)", [])
         .unwrap();
-    unit.progress_handler(1, Some(|| true));
+    unit.progress_handler(1, Some(|| true)).unwrap();
     let error = unit
         .execute("INSERT INTO units(id) VALUES (2)", [])
         .unwrap_err();
-    unit.progress_handler(0, None::<fn() -> bool>);
+    unit.progress_handler(0, None::<fn() -> bool>).unwrap();
     assert_eq!(
         error.sqlite_error_code(),
         Some(norn_db::rusqlite::ErrorCode::OperationInterrupted)

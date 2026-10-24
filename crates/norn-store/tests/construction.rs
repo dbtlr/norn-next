@@ -417,3 +417,72 @@ fn sqlite_full_keeps_marker_and_never_allows_an_autocommit_continuation() {
         );
     }
 }
+
+#[test]
+fn cleanup_units_preserve_sql_and_count_real_commits_separately_from_changesets() {
+    use norn_store::{DiscardScope, DocumentPath, induced_failure};
+    use norn_wire::FindingKind;
+    let mut legacy_sql = None;
+    for group in [None, Some(1), Some(16), Some(0)] {
+        let scratch = Scratch::new("construction-cleanup-sql");
+        induced_failure::record_statements_begun();
+        let mut store = open(&scratch);
+        store.begin_request().start_startup_experiment().unwrap();
+        induced_failure::statements_begun();
+        if let Some(group) = group {
+            store
+                .begin_request()
+                .begin_startup_construction(group)
+                .unwrap();
+        }
+        let path = DocumentPath::new("quarantined.md").unwrap();
+        for _ in 0..16 {
+            store
+                .begin_request()
+                .discard_findings_about(
+                    &path,
+                    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]),
+                )
+                .unwrap();
+        }
+        if group.is_some() {
+            store.begin_request().finish_startup_construction().unwrap();
+        }
+        let trace = induced_failure::statements_begun();
+        induced_failure::stop_recording_statements();
+        let commits = trace.iter().filter(|sql| sql.as_str() == "COMMIT").count() as u64;
+        let body: Vec<_> = trace
+            .into_iter()
+            .filter(|sql| !sql.starts_with("BEGIN") && sql != "COMMIT")
+            .collect();
+        if let Some(group) = group {
+            let receipt = store.begin_request().startup_construction_work();
+            assert_eq!(commits, if group == 1 { 16 } else { 1 });
+            assert_eq!(receipt["construction_commits"], commits);
+            assert_eq!(receipt["construction_commits_cleanup"], commits);
+            assert_eq!(receipt["construction_cleanup_units"], 16);
+            assert_eq!(receipt["construction_document_changesets"], 0);
+            assert_eq!(&body, legacy_sql.as_ref().unwrap(), "cleanup SQL changed");
+            // Captured watcher application uses ordinary one-unit commits even
+            // after an unbounded construction group has ended.
+            store
+                .begin_request()
+                .discard_findings_about(
+                    &path,
+                    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]),
+                )
+                .unwrap();
+            let receipt = store.begin_request().startup_construction_work();
+            assert_eq!(receipt["construction_drain_changesets"], 0);
+            assert_eq!(receipt["construction_drain_cleanup_units"], 1);
+            assert_eq!(receipt["construction_commits_drain"], 1);
+        } else {
+            assert_eq!(commits, 0);
+            legacy_sql = Some(body);
+        }
+        store
+            .begin_request()
+            .complete_startup_health_once()
+            .unwrap();
+    }
+}

@@ -103,7 +103,7 @@ pub enum Attempt {
 #[derive(Debug)]
 pub struct Database {
     #[cfg(feature = "induced-failure")]
-    pub(crate) construction: crate::construction::Control,
+    pub(crate) construction: Option<Box<crate::construction::Control>>,
     pub(crate) connection: Connection,
     /// Disposable domain connections carry their file through every pool handoff.
     /// Declared after the connection so SQLite closes before the owner can unlink.
@@ -177,7 +177,7 @@ impl Database {
         }
         Ok(Database {
             #[cfg(feature = "induced-failure")]
-            construction: crate::construction::Control::default(),
+            construction: None,
             connection,
             #[cfg(feature = "induced-failure")]
             temporary_file: None,
@@ -906,6 +906,20 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Check the transaction authority retained by a shared write body. This reads
+/// SQLite state without executing SQL, including after automatic rollback.
+pub fn require_transaction(connection: &Connection) -> Result<(), DbError> {
+    if connection.is_autocommit() {
+        Err(DbError::Sql {
+            operation: "checking write transaction authority",
+            condition: None,
+            message: "the write unit lost its active transaction".into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
@@ -1088,19 +1102,5 @@ mod tests {
             "a statement was counted on a thread other than the one that ran it"
         );
         drop(database);
-    }
-}
-
-/// Check the transaction authority retained by a shared write body. This reads
-/// SQLite state without executing SQL, including after automatic rollback.
-pub fn require_transaction(connection: &Connection) -> Result<(), DbError> {
-    if connection.is_autocommit() {
-        Err(DbError::Sql {
-            operation: "checking write transaction authority",
-            condition: None,
-            message: "the write unit lost its active transaction".into(),
-        })
-    } else {
-        Ok(())
     }
 }

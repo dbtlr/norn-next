@@ -34,9 +34,9 @@ class ConstructionReceipts(unittest.TestCase):
             r = dict(construction_group=group, construction_commit_attempts=0,
                      construction_commits=0, construction_rollback_attempts=0,
                      construction_rollbacks=0, construction_automatic_rollbacks=0,
-                     construction_document_changesets=1, construction_health_resets=0,
-                     construction_health_generation_groups=0, construction_drain_changesets=0,
-                     construction_commits_documents=0, construction_commits_health_reset=0,
+                     construction_document_changesets=1, construction_finding_units=0, construction_cleanup_units=0, construction_health_resets=0,
+                     construction_health_generation_groups=0, construction_drain_changesets=0, construction_drain_cleanup_units=0, construction_drain_finding_units=0,
+                     construction_commits_documents=0, construction_commits_findings=0, construction_commits_cleanup=0, construction_commits_health_reset=0,
                      construction_commits_health_generation=0, construction_commits_drain=0)
             if group == 1:
                 r.update(construction_commit_attempts=1, construction_commits=1,
@@ -102,3 +102,15 @@ class ConstructionReceipts(unittest.TestCase):
                     run_worker(args, 'current', 0, 0, fixture, manifest, io.StringIO())
                 self.assertEqual(current.call_args.kwargs['construction_group'], '16')
             self.assertEqual(calls, [])
+
+    def test_finding_only_and_cleanup_units_are_separate_from_document_changesets(self):
+        for group, label in [(1, '1'), (16, '16'), (0, 'unbounded')]:
+            stages, ready, manifest = self.fixture(group)
+            for index, stage in enumerate(stages):
+                work = stage['construction_work' if index == 2 else 'health_once_work']
+                work.update(construction_finding_units=1, construction_cleanup_units=1)
+                if group == 1:
+                    work['construction_commit_attempts'] += 2
+                    work['construction_commits'] += 2
+                    work.update(construction_commits_findings=1, construction_commits_cleanup=1)
+            loading.validate_receipts('health-once-txn', stages, ready, manifest, construction=label)
