@@ -200,10 +200,34 @@ pub fn audit(
         connection,
         "SELECT name,path,pageno,pagetype,ncell,payload,unused,mx_payload,pgsize FROM dbstat ORDER BY name,path,pageno",
     )?;
-    let result = json!({"canonical_identity_sha256": hex(&identity.finalize()), "page_map_sha256": page_map, "semantic_sha256": hex(&overall.finalize()), "tables": tables,
+    let construction = document_construction_digest(connection)?;
+    let result = json!({"document_construction_sha256": construction, "canonical_identity_sha256": hex(&identity.finalize()), "page_map_sha256": page_map, "semantic_sha256": hex(&overall.finalize()), "tables": tables,
         "counts": counts, "store_epoch": epoch, "write_generation": generation, "schema_version": 3});
     database.close_snapshot()?;
     Ok(result)
+}
+
+// Match the host equivalence seam: IDs establish insertion order; consecutive
+// equal document generations establish changeset membership. Finding writes
+// consume global generations, so their absolute gaps are deliberately absent.
+fn document_construction_digest(connection: &Connection) -> Result<String, StoreError> {
+    let mut statement =
+        read(connection.prepare("SELECT id,path,generation FROM documents ORDER BY id"))?;
+    let mut rows = read(statement.query([]))?;
+    let mut digest = Sha256::new();
+    let mut previous = None;
+    let mut group = 0_u64;
+    while let Some(row) = read(rows.next())? {
+        let id: i64 = read(row.get(0))?;
+        let path: String = read(row.get(1))?;
+        let generation: u64 = read(row.get(2))?;
+        if previous != Some(generation) {
+            group += 1;
+            previous = Some(generation);
+        }
+        hash_row(&mut digest, &json!([id, path, group]));
+    }
+    Ok(hex(&digest.finalize()))
 }
 
 fn read<T>(result: rusqlite::Result<T>) -> Result<T, StoreError> {
@@ -465,6 +489,70 @@ mod tests {
             .expect("open the disposable store for an arrangement");
         induced_failure::execute_out_of_band(&mut store, sql)
             .expect("arrange through the store seam");
+    }
+
+    #[test]
+    fn construction_digest_preserves_ids_order_and_document_generation_groups() {
+        let first = Scratch::new("startup-construction-first");
+        let second = Scratch::new("startup-construction-second");
+        let left_path = fixture(&first, 0, 1);
+        let right_path = fixture(&second, 0, 30);
+        let digest = |path: &std::path::Path| {
+            let receipt = super::audit(path, |_, _, _| Ok(())).unwrap();
+            receipt["document_construction_sha256"]
+                .as_str()
+                .expect("a construction digest")
+                .to_string()
+        };
+        let original = digest(&left_path);
+        assert_eq!(
+            original,
+            digest(&right_path),
+            "absolute generation gaps are health dependent"
+        );
+        change(
+            &right_path,
+            "UPDATE documents SET generation=50 WHERE path='b.md'",
+        );
+        let split = digest(&right_path);
+        assert_ne!(original, split, "changeset membership must participate");
+        change(
+            &right_path,
+            "UPDATE documents SET generation=generation+100",
+        );
+        change(
+            &right_path,
+            "UPDATE documents SET generation=generation+400 WHERE path='b.md'",
+        );
+        assert_eq!(
+            split,
+            digest(&right_path),
+            "shifted gaps preserve membership"
+        );
+        change(
+            &right_path,
+            "UPDATE documents SET path='temporary.md' WHERE path='a.md';
+            UPDATE documents SET path='a.md' WHERE path='b.md';
+            UPDATE documents SET path='b.md' WHERE path='temporary.md';",
+        );
+        assert_ne!(
+            split,
+            digest(&right_path),
+            "path insertion order must participate"
+        );
+        let third = Scratch::new("startup-construction-other-ids");
+        let other_ids_path = fixture(&third, 100, 30);
+        assert_ne!(
+            original,
+            digest(&other_ids_path),
+            "IDs matter even when path order stays the same"
+        );
+        let before_rename = digest(&right_path);
+        change(
+            &right_path,
+            "UPDATE documents SET path='renamed.md' WHERE path='a.md'",
+        );
+        assert_ne!(before_rename, digest(&right_path), "paths must participate");
     }
 
     #[test]
