@@ -3,6 +3,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
+use std::os::unix::ffi::OsStrExt;
 
 // A large neighborhood waits for ordinary readiness; a truncated head never
 // certifies absence. Residency follows this bound and one parsed document.
@@ -31,6 +32,14 @@ pub(super) fn run(
             let page = inventory.advance(policy.store_page_size).map_err(effect)?;
             for record in page.records {
                 catalogue_replayed += 1;
+                experiment
+                    .observer
+                    .catalogue_replay(
+                        Path::new(std::ffi::OsStr::from_bytes(&record.value)),
+                        &mut catalogue,
+                        &model,
+                    )
+                    .map_err(JobFailure::Environmental)?;
                 let fact = inventory.replay(&record.value).map_err(effect)?;
                 if experiment.frozen_prefix.is_some()
                     && let norn_fs::WalkFact::Skipped(skip) = &fact
@@ -95,18 +104,28 @@ pub(super) fn run(
                 .as_ref()
                 .is_none_or(|frozen| frozen.intact() && catalogue_decline.is_none())
         };
-        let prepared = frozen_valid()
-            && prepare(
+        let prepared = if frozen_valid() {
+            prepare(
                 &mut projection,
                 &catalogue,
                 &source,
                 &root,
                 exclusions,
                 policy,
-                &experiment.get_target,
-            )?;
+                experiment,
+            )?
+        } else {
+            Preparation::Declined
+        };
+        if prepared == Preparation::SourceChanged
+            && let Some(frozen) = &experiment.frozen_prefix
+        {
+            // Get and Find share this authority: an observed contradiction
+            // closes every later early claim, not just the current Get.
+            frozen.invalidate();
+        }
         drop(timing);
-        if prepared
+        if prepared == Preparation::Ready
             && frozen_valid()
             && attachment.subscription.as_ref().is_some_and(|watch| {
                 matches!(watch.state(), norn_fs::SubscriptionState::Live)
@@ -195,6 +214,13 @@ pub(super) fn run(
     notify(experiment, Stage::CanonicalHealth, &reader, &model)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Preparation {
+    Ready,
+    Declined,
+    SourceChanged,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare(
     store: &mut norn_store::Store,
@@ -203,22 +229,23 @@ fn prepare(
     root: &Path,
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
-    target: &str,
-) -> Result<bool, JobFailure> {
+    experiment: &Experiment,
+) -> Result<Preparation, JobFailure> {
+    let target = &experiment.get_target;
     // This capability covers whole-record default gets only. Other request
     // shapes must wait; the ordinary external API is unchanged.
     if target.contains('#') {
-        return Ok(false);
+        return Ok(Preparation::Declined);
     }
     let Some(demanded) = catalogue
         .demand_names(target, CLOSURE_BOUND)
         .map_err(store_effect)?
     else {
-        return Ok(false);
+        return Ok(Preparation::Declined);
     };
     // This prototype serves existing records; missing gets wait for ordinary readiness.
     if demanded.is_empty() {
-        return Ok(false);
+        return Ok(Preparation::Declined);
     }
     let demanded: BTreeSet<_> = demanded.into_iter().collect();
     let mut remaining = demanded.clone();
@@ -229,11 +256,11 @@ fn prepare(
             continue;
         }
         if observed.len() >= CLOSURE_BOUND {
-            return Ok(false);
+            return Ok(Preparation::Declined);
         }
         let fact = source.fact(Path::new(&name)).map_err(effect)?;
         if !matches!(fact, norn_fs::WalkFact::File(_)) {
-            return Ok(false);
+            return Ok(Preparation::SourceChanged);
         }
         let hash = {
             let mut pending =
@@ -243,8 +270,12 @@ fn prepare(
             hash
         };
         if is_markdown(Path::new(&name)) && hash.is_none() {
-            return Ok(false);
+            return Ok(Preparation::SourceChanged);
         }
+        experiment
+            .observer
+            .demand_loaded(&name)
+            .map_err(JobFailure::Environmental)?;
         observed.insert(name.clone(), hash);
         let path = document_path(Path::new(&name))
             .map_err(|_| JobFailure::Environmental("catalogue path became invalid".into()))?;
@@ -255,7 +286,7 @@ fn prepare(
                 .demand_names(&spelling, CLOSURE_BOUND)
                 .map_err(store_effect)?
             else {
-                return Ok(false);
+                return Ok(Preparation::Declined);
             };
             remaining.extend(
                 names
@@ -263,7 +294,7 @@ fn prepare(
                     .filter(|name| !observed.contains_key(name)),
             );
             if remaining.len() + observed.len() > CLOSURE_BOUND {
-                return Ok(false);
+                return Ok(Preparation::Declined);
             }
         }
         if demanded.contains(&name)
@@ -277,7 +308,7 @@ fn prepare(
                     .demand_link_names(&link.fact, &path, CLOSURE_BOUND)
                     .map_err(store_effect)?
                 else {
-                    return Ok(false);
+                    return Ok(Preparation::Declined);
                 };
                 remaining.extend(
                     names
@@ -285,7 +316,7 @@ fn prepare(
                         .filter(|name| !observed.contains_key(name)),
                 );
                 if remaining.len() + observed.len() > CLOSURE_BOUND {
-                    return Ok(false);
+                    return Ok(Preparation::Declined);
                 }
             }
         }
@@ -294,18 +325,18 @@ fn prepare(
     // candidates. A changed or removed member closes this simulation checkpoint.
     for (name, hash) in observed {
         let norn_fs::WalkFact::File(file) = source.fact(Path::new(&name)).map_err(effect)? else {
-            return Ok(false);
+            return Ok(Preparation::SourceChanged);
         };
         if let Some(hash) = hash {
             let Some(read) = file.read_optional().map_err(effect)? else {
-                return Ok(false);
+                return Ok(Preparation::SourceChanged);
             };
             if read.content_hash().to_string() != hash {
-                return Ok(false);
+                return Ok(Preparation::SourceChanged);
             }
         }
     }
-    Ok(true)
+    Ok(Preparation::Ready)
 }
 
 // Catalogue neighborhoods over-approximate eligibility: every name may be

@@ -42,6 +42,20 @@ pub trait Observer: Send + Sync {
     fn prefix_loaded(&self, _path: &str) -> Result<(), String> {
         Ok(())
     }
+    /// Private Get load/rehash window for deterministic source movement probes.
+    fn demand_loaded(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Inventory has named this entry; its anchored replay and record are next.
+    /// The lab may arrange a real vanished name or duplicate SQLite record here.
+    fn catalogue_replay(
+        &self,
+        _path: &Path,
+        _catalogue: &mut Catalogue,
+        _model: &ContentModel,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Capped resources have been retired and dropped, before ordinary heal starts.
     fn prefix_retired(&self) -> Result<(), String> {
         Ok(())
