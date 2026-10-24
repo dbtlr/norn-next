@@ -79,18 +79,23 @@ pub fn run_prefix_helper(
     }
     let _job = ops.evidence.attributing();
     let progress = ProgressReporter::disconnected();
-    let mut attachment = ops
-        .attach_prologue(registration, &progress)
-        .map_err(|error| fail(HelperCause::Operation(error)))?;
+    let Some(mut attachment) = ops
+        .attach_prologue_if(registration, &progress, |path| {
+            norn_store::startup_experiment::fresh_namespace(path).map_err(store_effect)
+        })
+        .map_err(|error| fail(HelperCause::Operation(error)))?
+    else {
+        return Err(fail(HelperCause::Ineligible));
+    };
     let result = (|| {
         attachment
             .store
             .ensure_startup_complete()
             .map_err(store_effect)?;
         if attachment.controls.undeclarable().is_some()
-            || matches!(
+            || !matches!(
                 attachment.store.open_outcome(),
-                norn_store::OpenOutcome::Reused
+                norn_store::OpenOutcome::Created
             )
         {
             return Ok(None);

@@ -798,3 +798,150 @@ fn cancellation_or_disconnect_at_either_ack_never_completes_successfully() {
         }
     }
 }
+
+// Reviewer-owned adversarial probes. Production source remains byte-identical.
+struct ReviewObserver {
+    normal: Transcript,
+    busy_find: bool,
+    corrupt_find: Option<PathBuf>,
+    keep_idle_reader: bool,
+    checkpoint_failure: bool,
+}
+impl Observer for ReviewObserver {
+    fn catalogue(&self, c: &Catalogue, m: &ContentModel) -> Result<(), String> {
+        self.normal.catalogue(c, m)
+    }
+    fn indexed(&self, s: Stage, r: Arc<SnapshotReader>, m: Arc<ContentModel>) -> Result<(), String> {
+        if self.keep_idle_reader {
+            *self.normal.retained_reader.lock().unwrap() = Some(r.clone());
+        }
+        self.normal.indexed(s, r, m)
+    }
+    fn prefix(&self, r: &PrefixReader) -> Result<(), String> {
+        if let Some(root) = &self.corrupt_find {
+            use std::os::unix::fs::MetadataExt;
+            let path=files(root).into_iter().find(|p|p.file_name().unwrap().to_string_lossy().starts_with("intake-prefix-") && p.extension().is_some_and(|e|e=="sqlite3")).unwrap();
+            let before=std::fs::metadata(&path).unwrap();
+            std::fs::write(&path,b"injected invalid SQLite header").unwrap();
+            let after=std::fs::metadata(&path).unwrap();
+            assert_eq!((before.dev(),before.ino()),(after.dev(),after.ino()));
+            eprintln!("REVIEW in-place disposable SQLite damage={path:?}; inode preserved=true");
+        }
+        if self.busy_find { norn_db::faults::fail_next_meta_read_as_busy(); }
+        let result = self.normal.prefix(r);
+        norn_db::faults::clear_the_meta_read_arm();
+        result
+    }
+    fn prefix_retired(&self) -> Result<(), String> {
+        self.normal.prefix_retired()?;
+        if self.checkpoint_failure { Err("review checkpoint primary failure".into()) } else { Ok(()) }
+    }
+    fn canonical_work(&self, w: &std::collections::BTreeMap<&'static str,u64>) -> Result<(),String> {
+        self.normal.canonical_work(w)
+    }
+}
+fn review_observer(v: &attach::Vault) -> ReviewObserver {
+    ReviewObserver { normal: Transcript::new(v), busy_find:false, corrupt_find:None, keep_idle_reader:false, checkpoint_failure:false }
+}
+#[test]
+fn review_storage_failure_during_find_must_not_be_a_successful_expected_decline() {
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 2, true);
+    let before = source(vault.path());
+    let mut probe = review_observer(&vault);
+    probe.busy_find = true;
+    let probe = Arc::new(probe);
+    let result = vault.prefix_helper(&Experiment::capped_prefix_frozen("first", probe.clone(), FrozenInput::assume_immutable()), &Default::default());
+    eprintln!("REVIEW busy Find attempt={:?}; terminal={result:?}", probe.normal.find.lock().unwrap());
+    assert_eq!(source(vault.path()), before);
+    assert_no_projection(scratch.root());
+    assert!(matches!(result, Err(norn_host::startup_experiment::HelperFailure { cause: HelperCause::Operation(_), .. })), "storage refusal must remain operational failure");
+}
+#[test]
+fn review_sqlite_damage_during_find_must_not_be_a_successful_expected_decline() {
+    let scratch=scratch();let vault=fixture(scratch.root(),2,true);let before=source(vault.path());
+    let mut probe=review_observer(&vault);probe.corrupt_find=Some(scratch.root().to_owned());let probe=Arc::new(probe);
+    let result=vault.prefix_helper(&Experiment::capped_prefix_frozen("first",probe.clone(),FrozenInput::assume_immutable()),&Default::default());
+    eprintln!("REVIEW SQLite damage Find attempt={:?}; terminal={result:?}",probe.normal.find.lock().unwrap());
+    assert_eq!(source(vault.path()),before);assert_no_projection(scratch.root());
+    assert!(matches!(result,Err(norn_host::startup_experiment::HelperFailure {cause:HelperCause::Operation(_),..})),"SQLite corruption must remain operational failure");
+}
+#[test]
+fn review_existing_nonempty_wrong_derivation_store_must_refuse_fresh_helper() {
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 2, true);
+    let before = source(vault.path());
+    let mut existing = norn_store::Store::open(vault.database(), norn_store::StoredPathOrder::Sensitive,
+        norn_store::DerivationVersion::new(norn_host::DERIVATION_VERSION.get() + 1)).unwrap();
+    let path=norn_store::DocumentPath::new("existing.md").unwrap();
+    existing.begin_request().apply_increment(norn_store::IncrementProvenance::Derived,
+        [norn_store::Change::Upsert(norn_store::DocumentFacts::new(path.clone(), "hash", "old body", 8))],
+        &[], &ContentModel::none()).unwrap();
+    assert!(existing.begin_request().stored_document(&path).unwrap().is_some());
+    eprintln!("REVIEW preexisting outcome={:?}; nonempty=true",existing.open_outcome());
+    existing.close().unwrap();
+    let state_before = std::fs::read(vault.database()).unwrap();
+    let probe = Arc::new(Transcript::new(&vault));
+    let result = vault.prefix_helper(&experiment(probe, "first"), &Default::default());
+    eprintln!("REVIEW rebuilt-state terminal={result:?}");
+    assert_eq!(source(vault.path()), before);
+    assert_no_projection(scratch.root());
+    assert!(std::fs::read(vault.database()).unwrap() == state_before, "preexisting state must not be rebuilt");
+    assert!(matches!(result, Err(_)), "a preexisting nonempty namespace must not satisfy fresh-helper admission");
+}
+
+#[test]
+fn existing_database_and_sidecars_are_preserved_before_any_open() {
+    use std::os::unix::fs::MetadataExt;
+    for state in ["valid", "wrong-derivation", "damaged", "empty", "sidecar-only"] {
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 2, true);
+        let database = vault.database();
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        match state {
+            "valid" | "wrong-derivation" => {
+                norn_store::Store::open(&database, norn_store::StoredPathOrder::Sensitive,
+                    norn_store::DerivationVersion::new(norn_host::DERIVATION_VERSION.get() + u32::from(state == "wrong-derivation")))
+                    .unwrap().close().unwrap();
+            }
+            "damaged" => std::fs::write(&database, b"damaged SQLite state").unwrap(),
+            "empty" => std::fs::write(&database, b"").unwrap(),
+            "sidecar-only" => (),
+            _ => unreachable!(),
+        }
+        let mut paths = Vec::new();
+        if state != "sidecar-only" { paths.push(database.clone()); }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut name = database.as_os_str().to_owned(); name.push(suffix);
+            let path = PathBuf::from(name);
+            std::fs::write(&path, format!("preserve {state} {suffix}")).unwrap(); paths.push(path);
+        }
+        let before: Vec<_> = paths.iter().map(|p| {
+            let meta = std::fs::symlink_metadata(p).unwrap();
+            (std::fs::read(p).unwrap(), meta.dev(), meta.ino())
+        }).collect();
+        let probe = Arc::new(Transcript::new(&vault));
+        let failure = vault.prefix_helper(&experiment(probe.clone(), "first"), &Default::default()).unwrap_err();
+        assert!(matches!(failure.cause, HelperCause::Ineligible), "{state}: {failure:?}");
+        assert!(probe.stages.lock().unwrap().is_empty());
+        for (path, expected) in paths.iter().zip(before) {
+            let meta = std::fs::symlink_metadata(path).unwrap();
+            assert_eq!((std::fs::read(path).unwrap(), meta.dev(), meta.ino()), expected, "{state}: {path:?}");
+        }
+        assert_no_projection(scratch.root());
+    }
+}
+
+#[test]
+fn ordinary_attachment_still_rebuilds_wrong_derivation_state() {
+    let scratch = scratch(); let vault = fixture(scratch.root(), 2, true);
+    let old = norn_store::Store::open(vault.database(), norn_store::StoredPathOrder::Sensitive,
+        norn_store::DerivationVersion::new(norn_host::DERIVATION_VERSION.get() + 1)).unwrap();
+    let epoch = old.epoch().to_owned(); old.close().unwrap();
+    let host = vault.host(); let demand = attach::attach_and_wait(&host, vault.name());
+    assert!(host.get(&get_query(&VaultAddress::name(vault.name().clone()))).is_ok());
+    drop(demand); drop(host);
+    let rebuilt = norn_store::Store::open(vault.database(), norn_store::StoredPathOrder::Sensitive, norn_host::DERIVATION_VERSION).unwrap();
+    assert_ne!(rebuilt.epoch(), epoch);
+    assert!(matches!(rebuilt.open_outcome(), norn_store::OpenOutcome::Reused));
+}

@@ -51,6 +51,7 @@ pub struct PrefixReader {
     frozen: Arc<FrozenInput>,
     certificate: PrefixCertificate,
     budget: Arc<norn_store::ReadBudget>,
+    failures: std::sync::Mutex<Vec<JobFailure>>,
 }
 impl Drop for PrefixReader {
     fn drop(&mut self) {
@@ -60,6 +61,11 @@ impl Drop for PrefixReader {
     }
 }
 impl PrefixReader {
+    fn break_certificate(&mut self, reason: &'static str) {
+        self.frozen.invalidate();
+        self.certificate.invalid = Some(reason.into());
+    }
+
     pub fn find(&self, params: &norn_wire::FindParams) -> PrefixAttempt {
         let mut attempt = PrefixAttempt {
             certificate: self.certificate.clone(),
@@ -140,8 +146,15 @@ impl PrefixReader {
                     .into(),
                 )
             }
+            Ok(Err(norn_store::PageRefusal::Store(error))) => {
+                attempt.decline = Some(format!("ordinary Find storage failure: {error}"));
+                self.failures.lock().unwrap().push(store_effect(error));
+            }
             Ok(Err(error)) => attempt.decline = Some(format!("ordinary Find refusal: {error:?}")),
-            Err(error) => attempt.decline = Some(format!("prefix acquisition failed: {error}")),
+            Err(error) => {
+                attempt.decline = Some(format!("prefix acquisition failed: {error}"));
+                self.failures.lock().unwrap().push(store_effect(error));
+            }
         }
         if let Some(during) = during {
             attempt.read_budget = Some([before, during, self.budget.census()]);
@@ -176,6 +189,7 @@ pub(super) fn run(
     let before = crate::evidence::startup_writer_work();
     let mut capability = PrefixReader {
         reader: None,
+        failures: Default::default(),
         model: model.clone(),
         frozen: frozen.clone(),
         budget: attachment.readers.clone(),
@@ -187,7 +201,7 @@ pub(super) fn run(
         },
     };
     if !frozen.intact() {
-        capability.certificate.invalid = Some("frozen-input certificate broken".into());
+        capability.break_certificate("frozen-input certificate broken");
     }
     let mut failure = None;
     if capability.certificate.invalid.is_none() {
@@ -214,6 +228,7 @@ pub(super) fn run(
         .observer
         .prefix(&capability)
         .map_err(JobFailure::Environmental)?;
+    failure = failure.or_else(|| capability.failures.lock().unwrap().drain(..).next());
     // Retirement is outside all budget bookkeeping locks. Active snapshots keep
     // their ordinary owner; there is no forced close or OS-release guarantee.
     let check = capability
@@ -269,13 +284,11 @@ fn prepare(
         for name in &names.paths {
             let fact = source.fact(Path::new(name)).map_err(effect)?;
             let norn_fs::WalkFact::File(file) = &fact else {
-                capability.certificate.invalid =
-                    Some("changed/vanished candidate; frozen-input certificate broken".into());
+                capability.break_certificate("changed/vanished candidate; frozen-input certificate broken");
                 break;
             };
             if file.path().as_path() != Path::new(name) {
-                capability.certificate.invalid =
-                    Some("changed candidate spelling; frozen-input certificate broken".into());
+                capability.break_certificate("changed candidate spelling; frozen-input certificate broken");
                 break;
             }
             let path = document_path(Path::new(name))
@@ -287,14 +300,12 @@ fn prepare(
                 .map_err(store_effect)?
                 .is_some()
             {
-                capability.certificate.invalid =
-                    Some("duplicate/colliding prefix path; frozen-input certificate broken".into());
+                capability.break_certificate("duplicate/colliding prefix path; frozen-input certificate broken");
                 break;
             }
             let hash = load_fact(&mut pending, fact, Depth::Metadata, false)?;
             if hash.is_none() {
-                capability.certificate.invalid =
-                    Some("unresolved prefix read; frozen-input certificate broken".into());
+                capability.break_certificate("unresolved prefix read; frozen-input certificate broken");
                 break;
             }
             // The private observer can place a deterministic edit in this
@@ -316,8 +327,7 @@ fn prepare(
                 .map(|read| read.content_hash().to_string())
                 != hash
             {
-                capability.certificate.invalid =
-                    Some("changed/vanished bytes; frozen-input certificate broken".into());
+                capability.break_certificate("changed/vanished bytes; frozen-input certificate broken");
                 break;
             }
             capability.certificate.consumed += 1;
@@ -330,8 +340,7 @@ fn prepare(
         drop(pending);
         capability.certificate.bytes_read = account.bytes_read;
         if !account.withheld.roots.is_empty() || account.withheld.rendered {
-            capability.certificate.invalid =
-                Some("unresolved prefix observation; frozen-input certificate broken".into());
+            capability.break_certificate("unresolved prefix observation; frozen-input certificate broken");
         }
         Ok(())
     })?;

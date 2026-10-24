@@ -404,3 +404,9 @@ fn prefix_error(message: &str) -> StoreError {
         message: message.into(),
     }
 }
+
+/// Fresh helper state has neither a database nor any journal sidecar.
+/// Inspect under maintainership before the ordinary open can rebuild old state.
+pub fn fresh_namespace(path: &Path) -> Result<bool, StoreError> {
+    norn_db::database_is_absent(path).map_err(StoreError::from)
+}

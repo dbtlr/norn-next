@@ -1292,6 +1292,17 @@ impl ProductionEntryOps {
         registration: &Registration,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<ProductionAttachment, JobFailure> {
+        self.attach_prologue_if(registration, progress, |_| Ok(true))
+            .map(|attachment| attachment.expect("ordinary admission is unconditional"))
+    }
+
+    /// Admission runs under keyed ownership, before any store open or rebuild.
+    fn attach_prologue_if(
+        &self,
+        registration: &Registration,
+        progress: &ProgressReporter<ProductionAttachment>,
+        admit: impl FnOnce(&Path) -> Result<bool, JobFailure>,
+    ) -> Result<Option<ProductionAttachment>, JobFailure> {
         // Everything up to the heal takes the maintainer lock, sweeps the
         // shadow home, installs watcher coverage and opens the store — work
         // that counts no document and can take a while on a loaded machine.
@@ -1308,6 +1319,9 @@ impl ProductionEntryOps {
                     return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
                 }
             };
+        if !admit(&derived.join(STORE_FILE))? {
+            return Ok(None);
+        }
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
         // by: the lock by sitting in that directory, the home by carrying the
@@ -1408,14 +1422,14 @@ impl ProductionEntryOps {
             // observable and so a demand can read the schema again; what it is
             // holding back is published as the entry's trust, read off the
             // controls the attachment holds.
-            return Ok(attachment);
+            return Ok(Some(attachment));
         }
         {
             #[cfg(feature = "induced-failure")]
             let _timing = norn_store::profiling::span("host.schema_pin");
             attachment.pin(&candidate)?;
         }
-        Ok(attachment)
+        Ok(Some(attachment))
     }
 
     /// Run one hash-authoritative heal against coverage that is already live,

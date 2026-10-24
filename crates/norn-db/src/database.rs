@@ -890,6 +890,26 @@ pub fn remove_database(path: &Path) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Inspect every database name without opening, recovering, or removing it.
+/// The caller must hold its ordinary keyed ownership across inspection and open.
+#[cfg(feature = "induced-failure")]
+#[allow(clippy::disallowed_methods)] // Database lifecycle mechanics stay in the substrate.
+pub fn database_is_absent(path: &Path) -> Result<bool, DbError> {
+    refuse_a_name_that_is_not_a_file("checking fresh database state", path)?;
+    for candidate in database_paths(path) {
+        match std::fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(DbError::Lifecycle {
+                operation: "checking fresh database state",
+                path: candidate,
+                message: error.to_string(),
+            }),
+            Ok(_) => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn database_paths(path: &Path) -> [PathBuf; 4] {
     [
         path.to_path_buf(),

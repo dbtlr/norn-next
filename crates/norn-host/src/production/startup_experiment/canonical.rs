@@ -118,6 +118,9 @@ pub(super) fn prepare_prefix(
                     && let norn_fs::WalkFact::Skipped(skip) = &fact
                     && !skip.reason().stands()
                 {
+                    if let Some(frozen) = &experiment.frozen_prefix {
+                        frozen.invalidate();
+                    }
                     catalogue_decline = Some(
                         "unresolved catalogue observation; frozen-input certificate broken"
                             .to_string(),
