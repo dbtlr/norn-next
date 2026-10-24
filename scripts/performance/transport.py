@@ -93,13 +93,19 @@ def resources(pid: int) -> dict:
 
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
-                 loading: str | None = None, stage_handler=None,
+                 loading: str | None = None, stage_handler=None, construction_group: str | None = None,
                  initial_cache_kib: int | None = None, cache_diagnostics: bool = False):
         token = issue_root(root)
         env = environment(root, token, initial_cache_kib=initial_cache_kib,
                           cache_diagnostics=cache_diagnostics)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
+        if construction_group is not None:
+            if loading != "health-once-txn" or construction_group not in ("1", "16", "unbounded"):
+                raise ValueError("invalid explicit construction group")
+            env["NORN_PERFORMANCE_CONSTRUCTION_GROUP"] = construction_group
+        elif loading == "health-once-txn":
+            raise ValueError("transaction mode requires an explicit construction group")
         if loading is not None:
             env["NORN_PERFORMANCE_LOADING"] = loading
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")

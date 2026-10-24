@@ -40,10 +40,22 @@ INTAKE_PROBES = {(stage, probe) for stage in ("canonical-intake", "canonical-fin
                  ("active_page", "document_count", "active_count", "sparse_page", "zero_page", "unknown_field", "field_page")}
 
 
+def construction_group(mode, group):
+    """Reject a second factor or an implicit group selection."""
+    if mode == "health-once-txn":
+        if group not in ("1", "16", "unbounded"):
+            raise ValueError("health-once-txn requires group 1, 16, or unbounded")
+    elif group is not None:
+        raise ValueError("construction groups require health-once-txn")
+    return group
+
+
 def expected_checkpoints(mode):
     """One protocol definition shared by cold and warm controllers."""
     if mode == "baseline":
         return set()
+    if mode == "health-once-txn":
+        return expected_checkpoints("health-once") | {("construction-complete", "boundary")}
     if mode == "health-once":
         return {("health-once-facts", "boundary"), ("health-once-health", "boundary")}
     if mode in ("canonical-intake", "canonical-intake-silent"):
@@ -89,13 +101,18 @@ def validate_fresh_work(ready, manifest):
     validate_work(evidence, "fresh", documents, batch)
 
 
-def validate_receipts(mode, stages, ready, manifest, *, stored_links=None):
+def validate_receipts(mode, stages, ready, manifest, *, stored_links=None, construction=None):
     """Validate execution proof before queries; recheck against the later store audit."""
     keys = [(row.get("startup_stage"), row.get("probe")) for row in stages]
     expected = expected_checkpoints(mode)
     if len(keys) != len(expected) or set(keys) != expected:
         raise ValueError("checkpoint coverage differs from the requested loading mode")
-    if mode != "health-once":
+    construction_group(mode, construction)
+    if mode == "health-once-txn":
+        validate_construction_receipts(stages, ready, construction)
+        stages = stages[:2]
+        keys = keys[:2]
+    if mode not in ("health-once", "health-once-txn"):
         return
     if keys != [("health-once-facts", "boundary"), ("health-once-health", "boundary")]:
         raise ValueError("health-once boundaries are out of order")
@@ -109,7 +126,7 @@ def validate_receipts(mode, stages, ready, manifest, *, stored_links=None):
     previous_clock = -1
     works = []
     for index, stage in enumerate(stages):
-        exact = {"loading_mode": "health-once", "mode_executed": True,
+        exact = {"loading_mode": mode, "mode_executed": True,
                  "simulation": "private-initial-build", "global_ready": False,
                  "queries_executed": False, "health_complete": bool(index)}
         for key, value in exact.items():
@@ -138,6 +155,62 @@ def validate_receipts(mode, stages, ready, manifest, *, stored_links=None):
             raise ValueError("final health work disagrees with the Ready account")
     if stored_links is not None and final["links_redecided"] != nonnegative(stored_links, "stored links"):
         raise ValueError("final health did not judge each stored link exactly once")
+
+
+CONSTRUCTION_KEYS = ("group", "commit_attempts", "commits", "rollback_attempts", "rollbacks",
+    "automatic_rollbacks", "document_changesets", "health_resets", "health_generation_groups",
+    "drain_changesets", "commits_documents", "commits_health_reset", "commits_health_generation", "commits_drain")
+
+
+def validate_construction_receipts(stages, ready, group):
+    expected_order = ["health-once-facts", "health-once-health", "construction-complete"]
+    if [s.get("startup_stage") for s in stages] != expected_order:
+        raise ValueError("construction boundaries are out of order")
+    expected_group = 0 if group == "unbounded" else int(group)
+    previous = None
+    for index, stage in enumerate(stages):
+        work = stage.get("construction_work" if index == 2 else "health_once_work", {})
+        if not isinstance(work, dict):
+            raise ValueError("construction work receipt is missing")
+        r = {k: nonnegative(work.get("construction_" + k), "construction_" + k) for k in CONSTRUCTION_KEYS}
+        if r["group"] != expected_group or r["commit_attempts"] != r["commits"]:
+            raise ValueError("construction group or successful commits disagree")
+        if any(r[k] for k in ("rollback_attempts", "rollbacks", "automatic_rollbacks")):
+            raise ValueError("completed construction contains a rollback")
+        if r["commits"] != sum(r["commits_" + p] for p in ("documents", "health_reset", "health_generation", "drain")):
+            raise ValueError("construction phase commits disagree")
+        if index < 2 and r["drain_changesets"] + r["commits_drain"]:
+            raise ValueError("watcher drain preceded construction commit")
+        if index == 0 and (r["health_resets"] or r["health_generation_groups"]):
+            raise ValueError("final health preceded full facts")
+        if r["document_changesets"] != stages[0]["health_once_work"]["changesets_applied"]:
+            raise ValueError("construction changed logical document changesets")
+        if index >= 1:
+            if r["health_resets"] != 1 or not 0 < r["health_generation_groups"] <= r["document_changesets"]:
+                raise ValueError("final health generation account is missing")
+            units = r["document_changesets"] + r["health_resets"] + r["health_generation_groups"]
+            # Sanity-check independently recorded counts; norn-db tests also
+            # reconcile successful commits against actual SQLite execution.
+            expected_commits = 1 if expected_group == 0 else (units + expected_group - 1) // expected_group
+            if r["commits"] != expected_commits + r["commits_drain"]:
+                raise ValueError("construction commits disagree with bounded units")
+        if previous is not None:
+            for key in CONSTRUCTION_KEYS:
+                if r[key] < previous[key]:
+                    raise ValueError("construction receipt lost work")
+        previous = r
+    final = stages[2]
+    for key, value in {"loading_mode": "health-once-txn", "mode_executed": True,
+            "queries_executed": False, "health_complete": True, "global_ready": False,
+            "simulation": "private-initial-build"}.items():
+        if type(final.get(key)) is not type(value) or final.get(key) != value:
+            raise ValueError("invalid final construction boundary")
+    if final.get("query_host_ns") != 0 or any(key in final for key in ("answer", "command", "query_started_ns", "query_finished_ns")):
+        raise ValueError("construction boundary executed a query")
+    if not stages[1]["stage_boundary_ns"] < nonnegative(final.get("stage_boundary_ns"), "final boundary") < ready["startup_complete_ns"]:
+        raise ValueError("final construction boundary clock is invalid")
+    if ready.get("changeset_size") != 128:
+        raise ValueError("transaction experiment fixes document changesets at 128")
 
 
 def metadata_answer(stage):
@@ -257,8 +330,9 @@ def compare_cold_arms(reference, result):
             raise ValueError(f"cold arms differ in {key}")
 
 
-def run_one(binary, root, manifest, mode, *, profiling=True):
+def run_one(binary, root, manifest, mode, *, profiling=True, construction=None):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
+    construction_group(mode, construction)
     began = time.perf_counter_ns()
     keys = []
     canonical = mode.startswith("canonical-")
@@ -267,7 +341,7 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
 
     def on_stage(stage):
         key = stage["startup_stage"], stage["probe"]
-        if mode.endswith("-silent") or mode == "health-once":
+        if mode.endswith("-silent") or mode in ("health-once", "health-once-txn"):
             if key not in expected or stage.get("queries_executed") is not False:
                 raise ValueError("a silent control emitted a query claim")
         else:
@@ -278,10 +352,11 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         stage["observed_after_launch_ns"] = time.perf_counter_ns() - began
 
     worker = Current(binary, root, profiling=profiling,
-                     loading=None if mode == "baseline" else mode, stage_handler=on_stage)
+                     loading=None if mode == "baseline" else mode, stage_handler=on_stage,
+                     **({"construction_group": construction} if construction is not None else {}))
     try:
         ready_observed = time.perf_counter_ns() - began
-        validate_receipts(mode, worker.stages, worker.ready, manifest)
+        validate_receipts(mode, worker.stages, worker.ready, manifest, construction=construction)
         # The staged modes intentionally derive/replay extra documents; only
         # baseline and health-once are the ordinary-heal work comparison.
         if mode == "baseline":
@@ -330,7 +405,7 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         for stage in worker.stages:
             name = stage["startup_stage"]
             milestones[name] = min(milestones.get(name, stage["stage_boundary_ns"]), stage["stage_boundary_ns"])
-        result = {"mode": mode, "ready_observed_ns": ready_observed, "ready": worker.ready,
+        result = {"mode": mode, "construction_group": construction, "ready_observed_ns": ready_observed, "ready": worker.ready,
                   "checkpoint_boundaries_ns": milestones,
                   "probe_query_ns": sum(stage["query_host_ns"] for stage in worker.stages),
                   "stages": worker.stages, "checks": checked,
@@ -360,8 +435,8 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
     result["integrity_verified"] = True
     result["store"] = audit_store(binary, root, manifest)
     validate_receipts(mode, worker.stages, worker.ready, manifest,
-                      stored_links=result["store"]["counts"]["links"])
-    if mode not in ("baseline", "health-once") and not mode.endswith("-silent"):
+                      stored_links=result["store"]["counts"]["links"], construction=construction)
+    if mode not in ("baseline", "health-once", "health-once-txn") and not mode.endswith("-silent"):
         summary = next(s for s in result["stages"] if s["startup_stage"] == "health")
         total = sum(row["count"] for row in summary["answer"]["report"]["by_kind"])
         if total != result["store"]["counts"]["findings"]:
@@ -370,7 +445,7 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         shutil.copy2(root / f"worker.{stream}.log", root / f"fresh.{stream}.log")
     # Health-once deliberately refuses all existing stores. Warm verification
     # uses ordinary loading; no experimental observer can touch that history.
-    restart_loading = None if mode in ("baseline", "health-once") else mode
+    restart_loading = None if mode in ("baseline", "health-once", "health-once-txn") else mode
     restart = Current(binary, root, profiling=profiling, loading=restart_loading)
     try:
         if restart.stages:
@@ -399,12 +474,17 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "health-once", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "health-once", "health-once-txn", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--construction-groups", nargs="+", choices=["1", "16", "unbounded"])
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--no-profile", action="store_true", help="disable optional profiling spans in measured workers")
     args = parser.parse_args()
-    if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
+    if ("baseline" not in args.modes and "health-once-txn" not in args.modes) or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
         parser.error("include one baseline and use unique modes and sizes")
+    if ("health-once-txn" in args.modes) != bool(args.construction_groups):
+        parser.error("health-once-txn requires explicit --construction-groups (and only that mode uses them)")
+    if args.construction_groups and len(set(args.construction_groups)) != len(args.construction_groups):
+        parser.error("use unique construction groups")
     repo = Path(__file__).resolve().parents[2]
     receipt = verify_build(args.build, repo)
     if "induced-failure" not in receipt["features"]:
@@ -421,7 +501,7 @@ def main():
         shutil.copy2(path, runner / path.name)
     metadata = {"completed": False, "build": receipt, "source_sha256": source_tree_digest(repo),
                 "sizes": args.sizes, "modes": args.modes, "repetitions": args.repetitions,
-                "profiling": not args.no_profile,
+                "profiling": not args.no_profile, "construction_groups": args.construction_groups,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "load_start": os.getloadavg()}
     write_json(args.output / "run.json", metadata)
@@ -441,21 +521,24 @@ def main():
             fixtures[size] = frozen, manifest
         with (args.output / "samples.jsonl").open("w") as samples:
             for repetition in range(args.repetitions):
-                modes = args.modes if repetition % 2 == 0 else list(reversed(args.modes))
+                arms = [(mode, group) for mode in args.modes
+                        for group in (args.construction_groups if mode == "health-once-txn" else [None])]
+                modes = arms if repetition % 2 == 0 else list(reversed(arms))
                 sizes = args.sizes[repetition % len(args.sizes):] + args.sizes[:repetition % len(args.sizes)]
                 for size in sizes:
                     frozen, manifest = fixtures[size]
-                    for mode in modes:
-                        root = (args.output / "work" / f"r{repetition}-n{size}-{mode}").resolve()
+                    for mode, group in modes:
+                        label = mode if group is None else f"{mode}-g{group}"
+                        root = (args.output / "work" / f"r{repetition}-n{size}-{label}").resolve()
                         root.mkdir(parents=True)
                         shutil.copytree(frozen / "vault", root / "vault")
                         if tree_digest(root / "vault") != manifest["tree_sha256"]:
                             raise ValueError("copied fixture changed")
-                        result = run_one(binary, root, manifest, mode, profiling=not args.no_profile)
+                        result = run_one(binary, root, manifest, mode, profiling=not args.no_profile, construction=group)
                         digest = result["store"]["semantic_sha256"]
                         if references.setdefault(size, digest) != digest:
                             raise ValueError("staging changed the final index")
-                        if mode in ("baseline", "health-once"):
+                        if mode in ("baseline", "health-once", "health-once-txn"):
                             reference = construction_references.setdefault(size, cold_equivalence(result))
                             compare_cold_arms(reference, result)
                         append(samples, {"repetition": repetition, "background_documents": size,

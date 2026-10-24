@@ -117,11 +117,18 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     loading = getattr(args, "loading", None)
     if loading and engine != "current":
         raise ValueError("staged loading is only supported by the current worker")
-    worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
+    group = getattr(args, "construction_group", None)
+    if group is not None or loading == "health-once-txn":
+        from loading import construction_group
+        construction_group(loading, group)
+    worker = (cls(binary, root, loading=loading,
+                  **({"construction_group": group} if group is not None else {}))
+              if loading else cls(binary, root))
     try:
         if loading:
             from loading import validate_receipts
-            validate_receipts(loading, worker.stages, getattr(worker, "ready", {}), manifest)
+            validate_receipts(loading, worker.stages, getattr(worker, "ready", {}), manifest,
+                              **({"construction": group} if group is not None else {}))
             write_json(root / "loading-checkpoints.json", worker.stages)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
         first, _ = worker.call({"op": "search", "query": COMMON})
