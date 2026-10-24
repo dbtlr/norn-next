@@ -35,6 +35,24 @@ class FixtureTests(unittest.TestCase):
 
 
 class LoadingProtocolTests(unittest.TestCase):
+    def test_stage_resource_sampling_retains_its_overhead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "worker"
+            binary.write_text("#!/usr/bin/env python3\nimport sys\n"
+                              "print('NORN_PERFORMANCE {\"startup_stage\":\"facts\"}', flush=True)\n"
+                              "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                              "sys.stdin.readline()\n")
+            binary.chmod(0o700)
+            with patch("transport.resources", return_value={"reading": "kept"}), \
+                 patch("transport.time.perf_counter_ns", side_effect=[100, 170]):
+                worker = Current(binary, root / "run")
+                try:
+                    self.assertEqual(worker.stages[0]["resources_sampling_ns"], 70)
+                    self.assertEqual(worker.stages[0]["resources_when_observed"], {"reading": "kept"})
+                finally:
+                    worker.close()
+
     def test_warm_controller_checks_the_requested_modes_checkpoint_set(self):
         from baseline import run_worker
         from types import SimpleNamespace

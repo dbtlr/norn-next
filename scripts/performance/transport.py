@@ -121,7 +121,9 @@ class Current:
                 stage = self.ready
                 if stage_handler is not None:
                     stage_handler(stage)
+                sampling_started = time.perf_counter_ns()
                 stage["resources_when_observed"] = resources(self.process.pid)
+                stage["resources_sampling_ns"] = time.perf_counter_ns() - sampling_started
                 self.stages.append(stage)
                 self.ready = self.receive()
             if not self.ready.get("ready"):

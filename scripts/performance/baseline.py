@@ -120,9 +120,8 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
     try:
         if loading:
-            from loading import expected_checkpoints
-            if {(row["startup_stage"], row["probe"]) for row in worker.stages} != expected_checkpoints(loading):
-                raise ValueError("warm comparison did not execute the requested loading mode")
+            from loading import validate_receipts
+            validate_receipts(loading, worker.stages, getattr(worker, "ready", {}), manifest)
             write_json(root / "loading-checkpoints.json", worker.stages)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
         first, _ = worker.call({"op": "search", "query": COMMON})

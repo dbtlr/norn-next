@@ -15,7 +15,7 @@ from pathlib import Path
 from baseline import READS, append, write_json
 from fixture import tree_digest
 from provenance import sha256, source_tree_digest, verify_build
-from results import validate_read
+from results import validate_read, validate_first_get, whole_get_answer
 from startup import storage_bytes, validate_work
 from startup_audit import audit_store
 from transport import Current, PREFIX, environment, resources
@@ -56,32 +56,88 @@ def expected_checkpoints(mode):
     raise ValueError(f"unknown loading mode: {mode}")
 
 
-def whole_get_answer(stage):
-    """Keep the complete record while comparing finding content across store epochs."""
-    answer = copy.deepcopy(stage["answer"])
-    report = answer["report"]
-    document = report.get("document", {})
-    required = {"path", "body", "fields", "headings", "blocks", "tags", "links", "findings"}
-    if report.get("shape") != "record" or not required <= document.keys():
-        raise ValueError("whole-record comparison cannot omit requested collections")
-    epoch, generation = stage.get("projection_epoch"), stage.get("projection_generation")
-    if not isinstance(epoch, str) or not epoch or type(generation) is not int or generation < 0:
-        raise ValueError("whole-record projection provenance is missing or invalid")
-    findings = document["findings"]
-    if findings["total"] < len(findings["items"]):
-        raise ValueError("whole-record finding total is below its returned head")
-    finding_ids = set()
-    for finding in findings["items"]:
-        if (type(finding.get("id")) is not int or finding["id"] <= 0
-                or type(finding.get("generation")) is not int
-                or not 0 <= finding["generation"] <= generation):
-            raise ValueError("whole-record finding provenance is outside its projection")
-        if finding["id"] in finding_ids:
-            raise ValueError("whole-record finding handles contain a duplicate")
-        finding_ids.add(finding["id"])
-        finding.pop("id")
-        finding.pop("generation")
-    return answer
+DOCUMENT_WORK = ("documents_derived", "documents_upserted", "documents_deleted",
+                 "tombstones_recorded", "changesets_applied")
+HEALTH_WORK = ("links_redecided", "link_health_keys_resolved", "link_health_candidates_read")
+WRITER_WORK = DOCUMENT_WORK + HEALTH_WORK + ("findings_written", "findings_discarded", "changeset_read_steps")
+ORDINARY_WORK = ("document_opens", "stats", "walk_dirents") + DOCUMENT_WORK
+
+
+def nonnegative(value, name):
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def validate_fresh_work(ready, manifest):
+    evidence = ready.get("job_evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("fresh startup requires its Ready work account")
+    for key, value in evidence.items():
+        nonnegative(value, key)
+    for key in ORDINARY_WORK + HEALTH_WORK + ("findings_written", "findings_discarded",
+                                             "changeset_read_steps", "recoveries_run", "rebuilds_run"):
+        nonnegative(evidence.get(key), key)
+    documents = nonnegative(manifest.get("document_count"), "document_count")
+    batch = nonnegative(ready.get("changeset_size"), "changeset_size")
+    if batch == 0:
+        raise ValueError("changeset_size must be positive")
+    if (evidence["documents_derived"] != documents or evidence["documents_upserted"] != documents
+            or evidence["document_opens"] < documents or evidence["documents_deleted"]
+            or evidence["tombstones_recorded"] or evidence["recoveries_run"] or evidence["rebuilds_run"]):
+        raise ValueError("fresh startup did not complete ordinary document work")
+    validate_work(evidence, "fresh", documents, batch)
+
+
+def validate_receipts(mode, stages, ready, manifest, *, stored_links=None):
+    """Validate execution proof before queries; recheck against the later store audit."""
+    keys = [(row.get("startup_stage"), row.get("probe")) for row in stages]
+    expected = expected_checkpoints(mode)
+    if len(keys) != len(expected) or set(keys) != expected:
+        raise ValueError("checkpoint coverage differs from the requested loading mode")
+    if mode != "health-once":
+        return
+    if keys != [("health-once-facts", "boundary"), ("health-once-health", "boundary")]:
+        raise ValueError("health-once boundaries are out of order")
+    if ready.get("ready") is not True:
+        raise ValueError("health-once did not complete Ready")
+    startup = nonnegative(ready.get("startup_complete_ns"), "startup_complete_ns")
+    for key in ("attach_ns", "observed_ready_ns", "host_setup_ns"):
+        if key in ready and nonnegative(ready[key], key) > startup:
+            raise ValueError(f"{key} exceeds startup_complete_ns")
+    validate_fresh_work(ready, manifest)
+    previous_clock = -1
+    works = []
+    for index, stage in enumerate(stages):
+        exact = {"loading_mode": "health-once", "mode_executed": True,
+                 "simulation": "private-initial-build", "global_ready": False,
+                 "queries_executed": False, "health_complete": bool(index)}
+        for key, value in exact.items():
+            if type(stage.get(key)) is not type(value) or stage.get(key) != value:
+                raise ValueError(f"invalid health-once {key} receipt")
+        if nonnegative(stage.get("query_host_ns"), "query_host_ns") != 0 or any(
+                key in stage for key in ("command", "answer", "query_started_ns", "query_finished_ns")):
+            raise ValueError("health-once must not execute checkpoint queries")
+        clock = nonnegative(stage.get("stage_boundary_ns"), "stage_boundary_ns")
+        if not previous_clock < clock < startup:
+            raise ValueError("health-once boundaries must increase within startup_complete_ns")
+        previous_clock = clock
+        work = stage.get("health_once_work")
+        if not isinstance(work, dict) or not set(WRITER_WORK) <= work.keys():
+            raise ValueError("health-once work receipt is incomplete")
+        for key, value in work.items():
+            nonnegative(value, key)
+        works.append(work)
+    facts, final = works
+    if any(facts[key] for key in HEALTH_WORK):
+        raise ValueError("ingestion performed link health decisions")
+    for key in WRITER_WORK:
+        if final[key] < facts[key] or (key in DOCUMENT_WORK and final[key] != facts[key]):
+            raise ValueError("final health changed document work or lost accumulated work")
+        if ready["job_evidence"][key] != final[key]:
+            raise ValueError("final health work disagrees with the Ready account")
+    if stored_links is not None and final["links_redecided"] != nonnegative(stored_links, "stored links"):
+        raise ValueError("final health did not judge each stored link exactly once")
 
 
 def metadata_answer(stage):
@@ -186,6 +242,21 @@ def validate_stage(stage, manifest):
             raise ValueError("final health did not answer a summary")
 
 
+def cold_equivalence(result):
+    """Compare logical rows, construction, whole Get and ordinary work, not page maps."""
+    return {"semantic_sha256": result["store"]["semantic_sha256"],
+            "document_construction_sha256": result["store"]["document_construction_sha256"],
+            "whole_get": result["first_get"]["normalized_answer"],
+            "ordinary_work": {key: result["ready"]["job_evidence"][key] for key in ORDINARY_WORK}}
+
+
+def compare_cold_arms(reference, result):
+    actual = cold_equivalence(result)
+    for key, value in reference.items():
+        if actual[key] != value:
+            raise ValueError(f"cold arms differ in {key}")
+
+
 def run_one(binary, root, manifest, mode, *, profiling=True):
     """Keep query validation in readiness clocks and persisted-state audit outside them."""
     began = time.perf_counter_ns()
@@ -204,15 +275,37 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         if key in keys:
             raise ValueError("duplicate checkpoint")
         keys.append(key)
-        stage["validated_after_launch_ns"] = time.perf_counter_ns() - began
-        stage["verified"] = True
-        with (root / "stages.jsonl").open("a") as log:
-            append(log, stage)
+        stage["observed_after_launch_ns"] = time.perf_counter_ns() - began
 
     worker = Current(binary, root, profiling=profiling,
                      loading=None if mode == "baseline" else mode, stage_handler=on_stage)
     try:
         ready_observed = time.perf_counter_ns() - began
+        validate_receipts(mode, worker.stages, worker.ready, manifest)
+        # The staged modes intentionally derive/replay extra documents; only
+        # baseline and health-once are the ordinary-heal work comparison.
+        if mode == "baseline":
+            validate_fresh_work(worker.ready, manifest)
+        with (root / "stages.jsonl").open("a") as log:
+            for stage in worker.stages:
+                stage["verified"] = True
+                stage["validated_after_launch_ns"] = time.perf_counter_ns() - began
+                append(log, stage)
+
+        def sample():
+            started = time.perf_counter_ns() - began
+            reading = {"resources": resources(worker.process.pid), "load": os.getloadavg(),
+                       "storage": storage_bytes(root)}
+            finished = time.perf_counter_ns() - began
+            return {"started_after_launch_ns": started, "finished_after_launch_ns": finished,
+                    "sampling_ns": finished - started, **reading}
+
+        before_first = sample()
+        first_command = {"op": "get", "target": "small"}
+        first, first_round_trip = worker.call(first_command)
+        normalized_first = validate_first_get(first, manifest)
+        first_validated = time.perf_counter_ns() - began
+        after_first = sample()
         checked = []
         for name, command in READS:
             answer, elapsed = worker.call(command)
@@ -231,6 +324,8 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
             for probe, early in early_rows.items():
                 if metadata_answer(early) != metadata_answer(final_rows[probe]):
                     raise ValueError(f"metadata answer differs from ordinary final answer: {probe}")
+        later_checks_validated = time.perf_counter_ns() - began
+        after_checks = sample()
         milestones = {}
         for stage in worker.stages:
             name = stage["startup_stage"]
@@ -238,13 +333,21 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         result = {"mode": mode, "ready_observed_ns": ready_observed, "ready": worker.ready,
                   "checkpoint_boundaries_ns": milestones,
                   "probe_query_ns": sum(stage["query_host_ns"] for stage in worker.stages),
-                  "stages": worker.stages, "checks": checked, "load_at_ready": os.getloadavg(),
-                  "resources_at_ready": resources(worker.process.pid),
-                  "storage_at_ready": storage_bytes(root)}
+                  "stages": worker.stages, "checks": checked,
+                  "first_get": {"command": first_command, "response": first,
+                                "normalized_answer": normalized_first, "round_trip_ns": first_round_trip},
+                  "first_validated_get_ns": first_validated,
+                  "later_checks_validated_ns": later_checks_validated,
+                  "samples": {"before_first_request": before_first,
+                              "after_first_validated_get": after_first, "after_later_checks": after_checks},
+                  "resource_scope": "main-process Linux observations during the recorded sampling intervals; not exact kernel-boundary samples",
+                  "endpoint_scope": "launch through answer validation; includes receipt validation and all pre-Get sampling overhead"}
     finally:
         closing = time.perf_counter_ns()
         worker.close()
         closed = time.perf_counter_ns()
+    result["shutdown_started_ns"] = closing - began
+    result["closed_after_launch_ns"] = closed - began
     result["shutdown_ns"] = closed - closing
     result["validated_lifecycle_ns"] = closed - began
     verification = subprocess.run([str(binary), "verify"], cwd=root,
@@ -256,6 +359,8 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         raise ValueError("integrity worker did not confirm its check")
     result["integrity_verified"] = True
     result["store"] = audit_store(binary, root, manifest)
+    validate_receipts(mode, worker.stages, worker.ready, manifest,
+                      stored_links=result["store"]["counts"]["links"])
     if mode not in ("baseline", "health-once") and not mode.endswith("-silent"):
         summary = next(s for s in result["stages"] if s["startup_stage"] == "health")
         total = sum(row["count"] for row in summary["answer"]["report"]["by_kind"])
@@ -279,9 +384,10 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
     finally:
         restart.close()
     restarted = audit_store(binary, root, manifest)
-    for key in ("store_epoch", "write_generation", "semantic_sha256"):
+    for key in ("store_epoch", "write_generation", "semantic_sha256", "document_construction_sha256"):
         if restarted[key] != result["store"][key]:
             raise ValueError("unchanged restart rebuilt or changed the final index")
+    result["persisted_checks_completed_ns"] = time.perf_counter_ns() - began
     result["restart"]["verified"] = True
     result["verified"] = True
     return result
@@ -320,6 +426,7 @@ def main():
                 "load_start": os.getloadavg()}
     write_json(args.output / "run.json", metadata)
     references = {}
+    construction_references = {}
     try:
         fixtures = {}
         for size in args.sizes:
@@ -348,6 +455,9 @@ def main():
                         digest = result["store"]["semantic_sha256"]
                         if references.setdefault(size, digest) != digest:
                             raise ValueError("staging changed the final index")
+                        if mode in ("baseline", "health-once"):
+                            reference = construction_references.setdefault(size, cold_equivalence(result))
+                            compare_cold_arms(reference, result)
                         append(samples, {"repetition": repetition, "background_documents": size,
                                          "document_count": manifest["document_count"], **result})
                         milestones = {name: round(value / 1e9, 4) for name, value in result["checkpoint_boundaries_ns"].items()}

@@ -13,44 +13,112 @@ from loading import validate_stage
 
 
 class LoadingChecks(unittest.TestCase):
-    def test_health_once_controller_checks_after_ready_and_restarts_in_ordinary_mode(self):
+    def test_cold_first_get_endpoint_and_resource_samples_have_identical_query_history(self):
         from loading import run_one
         from transport import PREFIX
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "performance-token").write_text("token")
-            for stream in ("stdout", "stderr"):
-                (root / f"worker.{stream}.log").write_text("")
-            launches = []
+        from test_loading_receipts import receipts
+        from test_whole_get import example
+        stages, ready, manifest = receipts()
+        response, get_manifest = example()
+        manifest.update(get_manifest)
+        histories = []
+        for mode in ["baseline", "health-once"]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "performance-token").write_text("token")
+                for stream in ("stdout", "stderr"):
+                    (root / f"worker.{stream}.log").write_text("")
+                launches, events, commands = [], [], []
+                tick = [0]
+                def clock():
+                    tick[0] += 10
+                    return tick[0]
+                def call(command):
+                    commands.append(command)
+                    events.append("query")
+                    return dict(response, host_ns=1), 2
+                def worker(_binary, _root, *, loading, profiling, stage_handler=None):
+                    launches.append(loading)
+                    rows = copy.deepcopy(stages) if loading == "health-once" else []
+                    for row in rows:
+                        stage_handler(row)
+                    evidence = copy.deepcopy(ready)
+                    if len(launches) == 2:
+                        evidence["job_evidence"].update(documents_derived=0, documents_upserted=0)
+                    return SimpleNamespace(stages=rows, ready=evidence,
+                        process=SimpleNamespace(pid=1), call=call, close=lambda: events.append("close"))
+                def sample(_pid):
+                    events.append("resource")
+                    tick[0] += 1000
+                    return {"rss_bytes": len(commands)}
+                audit = {"semantic_sha256": "same", "document_construction_sha256": "identity",
+                         "store_epoch": "same", "write_generation": 1, "counts": {"links": 4}}
+                with patch("loading.Current", side_effect=worker), \
+                     patch("loading.time.perf_counter_ns", side_effect=clock), \
+                     patch("loading.READS", [("known_get", {"op": "get", "target": "bench/small.md"})]), \
+                     patch("loading.resources", side_effect=sample), patch("loading.storage_bytes", return_value={}), \
+                     patch("loading.environment", return_value={}), \
+                     patch("loading.audit_store", return_value=audit), \
+                     patch("loading.subprocess.run", return_value=SimpleNamespace(
+                         stdout=PREFIX + '{"integrity_verified":true}', stderr="")):
+                    result = run_one(Path("worker"), root, manifest, mode, profiling=False)
+                histories.append(commands)
+                self.assertEqual(launches, [None if mode == "baseline" else mode, None])
+                self.assertEqual(commands[0], {"op": "get", "target": "small"})
+                self.assertEqual(events[:5], ["resource", "query", "resource", "query", "resource"])
+                self.assertEqual(result["first_get"]["response"]["answer"], response["answer"])
+                self.assertEqual(result["samples"]["before_first_request"]["resources"]["rss_bytes"], 0)
+                self.assertEqual(result["samples"]["after_first_validated_get"]["resources"]["rss_bytes"], 1)
+                self.assertEqual(result["samples"]["after_later_checks"]["resources"]["rss_bytes"], 2)
+                self.assertGreaterEqual(result["first_validated_get_ns"] - result["ready_observed_ns"], 1000)
+                clocks = [result[key] for key in ["ready_observed_ns", "first_validated_get_ns",
+                          "later_checks_validated_ns", "shutdown_started_ns", "closed_after_launch_ns"]]
+                self.assertEqual(clocks, sorted(set(clocks)))
+                self.assertNotIn("resources_at_ready", result)
+                self.assertTrue(result["verified"])
+        self.assertEqual(*histories)
 
-            def worker(_binary, _root, *, loading, profiling, stage_handler=None):
-                launches.append(loading)
-                stages = []
-                if len(launches) == 1:
-                    for name in ("health-once-facts", "health-once-health"):
-                        stage = {"startup_stage": name, "probe": "boundary",
-                                 "queries_executed": False, "stage_boundary_ns": 1,
-                                 "query_host_ns": 0}
-                        stages.append(stage)
-                        stage_handler(stage)
-                elif loading is not None:
-                    raise ValueError("health-once must refuse an existing index")
-                return SimpleNamespace(stages=stages, ready={"job_evidence": {}},
-                    process=SimpleNamespace(pid=1), call=lambda _: ({"host_ns": 0}, 0), close=lambda: None)
+    def test_supported_staged_modes_keep_their_intentional_extra_document_work(self):
+        from loading import run_one, expected_checkpoints
+        from test_loading_receipts import receipts
+        class ReachedFirstGet(Exception):
+            pass
+        for mode in ["layered", "layered-silent", "facts-once", "facts-once-silent",
+                     "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"]:
+            _, ready, manifest = receipts()
+            # These modes deliberately perform a requested-document derivation
+            # before their one or two whole-corpus passes.
+            work = manifest["document_count"] * (2 if mode.startswith("layered") else 1) + 1
+            ready["job_evidence"].update(documents_derived=work, documents_upserted=work)
+            stages = [dict(startup_stage=stage, probe=probe) for stage, probe in expected_checkpoints(mode)]
+            commands = []
+            def call(command):
+                commands.append(command)
+                raise ReachedFirstGet()
+            worker = SimpleNamespace(stages=stages, ready=ready, process=SimpleNamespace(pid=1),
+                                     call=call, close=lambda: None)
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
+                 patch("loading.Current", return_value=worker), patch("loading.resources", return_value={}), \
+                 patch("loading.storage_bytes", return_value={}):
+                with self.assertRaises(ReachedFirstGet):
+                    run_one(Path("worker"), Path(directory), manifest, mode, profiling=False)
+            self.assertEqual(commands, [{"op": "get", "target": "small"}])
 
-            audit = {"semantic_sha256": "same", "store_epoch": "same", "write_generation": 1}
-            with patch("loading.Current", side_effect=worker), \
-                 patch("loading.READS", [("known_get", {"op": "get", "target": "first"})]), \
-                 patch("loading.validate_read") as checked, patch("loading.validate_work"), \
-                 patch("loading.resources", return_value={}), patch("loading.storage_bytes", return_value={}), \
-                 patch("loading.environment", return_value={}), \
-                 patch("loading.audit_store", return_value=audit), \
-                 patch("loading.subprocess.run", return_value=SimpleNamespace(
-                     stdout=PREFIX + '{"integrity_verified":true}', stderr="")):
-                result = run_one(Path("worker"), root, {"document_count": 1}, "health-once", profiling=False)
-            self.assertEqual(launches, ["health-once", None])
-            self.assertEqual(checked.call_count, 2)
-            self.assertTrue(result["verified"])
+    def test_canonical_whole_get_keeps_private_projection_provenance_without_a_host_reading(self):
+        from loading import whole_get_answer
+        from test_whole_get import example
+        response, manifest = example()
+        answer = response["answer"]
+        answer.pop("reading")
+        for stage_name in ["canonical-demand", "canonical-health"]:
+            stage = dict(answer=copy.deepcopy(answer), startup_stage=stage_name, probe="whole_slug",
+                         command=dict(op="get", target="small", whole=True), simulation="paused",
+                         global_ready=False, projection_epoch="private-projection", projection_generation=3)
+            validate_stage(stage, manifest)
+            self.assertEqual(whole_get_answer(stage), answer)
+            del stage["projection_epoch"]
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                whole_get_answer(stage)
 
     def test_health_once_has_only_counter_boundaries_and_no_partial_query_protocol(self):
         from loading import expected_checkpoints

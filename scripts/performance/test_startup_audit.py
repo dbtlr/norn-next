@@ -28,7 +28,7 @@ def fixture(root, mutate=None, exit_code=0):
                 "tree_sha256": tree_digest(vault)}
     summary = {"semantic_sha256": "ab" * 32, "tables": {"documents": {"rows": 2, "sha256": "cd" * 32}},
                "counts": {"documents": 2}, "store_epoch": "epoch", "write_generation": 3,
-               "schema_version": 3}
+               "schema_version": 3, "document_construction_sha256": "ef" * 32}
     records.append({"summary": summary})
     if mutate:
         mutate(records)
@@ -88,6 +88,15 @@ class StartupAuditTests(unittest.TestCase):
                 root = Path(directory)
                 worker, manifest, _ = fixture(root, mutate)
                 with self.assertRaises(ValueError):
+                    audit_store(worker, root, manifest)
+
+    def test_missing_or_malformed_construction_receipts_are_rejected(self):
+        for digest in [None, "short", True, "g" * 64]:
+            with self.subTest(digest=digest), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                worker, manifest, _ = fixture(root, lambda rows: rows[-1]["summary"].update(
+                    document_construction_sha256=digest))
+                with self.assertRaisesRegex(ValueError, "construction"):
                     audit_store(worker, root, manifest)
 
     def test_changed_frozen_source_is_rejected(self):

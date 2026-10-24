@@ -1,0 +1,287 @@
+{
+  "advisories": [],
+  "reading": {
+    "epoch": "example-store",
+    "generation": 1475,
+    "trust": {
+      "state": "ready"
+    }
+  },
+  "report": {
+    "document": {
+      "blocks": {
+        "items": [],
+        "total": 0
+      },
+      "body": {
+        "byte_length": 2506,
+        "text": "# Small\nprofileraresignal profilecommonword\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\nA regular document with a few paragraphs of stable reference material.\n## Details\nA bounded section with a precise answer.\n\n## Linked material\nA valid heading target: [[large#Details]].\nA valid document target: [[referrer-00]].\nA missing target: [[profilemissingcoldtarget]].\nA missing heading: [[large#ProfileMissingHeading]].\nA missing block: [[large#^profilemissingblock]].\nA literal tag: #coldprobe\n"
+      },
+      "fields": {
+        "perf_bucket": {
+          "kind": "scalar",
+          "raw": "probe"
+        },
+        "status": {
+          "kind": "scalar",
+          "raw": "draft"
+        }
+      },
+      "findings": {
+        "items": [
+          {
+            "generation": 215,
+            "head": {
+              "candidates": [],
+              "total": 0
+            },
+            "hint": null,
+            "id": 213,
+            "kind": "link/broken",
+            "message": "the link names no document",
+            "path": "bench/small.md",
+            "rule_set": null,
+            "severity": "warning",
+            "span": {
+              "byte_offset": 2390,
+              "column": 19,
+              "line": 43
+            },
+            "target": "profilemissingcoldtarget",
+            "value": null
+          },
+          {
+            "generation": 216,
+            "head": {
+              "candidates": [
+                {
+                  "path": "bench/large.md",
+                  "suffix": "large"
+                }
+              ],
+              "total": 1
+            },
+            "hint": null,
+            "id": 214,
+            "kind": "link/missing-anchor",
+            "message": "the document the link names holds no place its anchor names",
+            "path": "bench/small.md",
+            "rule_set": null,
+            "severity": "warning",
+            "span": {
+              "byte_offset": 2439,
+              "column": 20,
+              "line": 44
+            },
+            "target": "large#ProfileMissingHeading",
+            "value": null
+          },
+          {
+            "generation": 217,
+            "head": {
+              "candidates": [
+                {
+                  "path": "bench/large.md",
+                  "suffix": "large"
+                }
+              ],
+              "total": 1
+            },
+            "hint": null,
+            "id": 215,
+            "kind": "link/missing-anchor",
+            "message": "the document the link names holds no place its anchor names",
+            "path": "bench/small.md",
+            "rule_set": null,
+            "severity": "warning",
+            "span": {
+              "byte_offset": 2489,
+              "column": 18,
+              "line": 45
+            },
+            "target": "large#^profilemissingblock",
+            "value": null
+          }
+        ],
+        "total": 3
+      },
+      "headings": {
+        "items": [
+          {
+            "level": 1,
+            "slug": "small",
+            "span": {
+              "byte_offset": 41,
+              "column": 1,
+              "line": 5
+            },
+            "text": "Small"
+          },
+          {
+            "level": 2,
+            "slug": "details",
+            "span": {
+              "byte_offset": 2215,
+              "column": 1,
+              "line": 37
+            },
+            "text": "Details"
+          },
+          {
+            "level": 2,
+            "slug": "linked-material",
+            "span": {
+              "byte_offset": 2268,
+              "column": 1,
+              "line": 40
+            },
+            "text": "Linked material"
+          }
+        ],
+        "total": 3
+      },
+      "links": {
+        "items": [
+          {
+            "anchor": {
+              "kind": "heading",
+              "text": "Details"
+            },
+            "embed": false,
+            "family": "wikilink",
+            "health": "healthy",
+            "protocol": null,
+            "span": {
+              "byte_offset": 2311,
+              "column": 25,
+              "line": 41
+            },
+            "target": "large",
+            "targets": {
+              "candidates": [
+                {
+                  "path": "bench/large.md",
+                  "suffix": "large"
+                }
+              ],
+              "total": 1
+            },
+            "title": null
+          },
+          {
+            "anchor": null,
+            "embed": false,
+            "family": "wikilink",
+            "health": "healthy",
+            "protocol": null,
+            "span": {
+              "byte_offset": 2355,
+              "column": 26,
+              "line": 42
+            },
+            "target": "referrer-00",
+            "targets": {
+              "candidates": [
+                {
+                  "path": "bench/referrer-00.md",
+                  "suffix": "referrer-00"
+                }
+              ],
+              "total": 1
+            },
+            "title": null
+          },
+          {
+            "anchor": null,
+            "embed": false,
+            "family": "wikilink",
+            "health": "broken",
+            "protocol": null,
+            "span": {
+              "byte_offset": 2390,
+              "column": 19,
+              "line": 43
+            },
+            "target": "profilemissingcoldtarget",
+            "targets": {
+              "candidates": [],
+              "total": 0
+            },
+            "title": null
+          },
+          {
+            "anchor": {
+              "kind": "heading",
+              "text": "ProfileMissingHeading"
+            },
+            "embed": false,
+            "family": "wikilink",
+            "health": "healthy",
+            "protocol": null,
+            "span": {
+              "byte_offset": 2439,
+              "column": 20,
+              "line": 44
+            },
+            "target": "large",
+            "targets": {
+              "candidates": [
+                {
+                  "path": "bench/large.md",
+                  "suffix": "large"
+                }
+              ],
+              "total": 1
+            },
+            "title": null
+          },
+          {
+            "anchor": {
+              "id": "profilemissingblock",
+              "kind": "block"
+            },
+            "embed": false,
+            "family": "wikilink",
+            "health": "healthy",
+            "protocol": null,
+            "span": {
+              "byte_offset": 2489,
+              "column": 18,
+              "line": 45
+            },
+            "target": "large",
+            "targets": {
+              "candidates": [
+                {
+                  "path": "bench/large.md",
+                  "suffix": "large"
+                }
+              ],
+              "total": 1
+            },
+            "title": null
+          }
+        ],
+        "total": 5
+      },
+      "path": "bench/small.md",
+      "tags": {
+        "items": [
+          {
+            "name": "coldprobe",
+            "source": "body",
+            "span": {
+              "byte_offset": 2536,
+              "column": 16,
+              "line": 46
+            }
+          }
+        ],
+        "total": 1
+      }
+    },
+    "rule_sets": [],
+    "shape": "record"
+  },
+  "unsatisfied": []
+}

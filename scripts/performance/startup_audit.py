@@ -97,6 +97,10 @@ def audit_store(binary: Path, run_root: Path, manifest: dict) -> dict:
         raise ValueError("frozen Markdown byte length differs from the manifest")
     if not isinstance(summary, dict) or summary.get("schema_version") != 3:
         raise ValueError("startup audit worker supplied no schema-3 summary")
+    construction = summary.get("document_construction_sha256")
+    if (not isinstance(construction, str) or len(construction) != 64
+            or any(char not in "0123456789abcdef" for char in construction)):
+        raise ValueError("startup audit worker supplied no valid document construction digest")
     if summary["counts"]["documents"] != count or summary["tables"]["documents"]["rows"] != count:
         raise ValueError("startup audit document counts disagree")
     return summary | {"source_sha256": source_sha256}

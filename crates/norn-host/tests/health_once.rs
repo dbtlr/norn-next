@@ -152,6 +152,10 @@ fn health_once_preserves_ordinary_heal_identity_work_and_whole_get() {
         results[0].0["semantic_sha256"],
         results[1].0["semantic_sha256"]
     );
+    assert_eq!(
+        results[0].0["document_construction_sha256"],
+        results[1].0["document_construction_sha256"]
+    );
     assert_eq!(results[0].0["counts"], results[1].0["counts"]);
     assert_eq!(results[0].1, results[1].1);
     assert_eq!(
