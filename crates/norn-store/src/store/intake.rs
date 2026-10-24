@@ -66,7 +66,10 @@ impl IntakeBuilder {
 
     /// Audit the actual owner and paths even if construction never reaches sealing.
     pub fn retirement_check(&self) -> norn_db::RetirementCheck {
-        self.file.as_ref().expect("a newly created intake owns its file").retirement_check()
+        self.file
+            .as_ref()
+            .expect("a newly created intake owns its file")
+            .retirement_check()
     }
 
     /// Run one bounded loading step through the ordinary store writer.

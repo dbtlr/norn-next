@@ -1,4 +1,5 @@
-//! Reviewer-owned adversarial probes over a COPY of the frozen helper source.
+//! Assertions derived from the accepted private helper review probes.
+//! Every native clock is nonqualifying.
 #![cfg(feature = "induced-failure")]
 #![allow(clippy::disallowed_methods)]
 mod attach;
@@ -99,7 +100,9 @@ impl Observer for Probe {
                     && p.extension().is_some_and(|e| e == "sqlite3")
             });
         }
-        if let Some(control) = &self.cancel_before_failure { control.cancel(); }
+        if let Some(control) = &self.cancel_before_failure {
+            control.cancel();
+        }
         if self.fail_prefix_load {
             return Err("probe: injected prefix load failure".into());
         }
@@ -134,69 +137,220 @@ impl Observer for Probe {
         if let Some(control) = &self.cancel_in_prefix {
             control.cancel();
         }
-        if self.fail_callback { return Err("probe: callback failure".into()); }
+        if self.fail_callback {
+            return Err("probe: callback failure".into());
+        }
         Ok(())
     }
 }
-fn run(vault: &attach::Vault, probe: Arc<Probe>, control: &HelperControl) -> Result<norn_host::startup_experiment::HelperComplete, norn_host::startup_experiment::HelperFailure> {
-    let experiment = Experiment::capped_prefix_frozen("first", probe, FrozenInput::assume_immutable());
+fn run(
+    vault: &attach::Vault,
+    probe: Arc<Probe>,
+    control: &HelperControl,
+) -> Result<
+    norn_host::startup_experiment::HelperComplete,
+    norn_host::startup_experiment::HelperFailure,
+> {
+    let experiment =
+        Experiment::capped_prefix_frozen("first", probe, FrozenInput::assume_immutable());
     vault.prefix_helper(&experiment, control)
 }
 
 #[test]
 fn observed_rehash_movement_fails_even_without_a_tree_watch_event() {
     for outside in [true, false] {
-        let scratch = scratch(); let vault = fixture(scratch.root(), 10, SCHEMA);
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 10, SCHEMA);
         let target = vault.path().join("a-005.md");
         let link = scratch.root().join("outside-link.md");
         std::fs::hard_link(&target, &link).unwrap();
         let probe = Arc::new(Probe {
             address: Some(VaultAddress::name(vault.name().clone())),
-            mutate: Some((target.clone(), "---\nperf_bucket: inactive\n---\nChanged\n".into())),
+            mutate: Some((
+                target.clone(),
+                "---\nperf_bucket: inactive\n---\nChanged\n".into(),
+            )),
             via_link: outside.then_some(link),
             ..Default::default()
         });
         let result = run(&vault, probe.clone(), &Default::default());
-        eprintln!("rehash outside={outside}: {result:?}; decline={:?}", probe.decline.lock().unwrap());
-        assert!(matches!(result, Err(norn_host::startup_experiment::HelperFailure {cause: HelperCause::SourceChanged, ..})), "actual rehash movement must fail independently of watcher delivery");
+        eprintln!(
+            "rehash outside={outside}: {result:?}; decline={:?}",
+            probe.decline.lock().unwrap()
+        );
+        assert!(
+            matches!(
+                result,
+                Err(norn_host::startup_experiment::HelperFailure {
+                    cause: HelperCause::SourceChanged,
+                    ..
+                })
+            ),
+            "actual rehash movement must fail independently of watcher delivery"
+        );
     }
 }
 
 #[test]
 fn preseal_residue_is_preserved_beside_source_or_operation_failure() {
     for source_change in [true, false] {
-        let scratch = scratch(); let vault = fixture(scratch.root(), 10, SCHEMA);
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 10, SCHEMA);
         let target = vault.path().join("a-005.md");
         let link = scratch.root().join("outside-link.md");
         std::fs::hard_link(&target, &link).unwrap();
         let probe = Arc::new(Probe {
             address: Some(VaultAddress::name(vault.name().clone())),
-            mutate: source_change.then_some((target, "---\nperf_bucket: inactive\n---\nChanged\n".into())),
-            via_link: Some(link), fail_prefix_load: !source_change,
-            scan_root: Some(scratch.root().to_owned()), recreate_builder_as_file: true,
+            mutate: source_change
+                .then_some((target, "---\nperf_bucket: inactive\n---\nChanged\n".into())),
+            via_link: Some(link),
+            fail_prefix_load: !source_change,
+            scan_root: Some(scratch.root().to_owned()),
+            recreate_builder_as_file: true,
             ..Default::default()
         });
         let failure = run(&vault, probe.clone(), &Default::default()).unwrap_err();
         eprintln!("preseal source={source_change}: {failure:?}");
-        assert!(if source_change { matches!(failure.cause, HelperCause::SourceChanged) } else { matches!(failure.cause, HelperCause::Operation(_)) });
-        let path = probe.builder_path.lock().unwrap().clone().expect("actual builder path observed");
+        assert!(if source_change {
+            matches!(failure.cause, HelperCause::SourceChanged)
+        } else {
+            matches!(failure.cause, HelperCause::Operation(_))
+        });
+        let path = probe
+            .builder_path
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("actual builder path observed");
         assert_eq!(std::fs::read(&path).unwrap(), b"probe residue");
-        assert!(!failure.cleanup.is_empty(), "pre-seal intake residue must survive beside primary failure");
+        assert!(
+            !failure.cleanup.is_empty(),
+            "pre-seal intake residue must survive beside primary failure"
+        );
     }
 }
 
 #[test]
 fn callback_error_does_not_discard_preseal_retirement_evidence() {
-    let scratch = scratch(); let vault = fixture(scratch.root(), 4, SCHEMA);
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 4, SCHEMA);
     let probe = Arc::new(Probe {
         address: Some(VaultAddress::name(vault.name().clone())),
-        fail_prefix_load: true, fail_callback: true,
-        scan_root: Some(scratch.root().to_owned()), recreate_builder_as_file: true,
+        fail_prefix_load: true,
+        fail_callback: true,
+        scan_root: Some(scratch.root().to_owned()),
+        recreate_builder_as_file: true,
         ..Default::default()
     });
     let failure = run(&vault, probe.clone(), &Default::default()).unwrap_err();
     eprintln!("callback + preseal: {failure:?}");
-    assert!(matches!(failure.cause, HelperCause::Operation(_)));
+    assert_eq!(
+        failure.cause,
+        HelperCause::Operation(norn_host::JobFailure::Environmental(
+            "probe: injected prefix load failure".into()
+        ))
+    );
+    assert!(failure.secondary.contains(&HelperCause::Operation(
+        norn_host::JobFailure::Environmental("probe: callback failure".into())
+    )));
     assert!(!failure.cleanup.is_empty());
-    assert!(probe.builder_path.lock().unwrap().as_ref().unwrap().exists());
+    assert!(
+        probe
+            .builder_path
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .exists()
+    );
+}
+
+#[test]
+fn cancellation_never_masks_an_operation_observed_before_or_after_it() {
+    for cancel_first in [false, true] {
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 4, SCHEMA);
+        let control = Arc::new(HelperControl::default());
+        let probe = Arc::new(Probe {
+            address: Some(VaultAddress::name(vault.name().clone())),
+            fail_prefix_load: true,
+            cancel_in_prefix: (!cancel_first).then(|| control.clone()),
+            cancel_before_failure: cancel_first.then(|| control.clone()),
+            ..Default::default()
+        });
+        let result = run(&vault, probe, &control);
+        eprintln!("cancel_first={cancel_first}: {result:?}");
+        let failure = result.unwrap_err();
+        assert_eq!(
+            failure.cause,
+            HelperCause::Operation(norn_host::JobFailure::Environmental(
+                "probe: injected prefix load failure".into()
+            ))
+        );
+        assert_eq!(failure.secondary, [HelperCause::Cancelled]);
+    }
+}
+
+#[test]
+fn operation_source_retained_reader_and_cancellation_all_survive() {
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 10, SCHEMA);
+    let target = vault.path().join("a-005.md");
+    let link = scratch.root().join("outside-link.md");
+    std::fs::hard_link(&target, &link).unwrap();
+    let control = Arc::new(HelperControl::default());
+    let probe = Arc::new(Probe {
+        address: Some(VaultAddress::name(vault.name().clone())),
+        mutate: Some((target, "---\nperf_bucket: inactive\n---\nChanged\n".into())),
+        via_link: Some(link),
+        hold: true,
+        fail_callback: true,
+        cancel_in_prefix: Some(control.clone()),
+        ..Default::default()
+    });
+    let failure = run(&vault, probe.clone(), &control).unwrap_err();
+    eprintln!("combined: {failure:?}");
+    assert_eq!(
+        failure.cause,
+        HelperCause::Operation(norn_host::JobFailure::Environmental(
+            "probe: callback failure".into()
+        ))
+    );
+    assert!(failure.secondary.contains(&HelperCause::SourceChanged));
+    assert!(failure.secondary.contains(&HelperCause::Cancelled));
+    assert!(failure.secondary.iter().any(
+        |cause| matches!(cause, HelperCause::OutstandingReaders(c) if c.live_connections == 0)
+    ));
+    let reader = probe.hold_reader.lock().unwrap().take().unwrap();
+    assert!(
+        reader
+            .acquire(
+                norn_store::ReadNeed::Source,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap()
+            .is_none()
+    );
+    drop(reader);
+}
+
+#[test]
+fn cancellation_before_work_reports_only_cancellation() {
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 4, SCHEMA);
+    let control = HelperControl::default();
+    control.cancel();
+    let probe = Arc::new(Probe {
+        address: Some(VaultAddress::name(vault.name().clone())),
+        fail_prefix_load: true,
+        scan_root: Some(scratch.root().to_owned()),
+        ..Default::default()
+    });
+    let failure = run(&vault, probe.clone(), &control).unwrap_err();
+    assert_eq!(failure.cause, HelperCause::Cancelled);
+    assert!(failure.secondary.is_empty());
+    assert!(failure.cleanup.is_empty());
+    assert!(probe.builder_path.lock().unwrap().is_none());
+    assert!(probe.decline.lock().unwrap().is_none());
+    assert!(!vault.database().exists());
 }

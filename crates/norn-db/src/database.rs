@@ -899,11 +899,13 @@ pub fn database_is_absent(path: &Path) -> Result<bool, DbError> {
     for candidate in database_paths(path) {
         match std::fs::symlink_metadata(&candidate) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(DbError::Lifecycle {
-                operation: "checking fresh database state",
-                path: candidate,
-                message: error.to_string(),
-            }),
+            Err(error) => {
+                return Err(DbError::Lifecycle {
+                    operation: "checking fresh database state",
+                    path: candidate,
+                    message: error.to_string(),
+                });
+            }
             Ok(_) => return Ok(false),
         }
     }

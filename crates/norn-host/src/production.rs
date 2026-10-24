@@ -1463,12 +1463,24 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         run: impl FnOnce(&mut ProductionAttachment) -> Result<T, JobFailure>,
     ) -> Result<T, JobFailure> {
+        Self::under_coverage_recording(attachment, run, &mut Vec::new())
+    }
+
+    /// Retain independently observed phase and coverage failures for private owners.
+    fn under_coverage_recording<T>(
+        attachment: &mut ProductionAttachment,
+        run: impl FnOnce(&mut ProductionAttachment) -> Result<T, JobFailure>,
+        failures: &mut Vec<JobFailure>,
+    ) -> Result<T, JobFailure> {
         attachment
             .subscription
             .as_ref()
             .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .begin_heal();
         let result = run(attachment);
+        if let Err(error) = &result {
+            failures.push(error.clone());
+        }
         let (settled_before_the_window, drain_failure) = attachment
             .subscription
             .as_ref()
@@ -1480,8 +1492,14 @@ impl ProductionEntryOps {
             .as_ref()
             .expect("subscription remains installed through its heal")
             .finish_heal()
-            .map_err(watcher)?;
-        attachment.heal_observed.merge(observed);
+            .map_err(watcher);
+        if let Some(failure) = &drain_failure {
+            failures.push(watcher(failure.clone()));
+        }
+        if let Err(error) = &observed {
+            failures.push(error.clone());
+        }
+        attachment.heal_observed.merge(observed?);
         // The window is closed either way before the drain's own failure is
         // reported: a heal that left it open would park the coalescer over a
         // subscription nothing is going to poll again.

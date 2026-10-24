@@ -17,7 +17,13 @@ pub(super) fn run(
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
     let root = attachment.covered_root.clone();
-    let PrefixPhase { model, .. } = prepare_prefix(attachment, exclusions, policy, experiment, &mut Vec::new())?;
+    let model = prepare_prefix(
+        attachment,
+        exclusions,
+        policy,
+        experiment,
+        &mut PrefixEvidence::default(),
+    )?;
     let intake = if experiment.intake {
         Some(super::intake::prepare(
             attachment, exclusions, policy, experiment, &model,
@@ -69,11 +75,13 @@ pub(super) fn run(
     notify(experiment, Stage::CanonicalHealth, &reader, &model)
 }
 
-pub(super) struct PrefixPhase {
-    pub model: Arc<ContentModel>,
+/// Evidence outlives failed preparation as well as the successful bounded phase.
+#[derive(Default)]
+pub(super) struct PrefixEvidence {
     pub demand_served: bool,
     pub demand_reader: std::sync::Weak<SnapshotReader>,
-    pub prefix_failure: Option<JobFailure>,
+    pub checks: Vec<norn_store::startup_experiment::RetirementCheck>,
+    pub failures: Vec<JobFailure>,
 }
 
 /// Both continuations consume this scope before healing or stopping.
@@ -82,15 +90,12 @@ pub(super) fn prepare_prefix(
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
     experiment: &Experiment,
-    checks: &mut Vec<norn_store::startup_experiment::RetirementCheck>,
-) -> Result<PrefixPhase, JobFailure> {
+    evidence: &mut PrefixEvidence,
+) -> Result<Arc<ContentModel>, JobFailure> {
     let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
     let declared = Declaration::read(&mut attachment.store)?;
     let model = Arc::clone(declared.model.shared_content_model());
-    let mut demand_served = false;
-    let mut demand_reader = std::sync::Weak::new();
-    let mut prefix_failure = None;
     {
         let mut catalogue_decline = None;
         let mut catalogue_replayed = 0_u64;
@@ -98,7 +103,7 @@ pub(super) fn prepare_prefix(
         let timing = norn_store::profiling::span("startup.catalogue");
         let directory = attachment.shadows.directory().join("canonical-demand");
         let mut catalogue = Catalogue::open(&directory).map_err(store_effect)?;
-        checks.push(catalogue.retirement_check());
+        evidence.checks.push(catalogue.retirement_check());
         let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
         loop {
             let page = inventory.advance(policy.store_page_size).map_err(effect)?;
@@ -162,7 +167,7 @@ pub(super) fn prepare_prefix(
             crate::DERIVATION_VERSION,
         )
         .map_err(store_effect)?;
-        checks.push(projection.retirement_check());
+        evidence.checks.push(projection.retirement_check());
         if let Some(pin) = attachment
             .store
             .begin_request()
@@ -209,11 +214,11 @@ pub(super) fn prepare_prefix(
             })
         {
             let reader = Arc::new(projection.reader_pool(&attachment.readers));
-            demand_reader = Arc::downgrade(&reader);
+            evidence.demand_reader = Arc::downgrade(&reader);
             let _retire = RetireReader(reader.clone());
             if requested_class_exists(&reader, &model, &experiment.get_target)? && frozen_valid() {
                 notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
-                demand_served = true;
+                evidence.demand_served = true;
             } else {
                 experiment
                     .observer
@@ -226,7 +231,7 @@ pub(super) fn prepare_prefix(
         projection.close().map_err(store_effect)?;
         if let Some(frozen) = &experiment.frozen_prefix {
             // Get's observer has returned (including its ACK) before this index exists.
-            let ended = super::prefix::run(
+            super::prefix::run(
                 attachment,
                 exclusions,
                 policy,
@@ -238,17 +243,11 @@ pub(super) fn prepare_prefix(
                 catalogue_decline,
                 catalogue_replayed,
                 catalogue_document_candidates,
-                checks,
+                evidence,
             )?;
-            prefix_failure = ended.failure;
         }
     }
-    Ok(PrefixPhase {
-        model,
-        demand_served,
-        demand_reader,
-        prefix_failure,
-    })
+    Ok(model)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

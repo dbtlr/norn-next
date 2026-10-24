@@ -18,7 +18,7 @@ impl HelperComplete {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HelperCause {
     Ineligible,
     Cancelled,
@@ -29,10 +29,12 @@ pub enum HelperCause {
     Cleanup,
 }
 
-/// Cleanup failures survive beside the original operation or cancellation cause.
+/// The first observed operation leads, followed by source, eligibility, resource,
+/// cleanup and cancellation causes in that order. Every other observed cause survives.
 #[derive(Debug)]
 pub struct HelperFailure {
     pub cause: HelperCause,
+    pub secondary: Vec<HelperCause>,
     pub cleanup: Vec<String>,
 }
 
@@ -61,6 +63,7 @@ pub fn run_prefix_helper(
 ) -> Result<HelperComplete, HelperFailure> {
     let fail = |cause| HelperFailure {
         cause,
+        secondary: Vec::new(),
         cleanup: Vec::new(),
     };
     let Some(frozen) = &experiment.frozen_prefix else {
@@ -87,7 +90,8 @@ pub fn run_prefix_helper(
     else {
         return Err(fail(HelperCause::Ineligible));
     };
-    let mut checks = Vec::new();
+    let mut evidence = canonical::PrefixEvidence::default();
+    let mut coverage_failures = Vec::new();
     let result = (|| {
         attachment
             .store
@@ -120,36 +124,53 @@ pub fn run_prefix_helper(
             &attachment.shadows,
             &attachment.covered_root,
         );
-        ProductionEntryOps::under_coverage(&mut attachment, |attachment| {
-            canonical::prepare_prefix(attachment, &exclusions, ops.policy, experiment, &mut checks).map(Some)
-        })
+        ProductionEntryOps::under_coverage_recording(
+            &mut attachment,
+            |attachment| {
+                canonical::prepare_prefix(
+                    attachment,
+                    &exclusions,
+                    ops.policy,
+                    experiment,
+                    &mut evidence,
+                )
+                .map(Some)
+            },
+            &mut coverage_failures,
+        )
     })();
     // Drains retired idle connections only. Active readers are never preempted.
     ops.readers.trim(std::time::Instant::now());
-    let mut cause = None;
+    let mut causes = Vec::new();
+    let phase_completed = matches!(&result, Ok(Some(_)));
     match result {
-        Err(error) => cause = Some(HelperCause::Operation(error)),
-        Ok(None) => cause = Some(HelperCause::Ineligible),
-        Ok(Some(phase)) => {
-            if let Some(error) = phase.prefix_failure {
-                cause = Some(HelperCause::Operation(error));
-            } else if !phase.demand_served {
-                cause = Some(HelperCause::RequiredGetUnavailable);
-            } else if phase.demand_reader.strong_count() != 0 {
-                cause = Some(HelperCause::OutstandingReaders(ops.readers.census()));
-            }
-        }
+        Err(error) if !coverage_failures.contains(&error) => coverage_failures.push(error),
+        Ok(None) => causes.push(HelperCause::Ineligible),
+        _ => (),
+    }
+    causes.extend(
+        evidence
+            .failures
+            .into_iter()
+            .chain(coverage_failures)
+            .map(HelperCause::Operation),
+    );
+    if evidence.demand_reader.strong_count() != 0 {
+        causes.push(HelperCause::OutstandingReaders(ops.readers.census()));
+    }
+    if phase_completed && !evidence.demand_served {
+        causes.push(HelperCause::RequiredGetUnavailable);
     }
     if !attachment.heal_observed.is_empty() || !frozen.intact() {
         frozen.invalidate();
-        cause = Some(HelperCause::SourceChanged);
+        causes.push(HelperCause::SourceChanged);
     }
     let mut cleanup = Vec::new();
     // The observer checkpoint is evidence only, never the successful terminal.
-    if cause.is_none()
+    if causes.is_empty()
         && let Err(error) = experiment.observer.prefix_retired()
     {
-        cause = Some(HelperCause::Operation(JobFailure::Environmental(error)));
+        causes.push(HelperCause::Operation(JobFailure::Environmental(error)));
     }
     cleanup.extend(super::super::release_owned(attachment, |subscription| {
         if let Some(subscription) = subscription {
@@ -162,29 +183,50 @@ pub fn run_prefix_helper(
     ops.readers.trim(std::time::Instant::now());
     let budget = ops.readers.census();
     if budget.live_connections != 0 || budget.waiting_reads != 0 {
-        cause = Some(HelperCause::OutstandingReaders(budget));
+        causes.push(HelperCause::OutstandingReaders(budget));
     }
     if let Some(error) = ops.last_reader_cleanup_error() {
         cleanup.push(error);
     }
     let mut retired_paths = Vec::new();
-    for check in checks {
+    for check in evidence.checks {
         match check.verify() {
             Ok(paths) => retired_paths.extend_from_slice(paths),
             Err(error) => cleanup.push(error.to_string()),
         }
     }
     if !frozen.intact() {
-        cause = Some(HelperCause::SourceChanged);
+        causes.push(HelperCause::SourceChanged);
     }
     if control.cancelled() {
-        cause = Some(HelperCause::Cancelled);
+        causes.push(HelperCause::Cancelled);
     }
-    if !cleanup.is_empty() && cause.is_none() {
-        cause = Some(HelperCause::Cleanup);
+    if !cleanup.is_empty() {
+        causes.push(HelperCause::Cleanup);
     }
-    if let Some(cause) = cause {
-        return Err(HelperFailure { cause, cleanup });
+    causes.sort_by_key(|cause| match cause {
+        HelperCause::Operation(_) => 0,
+        HelperCause::SourceChanged => 1,
+        HelperCause::Ineligible => 2,
+        HelperCause::RequiredGetUnavailable => 3,
+        HelperCause::OutstandingReaders(_) => 4,
+        HelperCause::Cleanup => 5,
+        HelperCause::Cancelled => 6,
+    });
+    // Repeated source checks describe one invalidated authority.
+    causes.dedup_by(|later, earlier| {
+        matches!(
+            (later, earlier),
+            (HelperCause::SourceChanged, HelperCause::SourceChanged)
+        )
+    });
+    if !causes.is_empty() {
+        let cause = causes.remove(0);
+        return Err(HelperFailure {
+            cause,
+            secondary: causes,
+            cleanup,
+        });
     }
     Ok(HelperComplete {
         retired_paths,
