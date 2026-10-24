@@ -66,6 +66,8 @@
 pub use rusqlite;
 
 mod ceremony;
+#[cfg(feature = "induced-failure")]
+pub mod construction;
 mod database;
 mod error;
 #[cfg(feature = "induced-failure")]
@@ -84,7 +86,8 @@ pub use ceremony::{
 };
 pub use database::{
     Attempt, Database, ReadOnlyOpen, connect, connect_read_only, mint_an_epoch, open_read_only,
-    open_read_only_until, prepare_parent, remove_database, statements_begun_on_this_thread,
+    open_read_only_until, prepare_parent, remove_database, require_transaction,
+    statements_begun_on_this_thread,
 };
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{ColumnRead, EmittedPlan, PlanStep};

@@ -102,7 +102,9 @@ pub enum Attempt {
 /// An open database, bound to the file it came from and the epoch it records.
 #[derive(Debug)]
 pub struct Database {
-    connection: Connection,
+    #[cfg(feature = "induced-failure")]
+    pub(crate) construction: crate::construction::Control,
+    pub(crate) connection: Connection,
     /// Disposable domain connections carry their file through every pool handoff.
     /// Declared after the connection so SQLite closes before the owner can unlink.
     #[cfg(feature = "induced-failure")]
@@ -174,6 +176,8 @@ impl Database {
             arm_the_snapshot_control(&connection, Arc::clone(&snapshot_control))?;
         }
         Ok(Database {
+            #[cfg(feature = "induced-failure")]
+            construction: crate::construction::Control::default(),
             connection,
             #[cfg(feature = "induced-failure")]
             temporary_file: None,
@@ -280,6 +284,8 @@ impl Database {
         &mut self,
         operation: &'static str,
     ) -> Result<Transaction<'_>, DbError> {
+        #[cfg(feature = "induced-failure")]
+        self.refuse_unconverted_construction_writer()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error::sql(operation, error))
@@ -304,6 +310,8 @@ impl Database {
         &mut self,
         operation: &'static str,
     ) -> Result<Transaction<'_>, DbError> {
+        #[cfg(feature = "induced-failure")]
+        self.refuse_unconverted_construction_writer()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| error::sql(operation, error))
@@ -1080,5 +1088,19 @@ mod tests {
             "a statement was counted on a thread other than the one that ran it"
         );
         drop(database);
+    }
+}
+
+/// Check the transaction authority retained by a shared write body. This reads
+/// SQLite state without executing SQL, including after automatic rollback.
+pub fn require_transaction(connection: &Connection) -> Result<(), DbError> {
+    if connection.is_autocommit() {
+        Err(DbError::Sql {
+            operation: "checking write transaction authority",
+            condition: None,
+            message: "the write unit lost its active transaction".into(),
+        })
+    } else {
+        Ok(())
     }
 }
