@@ -343,7 +343,9 @@ def validate_stage(stage, manifest):
 
 def cold_equivalence(result):
     """Compare logical rows, construction, whole Get and ordinary work, not page maps."""
-    return {"semantic_sha256": result["store"]["semantic_sha256"],
+    return {"schema_version": result["store"]["schema_version"],
+            "source_sha256": result["store"]["source_sha256"],
+            "semantic_sha256": result["store"]["semantic_sha256"],
             "document_construction_sha256": result["store"]["document_construction_sha256"],
             "whole_get": result["first_get"]["normalized_answer"],
             "ordinary_work": {key: result["ready"]["job_evidence"][key] for key in ORDINARY_WORK}}
@@ -354,6 +356,30 @@ def compare_cold_arms(reference, result):
     for key, value in reference.items():
         if actual[key] != value:
             raise ValueError(f"cold arms differ in {key}")
+
+
+def compare_construction_round(results: list[dict]) -> None:
+    """Anchor each frozen-fixture round to ordinary and legacy health-once work."""
+    ordinary = [result for result in results if result["mode"] == "baseline"]
+    legacy = [result for result in results if result["mode"] == "health-once"]
+    grouped = [result for result in results if result["mode"] == "health-once-txn"]
+    if len(ordinary) != 1 or len(legacy) != 1 or not grouped:
+        raise ValueError("construction qualification requires baseline and legacy health-once in each round")
+    reference = cold_equivalence(ordinary[0])
+    legacy_work = {key: nonnegative(legacy[0]["ready"]["job_evidence"][key], key)
+                   for key in WRITER_WORK}
+    for result in legacy + grouped:
+        compare_cold_arms(reference, result)
+    for result in grouped:
+        work = {key: nonnegative(result["ready"]["job_evidence"][key], key)
+                for key in WRITER_WORK}
+        if work != legacy_work:
+            raise ValueError("construction writer work differs from legacy health-once")
+        drain = result["stages"][-1]["construction_work"]
+        for key in ("construction_drain_changesets", "construction_drain_cleanup_units",
+                    "construction_drain_finding_units"):
+            if nonnegative(drain[key], key) != 0:
+                raise ValueError("construction qualification requires an empty captured watcher drain")
 
 
 def run_one(binary, root, manifest, mode, *, profiling=True, construction=None):
@@ -505,8 +531,10 @@ def main():
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--no-profile", action="store_true", help="disable optional profiling spans in measured workers")
     args = parser.parse_args()
-    if ("baseline" not in args.modes and "health-once-txn" not in args.modes) or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
+    if "baseline" not in args.modes or len(set(args.modes)) != len(args.modes) or len(set(args.sizes)) != len(args.sizes):
         parser.error("include one baseline and use unique modes and sizes")
+    if "health-once-txn" in args.modes and "health-once" not in args.modes:
+        parser.error("construction qualification requires legacy health-once alongside baseline")
     if ("health-once-txn" in args.modes) != bool(args.construction_groups):
         parser.error("health-once-txn requires explicit --construction-groups (and only that mode uses them)")
     if args.construction_groups and len(set(args.construction_groups)) != len(args.construction_groups):
@@ -553,6 +581,7 @@ def main():
                 sizes = args.sizes[repetition % len(args.sizes):] + args.sizes[:repetition % len(args.sizes)]
                 for size in sizes:
                     frozen, manifest = fixtures[size]
+                    round_results = []
                     for mode, group in modes:
                         label = mode if group is None else f"{mode}-g{group}"
                         root = (args.output / "work" / f"r{repetition}-n{size}-{label}").resolve()
@@ -561,6 +590,7 @@ def main():
                         if tree_digest(root / "vault") != manifest["tree_sha256"]:
                             raise ValueError("copied fixture changed")
                         result = run_one(binary, root, manifest, mode, profiling=not args.no_profile, construction=group)
+                        round_results.append(result)
                         digest = result["store"]["semantic_sha256"]
                         if references.setdefault(size, digest) != digest:
                             raise ValueError("staging changed the final index")
@@ -571,6 +601,8 @@ def main():
                                          "document_count": manifest["document_count"], **result})
                         milestones = {name: round(value / 1e9, 4) for name, value in result["checkpoint_boundaries_ns"].items()}
                         print(size, mode, round(result["ready"]["startup_complete_ns"] / 1e9, 3), milestones, "verified", flush=True)
+                    if "health-once-txn" in args.modes:
+                        compare_construction_round(round_results)
         if source_tree_digest(repo) != metadata["source_sha256"]:
             raise ValueError("source changed during measurement")
         metadata["completed"] = True

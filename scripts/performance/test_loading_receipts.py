@@ -109,7 +109,7 @@ class ReceiptChecks(unittest.TestCase):
 
     def test_cold_comparison_rejects_changed_identity_work_or_complete_answer(self):
         _, ready, _ = receipts()
-        result = dict(store=dict(semantic_sha256="logical", document_construction_sha256="identities"),
+        result = dict(store=dict(schema_version=3, source_sha256="source", semantic_sha256="logical", document_construction_sha256="identities"),
                       ready=ready, first_get=dict(normalized_answer={"all": "columns"}))
         reference = loading.cold_equivalence(result)
         for key in ["semantic_sha256", "document_construction_sha256"]:

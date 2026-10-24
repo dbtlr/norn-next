@@ -3,6 +3,53 @@
 use norn_store::{DerivationVersion, Store, StoredPathOrder};
 use norn_testkit::scratch::Scratch;
 
+/// The statement recorder is process-wide; run only this census in a bounded
+/// child, retaining its output and joining it before reporting any failure.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness-owned child output.
+fn isolated_census(test: &str) -> bool {
+    const CHILD: &str = "NORN_CONSTRUCTION_CENSUS_CHILD";
+    if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new(test)) {
+        return false;
+    }
+    let scratch = Scratch::new("construction-census-child");
+    let output_path = scratch.join("output.log");
+    let output = std::fs::File::create(&output_path).expect("census output");
+    let errors = output.try_clone().expect("census error output");
+    let mut child = std::process::Command::new(std::env::current_exe().expect("suite executable"))
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD, test)
+        .stdout(output)
+        .stderr(errors)
+        .spawn()
+        .expect("running the isolated statement census");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                child.wait().expect("joining the stopped census");
+                break Err(format!(
+                    "census exceeded its bound or wait failed: {result:?}"
+                ));
+            }
+        }
+    };
+    let output = std::fs::read_to_string(output_path).expect("reading census output");
+    assert!(
+        status.as_ref().is_ok_and(|status| status.success()),
+        "isolated census {test} failed: {status:?}\n{output}"
+    );
+    assert!(
+        output.contains(&format!("{test} census completed")),
+        "isolated child did not complete {test}:\n{output}"
+    );
+    true
+}
+
 fn open(scratch: &Scratch) -> Store {
     Store::open(
         scratch.join("store.sqlite3"),
@@ -213,7 +260,13 @@ fn document(id: usize) -> norn_store::DocumentFacts {
 }
 
 #[test]
+#[allow(clippy::disallowed_macros)] // Child completion proof for the parent harness.
 fn control_preserves_the_complete_sql_trace_and_group_receipts_match_sqlite_execution() {
+    if isolated_census(
+        "control_preserves_the_complete_sql_trace_and_group_receipts_match_sqlite_execution",
+    ) {
+        return;
+    }
     use norn_store::{Change, ContentModel, induced_failure};
     let mut control = None;
     for group in [None, Some(1), Some(16), Some(0)] {
@@ -281,6 +334,9 @@ fn control_preserves_the_complete_sql_trace_and_group_receipts_match_sqlite_exec
             .unwrap();
         store.verify_integrity().unwrap();
     }
+    println!(
+        "control_preserves_the_complete_sql_trace_and_group_receipts_match_sqlite_execution census completed"
+    );
 }
 
 #[test]
@@ -419,7 +475,13 @@ fn sqlite_full_keeps_marker_and_never_allows_an_autocommit_continuation() {
 }
 
 #[test]
+#[allow(clippy::disallowed_macros)] // Child completion proof for the parent harness.
 fn cleanup_units_preserve_sql_and_count_real_commits_separately_from_changesets() {
+    if isolated_census(
+        "cleanup_units_preserve_sql_and_count_real_commits_separately_from_changesets",
+    ) {
+        return;
+    }
     use norn_store::{DiscardScope, DocumentPath, induced_failure};
     use norn_wire::FindingKind;
     let mut legacy_sql = None;
@@ -485,4 +547,7 @@ fn cleanup_units_preserve_sql_and_count_real_commits_separately_from_changesets(
             .complete_startup_health_once()
             .unwrap();
     }
+    println!(
+        "cleanup_units_preserve_sql_and_count_real_commits_separately_from_changesets census completed"
+    );
 }

@@ -264,3 +264,100 @@ class ConstructionReceipts(unittest.TestCase):
                     work['construction_commits'] += 2
                     work.update(construction_commits_findings=1, construction_commits_cleanup=1)
             loading.validate_receipts('health-once-txn', stages, ready, manifest, construction=label)
+
+
+class ConstructionColdRounds(unittest.TestCase):
+    def result(self, mode, group=None):
+        return dict(mode=mode, construction_group=group,
+                    store=dict(schema_version=3, source_sha256='source',
+                               semantic_sha256='semantics', document_construction_sha256='identity'),
+                    first_get=dict(normalized_answer={'body': 'complete'}),
+                    ready=dict(startup_complete_ns=1,
+                               job_evidence={key: 10 for key in set(loading.ORDINARY_WORK + loading.WRITER_WORK)}),
+                    stages=[dict(construction_work={
+                        'construction_drain_changesets': 0,
+                        'construction_drain_cleanup_units': 0,
+                        'construction_drain_finding_units': 0})],
+                    checkpoint_boundaries_ns={})
+
+    def run_controller(self, modes, mutate=lambda results: None):
+        import json
+        import sys
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from fixture import tree_digest
+        from provenance import sha256
+        results = [self.result(mode, group) for mode in modes
+                   for group in (['1', '16', 'unbounded'] if mode == 'health-once-txn' else [None])]
+        # Ordinary eager health does different work, and must not be compared
+        # with the deferred-health writer account.
+        for result in results:
+            if result['mode'] == 'baseline':
+                result['ready']['job_evidence']['links_redecided'] = 99
+        mutate(results)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / 'fixtures' / '300'
+            (fixture / 'vault').mkdir(parents=True)
+            (fixture / 'manifest.json').write_text(json.dumps(dict(
+                tree_sha256=tree_digest(fixture / 'vault'), document_count=314)))
+            binary = root / 'binary'
+            binary.write_bytes(b'debug-test-double')
+            argv = ['loading.py', '--build', str(root / 'build.json'),
+                    '--fixtures', str(root / 'fixtures'), '--output', str(root / 'out'),
+                    '--sizes', '300', '--modes', *modes, '--repetitions', '1', '--no-profile']
+            if 'health-once-txn' in modes:
+                argv += ['--construction-groups', '1', '16', 'unbounded']
+            with patch.object(sys, 'argv', argv), patch('loading.verify_build', return_value=dict(
+                    features=['induced-failure'], executable=str(binary), sha256=sha256(binary))), \
+                 patch('loading.source_tree_digest', return_value='pinned'), \
+                 patch('loading.run_one', side_effect=results):
+                loading.main()
+            self.assertTrue(json.loads((root / 'out' / 'run.json').read_text())['completed'])
+
+    def test_controller_requires_both_independent_references_for_transaction_qualification(self):
+        for modes in [['health-once-txn'], ['baseline', 'health-once-txn'],
+                      ['health-once', 'health-once-txn']]:
+            with self.subTest(modes=modes), self.assertRaises(SystemExit):
+                self.run_controller(modes)
+
+    def test_controller_accepts_references_before_or_after_transaction_block_and_plain_baseline(self):
+        for modes in [['baseline'], ['baseline', 'layered'], ['baseline', 'health-once'],
+                      ['baseline', 'health-once', 'health-once-txn'],
+                      ['health-once-txn', 'baseline', 'health-once']]:
+            with self.subTest(modes=modes):
+                self.run_controller(modes)
+
+    def test_controller_rejects_shared_group_deviations_from_independent_references(self):
+        import copy
+        changes = [('schema_version', 4), ('source_sha256', 'other-source'),
+                   ('semantic_sha256', 'other-semantics'),
+                   ('document_construction_sha256', 'other-identity'),
+                   ('whole_get', {'body': 'truncated'})]
+        changes += [(key, 11) for key in set(loading.ORDINARY_WORK + loading.WRITER_WORK)]
+        for modes in [['baseline', 'health-once', 'health-once-txn'],
+                      ['health-once-txn', 'baseline', 'health-once']]:
+            for key, value in changes:
+                def mutate(results):
+                    for result in results:
+                        if result['mode'] != 'health-once-txn':
+                            continue
+                        if key == 'whole_get':
+                            result['first_get']['normalized_answer'] = copy.deepcopy(value)
+                        elif key in result['store']:
+                            result['store'][key] = value
+                        else:
+                            result['ready']['job_evidence'][key] = value
+                with self.subTest(modes=modes, key=key), self.assertRaises(ValueError):
+                    self.run_controller(modes, mutate)
+
+    def test_controller_rejects_nonempty_captured_drain_for_any_group(self):
+        for group in ['1', '16', 'unbounded']:
+            for key in ['construction_drain_changesets', 'construction_drain_cleanup_units',
+                        'construction_drain_finding_units']:
+                def mutate(results):
+                    result = next(r for r in results if r['construction_group'] == group)
+                    result['stages'][-1]['construction_work'][key] = 1
+                with self.subTest(group=group, key=key), self.assertRaises(ValueError):
+                    self.run_controller(['baseline', 'health-once', 'health-once-txn'], mutate)
