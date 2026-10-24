@@ -142,21 +142,19 @@ pub fn run_prefix_helper(
     }
     let mut cleanup = Vec::new();
     // The observer checkpoint is evidence only, never the successful terminal.
-    if cause.is_none() {
-        if let Err(error) = experiment.observer.prefix_retired() {
-            cause = Some(HelperCause::Operation(JobFailure::Environmental(error)));
-        }
-    }
-    // Same order as ordinary release, with errors preserved for this owner.
-    if let Some(subscription) = attachment.subscription.take()
-        && let Err(error) = subscription.close_joined()
+    if cause.is_none()
+        && let Err(error) = experiment.observer.prefix_retired()
     {
-        cleanup.push(error.to_string());
+        cause = Some(HelperCause::Operation(JobFailure::Environmental(error)));
     }
-    if let Err(error) = attachment.store.close() {
-        cleanup.push(error.to_string());
-    }
-    drop(attachment.maintainership);
+    cleanup.extend(super::super::release_owned(attachment, |subscription| {
+        if let Some(subscription) = subscription {
+            subscription
+                .close_joined()
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }));
     ops.readers.trim(std::time::Instant::now());
     let budget = ops.readers.census();
     if budget.live_connections != 0 || budget.waiting_reads != 0 {

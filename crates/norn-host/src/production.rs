@@ -1599,9 +1599,24 @@ fn settled(
 /// reaches a drop instead of this call still gives its resources back the same
 /// way round.
 fn release(attachment: ProductionAttachment) {
-    drop(attachment.subscription);
-    let _ = attachment.store.close();
+    let _ = release_owned(attachment, |subscription| {
+        drop(subscription);
+        Ok(())
+    });
+}
+
+fn release_owned(
+    attachment: ProductionAttachment,
+    close_subscription: impl FnOnce(Option<Subscription>) -> Result<(), String>,
+) -> Vec<String> {
+    let watcher = close_subscription(attachment.subscription);
+    let store = attachment.store.close();
     drop(attachment.maintainership);
+    watcher
+        .err()
+        .into_iter()
+        .chain(store.err().map(|error| error.to_string()))
+        .collect()
 }
 
 /// The roots inside a vault a walk of it does not read: staged shadows wherever
@@ -5247,8 +5262,8 @@ mod tests {
     }
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
-    /// this file states that twice: [`release`] hands the resources back in
-    /// order, and the field declarations decide the order a *dropped*
+    /// this file states that twice: [`release_owned`] hands the resources back
+    /// in order, and the field declarations decide the order a *dropped*
     /// attachment hands them back in. Both orders are read here off this file's
     /// own source and held equal.
     ///
@@ -5273,13 +5288,13 @@ mod tests {
             "the fields of `ProductionAttachment`, which drop in declaration order,",
         );
         assert_ascending(
-            section(SOURCE, "fn release(attachment: ProductionAttachment) {"),
+            section(SOURCE, "fn release_owned("),
             &[
                 "attachment.subscription",
                 "attachment.store",
                 "attachment.maintainership",
             ],
-            "the body of `release`",
+            "the shared body of `release_owned`",
         );
     }
 

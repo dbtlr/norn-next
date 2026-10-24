@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[allow(clippy::disallowed_macros)] // Private machine-consumed lifecycle transcript.
+fn emit(value: Value) {
+    println!("HELPER {value}");
+}
+
 fn query(address: &VaultAddress) -> FindParams {
     FindParams::new(address.clone())
         .with_limit(25)
@@ -69,19 +74,24 @@ fn files(root: &Path) -> Vec<PathBuf> {
 }
 fn source(root: &Path) -> Vec<(PathBuf, Vec<u8>, u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    files(root)
-        .into_iter()
-        .map(|path| {
-            let metadata = std::fs::metadata(&path).unwrap();
-            let bytes = std::fs::read(&path).unwrap();
-            (
-                path.strip_prefix(root).unwrap().to_owned(),
-                bytes,
-                metadata.dev(),
-                metadata.ino(),
-            )
-        })
-        .collect()
+    let root_identity = std::fs::metadata(root).unwrap();
+    std::iter::once((
+        PathBuf::new(),
+        Vec::new(),
+        root_identity.dev(),
+        root_identity.ino(),
+    ))
+    .chain(files(root).into_iter().map(|path| {
+        let metadata = std::fs::metadata(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        (
+            path.strip_prefix(root).unwrap().to_owned(),
+            bytes,
+            metadata.dev(),
+            metadata.ino(),
+        )
+    }))
+    .collect()
 }
 fn assert_no_projection(root: &Path) {
     for path in files(root) {
@@ -102,6 +112,9 @@ struct Transcript {
     get: Mutex<Option<Value>>,
     find: Mutex<Option<Value>>,
     unsupported_find: bool,
+    fail_prefix_load: bool,
+    duplicate_catalogue: bool,
+    invalidate_at_retirement: Option<Arc<FrozenInput>>,
     held: Mutex<Option<norn_store::Snapshot>>,
     retained_reader: Mutex<Option<Arc<SnapshotReader>>>,
     hold: bool,
@@ -118,6 +131,9 @@ impl Transcript {
             get: Mutex::new(None),
             find: Mutex::new(None),
             unsupported_find: false,
+            fail_prefix_load: false,
+            duplicate_catalogue: false,
+            invalidate_at_retirement: None,
             held: Mutex::new(None),
             retained_reader: Mutex::new(None),
             hold: false,
@@ -130,10 +146,7 @@ impl Transcript {
     fn acknowledge(&self, sequence: u8, receipt: &Value) -> Result<(), String> {
         if let Some(control) = &self.ack {
             use std::io::Write;
-            println!(
-                "HELPER {}",
-                json!({"event":"response","sequence":sequence,"receipt":receipt})
-            );
+            emit(json!({"event":"response","sequence":sequence,"receipt":receipt}));
             std::io::stdout().flush().map_err(|e| e.to_string())?;
             let mut ack = String::new();
             if std::io::stdin()
@@ -155,6 +168,29 @@ impl Transcript {
     }
 }
 impl Observer for Transcript {
+    fn catalogue_replay(
+        &self,
+        path: &Path,
+        catalogue: &mut Catalogue,
+        model: &ContentModel,
+    ) -> Result<(), String> {
+        if self.duplicate_catalogue && path == Path::new("first.md") {
+            catalogue
+                .record_document(
+                    &norn_store::DocumentPath::new("first.md").unwrap(),
+                    model.ambiguity_ignore(),
+                )
+                .unwrap();
+        }
+        Ok(())
+    }
+    fn prefix_loaded(&self, _: &str) -> Result<(), String> {
+        if self.fail_prefix_load {
+            Err("injected prefix load failure".into())
+        } else {
+            Ok(())
+        }
+    }
     fn canonical_work(
         &self,
         _: &std::collections::BTreeMap<&'static str, u64>,
@@ -190,6 +226,10 @@ impl Observer for Transcript {
                 .unwrap();
         assert!(gotten.unsatisfied.is_empty());
         assert_eq!(gotten.snapshot.epoch, snapshot.reading().epoch());
+        assert_eq!(
+            gotten.snapshot.generation as i64,
+            snapshot.reading().write_generation()
+        );
         let receipt = json!({"report":gotten.report,"snapshot":gotten.snapshot,"unsatisfied":gotten.unsatisfied});
         *self.get.lock().unwrap() = Some(receipt.clone());
         if self.hold {
@@ -211,6 +251,7 @@ impl Observer for Transcript {
         let mut attempt = reader.find(&params);
         let answer = attempt.answer.take().map(|found| {
             assert_eq!(found.snapshot.epoch, attempt.reading.as_ref().unwrap().epoch());
+            assert_eq!(found.snapshot.generation as i64, attempt.reading.as_ref().unwrap().write_generation());
             if let Some(cursor) = &found.next { assert_eq!(cursor.snapshot(), &found.snapshot); }
             let snapshot = found.snapshot.clone();
             let (unsatisfied, advisories, report) = found.into_report();
@@ -230,6 +271,9 @@ impl Observer for Transcript {
         self.acknowledge(2, &receipt)
     }
     fn prefix_retired(&self) -> Result<(), String> {
+        if let Some(frozen) = &self.invalidate_at_retirement {
+            frozen.invalidate();
+        }
         if let Some(path) = self.retired_path.lock().unwrap().as_ref() {
             assert!(
                 !path.exists(),
@@ -369,14 +413,75 @@ fn actual_retired_path_residue_prevents_success_and_initial_marker_stays() {
             .cause,
         HelperCause::Ineligible
     ));
-    let error = norn_store::Store::open(
+    let error = match norn_store::Store::open(
         vault.database(),
         norn_store::StoredPathOrder::Sensitive,
         norn_host::DERIVATION_VERSION,
-    )
-    .err()
-    .expect("helper namespace remains incomplete");
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("helper namespace remains incomplete"),
+    };
     assert!(error.to_string().contains("incomplete"), "{error}");
+}
+
+#[test]
+fn storage_and_preparation_failures_are_not_expected_find_declines() {
+    for duplicate_catalogue in [false, true] {
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 2, true);
+        let mut probe = Transcript::new(&vault);
+        probe.duplicate_catalogue = duplicate_catalogue;
+        probe.fail_prefix_load = !duplicate_catalogue;
+        let probe = Arc::new(probe);
+        let failure = vault
+            .prefix_helper(&experiment(probe.clone(), "first"), &Default::default())
+            .unwrap_err();
+        assert!(
+            matches!(failure.cause, HelperCause::Operation(_)),
+            "{failure:?}"
+        );
+        if !duplicate_catalogue {
+            let attempt = probe.find.lock().unwrap();
+            let attempt = attempt.as_ref().unwrap();
+            assert!(attempt["answer"].is_null());
+            assert_eq!(attempt["query_executed"], false);
+        }
+        assert_no_projection(scratch.root());
+    }
+}
+
+#[test]
+fn invalidation_at_the_retirement_callback_cannot_claim_completion() {
+    let scratch = scratch();
+    let vault = fixture(scratch.root(), 2, true);
+    let frozen = FrozenInput::assume_immutable();
+    let mut probe = Transcript::new(&vault);
+    probe.invalidate_at_retirement = Some(frozen.clone());
+    let experiment = Experiment::capped_prefix_frozen("first", Arc::new(probe), frozen);
+    let failure = vault
+        .prefix_helper(&experiment, &Default::default())
+        .unwrap_err();
+    assert!(matches!(failure.cause, HelperCause::SourceChanged));
+    assert_no_projection(scratch.root());
+}
+
+#[cfg(target_os = "linux")]
+fn descriptors() -> Vec<PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .collect();
+    paths.sort();
+    paths
+}
+#[cfg(target_os = "linux")]
+fn threads() -> Vec<std::ffi::OsString> {
+    let mut threads: Vec<_> = std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    threads.sort();
+    threads
 }
 
 #[test]
@@ -386,7 +491,10 @@ fn native_helper_worker() {
     let root = PathBuf::from(std::env::var_os("NORN_PREFIX_HELPER_FIXTURE").unwrap());
     let vault = attach::Vault::adopt(&root).beside(&root.join("helper-machine"));
     let control = Arc::new(HelperControl::default());
+    let descriptors_before = descriptors();
+    let threads_before = threads();
     let mut probe = Transcript::new(&vault);
+    probe.unsupported_find = std::env::var_os("NORN_PREFIX_HELPER_UNSUPPORTED_FIND").is_some();
     probe.ack = Some(control.clone());
     let result = vault.prefix_helper(&experiment(Arc::new(probe), "first"), &control);
     let fds: Vec<_> = std::fs::read_dir("/proc/self/fd")
@@ -407,19 +515,27 @@ fn native_helper_worker() {
         })
         .collect();
     assert!(fds.is_empty(), "owned descriptors survive: {fds:?}");
+    assert_eq!(
+        descriptors(),
+        descriptors_before,
+        "all descriptors return to the pre-helper census, including anonymous scratch"
+    );
+    assert_eq!(
+        threads(),
+        threads_before,
+        "all native helper threads joined"
+    );
     assert!(
         children.is_empty(),
         "owned descendant survives: {children:?}"
     );
     match result {
-        Ok(completed) => println!(
-            "HELPER {}",
-            json!({"event":"complete","retired_paths":completed.retired_paths(),"live":completed.budget().live_connections,"waiting":completed.budget().waiting_reads,"owned_fds":fds,"children":children,"global_ready":false})
+        Ok(completed) => emit(
+            json!({"event":"complete","retired_paths":completed.retired_paths(),"live":completed.budget().live_connections,"waiting":completed.budget().waiting_reads,"owned_fds":fds,"children":children,"descriptor_census_restored":true,"thread_census_restored":true,"global_ready":false}),
         ),
         Err(failure) => {
-            println!(
-                "HELPER {}",
-                json!({"event":"failed","cause":format!("{:?}",failure.cause),"cleanup":failure.cleanup})
+            emit(
+                json!({"event":"failed","cause":format!("{:?}",failure.cause),"cleanup":failure.cleanup}),
             );
             panic!("helper failed");
         }
@@ -436,8 +552,15 @@ struct Child {
 #[cfg(target_os = "linux")]
 impl Child {
     fn spawn(root: &Path) -> Self {
+        Self::spawn_with_find(root, false)
+    }
+    fn spawn_with_find(root: &Path, unsupported: bool) -> Self {
         use std::io::BufRead;
-        let mut process = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        if unsupported {
+            command.env("NORN_PREFIX_HELPER_UNSUPPORTED_FIND", "1");
+        }
+        let mut process = command
             .args([
                 "--exact",
                 "native_helper_worker",
@@ -599,6 +722,14 @@ fn native_exit_then_fresh_ordinary_attach_preserves_whole_answers_and_source_ide
         early_cursor.snapshot().schema_fingerprint,
         canonical_cursor.snapshot().schema_fingerprint
     );
+    assert_eq!(
+        early_cursor.snapshot().sidecar_revision,
+        canonical_cursor.snapshot().sidecar_revision
+    );
+    assert_ne!(
+        get["receipt"]["snapshot"]["epoch"],
+        json!(canonical_cursor.snapshot().epoch)
+    );
     // Provenance is asserted separately; only its independent epochs/generations differ.
     early_find["page"]["next"] = Value::Null;
     canonical_find["page"]["next"] = Value::Null;
@@ -606,6 +737,34 @@ fn native_exit_then_fresh_ordinary_attach_preserves_whole_answers_and_source_ide
     drop(demand);
     drop(host);
     assert_eq!(source(vault.path()), before);
+    eprintln!(
+        "ordinary_attach_after_native_exit=true; source_bytes_and_root_file_inodes_preserved=true; source_files=315; helper_and_owner_state_separate=true"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_sql_and_non_sql_find_declines_exit_zero_after_real_retirement() {
+    for unsupported in [false, true] {
+        let scratch = scratch();
+        let vault = fixture(scratch.root(), 314, false);
+        let before = source(vault.path());
+        let mut child = Child::spawn_with_find(scratch.root(), unsupported);
+        assert_eq!(child.next()["sequence"], 1);
+        child.ack("ack-1");
+        let find = child.next();
+        assert_eq!(find["sequence"], 2);
+        assert!(find["receipt"]["answer"].is_null());
+        assert_eq!(find["receipt"]["query_executed"], !unsupported);
+        child.ack("ack-2");
+        let terminal = child.next();
+        assert_eq!(terminal["event"], "complete");
+        assert_eq!(terminal["descriptor_census_restored"], true);
+        assert_eq!(terminal["thread_census_restored"], true);
+        child.finish(true);
+        assert_no_projection(scratch.root());
+        assert_eq!(source(vault.path()), before);
+    }
 }
 
 #[test]

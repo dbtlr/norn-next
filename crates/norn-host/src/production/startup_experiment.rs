@@ -56,7 +56,7 @@ pub trait Observer: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-    /// Capped resources have been retired and dropped, before ordinary heal starts.
+    /// Capped scopes have retired, before ordinary heal or private helper teardown.
     fn prefix_retired(&self) -> Result<(), String> {
         Ok(())
     }
