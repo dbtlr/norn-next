@@ -594,31 +594,7 @@ fn check_residency_reporter(cell: &str) {
     drop(reports);
     drop(demand);
     drop(host);
-    assert!(
-        !scratch
-            .root()
-            .join("data")
-            .join("canonical-intake")
-            .exists()
-    );
-    // Check real storage residue, rather than relying on the observer's claims.
-    fn no_intake_files(path: &std::path::Path) {
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                no_intake_files(&path);
-            } else {
-                assert!(
-                    !path
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with("intake-")
-                );
-            }
-        }
-    }
-    no_intake_files(scratch.root());
+    no_projection_files(scratch.root());
 }
 
 #[cfg(target_os = "linux")]
@@ -1057,9 +1033,14 @@ fn check_operator_prefix() {
         vault.name().clone(),
         scratch.root().to_path_buf(),
     ));
+    let witness = Arc::new(PrefixWitness {
+        observer: observer.clone(),
+        reader: Mutex::new(std::sync::Weak::new()),
+        intake: Mutex::new(std::sync::Weak::new()),
+    });
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::canonical_intake("small", observer.clone()),
+        Experiment::canonical_intake("small", witness.clone()),
     );
     let demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1073,6 +1054,21 @@ fn check_operator_prefix() {
             );
             assert_eq!(row["operator_prefix_sequence"], index + 1);
             assert_eq!(row["global_ready"], false);
+            if index == 0 {
+                // production reader + retire guard; the observer's Arc must be gone.
+                settle(
+                    || witness.reader.lock().unwrap().strong_count(),
+                    2,
+                    "SnapshotReader",
+                );
+            } else {
+                // production Projection only; the observer's Arc must be gone.
+                settle(
+                    || witness.intake.lock().unwrap().strong_count(),
+                    1,
+                    "IntakeReader",
+                );
+            }
             let ack = serde_json::json!({"sequence":index+1,"probe":row["probe"]});
             std::fs::write(
                 scratch.join(format!("operator-prefix-acks/{}.json", index + 1)),
@@ -1127,8 +1123,19 @@ fn check_operator_prefix() {
             .unwrap()
             .contains_key("tombstones_recorded")
     );
+    assert_eq!(
+        witness.intake.lock().unwrap().strong_count(),
+        0,
+        "intake survived Ready"
+    );
+    assert_eq!(
+        witness.reader.lock().unwrap().strong_count(),
+        0,
+        "demand reader survived Ready"
+    );
     drop(demand);
     drop(host);
+    no_projection_files(scratch.root());
     vault.store().verify_integrity().unwrap();
     let audit = norn_store::startup_audit::audit(&vault.database(), |_, _, _| Ok(())).unwrap();
     let ordinary = vault.beside(&scratch.join("ordinary"));
@@ -1206,19 +1213,76 @@ fn check_operator_prefix_refused_ack() {
     }
     drop(demand);
     drop(host);
-    fn no_projection_files(path: &std::path::Path) {
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                no_projection_files(&path);
-            } else {
-                let name = path.file_name().unwrap().to_string_lossy();
-                assert!(
-                    !name.starts_with("demand-") && !name.starts_with("intake-"),
-                    "projection residue: {name}"
-                );
-            }
+    no_projection_files(scratch.root());
+}
+
+#[cfg(target_os = "linux")]
+struct PrefixWitness {
+    observer: Arc<staged::OperatorPrefix>,
+    reader: Mutex<std::sync::Weak<SnapshotReader>>,
+    intake: Mutex<std::sync::Weak<norn_host::startup_experiment::IntakeReader>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Observer for PrefixWitness {
+    fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
+        self.observer.catalogue(catalogue, model)
+    }
+    fn declined(&self, reason: &str) -> Result<(), String> {
+        self.observer.declined(reason)
+    }
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        self.observer.canonical_work(work)
+    }
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        if stage == Stage::CanonicalDemand {
+            *self.reader.lock().unwrap() = Arc::downgrade(&reader);
+        }
+        self.observer.indexed(stage, reader, model)
+    }
+    fn intake(
+        &self,
+        reader: Arc<norn_host::startup_experiment::IntakeReader>,
+    ) -> Result<(), String> {
+        *self.intake.lock().unwrap() = Arc::downgrade(&reader);
+        self.observer.intake(reader)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn settle(count: impl Fn() -> usize, expected: usize, what: &str) {
+    // The row is emitted before the observer drops; it must settle before its ack is written.
+    let until = Instant::now() + Duration::from_secs(2);
+    while count() != expected {
+        assert!(
+            Instant::now() < until,
+            "{what} still {} before ack",
+            count()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn no_projection_files(path: &std::path::Path) {
+    for entry in std::fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            no_projection_files(&path);
+        } else {
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.starts_with("demand-") && !name.starts_with("intake-"),
+                "projection residue: {name}"
+            );
         }
     }
-    no_projection_files(scratch.root());
 }
