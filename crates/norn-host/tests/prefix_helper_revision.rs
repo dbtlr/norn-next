@@ -111,6 +111,7 @@ impl Observer for Probe {
         {
             let write_to = self.via_link.as_ref().unwrap_or(target);
             use std::io::Write;
+            #[allow(clippy::disallowed_types)] // Probe writes through the outside-tree hard link.
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
@@ -287,7 +288,7 @@ fn cancellation_never_masks_an_operation_observed_before_or_after_it() {
                 "probe: injected prefix load failure".into()
             ))
         );
-        assert_eq!(failure.secondary, [HelperCause::Cancelled]);
+        assert_eq!(failure.secondary.as_ref(), [HelperCause::Cancelled]);
     }
 }
 

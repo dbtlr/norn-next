@@ -989,7 +989,13 @@ fn review_existing_nonempty_wrong_derivation_store_must_refuse_fresh_helper() {
         "preexisting state must not be rebuilt"
     );
     assert!(
-        matches!(result, Err(_)),
+        matches!(
+            result,
+            Err(norn_host::startup_experiment::HelperFailure {
+                cause: HelperCause::Ineligible,
+                ..
+            })
+        ),
         "a preexisting nonempty namespace must not satisfy fresh-helper admission"
     );
 }

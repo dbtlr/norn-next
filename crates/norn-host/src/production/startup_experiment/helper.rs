@@ -34,8 +34,8 @@ pub enum HelperCause {
 #[derive(Debug)]
 pub struct HelperFailure {
     pub cause: HelperCause,
-    pub secondary: Vec<HelperCause>,
-    pub cleanup: Vec<String>,
+    pub secondary: Box<[HelperCause]>,
+    pub cleanup: Box<[String]>,
 }
 
 /// The ACK transport owns waking a blocked callback before cancelling its run.
@@ -63,8 +63,8 @@ pub fn run_prefix_helper(
 ) -> Result<HelperComplete, HelperFailure> {
     let fail = |cause| HelperFailure {
         cause,
-        secondary: Vec::new(),
-        cleanup: Vec::new(),
+        secondary: Box::default(),
+        cleanup: Box::default(),
     };
     let Some(frozen) = &experiment.frozen_prefix else {
         return Err(fail(HelperCause::Ineligible));
@@ -224,8 +224,8 @@ pub fn run_prefix_helper(
         let cause = causes.remove(0);
         return Err(HelperFailure {
             cause,
-            secondary: causes,
-            cleanup,
+            secondary: causes.into_boxed_slice(),
+            cleanup: cleanup.into_boxed_slice(),
         });
     }
     Ok(HelperComplete {
