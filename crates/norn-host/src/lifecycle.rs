@@ -648,7 +648,7 @@ pub struct ProgressReporter<A: SnapshotSource> {
 }
 
 impl<A: SnapshotSource> ProgressReporter<A> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) fn disconnected() -> Self {
         Self {
             entry: std::sync::Weak::new(),

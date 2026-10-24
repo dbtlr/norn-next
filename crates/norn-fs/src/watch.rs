@@ -840,8 +840,13 @@ fn publish_control(control: &Arc<(Mutex<SubscriptionState>, Condvar)>, next: Sub
     }
 }
 
-impl Drop for Subscription {
-    fn drop(&mut self) {
+impl Subscription {
+    #[cfg(feature = "induced-failure")]
+    pub fn close_joined(mut self) -> Result<(), WatchError> {
+        self.close_owned()
+    }
+
+    fn close_owned(&mut self) -> Result<(), WatchError> {
         self.watcher.take();
         // Disconnect the delivery slot before joining the worker. A terminal
         // send blocked on the full slot fails, and a coalescer holding a batch,
@@ -857,8 +862,17 @@ impl Drop for Subscription {
         }
         self.wake.take();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            worker
+                .join()
+                .map_err(|_| WatchError::Backend("watcher worker panicked while joining".into()))?;
         }
+        Ok(())
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _ = self.close_owned();
     }
 }
 

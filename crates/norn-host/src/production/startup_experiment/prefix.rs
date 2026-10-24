@@ -153,6 +153,11 @@ impl PrefixReader {
     }
 }
 
+pub(super) struct PrefixEnd {
+    pub check: Option<norn_store::startup_experiment::RetirementCheck>,
+    pub failure: Option<JobFailure>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     attachment: &mut ProductionAttachment,
@@ -166,7 +171,7 @@ pub(super) fn run(
     invalid: Option<String>,
     catalogue_replayed: u64,
     catalogue_document_candidates: u64,
-) -> Result<(), JobFailure> {
+) -> Result<PrefixEnd, JobFailure> {
     let _timing = norn_store::profiling::span("startup.capped_prefix");
     let before = crate::evidence::startup_writer_work();
     let mut capability = PrefixReader {
@@ -184,6 +189,7 @@ pub(super) fn run(
     if !frozen.intact() {
         capability.certificate.invalid = Some("frozen-input certificate broken".into());
     }
+    let mut failure = None;
     if capability.certificate.invalid.is_none() {
         let prepared = prepare(
             attachment,
@@ -197,6 +203,7 @@ pub(super) fn run(
         if let Err(error) = prepared {
             capability.certificate.invalid =
                 Some(format!("prefix preparation declined: {error:?}"));
+            failure = Some(error);
         }
     }
     capability.certificate.writer_work = crate::evidence::startup_writer_work()
@@ -209,8 +216,12 @@ pub(super) fn run(
         .map_err(JobFailure::Environmental)?;
     // Retirement is outside all budget bookkeeping locks. Active snapshots keep
     // their ordinary owner; there is no forced close or OS-release guarantee.
+    let check = capability
+        .reader
+        .as_ref()
+        .and_then(|reader| reader.retirement_check());
     drop(capability);
-    Ok(())
+    Ok(PrefixEnd { check, failure })
 }
 
 fn prepare(

@@ -650,3 +650,6 @@ pub use intake::{IntakeReader, IntakeRefusal, IntakeSnapshot};
 
 mod prefix;
 pub use prefix::{FrozenInput, PrefixAttempt, PrefixCertificate, PrefixReader};
+
+mod helper;
+pub use helper::{HelperCause, HelperComplete, HelperControl, HelperFailure, run_prefix_helper};

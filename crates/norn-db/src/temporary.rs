@@ -70,7 +70,62 @@ impl std::fmt::Display for TemporaryReadError {
 
 impl std::error::Error for TemporaryReadError {}
 
+/// Non-owning evidence: successful drop must close owners and remove actual paths.
+#[cfg(feature = "induced-failure")]
+#[derive(Debug)]
+pub struct RetirementCheck {
+    owner: Option<std::sync::Weak<TemporaryFile>>,
+    paths: Vec<PathBuf>,
+}
+
+#[cfg(feature = "induced-failure")]
+impl RetirementCheck {
+    pub(crate) fn database(path: &Path) -> Self {
+        let paths = crate::database::database_paths(path).into();
+        Self { owner: None, paths }
+    }
+
+    /// This observes cleanup; it never deletes residue or closes a live owner.
+    #[allow(clippy::disallowed_methods)] // File lifecycle evidence belongs to the substrate.
+    pub fn verify(&self) -> Result<&[PathBuf], DbError> {
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.strong_count() != 0)
+        {
+            return Err(DbError::Lifecycle {
+                operation: "verifying disposable retirement",
+                path: self.paths[0].clone(),
+                message: "a disposable file still has an owner".into(),
+            });
+        }
+        for path in &self.paths {
+            match fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => {
+                    return Err(file_error("verifying disposable retirement", path, error));
+                }
+                Ok(_) => {
+                    return Err(DbError::Lifecycle {
+                        operation: "verifying disposable retirement",
+                        path: path.clone(),
+                        message: "disposable storage remains after retirement".into(),
+                    });
+                }
+            }
+        }
+        Ok(&self.paths)
+    }
+}
+
 impl TemporaryFile {
+    #[cfg(feature = "induced-failure")]
+    pub fn retirement_check(self: &Arc<Self>) -> RetirementCheck {
+        let mut check = RetirementCheck::database(&self.path);
+        check.owner = Some(Arc::downgrade(self));
+        check
+    }
+
     /// Experimental immutable source reads retain the ordinary snapshot seal.
     #[cfg(feature = "induced-failure")]
     pub fn open_snapshot(self: &Arc<Self>) -> Result<crate::Database, TemporaryReadError> {

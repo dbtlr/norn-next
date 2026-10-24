@@ -17,9 +17,81 @@ pub(super) fn run(
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
     let root = attachment.covered_root.clone();
+    let PrefixPhase { model, .. } = prepare_prefix(attachment, exclusions, policy, experiment)?;
+    let intake = if experiment.intake {
+        Some(super::intake::prepare(
+            attachment, exclusions, policy, experiment, &model,
+        )?)
+    } else {
+        None
+    };
+    if experiment.frozen_prefix.is_some() {
+        experiment
+            .observer
+            .prefix_retired()
+            .map_err(JobFailure::Environmental)?;
+    }
+    let before = crate::evidence::startup_writer_work();
+    {
+        let _timing = norn_store::profiling::span("startup.canonical_heal");
+        // No priority writes, alternate packing, health deferral, or pragma
+        // changes ever reach this store. This is the ordinary attach's call.
+        attachment.skipped_links = super::super::heal_documents(
+            &mut attachment.store,
+            &root,
+            exclusions,
+            policy,
+            progress,
+        )?;
+    }
+    let work = crate::evidence::startup_writer_work()
+        .into_iter()
+        .map(|(key, value)| {
+            value
+                .checked_sub(before[key])
+                .map(|delta| (key, delta))
+                .ok_or_else(|| {
+                    JobFailure::Environmental(format!("ordinary writer counter decreased: {key}"))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    experiment
+        .observer
+        .canonical_work(&work)
+        .map_err(JobFailure::Environmental)?;
+    // Close new acquisitions before the host can publish its ordinary reader.
+    // Existing snapshots retain their normal connection/descriptor lifetime.
+    if let Some(intake) = intake {
+        intake.close()?;
+    }
+    let reader = Arc::new(attachment.store.reader_pool(&attachment.readers));
+    let _retire = RetireReader(reader.clone());
+    notify(experiment, Stage::CanonicalHealth, &reader, &model)
+}
+
+pub(super) struct PrefixPhase {
+    pub model: Arc<ContentModel>,
+    pub demand_served: bool,
+    pub demand_reader: std::sync::Weak<SnapshotReader>,
+    pub checks: Vec<norn_store::startup_experiment::RetirementCheck>,
+    pub prefix_failure: Option<JobFailure>,
+}
+
+/// Both continuations consume this scope before healing or stopping.
+pub(super) fn prepare_prefix(
+    attachment: &mut ProductionAttachment,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    experiment: &Experiment,
+) -> Result<PrefixPhase, JobFailure> {
+    let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
     let declared = Declaration::read(&mut attachment.store)?;
     let model = Arc::clone(declared.model.shared_content_model());
+    let mut demand_served = false;
+    let mut checks = Vec::new();
+    let mut demand_reader = std::sync::Weak::new();
+    let mut prefix_failure = None;
     {
         let mut catalogue_decline = None;
         let mut catalogue_replayed = 0_u64;
@@ -27,6 +99,7 @@ pub(super) fn run(
         let timing = norn_store::profiling::span("startup.catalogue");
         let directory = attachment.shadows.directory().join("canonical-demand");
         let mut catalogue = Catalogue::open(&directory).map_err(store_effect)?;
+        checks.push(catalogue.retirement_check());
         let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
         loop {
             let page = inventory.advance(policy.store_page_size).map_err(effect)?;
@@ -87,6 +160,7 @@ pub(super) fn run(
             crate::DERIVATION_VERSION,
         )
         .map_err(store_effect)?;
+        checks.push(projection.retirement_check());
         if let Some(pin) = attachment
             .store
             .begin_request()
@@ -133,9 +207,11 @@ pub(super) fn run(
             })
         {
             let reader = Arc::new(projection.reader_pool(&attachment.readers));
+            demand_reader = Arc::downgrade(&reader);
             let _retire = RetireReader(reader.clone());
             if requested_class_exists(&reader, &model, &experiment.get_target)? && frozen_valid() {
                 notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
+                demand_served = true;
             } else {
                 experiment
                     .observer
@@ -148,7 +224,7 @@ pub(super) fn run(
         projection.close().map_err(store_effect)?;
         if let Some(frozen) = &experiment.frozen_prefix {
             // Get's observer has returned (including its ACK) before this index exists.
-            super::prefix::run(
+            let ended = super::prefix::run(
                 attachment,
                 exclusions,
                 policy,
@@ -161,57 +237,17 @@ pub(super) fn run(
                 catalogue_replayed,
                 catalogue_document_candidates,
             )?;
+            checks.extend(ended.check);
+            prefix_failure = ended.failure;
         }
     }
-    let intake = if experiment.intake {
-        Some(super::intake::prepare(
-            attachment, exclusions, policy, experiment, &model,
-        )?)
-    } else {
-        None
-    };
-    if experiment.frozen_prefix.is_some() {
-        experiment
-            .observer
-            .prefix_retired()
-            .map_err(JobFailure::Environmental)?;
-    }
-    let before = crate::evidence::startup_writer_work();
-    {
-        let _timing = norn_store::profiling::span("startup.canonical_heal");
-        // No priority writes, alternate packing, health deferral, or pragma
-        // changes ever reach this store. This is the ordinary attach's call.
-        attachment.skipped_links = super::super::heal_documents(
-            &mut attachment.store,
-            &root,
-            exclusions,
-            policy,
-            progress,
-        )?;
-    }
-    let work = crate::evidence::startup_writer_work()
-        .into_iter()
-        .map(|(key, value)| {
-            value
-                .checked_sub(before[key])
-                .map(|delta| (key, delta))
-                .ok_or_else(|| {
-                    JobFailure::Environmental(format!("ordinary writer counter decreased: {key}"))
-                })
-        })
-        .collect::<Result<_, _>>()?;
-    experiment
-        .observer
-        .canonical_work(&work)
-        .map_err(JobFailure::Environmental)?;
-    // Close new acquisitions before the host can publish its ordinary reader.
-    // Existing snapshots retain their normal connection/descriptor lifetime.
-    if let Some(intake) = intake {
-        intake.close()?;
-    }
-    let reader = Arc::new(attachment.store.reader_pool(&attachment.readers));
-    let _retire = RetireReader(reader.clone());
-    notify(experiment, Stage::CanonicalHealth, &reader, &model)
+    Ok(PrefixPhase {
+        model,
+        demand_served,
+        demand_reader,
+        checks,
+        prefix_failure,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

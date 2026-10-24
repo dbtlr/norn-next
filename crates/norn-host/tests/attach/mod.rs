@@ -280,6 +280,24 @@ impl Vault {
         }
     }
 
+    #[cfg(feature = "induced-failure")]
+    pub fn prefix_helper(
+        &self,
+        experiment: &norn_host::startup_experiment::Experiment,
+        control: &norn_host::startup_experiment::HelperControl,
+    ) -> Result<
+        norn_host::startup_experiment::HelperComplete,
+        norn_host::startup_experiment::HelperFailure,
+    > {
+        let _lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        let registration = Entry::new(
+            self.name.clone(),
+            VaultRoot::new(&self.vault).expect("vault root"),
+        );
+        let ops = ProductionEntryOps::new(self.dirs(), ProductionPolicy::new(32, 32).unwrap());
+        norn_host::startup_experiment::run_prefix_helper(&ops, &registration, experiment, control)
+    }
+
     pub fn name(&self) -> &VaultName {
         &self.name
     }

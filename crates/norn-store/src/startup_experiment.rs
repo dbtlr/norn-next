@@ -12,6 +12,7 @@ use crate::resolve::TargetClass;
 use crate::{AmbiguityIgnore, DocumentPath, StoreError};
 
 pub use crate::store::IntakeBuilder;
+pub use norn_db::RetirementCheck;
 
 /// A bounded head and exact count of provisional file and document names, using production SQL.
 pub struct CatalogueCandidates {
@@ -33,6 +34,13 @@ pub struct CataloguePrefix {
 }
 
 impl Catalogue {
+    pub fn retirement_check(&self) -> RetirementCheck {
+        self.database
+            .shared_file()
+            .expect("named catalogue")
+            .retirement_check()
+    }
+
     pub fn open(directory: &Path) -> Result<Self, StoreError> {
         let database = TemporaryDatabase::create_in(directory, 256, None)?;
         // The resolver sees the same key columns and SQL as the final store,

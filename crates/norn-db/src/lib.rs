@@ -93,3 +93,6 @@ pub use temporary::{
     TemporaryDatabase, TemporaryFile, TemporaryReadError, TemporarySetup,
     sweep_temporary_directory, temporary_store_parents,
 };
+
+#[cfg(feature = "induced-failure")]
+pub use temporary::RetirementCheck;

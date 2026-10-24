@@ -283,6 +283,13 @@ impl SnapshotReader {
         Ok(Some(self.ready_turn(grant, deadline)))
     }
 
+    #[cfg(feature = "induced-failure")]
+    pub fn intake_retirement_check(&self) -> Option<norn_db::RetirementCheck> {
+        self.intake_file
+            .as_ref()
+            .map(|file| file.retirement_check())
+    }
+
     /// Retire admission without closing files under the caller's entry gate.
     pub fn retire(&self) {
         if let Some(pool) = &self.pool {
@@ -1745,6 +1752,16 @@ impl Store {
     pub fn schema_digest(&self) -> Result<String, StoreError> {
         norn_db::schema_digest(self.connection())
             .map_err(|error| error::sql("digesting the schema", error))
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn retirement_check(&self) -> norn_db::RetirementCheck {
+        assert_eq!(
+            self.mode,
+            StoreMode::Throwaway,
+            "only disposable stores retire"
+        );
+        self.database.retirement_check()
     }
 
     /// Close the store, tearing a throwaway one down.

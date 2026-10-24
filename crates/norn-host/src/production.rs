@@ -1286,6 +1286,138 @@ impl ProductionEntryOps {
         Ok(())
     }
 
+    /// Establish the ordinary keyed ownership and schema pin before derivation.
+    fn attach_prologue(
+        &self,
+        registration: &Registration,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<ProductionAttachment, JobFailure> {
+        // Everything up to the heal takes the maintainer lock, sweeps the
+        // shadow home, installs watcher coverage and opens the store — work
+        // that counts no document and can take a while on a loaded machine.
+        // The phase is entered before it so a caller reading the entry sees
+        // what it is waiting on rather than a heal that appears not to start.
+        progress.installing_coverage();
+        let derived = self.derived(&registration.name);
+        #[cfg(test)]
+        crate::child_gate::await_spawns_in_flight();
+        let maintainership =
+            match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
+                Acquisition::Acquired(guard) => guard,
+                Acquisition::Contended { incumbent } => {
+                    return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
+                }
+            };
+        // The lock and the shadow home are two mechanisms of one maintainership,
+        // so both are keyed by the coordinates the derived directory is keyed
+        // by: the lock by sitting in that directory, the home by carrying the
+        // key wherever the device comparison places it.
+        let key = maintainership_key(&self.dirs, &registration.name);
+        let schema = Self::schema_path(registration);
+        let (subscription, own_writes) = {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.watch_start");
+            Self::start_watch(registration, &schema).map_err(watcher)?
+        };
+        let covered_root = subscription.covered_root().to_owned();
+        let root_identity = subscription.root_identity();
+        let path_order = stored_path_order(subscription.case_sensitivity());
+        let root = covered_root.as_path();
+        let shadows =
+            ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
+        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
+        let shadow_advisory = fallback_advisory(&shadows, root);
+        if shadows.placement() == Placement::VaultFallback {
+            // Residue no key's own sweep will ever open again: what a build that
+            // staged before homes were keyed left directly under the fallback
+            // root, and what a home whose key nothing resolves any more still
+            // holds. A failure here is dropped rather than reported: this pass
+            // is over ground no lock covers, so not managing it is no reason to
+            // refuse maintainership of this store, and the next attach comes
+            // round.
+            let _ = norn_fs::sweep_fallback_root(root);
+            let _ = norn_fs::sweep_fallback_tree(root);
+        }
+        // The store is opened under the case behaviour the coverage just
+        // proved and the derivation this build writes rows by, which the open
+        // judges against the order its rows were derived under and the
+        // derivation that wrote them: a store derived under another of either
+        // is rebuilt from zero here, before anything derives into it or reads
+        // from it.
+        // No root identity is recorded in the store. A registry root hand edit
+        // keeps its epoch when those rebuild inputs agree. `vault set --root`
+        // discards derived state so the next attach mints a new epoch.
+        let mut store = {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.store_open");
+            Store::open(
+                derived.join(STORE_FILE),
+                path_order,
+                crate::DERIVATION_VERSION,
+            )
+            .map_err(store_effect)?
+        };
+        store
+            .set_count_retention(self.policy.count_retention)
+            .map_err(store_effect)?;
+        if let Err(error) = store.sweep_count_results() {
+            *self
+                .cleanup_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+        }
+        {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.watch_sync_wait");
+            subscription
+                .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+                .map_err(watcher)?;
+        }
+        let candidate =
+            ReloadCandidate::read_at(registration, &covered_root).map_err(JobFailure::Reload)?;
+        let rolling = rolling::RollingHeal::new(
+            norn_fs::Vault::open(root, &exclusions_at(registration, &shadows, root))
+                .map_err(effect)?,
+            self.policy.rolling_period(),
+        );
+        let mut attachment = ProductionAttachment {
+            readers: Arc::clone(&self.readers),
+            registration: registration.clone(),
+            covered_root,
+            root_identity,
+            controls: candidate.clone(),
+            held_for_rung_three: None,
+            pinned: Arc::new(Declared::unpinned()),
+            config_delivery_owed: false,
+            maintainership,
+            store,
+            subscription: Some(subscription),
+            heal_observed: norn_fs::Batch::default(),
+            own_writes,
+            shadows,
+            shadow_advisory,
+            skipped_links: SkippedLinks::default(),
+            last_shadow_sweep: Instant::now(),
+            store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
+            rolling,
+        };
+        attachment.read_pinned_model()?;
+        if candidate.undeclarable().is_some() {
+            // Nothing is pinned and nothing is derived under a declaration this
+            // build cannot read. The attachment stands so the vault is
+            // observable and so a demand can read the schema again; what it is
+            // holding back is published as the entry's trust, read off the
+            // controls the attachment holds.
+            return Ok(attachment);
+        }
+        {
+            #[cfg(feature = "induced-failure")]
+            let _timing = norn_store::profiling::span("host.schema_pin");
+            attachment.pin(&candidate)?;
+        }
+        Ok(attachment)
+    }
+
     /// Run one hash-authoritative heal against coverage that is already live,
     /// keeping the facts the watcher reports while it runs.
     ///
@@ -1310,12 +1442,19 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
+        Self::under_coverage(attachment, |attachment| self.heal(attachment, progress))
+    }
+
+    fn under_coverage<T>(
+        attachment: &mut ProductionAttachment,
+        run: impl FnOnce(&mut ProductionAttachment) -> Result<T, JobFailure>,
+    ) -> Result<T, JobFailure> {
         attachment
             .subscription
             .as_ref()
             .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .begin_heal();
-        let result = self.heal(attachment, progress);
+        let result = run(attachment);
         let (settled_before_the_window, drain_failure) = attachment
             .subscription
             .as_ref()
@@ -1611,129 +1750,10 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<Self::Attachment, JobFailure> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_store::profiling::span("host.attach");
-        // Everything up to the heal takes the maintainer lock, sweeps the
-        // shadow home, installs watcher coverage and opens the store — work
-        // that counts no document and can take a while on a loaded machine.
-        // The phase is entered before it so a caller reading the entry sees
-        // what it is waiting on rather than a heal that appears not to start.
         let _job = self.evidence.attributing();
-        progress.installing_coverage();
-        let derived = self.derived(&registration.name);
-        #[cfg(test)]
-        crate::child_gate::await_spawns_in_flight();
-        let maintainership =
-            match try_acquire(&derived.join(MAINTAINER_LOCK_FILE)).map_err(data_dir_effect)? {
-                Acquisition::Acquired(guard) => guard,
-                Acquisition::Contended { incumbent } => {
-                    return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
-                }
-            };
-        // The lock and the shadow home are two mechanisms of one maintainership,
-        // so both are keyed by the coordinates the derived directory is keyed
-        // by: the lock by sitting in that directory, the home by carrying the
-        // key wherever the device comparison places it.
-        let key = maintainership_key(&self.dirs, &registration.name);
-        let schema = Self::schema_path(registration);
-        let (subscription, own_writes) = {
-            #[cfg(feature = "induced-failure")]
-            let _timing = norn_store::profiling::span("host.watch_start");
-            Self::start_watch(registration, &schema).map_err(watcher)?
-        };
-        let covered_root = subscription.covered_root().to_owned();
-        let root_identity = subscription.root_identity();
-        let path_order = stored_path_order(subscription.case_sensitivity());
-        let root = covered_root.as_path();
-        let shadows =
-            ShadowHome::resolve(root, &derived.join(DATA_TMP), &key).map_err(data_dir_effect)?;
-        shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
-        let shadow_advisory = fallback_advisory(&shadows, root);
-        if shadows.placement() == Placement::VaultFallback {
-            // Residue no key's own sweep will ever open again: what a build that
-            // staged before homes were keyed left directly under the fallback
-            // root, and what a home whose key nothing resolves any more still
-            // holds. A failure here is dropped rather than reported: this pass
-            // is over ground no lock covers, so not managing it is no reason to
-            // refuse maintainership of this store, and the next attach comes
-            // round.
-            let _ = norn_fs::sweep_fallback_root(root);
-            let _ = norn_fs::sweep_fallback_tree(root);
-        }
-        // The store is opened under the case behaviour the coverage just
-        // proved and the derivation this build writes rows by, which the open
-        // judges against the order its rows were derived under and the
-        // derivation that wrote them: a store derived under another of either
-        // is rebuilt from zero here, before anything derives into it or reads
-        // from it.
-        // No root identity is recorded in the store. A registry root hand edit
-        // keeps its epoch when those rebuild inputs agree. `vault set --root`
-        // discards derived state so the next attach mints a new epoch.
-        let mut store = {
-            #[cfg(feature = "induced-failure")]
-            let _timing = norn_store::profiling::span("host.store_open");
-            Store::open(
-                derived.join(STORE_FILE),
-                path_order,
-                crate::DERIVATION_VERSION,
-            )
-            .map_err(store_effect)?
-        };
-        store
-            .set_count_retention(self.policy.count_retention)
-            .map_err(store_effect)?;
-        if let Err(error) = store.sweep_count_results() {
-            *self
-                .cleanup_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
-        }
-        {
-            #[cfg(feature = "induced-failure")]
-            let _timing = norn_store::profiling::span("host.watch_sync_wait");
-            subscription
-                .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
-                .map_err(watcher)?;
-        }
-        let candidate =
-            ReloadCandidate::read_at(registration, &covered_root).map_err(JobFailure::Reload)?;
-        let rolling = rolling::RollingHeal::new(
-            norn_fs::Vault::open(root, &exclusions_at(registration, &shadows, root))
-                .map_err(effect)?,
-            self.policy.rolling_period(),
-        );
-        let mut attachment = ProductionAttachment {
-            readers: Arc::clone(&self.readers),
-            registration: registration.clone(),
-            covered_root,
-            root_identity,
-            controls: candidate.clone(),
-            held_for_rung_three: None,
-            pinned: Arc::new(Declared::unpinned()),
-            config_delivery_owed: false,
-            maintainership,
-            store,
-            subscription: Some(subscription),
-            heal_observed: norn_fs::Batch::default(),
-            own_writes,
-            shadows,
-            shadow_advisory,
-            skipped_links: SkippedLinks::default(),
-            last_shadow_sweep: Instant::now(),
-            store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
-            rolling,
-        };
-        attachment.read_pinned_model()?;
-        if candidate.undeclarable().is_some() {
-            // Nothing is pinned and nothing is derived under a declaration this
-            // build cannot read. The attachment stands so the vault is
-            // observable and so a demand can read the schema again; what it is
-            // holding back is published as the entry's trust, read off the
-            // controls the attachment holds.
+        let attachment = self.attach_prologue(registration, progress)?;
+        if attachment.controls.undeclarable().is_some() {
             return Ok(attachment);
-        }
-        {
-            #[cfg(feature = "induced-failure")]
-            let _timing = norn_store::profiling::span("host.schema_pin");
-            attachment.pin(&candidate)?;
         }
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
@@ -1748,7 +1768,11 @@ impl EntryOps for ProductionEntryOps {
             |attachment| self.heal_under_coverage(attachment, progress),
         )?;
         #[cfg(not(feature = "induced-failure"))]
-        let healed = self.heal_under_coverage(&mut attachment, progress);
+        let (attachment, healed) = {
+            let mut attachment = attachment;
+            let healed = self.heal_under_coverage(&mut attachment, progress);
+            (attachment, healed)
+        };
         let mut attached = match healed {
             Ok(()) => Ok(attachment),
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
