@@ -382,6 +382,45 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
 }
 
 #[cfg(target_os = "linux")]
+struct HandleWitness {
+    observer: Arc<staged::residency::Diagnostic>,
+    reader: Mutex<std::sync::Weak<SnapshotReader>>,
+    intake: Mutex<std::sync::Weak<norn_host::startup_experiment::IntakeReader>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Observer for HandleWitness {
+    fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
+        self.observer.catalogue(catalogue, model)
+    }
+
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        self.observer.canonical_work(work)
+    }
+
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        *self.reader.lock().unwrap() = Arc::downgrade(&reader);
+        self.observer.indexed(stage, reader, model)
+    }
+
+    fn intake(
+        &self,
+        reader: Arc<norn_host::startup_experiment::IntakeReader>,
+    ) -> Result<(), String> {
+        *self.intake.lock().unwrap() = Arc::downgrade(&reader);
+        self.observer.intake(reader)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn check_residency_reporter(cell: &str) {
     use staged::residency::{Cell, Diagnostic, thread_tid};
     let scratch = norn_testkit::scratch::Scratch::new("norn-residency-reporter");
@@ -408,15 +447,40 @@ fn check_residency_reporter(cell: &str) {
         Cell::parse(cell).unwrap(),
         Duration::from_secs(5),
     );
+    let witness = Arc::new(HandleWitness {
+        observer,
+        reader: Mutex::new(std::sync::Weak::new()),
+        intake: Mutex::new(std::sync::Weak::new()),
+    });
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        Experiment::canonical_intake("small", observer),
+        Experiment::canonical_intake("small", witness.clone()),
     );
     let demand = host.demand(vault.name()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while host.state(vault.name()).unwrap() != norn_wire::TrustState::Ready {
         dispatcher
             .pump(|event| {
+                // Observe the real outer handles before acknowledgement permits
+                // construction to continue. Weak counts add no reader owner.
+                let reader = witness.reader.lock().unwrap().strong_count();
+                let intake = witness.intake.lock().unwrap().strong_count();
+                match event["residency_checkpoint"].as_str().unwrap() {
+                    "before-early-get" | "intake-retired-before-final" => assert_eq!(reader, 3),
+                    "after-early-get" | "after-final" => assert_eq!(
+                        reader, 2,
+                        "observer retained SnapshotReader at acknowledgement"
+                    ),
+                    "before-metadata" => assert_eq!(intake, 2),
+                    "after-metadata" => assert_eq!(
+                        intake, 1,
+                        "observer retained IntakeReader at acknowledgement"
+                    ),
+                    other => panic!("unexpected handle checkpoint {other}"),
+                }
+                if event["residency_checkpoint"] == "intake-retired-before-final" {
+                    assert_eq!(intake, 0, "intake handle survived retirement");
+                }
                 REPORTED.lock().unwrap().push(event.clone());
                 Ok(())
             })
