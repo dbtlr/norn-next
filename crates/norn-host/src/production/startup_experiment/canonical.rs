@@ -17,7 +17,7 @@ pub(super) fn run(
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
     let root = attachment.covered_root.clone();
-    let PrefixPhase { model, .. } = prepare_prefix(attachment, exclusions, policy, experiment)?;
+    let PrefixPhase { model, .. } = prepare_prefix(attachment, exclusions, policy, experiment, &mut Vec::new())?;
     let intake = if experiment.intake {
         Some(super::intake::prepare(
             attachment, exclusions, policy, experiment, &model,
@@ -73,7 +73,6 @@ pub(super) struct PrefixPhase {
     pub model: Arc<ContentModel>,
     pub demand_served: bool,
     pub demand_reader: std::sync::Weak<SnapshotReader>,
-    pub checks: Vec<norn_store::startup_experiment::RetirementCheck>,
     pub prefix_failure: Option<JobFailure>,
 }
 
@@ -83,13 +82,13 @@ pub(super) fn prepare_prefix(
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
     experiment: &Experiment,
+    checks: &mut Vec<norn_store::startup_experiment::RetirementCheck>,
 ) -> Result<PrefixPhase, JobFailure> {
     let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
     let declared = Declaration::read(&mut attachment.store)?;
     let model = Arc::clone(declared.model.shared_content_model());
     let mut demand_served = false;
-    let mut checks = Vec::new();
     let mut demand_reader = std::sync::Weak::new();
     let mut prefix_failure = None;
     {
@@ -239,8 +238,8 @@ pub(super) fn prepare_prefix(
                 catalogue_decline,
                 catalogue_replayed,
                 catalogue_document_candidates,
+                checks,
             )?;
-            checks.extend(ended.check);
             prefix_failure = ended.failure;
         }
     }
@@ -248,7 +247,6 @@ pub(super) fn prepare_prefix(
         model,
         demand_served,
         demand_reader,
-        checks,
         prefix_failure,
     })
 }

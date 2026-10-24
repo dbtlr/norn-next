@@ -19,16 +19,6 @@ impl IntakeReader {
         }
     }
 
-    pub(super) fn retirement_check(
-        &self,
-    ) -> Option<norn_store::startup_experiment::RetirementCheck> {
-        self.reader
-            .lock()
-            .expect("intake reader poisoned")
-            .as_ref()?
-            .intake_retirement_check()
-    }
-
     /// Acquire a bounded source/scratch grant for Find or retained field counts.
     /// An already established snapshot survives retirement; a new one declines.
     pub fn snapshot(

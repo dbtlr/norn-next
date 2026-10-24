@@ -283,13 +283,6 @@ impl SnapshotReader {
         Ok(Some(self.ready_turn(grant, deadline)))
     }
 
-    #[cfg(feature = "induced-failure")]
-    pub fn intake_retirement_check(&self) -> Option<norn_db::RetirementCheck> {
-        self.intake_file
-            .as_ref()
-            .map(|file| file.retirement_check())
-    }
-
     /// Retire admission without closing files under the caller's entry gate.
     pub fn retire(&self) {
         if let Some(pool) = &self.pool {

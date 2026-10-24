@@ -52,6 +52,7 @@ pub struct PrefixReader {
     certificate: PrefixCertificate,
     budget: Arc<norn_store::ReadBudget>,
     failures: std::sync::Mutex<Vec<JobFailure>>,
+    retirement: Option<norn_store::startup_experiment::RetirementCheck>,
 }
 impl Drop for PrefixReader {
     fn drop(&mut self) {
@@ -167,7 +168,6 @@ impl PrefixReader {
 }
 
 pub(super) struct PrefixEnd {
-    pub check: Option<norn_store::startup_experiment::RetirementCheck>,
     pub failure: Option<JobFailure>,
 }
 
@@ -184,11 +184,13 @@ pub(super) fn run(
     invalid: Option<String>,
     catalogue_replayed: u64,
     catalogue_document_candidates: u64,
+    checks: &mut Vec<norn_store::startup_experiment::RetirementCheck>,
 ) -> Result<PrefixEnd, JobFailure> {
     let _timing = norn_store::profiling::span("startup.capped_prefix");
     let before = crate::evidence::startup_writer_work();
     let mut capability = PrefixReader {
         reader: None,
+        retirement: None,
         failures: Default::default(),
         model: model.clone(),
         frozen: frozen.clone(),
@@ -224,6 +226,7 @@ pub(super) fn run(
         .into_iter()
         .map(|(key, value)| (key, value - before[key]))
         .collect();
+    checks.extend(capability.retirement.take());
     experiment
         .observer
         .prefix(&capability)
@@ -231,12 +234,8 @@ pub(super) fn run(
     failure = failure.or_else(|| capability.failures.lock().unwrap().drain(..).next());
     // Retirement is outside all budget bookkeeping locks. Active snapshots keep
     // their ordinary owner; there is no forced close or OS-release guarantee.
-    let check = capability
-        .reader
-        .as_ref()
-        .and_then(|reader| reader.retirement_check());
     drop(capability);
-    Ok(PrefixEnd { check, failure })
+    Ok(PrefixEnd { failure })
 }
 
 fn prepare(
@@ -263,6 +262,7 @@ fn prepare(
         crate::DERIVATION_VERSION,
     )
     .map_err(store_effect)?;
+    capability.retirement = Some(builder.retirement_check());
     if let Some(pin) = attachment
         .store
         .begin_request()

@@ -87,6 +87,7 @@ pub fn run_prefix_helper(
     else {
         return Err(fail(HelperCause::Ineligible));
     };
+    let mut checks = Vec::new();
     let result = (|| {
         attachment
             .store
@@ -120,18 +121,16 @@ pub fn run_prefix_helper(
             &attachment.covered_root,
         );
         ProductionEntryOps::under_coverage(&mut attachment, |attachment| {
-            canonical::prepare_prefix(attachment, &exclusions, ops.policy, experiment).map(Some)
+            canonical::prepare_prefix(attachment, &exclusions, ops.policy, experiment, &mut checks).map(Some)
         })
     })();
     // Drains retired idle connections only. Active readers are never preempted.
     ops.readers.trim(std::time::Instant::now());
     let mut cause = None;
-    let mut checks = Vec::new();
     match result {
         Err(error) => cause = Some(HelperCause::Operation(error)),
         Ok(None) => cause = Some(HelperCause::Ineligible),
         Ok(Some(phase)) => {
-            checks = phase.checks;
             if let Some(error) = phase.prefix_failure {
                 cause = Some(HelperCause::Operation(error));
             } else if !phase.demand_served {
