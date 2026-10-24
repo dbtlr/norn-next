@@ -162,6 +162,9 @@ pub fn run_prefix_helper(
     if budget.live_connections != 0 || budget.waiting_reads != 0 {
         cause = Some(HelperCause::OutstandingReaders(budget));
     }
+    if let Some(error) = ops.last_reader_cleanup_error() {
+        cleanup.push(error);
+    }
     let mut retired_paths = Vec::new();
     for check in checks {
         match check.verify() {
