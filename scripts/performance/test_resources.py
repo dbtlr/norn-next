@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from transport import resources
+from transport import Current, resources
 
 
 class ResourceChecks(unittest.TestCase):
@@ -47,6 +47,40 @@ class ResourceChecks(unittest.TestCase):
         self.assertNotIn('RssFile_bytes', actual)
         self.assertEqual(actual['RssShmem_bytes'], 0)
         self.assertEqual(actual['VmRSS_bytes'], 102400)
+
+
+class PrefixResourceLabelChecks(unittest.TestCase):
+    def test_prefix_resource_sample_after_handler_has_explicit_scope_and_old_modes_keep_label(self):
+        for prefix in (True, False):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / 'worker'
+                row = {'startup_stage': 'canonical-demand'}
+                if prefix:
+                    row['operator_prefix_sequence'] = 1
+                import json
+                binary.write_text('#!/usr/bin/env python3\nimport sys\n'
+                    + 'print(' + repr('NORN_PERFORMANCE ' + json.dumps(row)) + ', flush=True)\n'
+                    + "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                    + 'sys.stdin.readline()\n')
+                binary.chmod(0o700)
+                events = []
+                def handler(stage):
+                    events.append('handler/ack')
+                def sample(pid):
+                    events.append('resources')
+                    return {'VmRSS_bytes': 42}
+                with patch('transport.resources', side_effect=sample) as reads:
+                    worker = Current(binary, root / 'run', stage_handler=handler)
+                    try:
+                        key = 'resources_after_handler' if prefix else 'resources_when_observed'
+                        self.assertEqual(worker.stages[0][key], {'VmRSS_bytes': 42})
+                        if prefix:
+                            self.assertNotIn('resources_when_observed', worker.stages[0])
+                        self.assertEqual(events, ['handler/ack', 'resources'])
+                        self.assertEqual(reads.call_count, 1)
+                    finally:
+                        worker.close()
 
 
 if __name__ == '__main__':

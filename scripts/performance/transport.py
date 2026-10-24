@@ -125,7 +125,10 @@ class Current:
                 if stage_handler is not None:
                     stage_handler(stage)
                 if residency is None:
-                    stage["resources_when_observed"] = resources(self.process.pid)
+                    # Prefix handlers publish ACK before returning. Keep the sample at
+                    # this endpoint, but distinguish it from the paused validation sample.
+                    key = "resources_after_handler" if "operator_prefix_sequence" in stage else "resources_when_observed"
+                    stage[key] = resources(self.process.pid)
                 self.stages.append(stage)
                 self.ready = self.receive()
             if not self.ready.get("ready"):
