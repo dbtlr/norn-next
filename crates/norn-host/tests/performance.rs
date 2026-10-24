@@ -198,7 +198,35 @@ fn performance_worker() {
         Err(error) => panic!("invalid residency option: {error}"),
     };
     #[cfg(feature = "induced-failure")]
-    let experiment = if let Some(observer) = diagnostic {
+    let operator_mode = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+        Ok("operator-prefix") => Some("early"),
+        Ok("operator-prefix-ordinary") => Some("ordinary"),
+        _ => None,
+    };
+    #[cfg(feature = "induced-failure")]
+    let operator_prefix = operator_mode.and_then(|mode| {
+        assert!(
+            residency.is_none()
+                && cache_options.kib.is_none()
+                && !cache_options.diagnostics
+                && !profiling,
+            "operator prefix requires default cache options and no diagnostic or profiler"
+        );
+        (mode == "early").then(|| {
+            std::sync::Arc::new(staged::OperatorPrefix::new(
+                began,
+                vault.name().clone(),
+                root.clone(),
+            ))
+        })
+    });
+    #[cfg(feature = "induced-failure")]
+    let experiment = if let Some(observer) = &operator_prefix {
+        Some(norn_host::startup_experiment::Experiment::canonical_intake(
+            "small",
+            observer.clone(),
+        ))
+    } else if let Some(observer) = diagnostic {
         Some(norn_host::startup_experiment::Experiment::canonical_intake(
             "small", observer,
         ))
@@ -230,7 +258,7 @@ fn performance_worker() {
                 };
                 Some(experiment)
             }
-            Err(_) => None,
+            Ok("operator-prefix-ordinary") | Err(_) => None,
             Ok(mode) => panic!("unknown startup experiment {mode}"),
         }
     };
@@ -238,6 +266,14 @@ fn performance_worker() {
     assert!(
         std::env::var_os("NORN_PERFORMANCE_RESIDENCY").is_none(),
         "residency diagnostics require induced-failure"
+    );
+    #[cfg(not(feature = "induced-failure"))]
+    assert!(
+        !matches!(
+            std::env::var("NORN_PERFORMANCE_LOADING").as_deref(),
+            Ok("operator-prefix" | "operator-prefix-ordinary")
+        ),
+        "operator prefix modes require induced-failure"
     );
     #[cfg(feature = "induced-failure")]
     let host = vault.host_with_loading_options(policy, experiment, cache_options.cache.clone());
@@ -319,12 +355,30 @@ fn performance_worker() {
             })
             .expect("acknowledge Ready before ordinary reads");
     }
-    emit(
-        json!({"ready": true, "initial_import_cache_kib":cache_kib,"writer_cache":cache_receipt, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
+    #[cfg(feature = "induced-failure")]
+    let evidence = if operator_mode.is_some() {
+        let mut evidence = evidence;
+        evidence["tombstones_recorded"] = json!(host.evidence().tombstones_recorded);
+        evidence
+    } else {
+        evidence
+    };
+    let ready = json!({"ready": true, "initial_import_cache_kib":cache_kib,"writer_cache":cache_receipt, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
                 "observed_ready_ns": ready_ns, "host_setup_ns": host_setup.as_nanos(),
                 "store_page_size": policy.store_page_size, "changeset_size": policy.changeset_size,
-                "timings": timings, "job_evidence": evidence}),
-    );
+                "timings": timings, "job_evidence": evidence});
+    #[cfg(feature = "induced-failure")]
+    let ready = if let Some(mode) = operator_mode {
+        let mut ready = ready;
+        ready["operator_prefix_mode"] = json!(mode);
+        ready["operator_prefix_receipt"] = operator_prefix
+            .as_ref()
+            .map_or(Value::Null, |observer| observer.receipt());
+        ready
+    } else {
+        ready
+    };
+    emit(ready);
     let address = VaultAddress::name(vault.name().clone());
     #[cfg(feature = "induced-failure")]
     let mut diagnostic_read = 0;

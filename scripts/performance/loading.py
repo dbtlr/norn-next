@@ -42,8 +42,11 @@ INTAKE_PROBES = {(stage, probe) for stage in ("canonical-intake", "canonical-fin
 
 def expected_checkpoints(mode):
     """One protocol definition shared by cold and warm controllers."""
-    if mode == "baseline":
+    if mode in ("baseline", "operator-prefix-ordinary"):
         return set()
+    if mode == "operator-prefix":
+        from operator_prefix import STAGES
+        return set(STAGES)
     if mode in ("canonical-intake", "canonical-intake-silent"):
         return (CANONICAL_SILENT_EXPECTED | {("canonical-intake", "boundary")}
                 if mode.endswith("-silent") else CANONICAL_EXPECTED | INTAKE_PROBES)

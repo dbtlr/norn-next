@@ -16,6 +16,7 @@ pub struct Reporter {
     address: VaultAddress,
     checkpoint: AtomicU64,
     silent: bool,
+    operator_prefix: bool,
     diagnostic_threads: bool,
     intake: AtomicBool,
     canonical_work: Mutex<Option<std::collections::BTreeMap<&'static str, u64>>>,
@@ -28,6 +29,7 @@ impl Reporter {
             address: VaultAddress::name(name),
             checkpoint: AtomicU64::new(0),
             silent,
+            operator_prefix: false,
             diagnostic_threads: false,
             intake: AtomicBool::new(false),
             canonical_work: Mutex::new(None),
@@ -35,6 +37,20 @@ impl Reporter {
     }
 
     fn emit(&self, mut value: Value) {
+        if self.operator_prefix {
+            value["operator_prefix_sequence"] =
+                json!(if value["startup_stage"] == "canonical-demand" {
+                    1
+                } else {
+                    2
+                });
+            value["availability_scope"] = json!("private simulated capability availability");
+            if value["startup_stage"] == "canonical-intake" {
+                value["counters"] = Value::Null;
+                value["counters_unavailable"] =
+                    json!("IntakeSnapshot exposes guarded queries and provenance, not counters");
+            }
+        }
         if self.diagnostic_threads {
             value["thread_tid"] = json!(residency::thread_tid());
         }
@@ -222,31 +238,41 @@ impl Reporter {
         boundary: u128,
     ) -> Result<(), String> {
         for (probe, command) in intake_probes() {
-            let requested = self.began.elapsed().as_nanos();
-            let started = Instant::now();
-            let snapshot = reader
-                .snapshot(Instant::now() + Duration::from_secs(5))
-                .map_err(|e| e.to_string())?
-                .ok_or("intake reader unavailable")?;
-            let answer = if command["op"] == "find" {
-                let (unsatisfied, advisories, report) = snapshot
-                    .find(&find_params(&self.address, &command))
-                    .map_err(|e| format!("{e:?}"))?
-                    .into_report();
-                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
-            } else {
-                let (unsatisfied, advisories, report) = snapshot
-                    .count(&count_params(&self.address, &command))
-                    .map_err(|e| format!("{e:?}"))?
-                    .into_report();
-                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
-            };
-            self.emit(json!({"startup_stage":"canonical-intake","probe":probe,
+            self.intake_query(reader, boundary, probe, command)?;
+        }
+        Ok(())
+    }
+    fn intake_query(
+        &self,
+        reader: &Arc<norn_host::startup_experiment::IntakeReader>,
+        boundary: u128,
+        probe: &str,
+        command: Value,
+    ) -> Result<(), String> {
+        let requested = self.began.elapsed().as_nanos();
+        let started = Instant::now();
+        let snapshot = reader
+            .snapshot(Instant::now() + Duration::from_secs(5))
+            .map_err(|e| e.to_string())?
+            .ok_or("intake reader unavailable")?;
+        let answer = if command["op"] == "find" {
+            let (unsatisfied, advisories, report) = snapshot
+                .find(&find_params(&self.address, &command))
+                .map_err(|e| format!("{e:?}"))?
+                .into_report();
+            json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+        } else {
+            let (unsatisfied, advisories, report) = snapshot
+                .count(&count_params(&self.address, &command))
+                .map_err(|e| format!("{e:?}"))?
+                .into_report();
+            json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+        };
+        self.emit(json!({"startup_stage":"canonical-intake","probe":probe,
                 "stage_boundary_ns":boundary,"query_host_ns":started.elapsed().as_nanos(),
                 "query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
                 "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),
                 "projection_generation":snapshot.reading().write_generation(),"simulation":"paused","global_ready":false}));
-        }
         Ok(())
     }
     fn probes(
@@ -414,3 +440,129 @@ fn intake_probes() -> [(&'static str, Value); 7] {
 
 #[path = "residency.rs"]
 pub mod residency;
+
+/// Exactly two private operator requests on the existing attachment thread.
+/// Parent acknowledgement follows receipt and full validation, before heal resumes.
+pub struct OperatorPrefix {
+    reporter: Reporter,
+    root: std::path::PathBuf,
+    completed: AtomicU64,
+}
+
+impl OperatorPrefix {
+    pub fn new(began: Instant, name: VaultName, root: std::path::PathBuf) -> Self {
+        let mut reporter = Reporter::new(began, name, false);
+        reporter.operator_prefix = true;
+        Self {
+            reporter,
+            root,
+            completed: AtomicU64::new(0),
+        }
+    }
+
+    pub fn receipt(&self) -> Value {
+        json!({"mode":"private-operator-prefix", "queries_executed":self.completed.load(Ordering::Relaxed),
+            "canonical_work":*self.reporter.canonical_work.lock().unwrap(),
+            "construction_eligibility_gets_declared":1,
+            "dispatch":"private observer on attachment thread",
+            "availability_scope":"private simulated capability availability"})
+    }
+
+    fn acknowledged(&self, sequence: u64, probe: &str) -> Result<(), String> {
+        operator_ack(&self.root, sequence, probe, residency::PARENT_ACK_TIMEOUT)?;
+        self.completed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+pub fn operator_ack(
+    root: &std::path::Path,
+    sequence: u64,
+    probe: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let path = root
+        .join("operator-prefix-acks")
+        .join(format!("{sequence}.json"));
+    let deadline = Instant::now() + timeout.min(residency::PARENT_ACK_TIMEOUT);
+    loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let ack: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("invalid operator prefix ack: {e}"))?;
+                if ack["sequence"].as_u64() != Some(sequence) || ack["probe"] != probe {
+                    return Err("invalid operator prefix acknowledgement identity".into());
+                }
+                std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("reading operator prefix ack: {e}")),
+        }
+        if Instant::now() >= deadline {
+            return Err("operator prefix parent acknowledgement timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+impl Observer for OperatorPrefix {
+    fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn declined(&self, reason: &str) -> Result<(), String> {
+        Err(format!(
+            "operator prefix requires the frozen eligible fixture: {reason}"
+        ))
+    }
+
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        self.reporter.canonical_work(work)
+    }
+
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        match stage {
+            Stage::CanonicalDemand => {
+                self.reporter.checkpoint.store(
+                    self.reporter.began.elapsed().as_nanos() as u64,
+                    Ordering::Relaxed,
+                );
+                self.reporter.query(
+                    "canonical-demand",
+                    "whole_slug",
+                    &reader,
+                    &model,
+                    json!({"op":"get","target":"small","whole":true}),
+                )?;
+                drop(reader);
+                drop(model);
+                self.acknowledged(1, "whole_slug")
+            }
+            Stage::CanonicalHealth => Ok(()),
+            _ => Err("unexpected operator prefix stage".into()),
+        }
+    }
+
+    fn intake(
+        &self,
+        reader: Arc<norn_host::startup_experiment::IntakeReader>,
+    ) -> Result<(), String> {
+        self.reporter.intake_query(
+            &reader,
+            self.reporter.began.elapsed().as_nanos(),
+            "active_page",
+            json!({"op":"find"}),
+        )?;
+        drop(reader);
+        self.acknowledged(2, "active_page")
+    }
+}

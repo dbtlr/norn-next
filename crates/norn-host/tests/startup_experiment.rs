@@ -376,6 +376,8 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
         for cell in ["N", "G", "E", "Q", "M"] {
             check_residency_reporter(cell);
         }
+        check_operator_prefix();
+        check_operator_prefix_refused_ack();
         check_residency_ack_failures();
         check_residency_observer_error_cleanup();
     }
@@ -1031,4 +1033,192 @@ fn diagnostic_receipts_cannot_carry_accepted_worker_clocks() {
         row,
         serde_json::json!({"ready":true,"diagnostic_only":true,"writer_cache":{"after":37}})
     );
+}
+
+#[cfg(target_os = "linux")]
+fn check_operator_prefix() {
+    let scratch = norn_testkit::scratch::Scratch::new("norn-operator-prefix");
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::create_dir(root.join("bench")).unwrap();
+    std::fs::create_dir(scratch.join("operator-prefix-acks")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    let small = "---\nstatus: draft\nperf_bucket: probe\n---\n# Small\nBody #known ^block\n[[large#Details]] [[missing]] [[large#Absent]]\n";
+    std::fs::write(root.join("bench/small.md"), small).unwrap();
+    std::fs::write(
+        root.join("bench/large.md"),
+        "---\nperf_bucket: active\n---\n## Details\nBody\n",
+    )
+    .unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    REPORTED.lock().unwrap().clear();
+    let observer = Arc::new(staged::OperatorPrefix::new(
+        Instant::now(),
+        vault.name().clone(),
+        scratch.root().to_path_buf(),
+    ));
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        Experiment::canonical_intake("small", observer.clone()),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut acknowledged = 0;
+    while host.state(vault.name()).unwrap() != norn_wire::TrustState::Ready {
+        let reports = REPORTED.lock().unwrap().clone();
+        for (index, row) in reports.iter().enumerate().skip(acknowledged) {
+            assert_ne!(
+                host.state(vault.name()).unwrap(),
+                norn_wire::TrustState::Ready
+            );
+            assert_eq!(row["operator_prefix_sequence"], index + 1);
+            assert_eq!(row["global_ready"], false);
+            let ack = serde_json::json!({"sequence":index+1,"probe":row["probe"]});
+            std::fs::write(
+                scratch.join(format!("operator-prefix-acks/{}.json", index + 1)),
+                ack.to_string(),
+            )
+            .unwrap();
+            acknowledged += 1;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let reports = REPORTED.lock().unwrap().clone();
+    assert_eq!(reports.len(), 2, "only the operator Get and Find may run");
+    assert_eq!(
+        reports[0]["command"],
+        serde_json::json!({"op":"get","target":"small","whole":true})
+    );
+    assert_eq!(reports[1]["command"], serde_json::json!({"op":"find"}));
+    assert_eq!(reports[0]["startup_stage"], "canonical-demand");
+    assert_eq!(reports[1]["startup_stage"], "canonical-intake");
+    let doc = &reports[0]["answer"]["report"]["document"];
+    for name in ["headings", "blocks", "tags", "links", "findings"] {
+        assert!(doc[name]["total"].as_u64().unwrap() > 0, "{name}");
+    }
+    let address = VaultAddress::name(vault.name().clone());
+    let get = norn_wire::GetParams::new(
+        address.clone(),
+        norn_wire::ResolutionTarget::new("small").unwrap(),
+    );
+    let find = FindParams::new(address)
+        .with_limit(25)
+        .with_predicates([Predicate::equal_to("perf_bucket", "active")]);
+    for (early, mut ordinary) in reports.iter().zip([
+        serde_json::to_value(host.get(&get).unwrap().answer).unwrap(),
+        serde_json::to_value(host.find(&find).unwrap().answer).unwrap(),
+    ]) {
+        ordinary.as_object_mut().unwrap().remove("reading");
+        let mut early = early["answer"].clone();
+        for answer in [&mut early, &mut ordinary] {
+            if let Some(items) = answer["report"]["document"]["findings"]["items"].as_array_mut() {
+                for finding in items {
+                    finding.as_object_mut().unwrap().remove("id");
+                    finding.as_object_mut().unwrap().remove("generation");
+                }
+            }
+        }
+        assert_eq!(early, ordinary, "full prefix answer parity");
+    }
+    assert!(
+        observer.receipt()["canonical_work"]
+            .as_object()
+            .unwrap()
+            .contains_key("tombstones_recorded")
+    );
+    drop(demand);
+    drop(host);
+    vault.store().verify_integrity().unwrap();
+    let audit = norn_store::startup_audit::audit(&vault.database(), |_, _, _| Ok(())).unwrap();
+    let ordinary = vault.beside(&scratch.join("ordinary"));
+    let host = ordinary.host();
+    let demand = host.demand(ordinary.name()).unwrap();
+    while host.state(ordinary.name()).unwrap() != norn_wire::TrustState::Ready {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(demand);
+    drop(host);
+    ordinary.store().verify_integrity().unwrap();
+    let other = norn_store::startup_audit::audit(&ordinary.database(), |_, _, _| Ok(())).unwrap();
+    assert_eq!(audit["semantic_sha256"], other["semantic_sha256"]);
+    for key in ["canonical_identity_sha256", "page_map_sha256"] {
+        assert_eq!(audit[key].as_str().unwrap().len(), 64);
+        assert_eq!(audit[key], other[key]);
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("bench/small.md")).unwrap(),
+        small
+    );
+    assert!(
+        std::fs::read_dir(scratch.join("operator-prefix-acks"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn check_operator_prefix_refused_ack() {
+    let scratch = norn_testkit::scratch::Scratch::new("norn-operator-prefix-refused");
+    std::fs::create_dir(scratch.join("operator-prefix-acks")).unwrap();
+    assert!(
+        staged::operator_ack(scratch.root(), 1, "whole_slug", Duration::ZERO)
+            .unwrap_err()
+            .contains("timed out")
+    );
+    for ack in [
+        "{",
+        r#"{"sequence":true,"probe":"whole_slug"}"#,
+        r#"{"sequence":2,"probe":"whole_slug"}"#,
+        r#"{"sequence":1,"probe":"active_page"}"#,
+    ] {
+        std::fs::write(scratch.join("operator-prefix-acks/1.json"), ack).unwrap();
+        assert!(
+            staged::operator_ack(scratch.root(), 1, "whole_slug", Duration::ZERO)
+                .unwrap_err()
+                .contains("invalid operator prefix")
+        );
+    }
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join("small.md"), "# Small\nBody\n").unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    let observer = Arc::new(staged::OperatorPrefix::new(
+        Instant::now(),
+        vault.name().clone(),
+        scratch.root().to_path_buf(),
+    ));
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        Experiment::canonical_intake("small", observer),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host.state(vault.name()).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "invalid prefix acknowledgement did not fail closed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(demand);
+    drop(host);
+    fn no_projection_files(path: &std::path::Path) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                no_projection_files(&path);
+            } else {
+                let name = path.file_name().unwrap().to_string_lossy();
+                assert!(
+                    !name.starts_with("demand-") && !name.starts_with("intake-"),
+                    "projection residue: {name}"
+                );
+            }
+        }
+    }
+    no_projection_files(scratch.root());
 }
