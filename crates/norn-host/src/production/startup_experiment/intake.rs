@@ -12,6 +12,13 @@ pub struct IntakeReader {
 }
 
 impl IntakeReader {
+    pub(super) fn from_sealed(reader: SnapshotReader, model: Arc<ContentModel>) -> Self {
+        Self {
+            reader: Mutex::new(Some(Arc::new(reader))),
+            model,
+        }
+    }
+
     /// Acquire a bounded source/scratch grant for Find or retained field counts.
     /// An already established snapshot survives retirement; a new one declines.
     pub fn snapshot(
@@ -31,7 +38,7 @@ impl IntakeReader {
             })
             .transpose()
     }
-    fn retire(&self) {
+    pub(super) fn retire(&self) {
         let reader = self.reader.lock().expect("intake reader poisoned").take();
         if let Some(reader) = reader {
             reader.retire_intake();
@@ -41,7 +48,7 @@ impl IntakeReader {
 
 /// Only guarded field/path reads are exposed; Get and rich reads are unavailable.
 pub struct IntakeSnapshot {
-    snapshot: norn_store::Snapshot,
+    pub(super) snapshot: norn_store::Snapshot,
     model: Arc<ContentModel>,
 }
 
@@ -217,4 +224,52 @@ pub(super) fn prepare(
             .map_err(JobFailure::Environmental)?;
     }
     Ok(projection)
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Private file ownership is the lifetime contract under test.
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_established_inner_intake_snapshot_keeps_its_real_file_until_release() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-inner-lifetime");
+        let path = scratch.join("intake-inner.sqlite3");
+        let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+        let sealed = norn_store::startup_experiment::IntakeBuilder::create(
+            &path,
+            norn_store::StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap()
+        .finish(&budget)
+        .unwrap();
+        let reader = IntakeReader::from_sealed(sealed, Arc::new(ContentModel::none()));
+        let held = reader
+            .snapshot(Instant::now() + std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        let reading = held.reading().clone();
+        reader.retire();
+        assert!(
+            reader
+                .snapshot(Instant::now() + std::time::Duration::from_secs(5))
+                .unwrap()
+                .is_none()
+        );
+        drop(reader);
+        assert!(
+            path.exists(),
+            "a pre-heal file scan detects the actual inner snapshot owner"
+        );
+        assert_eq!(
+            budget.census().live_connections,
+            2,
+            "the active source-and-scratch grant survives retirement"
+        );
+        assert_eq!(held.reading(), &reading);
+        drop(held);
+        assert!(!path.exists());
+        assert_eq!(budget.census().live_connections, 0);
+    }
 }

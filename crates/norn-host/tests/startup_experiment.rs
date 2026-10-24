@@ -1070,11 +1070,10 @@ fn check_operator_prefix() {
                 );
             }
             let ack = serde_json::json!({"sequence":index+1,"probe":row["probe"]});
-            std::fs::write(
-                scratch.join(format!("operator-prefix-acks/{}.json", index + 1)),
-                ack.to_string(),
-            )
-            .unwrap();
+            let ack_path = scratch.join(format!("operator-prefix-acks/{}.json", index + 1));
+            let pending = ack_path.with_extension("pending");
+            std::fs::write(&pending, ack.to_string()).unwrap();
+            std::fs::rename(pending, ack_path).unwrap();
             acknowledged += 1;
         }
         assert!(Instant::now() < deadline);

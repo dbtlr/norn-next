@@ -34,6 +34,14 @@ pub trait Observer: Send + Sync {
     fn intake(&self, _reader: Arc<IntakeReader>) -> Result<(), String> {
         Ok(())
     }
+    /// Partial frozen metadata has a separate capability; never a complete IntakeReader.
+    fn prefix(&self, _reader: &PrefixReader) -> Result<(), String> {
+        Ok(())
+    }
+    /// Capped resources have been retired and dropped, before ordinary heal starts.
+    fn prefix_retired(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn declined(&self, _reason: &str) -> Result<(), String> {
         Ok(())
     }
@@ -54,6 +62,7 @@ pub struct Experiment {
     separate_frontmatter: bool,
     canonical: bool,
     intake: bool,
+    frozen_prefix: Option<Arc<FrozenInput>>,
 }
 
 impl Experiment {
@@ -65,6 +74,7 @@ impl Experiment {
             separate_frontmatter: true,
             canonical: false,
             intake: false,
+            frozen_prefix: None,
         })
     }
 
@@ -76,6 +86,7 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: false,
             intake: false,
+            frozen_prefix: None,
         })
     }
 
@@ -91,6 +102,7 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: true,
             intake: false,
+            frozen_prefix: None,
         })
     }
 
@@ -106,6 +118,25 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: true,
             intake: true,
+            frozen_prefix: None,
+        })
+    }
+
+    /// Lab-only authority supplied by the owner of an immutable fixture copy.
+    /// This flag is an assumption, not a production freshness or watcher proof.
+    pub fn capped_prefix_frozen(
+        get_target: impl Into<String>,
+        observer: Arc<dyn Observer>,
+        frozen: Arc<FrozenInput>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: true,
+            intake: false,
+            frozen_prefix: Some(frozen),
         })
     }
 
@@ -598,3 +629,6 @@ mod canonical;
 
 mod intake;
 pub use intake::{IntakeReader, IntakeRefusal, IntakeSnapshot};
+
+mod prefix;
+pub use prefix::{FrozenInput, PrefixAttempt, PrefixCertificate, PrefixReader};

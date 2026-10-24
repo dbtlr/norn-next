@@ -566,3 +566,121 @@ impl Observer for OperatorPrefix {
         self.acknowledged(2, "active_page")
     }
 }
+
+/// One frozen capped attempt, followed by an explicitly required Host fallback
+/// after Ready when the ordinary page cannot certify its terminal boundary.
+#[allow(dead_code)] // The full-intake native harness compiles this shared module too.
+pub struct CappedPrefix {
+    operator: OperatorPrefix,
+    attempt: Mutex<Option<Value>>,
+}
+#[allow(dead_code)]
+impl CappedPrefix {
+    pub fn new(began: Instant, name: VaultName, root: std::path::PathBuf) -> Self {
+        Self {
+            operator: OperatorPrefix::new(began, name, root),
+            attempt: Mutex::new(None),
+        }
+    }
+    pub fn receipt(&self) -> Value {
+        let attempt = self.attempt.lock().unwrap();
+        let attempted = attempt.is_some();
+        let published = attempt
+            .as_ref()
+            .is_some_and(|a| a["early_published"] == true);
+        let sql = attempt
+            .as_ref()
+            .is_some_and(|a| a["query_executed"] == true);
+        json!({"mode":"private-capped-prefix", "cap_document_candidates":128,
+            "logical_requests":2,"early_find_attempts":u64::from(attempted),
+            "early_find_published":u64::from(published),"prefix_find_sql_dispatches":u64::from(sql),
+            "queries_executed":1+u64::from(sql),"fallback_required":attempted && !published,
+            "fallback_dispatch":"same logical Find through Host after Ready; controller owns this dispatch",
+            "canonical_work":*self.operator.reporter.canonical_work.lock().unwrap(),
+            "construction_eligibility_gets_declared":1,
+            "frozen_input_authority":"explicit immutable fixture assumption; not live freshness",
+            "dispatch":"private observer on attachment thread",
+            "availability_scope":"private simulated capability availability"})
+    }
+}
+impl Observer for CappedPrefix {
+    fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+        Ok(())
+    }
+    fn indexed(
+        &self,
+        stage: Stage,
+        reader: Arc<SnapshotReader>,
+        model: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        self.operator.indexed(stage, reader, model)
+    }
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        self.operator.canonical_work(work)
+    }
+    fn declined(&self, reason: &str) -> Result<(), String> {
+        self.operator.declined(reason)
+    }
+    fn prefix(&self, reader: &norn_host::startup_experiment::PrefixReader) -> Result<(), String> {
+        let reporter = &self.operator.reporter;
+        let boundary = reporter.began.elapsed().as_nanos();
+        let started = Instant::now();
+        let command = json!({"op":"find"});
+        let attempt = reader.find(&find_params(&reporter.address, &command));
+        let elapsed = started.elapsed().as_nanos();
+        let certificate = &attempt.certificate;
+        let answer = attempt.answer.map(|answer| {
+            let (unsatisfied, advisories, report) = answer.into_report();
+            json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+        });
+        let published = answer.is_some();
+        let read_budget = attempt.read_budget.map(|readings| readings.map(|reading| json!({
+            "connections_opened":reading.connections_opened,"live_connections":reading.live_connections,
+            "idle_connections":reading.idle_connections,"waiting_reads":reading.waiting_reads,"peak_connections":reading.peak_connections
+        })));
+        let record = json!({"startup_stage":"canonical-prefix", "probe":"active_page",
+            "command":command,"answer":answer,"early_published":published,
+            "query_executed":attempt.query_executed,"decline_reason":attempt.decline,"read_budget_before_during_after":read_budget,
+            "projection_epoch":attempt.reading.as_ref().map(|r| r.epoch()),
+            "projection_generation":attempt.reading.as_ref().map(|r| r.write_generation()),
+            "counters":attempt.counters,"stage_boundary_ns":boundary,
+            "query_started_ns":boundary,"query_host_ns":elapsed,"query_finished_ns":reporter.began.elapsed().as_nanos(),
+            "certificate":{"cap_document_candidates":128,"consumed":certificate.consumed,"catalogue_replayed":certificate.catalogue_replayed,
+                "catalogue_document_candidates":certificate.catalogue_document_candidates,
+                "frontier":certificate.frontier,"eof":certificate.eof,"invalid":certificate.invalid,
+                "bytes_read_including_reobservation":certificate.bytes_read,"writer_work":certificate.writer_work,
+                "authority":"FROZEN fixture names, bytes, schema and root; no live freshness proof",
+                "catalogue_sql_counters":null,"seal_sql_counters":null},
+            "simulation":"paused","global_ready":false});
+        *self.attempt.lock().unwrap() = Some(record.clone());
+        reporter.emit(record);
+        // PrefixReader::find has already released its actual IntakeSnapshot.
+        self.operator.acknowledged(2, "active_page")
+    }
+    fn prefix_retired(&self) -> Result<(), String> {
+        fn check(directory: &std::path::Path) -> Result<(), String> {
+            if !directory.exists() {
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(directory).map_err(|e| e.to_string())? {
+                let path = entry.map_err(|e| e.to_string())?.path();
+                if path.is_dir() {
+                    check(&path)?;
+                } else {
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    if name.starts_with("intake-") || name.starts_with("demand-") {
+                        return Err(format!(
+                            "projection retained before canonical heal: {}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        check(&self.operator.root.join("data"))
+    }
+}

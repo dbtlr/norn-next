@@ -247,3 +247,32 @@ fn catalogue_refuses_a_second_record_of_the_same_path() {
             .is_err()
     );
 }
+
+#[test]
+fn catalogue_prefix_uses_find_order_and_preserves_folded_ties() {
+    use norn_store::{AmbiguityIgnore, startup_experiment::Catalogue};
+    let scratch = Scratch::new("catalogue-find-prefix");
+    let mut catalogue = Catalogue::open(scratch.database().parent().unwrap()).unwrap();
+    for name in ["B.md", "C.md", "a.md", "A.md", "é.md", "Z.md"] {
+        catalogue
+            .record_document(&path(name), &AmbiguityIgnore::none())
+            .unwrap();
+    }
+    assert!(
+        catalogue.document_prefix(3).is_err(),
+        "unindexed names cannot certify a prefix"
+    );
+    catalogue.finish_inventory().unwrap();
+    assert!(
+        catalogue.document_prefix(3).is_err(),
+        "Get must precede Find index preparation"
+    );
+    catalogue.prepare_find_order().unwrap();
+    let head = catalogue.document_prefix(3).unwrap();
+    assert_eq!(head.paths, ["A.md", "a.md", "B.md"]);
+    assert!(!head.eof);
+    let all = catalogue.document_prefix(128).unwrap();
+    assert_eq!(all.paths, ["A.md", "a.md", "B.md", "C.md", "Z.md", "é.md"]);
+    assert!(all.eof);
+    assert!(catalogue.document_prefix(6).unwrap().eof);
+}

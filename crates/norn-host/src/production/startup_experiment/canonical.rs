@@ -20,6 +20,9 @@ pub(super) fn run(
     let declared = Declaration::read(&mut attachment.store)?;
     let model = Arc::clone(declared.model.shared_content_model());
     {
+        let mut catalogue_decline = None;
+        let mut catalogue_replayed = 0_u64;
+        let mut catalogue_document_candidates = 0_u64;
         let timing = norn_store::profiling::span("startup.catalogue");
         let directory = attachment.shadows.directory().join("canonical-demand");
         let mut catalogue = Catalogue::open(&directory).map_err(store_effect)?;
@@ -27,18 +30,35 @@ pub(super) fn run(
         loop {
             let page = inventory.advance(policy.store_page_size).map_err(effect)?;
             for record in page.records {
-                if let norn_fs::WalkFact::File(file) =
-                    inventory.replay(&record.value).map_err(effect)?
+                catalogue_replayed += 1;
+                let fact = inventory.replay(&record.value).map_err(effect)?;
+                if experiment.frozen_prefix.is_some()
+                    && let norn_fs::WalkFact::Skipped(skip) = &fact
+                    && !skip.reason().stands()
+                {
+                    catalogue_decline = Some(
+                        "unresolved catalogue observation; frozen-input certificate broken"
+                            .to_string(),
+                    );
+                }
+                if let norn_fs::WalkFact::File(file) = fact
                     && let Ok(path) = document_path(file.path().as_path())
                 {
-                    if is_markdown(file.path().as_path()) {
-                        catalogue
-                            .record_document(&path, model.ambiguity_ignore())
-                            .map_err(store_effect)?;
+                    let recorded = if is_markdown(file.path().as_path()) {
+                        catalogue_document_candidates += 1;
+                        catalogue.record_document(&path, model.ambiguity_ignore())
                     } else if path.is_vault_file() {
-                        catalogue
-                            .record_file(&path, model.ambiguity_ignore())
-                            .map_err(store_effect)?;
+                        catalogue.record_file(&path, model.ambiguity_ignore())
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(error) = recorded {
+                        if experiment.frozen_prefix.is_none() {
+                            return Err(store_effect(error));
+                        }
+                        catalogue_decline = Some(format!(
+                            "duplicate/colliding catalogue observation; frozen-input certificate broken: {error}"
+                        ));
                     }
                 }
             }
@@ -104,6 +124,22 @@ pub(super) fn run(
             experiment.observer.declined("closure exceeds the bound, request is unsupported, or source movement was observed; wait for ordinary readiness").map_err(JobFailure::Environmental)?;
         }
         projection.close().map_err(store_effect)?;
+        if let Some(frozen) = &experiment.frozen_prefix {
+            // Get's observer has returned (including its ACK) before this index exists.
+            super::prefix::run(
+                attachment,
+                exclusions,
+                policy,
+                experiment,
+                &model,
+                &source,
+                &mut catalogue,
+                frozen,
+                catalogue_decline,
+                catalogue_replayed,
+                catalogue_document_candidates,
+            )?;
+        }
     }
     let intake = if experiment.intake {
         Some(super::intake::prepare(
@@ -112,6 +148,12 @@ pub(super) fn run(
     } else {
         None
     };
+    if experiment.frozen_prefix.is_some() {
+        experiment
+            .observer
+            .prefix_retired()
+            .map_err(JobFailure::Environmental)?;
+    }
     let before = crate::evidence::startup_writer_work();
     {
         let _timing = norn_store::profiling::span("startup.canonical_heal");

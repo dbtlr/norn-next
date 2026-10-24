@@ -23,6 +23,13 @@ pub struct CatalogueCandidates {
 pub struct Catalogue {
     database: TemporaryDatabase,
     complete: bool,
+    find_order: bool,
+}
+
+/// Bounded candidate names, not eligible rows. EOF is namespace exhaustion only.
+pub struct CataloguePrefix {
+    pub paths: Vec<String>,
+    pub eof: bool,
 }
 
 impl Catalogue {
@@ -45,6 +52,7 @@ impl Catalogue {
         Ok(Self {
             database,
             complete: false,
+            find_order: false,
         })
     }
 
@@ -77,6 +85,48 @@ impl Catalogue {
             path.path_key(), ignore.admitting_segments(path.as_str()) as i64]))
             .map_err(|error| error::sql("recording experimental catalogue", error))?;
         Ok(())
+    }
+
+    /// Separate from inventory completion: the frozen lab calls this after Get ACK.
+    pub fn prepare_find_order(&mut self) -> Result<(), StoreError> {
+        if !self.complete {
+            return Err(prefix_error("catalogue inventory is incomplete"));
+        }
+        self.database
+            .connection()
+            .execute_batch(&format!(
+                "CREATE INDEX IF NOT EXISTS documents_find_order ON documents({})",
+                crate::read::answer_ordering("path", "")
+            ))
+            .map_err(|error| error::sql("indexing catalogue Find order", error))?;
+        self.find_order = true;
+        Ok(())
+    }
+
+    /// Read at most 128 names plus one EOF witness, without collapsing folded ties.
+    pub fn document_prefix(&self, cap: usize) -> Result<CataloguePrefix, StoreError> {
+        if !self.find_order || cap == 0 || cap > 128 {
+            return Err(prefix_error(
+                "catalogue prefix requires Find index and cap 1..=128",
+            ));
+        }
+        let sql = format!(
+            "SELECT path FROM documents ORDER BY {} LIMIT ?1",
+            crate::read::answer_ordering("path", "")
+        );
+        let mut paths = self
+            .database
+            .connection()
+            .prepare_cached(&sql)
+            .and_then(|mut statement| {
+                statement
+                    .query_map([cap + 1], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()
+            })
+            .map_err(|error| error::sql("reading catalogue Find prefix", error))?;
+        let eof = paths.len() <= cap;
+        paths.truncate(cap);
+        Ok(CataloguePrefix { paths, eof })
     }
 
     /// Publish names only after enumeration completes, so absence is not guessed.
@@ -336,5 +386,13 @@ mod intake_tests {
             .unwrap();
         assert_eq!(matches, 0);
         store.close().unwrap();
+    }
+}
+
+fn prefix_error(message: &str) -> StoreError {
+    StoreError::Sql {
+        operation: "reading experimental catalogue prefix",
+        condition: None,
+        message: message.into(),
     }
 }

@@ -103,6 +103,8 @@ class Current:
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
         if loading is not None:
             env["NORN_PERFORMANCE_LOADING"] = loading
+            if loading == "operator-prefix-capped":
+                env["NORN_PERFORMANCE_FROZEN_INPUT"] = "frozen-fixture-v1"
         if residency is not None:
             env["NORN_PERFORMANCE_RESIDENCY"] = residency
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")

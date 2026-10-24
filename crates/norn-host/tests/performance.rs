@@ -200,6 +200,7 @@ fn performance_worker() {
     #[cfg(feature = "induced-failure")]
     let operator_mode = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok("operator-prefix") => Some("early"),
+        Ok("operator-prefix-capped") => Some("capped"),
         Ok("operator-prefix-ordinary") => Some("ordinary"),
         _ => None,
     };
@@ -221,7 +222,28 @@ fn performance_worker() {
         })
     });
     #[cfg(feature = "induced-failure")]
-    let experiment = if let Some(observer) = &operator_prefix {
+    let capped_prefix = (operator_mode == Some("capped")).then(|| {
+        assert_eq!(
+            std::env::var("NORN_PERFORMANCE_FROZEN_INPUT").as_deref(),
+            Ok("frozen-fixture-v1"),
+            "capped prefix requires explicit FROZEN fixture authority"
+        );
+        std::sync::Arc::new(staged::CappedPrefix::new(
+            began,
+            vault.name().clone(),
+            root.clone(),
+        ))
+    });
+    #[cfg(feature = "induced-failure")]
+    let experiment = if let Some(observer) = &capped_prefix {
+        Some(
+            norn_host::startup_experiment::Experiment::capped_prefix_frozen(
+                "small",
+                observer.clone(),
+                norn_host::startup_experiment::FrozenInput::assume_immutable(),
+            ),
+        )
+    } else if let Some(observer) = &operator_prefix {
         Some(norn_host::startup_experiment::Experiment::canonical_intake(
             "small",
             observer.clone(),
@@ -271,7 +293,7 @@ fn performance_worker() {
     assert!(
         !matches!(
             std::env::var("NORN_PERFORMANCE_LOADING").as_deref(),
-            Ok("operator-prefix" | "operator-prefix-ordinary")
+            Ok("operator-prefix" | "operator-prefix-ordinary" | "operator-prefix-capped")
         ),
         "operator prefix modes require induced-failure"
     );
@@ -371,9 +393,13 @@ fn performance_worker() {
     let ready = if let Some(mode) = operator_mode {
         let mut ready = ready;
         ready["operator_prefix_mode"] = json!(mode);
-        ready["operator_prefix_receipt"] = operator_prefix
-            .as_ref()
-            .map_or(Value::Null, |observer| observer.receipt());
+        ready["operator_prefix_receipt"] = if let Some(observer) = &capped_prefix {
+            observer.receipt()
+        } else {
+            operator_prefix
+                .as_ref()
+                .map_or(Value::Null, |observer| observer.receipt())
+        };
         ready
     } else {
         ready
