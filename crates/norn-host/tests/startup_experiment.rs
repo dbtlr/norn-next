@@ -371,6 +371,362 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
     for mode in ["layered", "canonical-demand", "canonical-intake"] {
         check_measurement_reporter(mode);
     }
+    #[cfg(target_os = "linux")]
+    {
+        for cell in ["N", "G", "E", "Q", "M"] {
+            check_residency_reporter(cell);
+        }
+        check_residency_ack_failures();
+        check_residency_observer_error_cleanup();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_residency_reporter(cell: &str) {
+    use staged::residency::{Cell, Diagnostic, thread_tid};
+    let scratch = norn_testkit::scratch::Scratch::new("norn-residency-reporter");
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::create_dir_all(root.join("bench")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(
+        root.join("bench/small.md"),
+        "---\nperf_bucket: probe\n---\nprofileraresignal profilecommonword [[missing]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("bench/large.md"),
+        "---\nperf_bucket: active\n---\nprofilecommonword\n## Details\nSection body.\n",
+    )
+    .unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    REPORTED.lock().unwrap().clear();
+    let main = thread_tid();
+    let (observer, mut dispatcher) = Diagnostic::new(
+        Instant::now(),
+        vault.name().clone(),
+        Cell::parse(cell).unwrap(),
+        Duration::from_secs(5),
+    );
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        Experiment::canonical_intake("small", observer),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while host.state(vault.name()).unwrap() != norn_wire::TrustState::Ready {
+        dispatcher
+            .pump(|event| {
+                REPORTED.lock().unwrap().push(event.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let reports = REPORTED.lock().unwrap();
+    let checkpoints: Vec<_> = reports
+        .iter()
+        .filter(|r| r.get("residency_checkpoint").is_some())
+        .collect();
+    assert_eq!(
+        checkpoints
+            .iter()
+            .map(|r| r["residency_checkpoint"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "before-early-get",
+            "after-early-get",
+            "before-metadata",
+            "after-metadata",
+            "intake-retired-before-final",
+            "after-final"
+        ]
+    );
+    let attachment = checkpoints[0]["attachment_tid"].as_u64().unwrap();
+    assert_ne!(attachment, u64::from(main));
+    for (i, checkpoint) in checkpoints.iter().enumerate() {
+        assert_eq!(
+            checkpoint["construction_eligibility_gets"], 1,
+            "N still performs the constant eligibility Get"
+        );
+        assert_eq!(checkpoint["sequence"], i + 1);
+        assert_eq!(checkpoint["worker_tid"], main);
+        let position = reports
+            .iter()
+            .position(|r| std::ptr::eq(r, *checkpoint))
+            .unwrap();
+        assert_eq!(
+            reports[position + 1]["residency_acknowledged"],
+            i + 1,
+            "no query or continuation precedes sampling acknowledgement"
+        );
+    }
+    let queries: Vec<_> = reports
+        .iter()
+        .filter(|r| r.get("startup_stage").is_some())
+        .collect();
+    let mut expected = vec![("catalogue", "names")];
+    if cell != "N" {
+        expected.push(("canonical-demand", "whole_slug"));
+    }
+    let metadata = [
+        "active_page",
+        "document_count",
+        "active_count",
+        "sparse_page",
+        "zero_page",
+        "unknown_field",
+        "field_page",
+    ];
+    if matches!(cell, "E" | "Q" | "M") {
+        expected.extend(metadata.map(|p| ("canonical-intake", p)));
+    }
+    if cell == "Q" {
+        expected.push(("canonical-health", "whole_slug"));
+        expected.extend(metadata.map(|p| ("canonical-final-intake", p)));
+        expected.extend([
+            ("frontmatter", "active_page"),
+            ("frontmatter", "document_count"),
+            ("frontmatter", "active_count"),
+            ("lexical", "common"),
+            ("lexical", "rare"),
+            ("lexical", "missing"),
+            ("lexical", "filtered"),
+            ("lexical", "coverage"),
+            ("rich", "section"),
+            ("health", "summary"),
+        ]);
+    }
+    assert_eq!(
+        queries
+            .iter()
+            .map(|r| (
+                r["startup_stage"].as_str().unwrap(),
+                r["probe"].as_str().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for query in queries {
+        assert_eq!(
+            query["thread_tid"],
+            if cell == "M" && query["startup_stage"] != "catalogue" {
+                u64::from(main)
+            } else {
+                attachment
+            }
+        );
+        if query["startup_stage"] == "canonical-demand" {
+            assert_eq!(
+                query["answer"]["report"]["document"]["findings"]["total"],
+                1
+            );
+            assert_eq!(query["answer"]["report"]["document"]["links"]["total"], 1);
+        }
+    }
+    drop(reports);
+    drop(demand);
+    drop(host);
+    assert!(
+        !scratch
+            .root()
+            .join("data")
+            .join("canonical-intake")
+            .exists()
+    );
+    // Check real storage residue, rather than relying on the observer's claims.
+    fn no_intake_files(path: &std::path::Path) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                no_intake_files(&path);
+            } else {
+                assert!(
+                    !path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("intake-")
+                );
+            }
+        }
+    }
+    no_intake_files(scratch.root());
+}
+
+#[cfg(target_os = "linux")]
+fn check_residency_ack_failures() {
+    use staged::residency::sample_ack;
+    let scratch = norn_testkit::scratch::Scratch::new("norn-residency-ack");
+    std::fs::create_dir(scratch.join("residency-acks")).unwrap();
+    let event = serde_json::json!({"sequence":1,"residency_checkpoint":"before-early-get"});
+    assert!(
+        sample_ack(scratch.root(), &event, Duration::ZERO)
+            .unwrap_err()
+            .contains("timed out")
+    );
+    for ack in [
+        "{",
+        r#"{"sequence":true,"checkpoint":"before-early-get"}"#,
+        r#"{"sequence":2,"checkpoint":"before-early-get"}"#,
+        r#"{"sequence":1,"checkpoint":"after-early-get"}"#,
+    ] {
+        std::fs::write(scratch.join("residency-acks/1.json"), ack).unwrap();
+        assert!(
+            sample_ack(scratch.root(), &event, Duration::ZERO)
+                .unwrap_err()
+                .contains("invalid residency")
+        );
+    }
+    std::fs::write(
+        scratch.join("residency-acks/1.json"),
+        r#"{"sequence":1,"checkpoint":"before-early-get"}"#,
+    )
+    .unwrap();
+    sample_ack(scratch.root(), &event, Duration::ZERO).unwrap();
+    assert!(!scratch.join("residency-acks/1.json").exists());
+}
+
+#[cfg(target_os = "linux")]
+fn check_residency_observer_error_cleanup() {
+    use staged::residency::{Cell, Diagnostic};
+    let scratch = norn_testkit::scratch::Scratch::new("norn-residency-error-cleanup");
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::create_dir(root.join("bench")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(
+        root.join("bench/small.md"),
+        "---\nperf_bucket: probe\n---\nBody\n",
+    )
+    .unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    let (observer, mut dispatcher) = Diagnostic::new(
+        Instant::now(),
+        vault.name().clone(),
+        Cell::M,
+        Duration::from_secs(2),
+    );
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(128, 128).unwrap(),
+        Experiment::canonical_intake("small", observer),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = dispatcher.pump(|event| {
+            if event["residency_checkpoint"] == "after-metadata" {
+                Err("invalid external ack".into())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = result {
+            assert_eq!(error, "invalid external ack");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(dispatcher);
+    drop(demand);
+    drop(host);
+    fn check_files(path: &std::path::Path) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                check_files(&path);
+            } else {
+                assert!(
+                    !path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("intake-")
+                );
+            }
+        }
+    }
+    check_files(scratch.root());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn residency_rendezvous_drops_work_before_ack_and_propagates_errors() {
+    use staged::residency::{Cell, Diagnostic};
+    for cell in [Cell::N, Cell::G, Cell::E, Cell::Q, Cell::M] {
+        let (observer, mut dispatcher) = Diagnostic::new(
+            Instant::now(),
+            VaultName::new("notes").unwrap(),
+            cell,
+            Duration::from_secs(2),
+        );
+        let captured = Arc::new(());
+        let weak = Arc::downgrade(&captured);
+        let main = std::thread::current().id();
+        let (thread_tx, thread_rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            observer.execute(Box::new(move || {
+                thread_tx.send(std::thread::current().id()).unwrap();
+                drop(captured);
+                Err("query refused".into())
+            }))
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !join.is_finished() {
+            let _ = dispatcher.pump(|_| Ok(()));
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(join.join().unwrap(), Err("query refused".into()));
+        assert!(
+            weak.upgrade().is_none(),
+            "dispatcher retained a work handle"
+        );
+        assert_eq!(thread_rx.recv().unwrap() == main, cell == Cell::M);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn residency_disconnect_and_timeout_release_queued_handles_without_running_queries() {
+    use staged::residency::{Cell, Diagnostic};
+    for disconnected in [true, false] {
+        let (observer, dispatcher) = Diagnostic::new(
+            Instant::now(),
+            VaultName::new("notes").unwrap(),
+            Cell::M,
+            Duration::from_millis(10),
+        );
+        let mut dispatcher = Some(dispatcher);
+        if disconnected {
+            dispatcher.take();
+        }
+        let captured = Arc::new(());
+        let weak = Arc::downgrade(&captured);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let call = called.clone();
+        let worker = std::thread::spawn(move || {
+            observer.execute(Box::new(move || {
+                call.store(true, std::sync::atomic::Ordering::Relaxed);
+                drop(captured);
+                Ok(())
+            }))
+        });
+        assert!(worker.join().unwrap().is_err());
+        if let Some(dispatcher) = &mut dispatcher {
+            assert!(
+                dispatcher
+                    .pump(|_| Ok(()))
+                    .unwrap_err()
+                    .contains("cancelled")
+            );
+        }
+        drop(dispatcher);
+        assert!(weak.upgrade().is_none());
+        assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 fn check_measurement_reporter(mode: &str) {

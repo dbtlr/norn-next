@@ -16,6 +16,7 @@ pub struct Reporter {
     address: VaultAddress,
     checkpoint: AtomicU64,
     silent: bool,
+    diagnostic_threads: bool,
     intake: AtomicBool,
     canonical_work: Mutex<Option<std::collections::BTreeMap<&'static str, u64>>>,
 }
@@ -27,9 +28,17 @@ impl Reporter {
             address: VaultAddress::name(name),
             checkpoint: AtomicU64::new(0),
             silent,
+            diagnostic_threads: false,
             intake: AtomicBool::new(false),
             canonical_work: Mutex::new(None),
         }
+    }
+
+    fn emit(&self, mut value: Value) {
+        if self.diagnostic_threads {
+            value["thread_tid"] = json!(residency::thread_tid());
+        }
+        super::emit(value);
     }
 
     fn query(
@@ -108,7 +117,7 @@ impl Reporter {
         if stage == "canonical-health" {
             record["canonical_work"] = json!(*self.canonical_work.lock().unwrap());
         }
-        super::emit(record);
+        self.emit(record);
         Ok(())
     }
 }
@@ -129,44 +138,18 @@ impl Observer for Reporter {
         self.intake.store(true, Ordering::Relaxed);
         let boundary = self.began.elapsed().as_nanos();
         if self.silent {
-            super::emit(
+            self.emit(
                 json!({"startup_stage":"canonical-intake", "probe":"boundary",
                 "stage_boundary_ns":boundary,"query_host_ns":0,"queries_executed":false,
                 "simulation":"paused","global_ready":false}),
             );
             return Ok(());
         }
-        for (probe, command) in intake_probes() {
-            let requested = self.began.elapsed().as_nanos();
-            let started = Instant::now();
-            let snapshot = reader
-                .snapshot(Instant::now() + Duration::from_secs(5))
-                .map_err(|e| e.to_string())?
-                .ok_or("intake reader unavailable")?;
-            let answer = if command["op"] == "find" {
-                let (unsatisfied, advisories, report) = snapshot
-                    .find(&find_params(&self.address, &command))
-                    .map_err(|e| format!("{e:?}"))?
-                    .into_report();
-                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
-            } else {
-                let (unsatisfied, advisories, report) = snapshot
-                    .count(&count_params(&self.address, &command))
-                    .map_err(|e| format!("{e:?}"))?
-                    .into_report();
-                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
-            };
-            super::emit(json!({"startup_stage":"canonical-intake","probe":probe,
-                "stage_boundary_ns":boundary,"query_host_ns":started.elapsed().as_nanos(),
-                "query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
-                "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),
-                "projection_generation":snapshot.reading().write_generation(),"simulation":"paused","global_ready":false}));
-        }
-        Ok(())
+        self.intake_queries(&reader, boundary)
     }
 
     fn declined(&self, reason: &str) -> Result<(), String> {
-        super::emit(
+        self.emit(
             json!({"startup_stage":"canonical-demand", "probe":"declined", "reason":reason, "simulation":"paused","global_ready":false}),
         );
         Ok(())
@@ -174,12 +157,13 @@ impl Observer for Reporter {
     fn catalogue(&self, catalogue: &Catalogue, model: &ContentModel) -> Result<(), String> {
         let boundary = self.began.elapsed().as_nanos();
         if self.silent {
-            super::emit(
+            self.emit(
                 json!({"startup_stage":"catalogue","probe":"boundary","stage_boundary_ns":boundary,
                 "query_host_ns":0,"queries_executed":false,"simulation":"paused","global_ready":false}),
             );
             return Ok(());
         }
+        let requested = self.began.elapsed().as_nanos();
         let began = Instant::now();
         let mut answers = Vec::new();
         for target in ["small", "roadmap", "profilenonexistentdocument"] {
@@ -189,11 +173,13 @@ impl Observer for Reporter {
                 .ok_or("catalogue incomplete")?;
             answers.push(json!({"target":target,"paths":found.paths,"total":found.total}));
         }
-        super::emit(
-            json!({"startup_stage":"catalogue","probe":"names","stage_boundary_ns":boundary,
+        let mut record = json!({"startup_stage":"catalogue","probe":"names","stage_boundary_ns":boundary,
             "query_host_ns":began.elapsed().as_nanos(),"query_finished_ns":self.began.elapsed().as_nanos(),
-            "candidates":answers,"simulation":"paused","global_ready":false}),
-        );
+            "candidates":answers,"simulation":"paused","global_ready":false});
+        if self.diagnostic_threads {
+            record["query_started_ns"] = json!(requested);
+        }
+        self.emit(record);
         Ok(())
     }
 
@@ -221,7 +207,7 @@ impl Observer for Reporter {
                 if stage == Stage::CanonicalHealth {
                     record["canonical_work"] = json!(*self.canonical_work.lock().unwrap());
                 }
-                super::emit(record);
+                self.emit(record);
             }
             return Ok(());
         }
@@ -230,6 +216,39 @@ impl Observer for Reporter {
 }
 
 impl Reporter {
+    fn intake_queries(
+        &self,
+        reader: &Arc<norn_host::startup_experiment::IntakeReader>,
+        boundary: u128,
+    ) -> Result<(), String> {
+        for (probe, command) in intake_probes() {
+            let requested = self.began.elapsed().as_nanos();
+            let started = Instant::now();
+            let snapshot = reader
+                .snapshot(Instant::now() + Duration::from_secs(5))
+                .map_err(|e| e.to_string())?
+                .ok_or("intake reader unavailable")?;
+            let answer = if command["op"] == "find" {
+                let (unsatisfied, advisories, report) = snapshot
+                    .find(&find_params(&self.address, &command))
+                    .map_err(|e| format!("{e:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            } else {
+                let (unsatisfied, advisories, report) = snapshot
+                    .count(&count_params(&self.address, &command))
+                    .map_err(|e| format!("{e:?}"))?
+                    .into_report();
+                json!({"report":report,"unsatisfied":unsatisfied,"advisories":advisories})
+            };
+            self.emit(json!({"startup_stage":"canonical-intake","probe":probe,
+                "stage_boundary_ns":boundary,"query_host_ns":started.elapsed().as_nanos(),
+                "query_started_ns":requested,"query_finished_ns":self.began.elapsed().as_nanos(),
+                "command":command,"answer":answer,"projection_epoch":snapshot.reading().epoch(),
+                "projection_generation":snapshot.reading().write_generation(),"simulation":"paused","global_ready":false}));
+        }
+        Ok(())
+    }
     fn probes(
         &self,
         stage: Stage,
@@ -392,3 +411,6 @@ fn intake_probes() -> [(&'static str, Value); 7] {
         ),
     ]
 }
+
+#[path = "residency.rs"]
+pub mod residency;

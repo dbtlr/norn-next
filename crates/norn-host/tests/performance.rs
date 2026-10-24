@@ -12,6 +12,9 @@ mod cache;
 mod staged;
 #[cfg(feature = "induced-failure")]
 static CACHE_DIAGNOSTICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "induced-failure")]
+static RESIDENCY_DIAGNOSTICS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -32,6 +35,10 @@ fn emit(value: Value) {
         let mut value = value;
         if CACHE_DIAGNOSTICS.load(std::sync::atomic::Ordering::Relaxed) {
             cache::suppress_clocks(&mut value);
+        }
+        if RESIDENCY_DIAGNOSTICS.load(std::sync::atomic::Ordering::Relaxed) {
+            value["diagnostic_only"] = json!(true);
+            value["timing_accepted"] = json!(false);
         }
         value
     };
@@ -169,45 +176,94 @@ fn performance_worker() {
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
     #[cfg(feature = "induced-failure")]
-    let experiment = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
-        Ok(
-            mode @ ("layered"
-            | "layered-silent"
-            | "facts-once"
-            | "facts-once-silent"
-            | "canonical-demand"
-            | "canonical-demand-silent"
-            | "canonical-intake"
-            | "canonical-intake-silent"),
-        ) => {
-            let reporter = std::sync::Arc::new(staged::Reporter::new(
+    let (diagnostic, residency) = match std::env::var("NORN_PERFORMANCE_RESIDENCY") {
+        Ok(cell) => {
+            RESIDENCY_DIAGNOSTICS.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                std::env::var_os("NORN_PERFORMANCE_LOADING").is_none()
+                    && cache_options.kib.is_none()
+                    && !cache_options.diagnostics
+                    && !profiling,
+                "residency attribution requires default cache options and no other experiment or profiler"
+            );
+            let (observer, dispatcher) = staged::residency::Diagnostic::new(
                 began,
                 vault.name().clone(),
-                mode.ends_with("-silent"),
-            ));
-            let experiment = if mode.starts_with("canonical-intake") {
-                norn_host::startup_experiment::Experiment::canonical_intake("small", reporter)
-            } else if mode.starts_with("canonical-demand") {
-                norn_host::startup_experiment::Experiment::canonical_demand("small", reporter)
-            } else if mode.starts_with("facts-once") {
-                norn_host::startup_experiment::Experiment::facts_once("small", reporter)
-            } else {
-                norn_host::startup_experiment::Experiment::new("small", reporter)
-            };
-            Some(experiment)
+                staged::residency::Cell::parse(&cell).expect("residency cell"),
+                std::time::Duration::from_secs(60),
+            );
+            (Some(observer), Some(dispatcher))
         }
-        Err(_) => None,
-        Ok(mode) => panic!("unknown startup experiment {mode}"),
+        Err(std::env::VarError::NotPresent) => (None, None),
+        Err(error) => panic!("invalid residency option: {error}"),
     };
+    #[cfg(feature = "induced-failure")]
+    let experiment = if let Some(observer) = diagnostic {
+        Some(norn_host::startup_experiment::Experiment::canonical_intake(
+            "small", observer,
+        ))
+    } else {
+        match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+            Ok(
+                mode @ ("layered"
+                | "layered-silent"
+                | "facts-once"
+                | "facts-once-silent"
+                | "canonical-demand"
+                | "canonical-demand-silent"
+                | "canonical-intake"
+                | "canonical-intake-silent"),
+            ) => {
+                let reporter = std::sync::Arc::new(staged::Reporter::new(
+                    began,
+                    vault.name().clone(),
+                    mode.ends_with("-silent"),
+                ));
+                let experiment = if mode.starts_with("canonical-intake") {
+                    norn_host::startup_experiment::Experiment::canonical_intake("small", reporter)
+                } else if mode.starts_with("canonical-demand") {
+                    norn_host::startup_experiment::Experiment::canonical_demand("small", reporter)
+                } else if mode.starts_with("facts-once") {
+                    norn_host::startup_experiment::Experiment::facts_once("small", reporter)
+                } else {
+                    norn_host::startup_experiment::Experiment::new("small", reporter)
+                };
+                Some(experiment)
+            }
+            Err(_) => None,
+            Ok(mode) => panic!("unknown startup experiment {mode}"),
+        }
+    };
+    #[cfg(not(feature = "induced-failure"))]
+    assert!(
+        std::env::var_os("NORN_PERFORMANCE_RESIDENCY").is_none(),
+        "residency diagnostics require induced-failure"
+    );
     #[cfg(feature = "induced-failure")]
     let host = vault.host_with_loading_options(policy, experiment, cache_options.cache.clone());
     #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
+    // Drop the diagnostic receiver before Host joins its attachment worker,
+    // including during unwind. A parked observer must wake on teardown.
+    #[cfg(feature = "induced-failure")]
+    let mut residency = residency;
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
     let until = Instant::now() + std::time::Duration::from_secs(240);
     while host.state(vault.name()).expect("registered vault state") != norn_wire::TrustState::Ready
     {
+        #[cfg(feature = "induced-failure")]
+        if let Some(dispatcher) = &mut residency {
+            dispatcher
+                .pump(|event| {
+                    staged::residency::sample_ack(
+                        &root,
+                        event,
+                        staged::residency::PARENT_ACK_TIMEOUT,
+                    )
+                })
+                .expect("bounded diagnostic rendezvous");
+        }
         assert!(Instant::now() < until, "startup did not become ready");
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -255,6 +311,14 @@ fn performance_worker() {
     let cache_kib = cache_options.kib;
     #[cfg(not(feature = "induced-failure"))]
     let cache_kib: Option<u32> = None;
+    #[cfg(feature = "induced-failure")]
+    if let Some(dispatcher) = &mut residency {
+        dispatcher
+            .checkpoint("at-ready-before-reads", |event| {
+                staged::residency::sample_ack(&root, event, staged::residency::PARENT_ACK_TIMEOUT)
+            })
+            .expect("acknowledge Ready before ordinary reads");
+    }
     emit(
         json!({"ready": true, "initial_import_cache_kib":cache_kib,"writer_cache":cache_receipt, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
                 "observed_ready_ns": ready_ns, "host_setup_ns": host_setup.as_nanos(),
@@ -262,6 +326,8 @@ fn performance_worker() {
                 "timings": timings, "job_evidence": evidence}),
     );
     let address = VaultAddress::name(vault.name().clone());
+    #[cfg(feature = "induced-failure")]
+    let mut diagnostic_read = 0;
 
     for line in std::io::stdin().lock().lines() {
         let line = line.expect("read a command");
@@ -270,6 +336,45 @@ fn performance_worker() {
         if op == "stop" {
             break;
         }
+        #[cfg(feature = "induced-failure")]
+        if let Some(dispatcher) = &mut residency {
+            if op == "residency-endpoint" {
+                assert_eq!(
+                    diagnostic_read, 8,
+                    "endpoint follows exactly the common eight reads"
+                );
+                dispatcher
+                    .checkpoint("after-common-reads", |event| {
+                        staged::residency::sample_ack(
+                            &root,
+                            event,
+                            staged::residency::PARENT_ACK_TIMEOUT,
+                        )
+                    })
+                    .expect("acknowledge final residency endpoint");
+                diagnostic_read += 1;
+                emit(json!({"answer":{"residency_endpoint":true},"host_ns":0,"counters":{}}));
+                continue;
+            }
+            let expected = [
+                json!({"op":"search","query":"profileraresignal"}),
+                json!({"op":"search","query":"profilecommonword"}),
+                json!({"op":"search","query":"profilenonexistenttoken"}),
+                json!({"op":"search","query":"profilecommonword","path":"bench/**"}),
+                json!({"op":"find"}),
+                json!({"op":"get","target":"bench/small.md"}),
+                json!({"op":"get","target":"bench/large.md"}),
+                json!({"op":"get","target":"bench/large.md#Details"}),
+            ];
+            assert_eq!(
+                expected.get(diagnostic_read),
+                Some(&command),
+                "diagnostic common read history"
+            );
+            diagnostic_read += 1;
+        }
+        #[cfg(feature = "induced-failure")]
+        let diagnostic_started = began.elapsed().as_nanos();
         let mut counters = BTreeMap::new();
         let (answer, elapsed) = match op {
             "search" => {
@@ -381,7 +486,19 @@ fn performance_worker() {
             }
             _ => panic!("unknown performance operation {op}"),
         };
-        emit(json!({"answer": answer, "host_ns": elapsed.as_nanos(), "counters": counters}));
+        let record = json!({"answer": answer, "host_ns": elapsed.as_nanos(), "counters": counters});
+        #[cfg(feature = "induced-failure")]
+        let record = if residency.is_some() {
+            let mut record = record;
+            record["thread_tid"] = json!(staged::residency::thread_tid());
+            record["diagnostic_common_index"] = json!(diagnostic_read - 1);
+            record["query_started_ns"] = json!(diagnostic_started);
+            record["query_finished_ns"] = json!(began.elapsed().as_nanos());
+            record
+        } else {
+            record
+        };
+        emit(record);
     }
 }
 

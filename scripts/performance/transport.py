@@ -94,7 +94,8 @@ def resources(pid: int) -> dict:
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
                  loading: str | None = None, stage_handler=None,
-                 initial_cache_kib: int | None = None, cache_diagnostics: bool = False):
+                 initial_cache_kib: int | None = None, cache_diagnostics: bool = False,
+                 residency: str | None = None):
         token = issue_root(root)
         env = environment(root, token, initial_cache_kib=initial_cache_kib,
                           cache_diagnostics=cache_diagnostics)
@@ -102,6 +103,8 @@ class Current:
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
         if loading is not None:
             env["NORN_PERFORMANCE_LOADING"] = loading
+        if residency is not None:
+            env["NORN_PERFORMANCE_RESIDENCY"] = residency
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
@@ -121,7 +124,8 @@ class Current:
                 stage = self.ready
                 if stage_handler is not None:
                     stage_handler(stage)
-                stage["resources_when_observed"] = resources(self.process.pid)
+                if residency is None:
+                    stage["resources_when_observed"] = resources(self.process.pid)
                 self.stages.append(stage)
                 self.ready = self.receive()
             if not self.ready.get("ready"):
