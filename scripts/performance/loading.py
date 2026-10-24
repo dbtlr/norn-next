@@ -179,6 +179,12 @@ def validate_construction_receipts(stages, ready, group):
             raise ValueError("completed construction contains a rollback")
         if r["commits"] != sum(r["commits_" + p] for p in ("documents", "findings", "cleanup", "health_reset", "health_generation", "drain")):
             raise ValueError("construction phase commits disagree")
+        for phase, units in (("documents", "document_changesets"), ("findings", "finding_units"),
+                ("cleanup", "cleanup_units"), ("health_reset", "health_resets"),
+                ("health_generation", "health_generation_groups")):
+            if r["commits_" + phase] > r[units] or (
+                    expected_group == 1 and r["commits_" + phase] != r[units]):
+                raise ValueError("construction phase commits disagree with completed units")
         if r["commits_drain"] != r["drain_changesets"] + r["drain_cleanup_units"] + r["drain_finding_units"]:
             raise ValueError("ordinary drain units must commit individually")
         if index < 2 and r["drain_changesets"] + r["drain_cleanup_units"] + r["drain_finding_units"] + r["commits_drain"]:
@@ -187,19 +193,37 @@ def validate_construction_receipts(stages, ready, group):
             raise ValueError("final health preceded full facts")
         if r["document_changesets"] != stages[0]["health_once_work"]["changesets_applied"]:
             raise ValueError("construction changed logical document changesets")
+        facts_units = r["document_changesets"] + r["finding_units"] + r["cleanup_units"]
+        if index == 0:
+            expected_commits = 0 if expected_group == 0 else facts_units // expected_group
+            if r["commits"] != expected_commits:
+                raise ValueError("facts commits disagree with completed full groups")
         if index >= 1:
             if r["health_resets"] != 1 or not 0 < r["health_generation_groups"] <= r["document_changesets"]:
                 raise ValueError("final health generation account is missing")
-            units = r["document_changesets"] + r["finding_units"] + r["cleanup_units"] + r["health_resets"] + r["health_generation_groups"]
+            units = facts_units + r["health_resets"] + r["health_generation_groups"]
             # Sanity-check independently recorded counts; norn-db tests also
             # reconcile successful commits against actual SQLite execution.
             expected_commits = 1 if expected_group == 0 else (units + expected_group - 1) // expected_group
             if r["commits"] != expected_commits + r["commits_drain"]:
                 raise ValueError("construction commits disagree with bounded units")
+            # Facts precede the single reset, then generation units are contiguous.
+            # Only their group endpoints (including the final partial) can commit.
+            facts_commits = 0 if expected_group == 0 else facts_units // expected_group
+            reset_commits = int(expected_group != 0 and (facts_units + 1) % expected_group == 0)
+            if (r["commits_health_reset"] != reset_commits or
+                    r["commits_health_generation"] != expected_commits - facts_commits - reset_commits):
+                raise ValueError("final health commits disagree with reset and generation order")
         if previous is not None:
             for key in CONSTRUCTION_KEYS:
                 if r[key] < previous[key]:
                     raise ValueError("construction receipt lost work")
+                if index == 1 and key in ("document_changesets", "finding_units", "cleanup_units",
+                        "commits_documents", "commits_findings", "commits_cleanup") and r[key] != previous[key]:
+                    raise ValueError("final health changed completed facts units or phase commits")
+                if index == 2 and key not in ("commit_attempts", "commits", "drain_changesets",
+                        "drain_cleanup_units", "drain_finding_units", "commits_drain") and r[key] != previous[key]:
+                    raise ValueError("completed health changed construction units or phase commits")
         previous = r
     final = stages[2]
     for key, value in {"loading_mode": "health-once-txn", "mode_executed": True,
