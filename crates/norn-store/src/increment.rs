@@ -8,9 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use norn_db::rusqlite::{
-    CachedStatement, OptionalExtension, Transaction, params, params_from_iter,
-};
+use norn_db::rusqlite::{CachedStatement, Connection, OptionalExtension, params, params_from_iter};
 use norn_wire::{FindingKind, fold_tag};
 
 use crate::counters::{Counter, DerivationCounters};
@@ -289,9 +287,19 @@ pub(crate) fn apply(
     let recorded_at = request::unix_seconds();
     // Findings and changed paths share one comparison key for both axes.
     let class_space = SuffixKey::Comparison;
+    #[cfg(not(feature = "induced-failure"))]
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
+    #[cfg(feature = "induced-failure")]
+    if mode != crate::startup_experiment::WriteMode::DeferredHealth {
+        store.database.refuse_unconverted_construction_writer()?;
+    }
+    #[cfg(feature = "induced-failure")]
+    let transaction = store.database.construction_unit(
+        norn_db::construction::Phase::Documents,
+        "opening the increment transaction",
+    )?;
     // The pin is read in the transaction every row is written in, so no pin
     // lands between the comparisons below and the writes they admit.
     let pinned: Option<String> =
@@ -447,9 +455,12 @@ pub(crate) fn apply(
     {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_db::profiling::span("store.commit");
+        #[cfg(not(feature = "induced-failure"))]
         transaction
             .commit()
             .map_err(|error| error::sql("committing an increment", error))?;
+        #[cfg(feature = "induced-failure")]
+        transaction.commit()?;
     }
 
     // The act is at rest, findings included. A process that ends here has lost
@@ -505,9 +516,10 @@ pub(crate) fn finish_startup_health(
     declared: &ContentModel,
 ) -> Result<(), StoreError> {
     {
-        let transaction = store
-            .database
-            .immediate_transaction("resetting experimental health")?;
+        let transaction = store.database.construction_unit(
+            norn_db::construction::Phase::HealthReset,
+            "resetting experimental health",
+        )?;
         let pinned: Option<String> =
             norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
         refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
@@ -517,9 +529,7 @@ pub(crate) fn finish_startup_health(
                 .map_err(|error| error::sql("resetting experimental health", error))?;
             counters.add(Counter::FindingsDiscarded, removed as u64);
         }
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing experimental health reset", error))?;
+        transaction.commit()?;
     }
     let mut after = 0_i64;
     loop {
@@ -532,9 +542,10 @@ pub(crate) fn finish_startup_health(
             )
             .map_err(|error| error::sql("paging experimental generations", error))?;
         let Some(generation) = generation else { break };
-        let transaction = store
-            .database
-            .immediate_transaction("judging experimental health")?;
+        let transaction = store.database.construction_unit(
+            norn_db::construction::Phase::HealthGeneration,
+            "judging experimental health",
+        )?;
         let judged = health::redecide(
             &transaction,
             work,
@@ -543,9 +554,7 @@ pub(crate) fn finish_startup_health(
             &BTreeSet::new(),
             &BTreeSet::new(),
         )?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing experimental health", error))?;
+        transaction.commit()?;
         counters.add(Counter::FindingsWritten, judged.findings);
         counters.add(Counter::LinksRedecided, judged.links);
         counters.add(Counter::LinkHealthKeysResolved, judged.keys_resolved);
@@ -634,7 +643,8 @@ impl FindingsDiscard {
 }
 
 impl<'t> Statements<'t> {
-    fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
+    fn prepare(transaction: &'t Connection) -> Result<Self, StoreError> {
+        norn_db::require_transaction(transaction)?;
         // Every statement but the three findings discards is taken from the
         // registry, which is the one place a write statement's text is spelled:
         // see [`crate::write_path`]. The discards are the plan seam's own

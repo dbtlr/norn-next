@@ -171,7 +171,8 @@ fn performance_worker() {
     #[cfg(feature = "induced-failure")]
     let experiment = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok(
-            mode @ ("health-once"
+            mode @ ("health-once-txn"
+            | "health-once"
             | "layered"
             | "layered-silent"
             | "facts-once"
@@ -186,7 +187,21 @@ fn performance_worker() {
                 vault.name().clone(),
                 mode.ends_with("-silent"),
             ));
-            let experiment = if mode == "health-once" {
+            let experiment = if mode == "health-once-txn" {
+                assert_eq!(changeset_size, 128, "transaction mode fixes Pending at 128");
+                assert!(
+                    cache_options.cache.is_none() && !cache_options.diagnostics,
+                    "transaction mode cannot vary cache settings"
+                );
+                let group = match std::env::var("NORN_PERFORMANCE_CONSTRUCTION_GROUP").as_deref() {
+                    Ok("1") => 1,
+                    Ok("16") => 16,
+                    Ok("unbounded") => 0,
+                    _ => panic!("transaction mode requires explicit group 1, 16, or unbounded"),
+                };
+                norn_host::startup_experiment::Experiment::health_once_construction(reporter, group)
+                    .unwrap()
+            } else if mode == "health-once" {
                 norn_host::startup_experiment::Experiment::health_once(reporter)
             } else if mode.starts_with("canonical-intake") {
                 norn_host::startup_experiment::Experiment::canonical_intake("small", reporter)
@@ -202,6 +217,11 @@ fn performance_worker() {
         Err(_) => None,
         Ok(mode) => panic!("unknown startup experiment {mode}"),
     };
+    assert!(
+        std::env::var_os("NORN_PERFORMANCE_CONSTRUCTION_GROUP").is_none()
+            || std::env::var("NORN_PERFORMANCE_LOADING").as_deref() == Ok("health-once-txn"),
+        "construction group requires the explicit transaction mode"
+    );
     #[cfg(feature = "induced-failure")]
     let host = vault.host_with_loading_options(policy, experiment, cache_options.cache.clone());
     #[cfg(not(feature = "induced-failure"))]

@@ -31,6 +31,13 @@ pub trait Observer: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+    /// Final counter-only receipt after watcher and semantic completion.
+    fn construction_complete(
+        &self,
+        _work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Ordinary writer counters exclude every disposable phase.
     fn canonical_work(
         &self,
@@ -64,6 +71,7 @@ pub struct Experiment {
     canonical: bool,
     intake: bool,
     pub(super) health_once: bool,
+    pub(super) construction_group: Option<usize>,
 }
 
 impl Experiment {
@@ -76,6 +84,7 @@ impl Experiment {
             canonical: false,
             intake: false,
             health_once: false,
+            construction_group: None,
         })
     }
 
@@ -88,6 +97,7 @@ impl Experiment {
             canonical: false,
             intake: false,
             health_once: false,
+            construction_group: None,
         })
     }
 
@@ -104,6 +114,7 @@ impl Experiment {
             canonical: true,
             intake: false,
             health_once: false,
+            construction_group: None,
         })
     }
 
@@ -120,6 +131,7 @@ impl Experiment {
             canonical: true,
             intake: true,
             health_once: false,
+            construction_group: None,
         })
     }
 
@@ -137,7 +149,23 @@ impl Experiment {
             canonical: false,
             intake: false,
             health_once: true,
+            construction_group: None,
         })
+    }
+
+    /// Explicit private lab mode: 1 ordinary, 16 bounded, 0 unbounded diagnostic.
+    pub fn health_once_construction(
+        observer: Arc<dyn Observer>,
+        group: usize,
+    ) -> Result<Arc<Self>, String> {
+        if !matches!(group, 0 | 1 | 16) {
+            return Err("construction group must be 1, 16, or unbounded (0)".into());
+        }
+        let mut experiment = Self::health_once(observer);
+        Arc::get_mut(&mut experiment)
+            .expect("new experiment")
+            .construction_group = Some(group);
+        Ok(experiment)
     }
 
     pub(super) fn take_initial_attempt(&self) -> bool {
@@ -341,44 +369,87 @@ fn run_health_once(
         .begin_request()
         .start_startup_experiment()
         .map_err(store_effect)?;
-    let model = Arc::clone(Declaration::read(store)?.model.shared_content_model());
-    let mut account = Account {
-        defer_health: true,
-        ..Account::default()
-    };
-    super::heal_documents_accounted(
-        store,
-        &attachment.covered_root,
-        exclusions,
-        policy,
-        progress,
-        &mut account,
-    )?;
-    let checkpoint = |finalized| {
-        let work = crate::evidence::startup_writer_work()
-            .into_iter()
-            .map(|(key, value)| (key, value - before[key]))
-            .collect();
-        experiment
-            .observer
-            .health_once_work(finalized, &work)
-            .map_err(JobFailure::Environmental)
-    };
-    checkpoint(false)?;
-    {
-        // This routine commits a reset and one transaction per document
-        // generation. Those commits are outside changesets_applied: the lab
-        // factor includes all work of moving health to completed facts.
-        let _timing = norn_store::profiling::span("startup.final_health");
-        let mut request = store.begin_request();
-        request
-            .finish_startup_health(&model)
+    if let Some(group) = experiment.construction_group {
+        store
+            .begin_request()
+            .begin_startup_construction(group)
             .map_err(store_effect)?;
-        count_increment_work(request.counters(), request.read_steps());
     }
-    checkpoint(true)?;
-    attachment.skipped_links = account.links;
-    Ok(())
+    // Unit guards cover errors inside SQL. This covers every other exit between
+    // units too (walk, observer, cancellation and panic), without publishing.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let model = Arc::clone(Declaration::read(store)?.model.shared_content_model());
+        let mut account = Account {
+            defer_health: true,
+            ..Account::default()
+        };
+        super::heal_documents_accounted(
+            store,
+            &attachment.covered_root,
+            exclusions,
+            policy,
+            progress,
+            &mut account,
+        )?;
+        let checkpoint = |finalized, store: &mut norn_store::Store| {
+            let mut work: std::collections::BTreeMap<_, _> = crate::evidence::startup_writer_work()
+                .into_iter()
+                .map(|(key, value)| (key, value - before[key]))
+                .collect();
+            work.extend(store.begin_request().startup_construction_work());
+            experiment
+                .observer
+                .health_once_work(finalized, &work)
+                .map_err(JobFailure::Environmental)
+        };
+        checkpoint(false, store)?;
+        {
+            let _timing = norn_store::profiling::span("startup.final_health");
+            let mut request = store.begin_request();
+            request
+                .finish_startup_health(&model)
+                .map_err(store_effect)?;
+            count_increment_work(request.counters(), request.read_steps());
+        }
+        if experiment.construction_group.is_some() {
+            store
+                .begin_request()
+                .finish_startup_construction()
+                .map_err(store_effect)?;
+        }
+        checkpoint(true, store)?;
+        Ok(account.links)
+    }));
+    match result {
+        Ok(Ok(links)) => {
+            attachment.skipped_links = links;
+            Ok(())
+        }
+        Ok(Err(failure)) => {
+            if experiment.construction_group.is_some() {
+                if let Err(cleanup) = store.begin_request().abandon_startup_construction() {
+                    return Err(JobFailure::Environmental(format!(
+                        "{failure:?}; construction rollback: {cleanup}"
+                    )));
+                }
+            }
+            Err(failure)
+        }
+        Err(panic) => {
+            if experiment.construction_group.is_some() {
+                // The store is dropped by the unwinding attach. A failed
+                // rollback is retained by norn-db; closing SQLite is the last
+                // rollback backstop, and the committed marker still refuses.
+                let cleanup = store.begin_request().abandon_startup_construction();
+                if let Err(error) = cleanup {
+                    return Err(JobFailure::Environmental(format!(
+                        "construction panicked; rollback: {error}"
+                    )));
+                }
+            }
+            std::panic::resume_unwind(panic)
+        }
+    }
 }
 
 struct RetireReader(Arc<SnapshotReader>);

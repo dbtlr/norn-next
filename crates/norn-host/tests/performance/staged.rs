@@ -123,8 +123,22 @@ impl Observer for Reporter {
             json!({"startup_stage": if finalized {"health-once-health"} else {"health-once-facts"},
             "probe":"boundary", "stage_boundary_ns":self.began.elapsed().as_nanos(),
             "query_host_ns":0, "queries_executed":false, "global_ready":false,
-            "simulation":"private-initial-build", "loading_mode":"health-once",
+            "simulation":"private-initial-build", "loading_mode": if work.contains_key("construction_group") {"health-once-txn"} else {"health-once"},
             "mode_executed":true, "health_complete":finalized, "health_once_work":work}),
+        );
+        Ok(())
+    }
+
+    fn construction_complete(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        super::emit(
+            json!({"startup_stage":"construction-complete", "probe":"boundary",
+            "stage_boundary_ns":self.began.elapsed().as_nanos(), "query_host_ns":0,
+            "queries_executed":false, "global_ready":false, "health_complete":true,
+            "simulation":"private-initial-build", "loading_mode":"health-once-txn",
+            "mode_executed":true, "construction_work":work}),
         );
         Ok(())
     }

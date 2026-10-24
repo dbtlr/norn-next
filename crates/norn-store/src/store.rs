@@ -1025,6 +1025,8 @@ impl StoreMode {
 pub struct Store {
     #[cfg(feature = "induced-failure")]
     intake_unsealed: bool,
+    #[cfg(feature = "induced-failure")]
+    pub(crate) construction_marked: bool,
     count_results: Arc<crate::count::CountResults>,
     pub(crate) database: Database,
     mode: StoreMode,
@@ -1114,6 +1116,8 @@ impl Store {
         Ok(Store {
             #[cfg(feature = "induced-failure")]
             intake_unsealed: false,
+            #[cfg(feature = "induced-failure")]
+            construction_marked: false,
             count_results: Arc::new(crate::count::CountResults::for_store(
                 crate::CountRetentionPolicy::default(),
                 path,
@@ -1159,6 +1163,13 @@ impl Store {
     /// Reject an interrupted experiment retained by recovery without reopening.
     #[cfg(feature = "induced-failure")]
     pub fn ensure_startup_complete(&self) -> Result<(), StoreError> {
+        // Only the same successfully finished construction may consume its
+        // held watcher facts before removing the marker. Reopened, failed and
+        // ordinary health-once handles have no such local authority.
+        if self.construction_marked && self.database.construction_receipt().is_some() {
+            self.database.ensure_construction_complete()?;
+            return Ok(());
+        }
         refuse_incomplete_startup(&self.database)
     }
 

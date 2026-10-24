@@ -373,6 +373,7 @@ fn measurement_reporter_runs_every_query_including_the_section_shape() {
         "canonical-demand",
         "canonical-intake",
         "health-once",
+        "health-once-txn",
     ] {
         check_measurement_reporter(mode);
     }
@@ -396,7 +397,9 @@ fn check_measurement_reporter(mode: &str) {
     let reporter = staged::Reporter::new(Instant::now(), vault.name().clone(), false);
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        if mode == "health-once" {
+        if mode == "health-once-txn" {
+            Experiment::health_once_construction(Arc::new(reporter), 16).unwrap()
+        } else if mode == "health-once" {
             Experiment::health_once(Arc::new(reporter))
         } else if mode == "canonical-intake" {
             Experiment::canonical_intake("small", Arc::new(reporter))
@@ -415,7 +418,9 @@ fn check_measurement_reporter(mode: &str) {
     let reports = REPORTED.lock().unwrap();
     assert_eq!(
         reports.len(),
-        if mode == "health-once" {
+        if mode == "health-once-txn" {
+            3
+        } else if mode == "health-once" {
             2
         } else if mode == "canonical-intake" {
             27
@@ -425,6 +430,22 @@ fn check_measurement_reporter(mode: &str) {
             12
         }
     );
+    if mode == "health-once-txn" {
+        assert_eq!(reports[2]["startup_stage"], "construction-complete");
+        for (index, record) in reports.iter().enumerate() {
+            assert_eq!(record["loading_mode"], mode);
+            assert_eq!(record["queries_executed"], false);
+            assert!(record.get("answer").is_none());
+            let key = if index == 2 {
+                "construction_work"
+            } else {
+                "health_once_work"
+            };
+            assert_eq!(record[key]["construction_group"], 16);
+        }
+        assert_eq!(reports[2]["construction_work"]["construction_commits"], 1);
+        return;
+    }
     if mode == "health-once" {
         for record in reports.iter() {
             assert_eq!(record["probe"], "boundary");

@@ -47,6 +47,7 @@ impl IntakeBuilder {
         Ok(Self {
             store: Some(Store {
                 intake_unsealed: true,
+                construction_marked: false,
                 count_results: Arc::new(crate::count::CountResults::for_store(
                     crate::CountRetentionPolicy::default(),
                     path,

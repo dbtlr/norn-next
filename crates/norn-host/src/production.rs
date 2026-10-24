@@ -800,6 +800,18 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
+        self.reconcile_under_attribution(name, attachment, work, progress)
+    }
+
+    /// Attach's lab drain already owns its filesystem read account. Ordinary
+    /// reconciliation enters through reconcile_leg, which opens that account.
+    fn reconcile_under_attribution(
+        &self,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        work: ReconcileWork,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
         if !attachment
             .maintainership
             .still_current()
@@ -1806,6 +1818,26 @@ impl EntryOps for ProductionEntryOps {
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
         }?;
+        #[cfg(feature = "induced-failure")]
+        if self
+            .startup_experiment
+            .as_ref()
+            .is_some_and(|e| e.construction_group.is_some())
+        {
+            // The grouped transaction ended in run_health_once. Reconcile the
+            // window's captured facts with ordinary per-changeset commits while
+            // the persistent marker still prevents adoption and publication.
+            let batch = std::mem::take(&mut attached.heal_observed);
+            if !batch.is_empty() {
+                rolling::watcher_turn(&mut attached, &batch)?;
+                self.reconcile_under_attribution(
+                    &registration.name,
+                    &mut attached,
+                    ReconcileWork { batch },
+                    progress,
+                )?;
+            }
+        }
         self.dispatch_config(&mut attached);
         self.drain_semantic(&registration.name, &mut attached, progress);
         #[cfg(feature = "induced-failure")]
@@ -1814,6 +1846,15 @@ impl EntryOps for ProductionEntryOps {
             .as_ref()
             .is_some_and(|e| e.health_once)
         {
+            if let Some(experiment) = self.startup_experiment.as_ref()
+                && experiment.construction_group.is_some()
+            {
+                let work = attached.store.begin_request().startup_construction_work();
+                experiment
+                    .observer
+                    .construction_complete(&work)
+                    .map_err(JobFailure::Environmental)?;
+            }
             attached
                 .store
                 .begin_request()
@@ -5285,13 +5326,28 @@ mod tests {
             }
         }
         let mut works = Vec::new();
-        for mode in ["ordinary", "initial", "unstarted"] {
+        for (mode, group) in [
+            ("ordinary", None),
+            ("initial", None),
+            ("unstarted", None),
+            ("initial", Some(1)),
+            ("initial", Some(16)),
+            ("initial", Some(0)),
+            ("unstarted", Some(16)),
+            ("unstarted", Some(0)),
+        ] {
             let f = Fixture::new("health-once-warm");
             fs::write(f.vault().join("first.md"), "[[later#Present]]\n").unwrap();
             fs::write(f.vault().join("later.md"), "# Present\n").unwrap();
             let (mut ops, name) = f.ops(1);
             let probe = Arc::new(Probe::default());
-            let experiment = startup_experiment::Experiment::health_once(probe.clone());
+            let experiment = match group {
+                None => startup_experiment::Experiment::health_once(probe.clone()),
+                Some(group) => {
+                    startup_experiment::Experiment::health_once_construction(probe.clone(), group)
+                        .unwrap()
+                }
+            };
             if mode == "initial" {
                 ops = ops.with_startup_experiment(experiment.clone());
             }
@@ -5325,6 +5381,7 @@ mod tests {
                 "warm writes must judge untouched incoming links immediately"
             );
             ops.recover(&name, &mut attachment, &progress).unwrap();
+            ops.reload(&name, &mut attachment, &progress).unwrap();
             let after = ops.account().read().since(before);
             works.push((
                 after.documents_derived,
@@ -5340,8 +5397,9 @@ mod tests {
             );
             ops.detach(&name, attachment);
         }
-        assert_eq!(works[0], works[1]);
-        assert_eq!(works[0], works[2]);
+        for work in &works[1..] {
+            assert_eq!(&works[0], work);
+        }
     }
 
     /// **An attach refused in the host's own data directory reaches a caller

@@ -525,6 +525,10 @@ impl<'a> Request<'a> {
         scope: DiscardScope<'_>,
     ) -> Result<Invalidation, StoreError> {
         check_callers_discard(scope)?;
+        #[cfg(feature = "induced-failure")]
+        self.store
+            .database
+            .refuse_unconverted_construction_writer()?;
         let discarded = self
             .store
             .connection()
@@ -650,6 +654,7 @@ impl<'a> Request<'a> {
     /// A matching hash cannot certify rich facts that an experiment has not written.
     #[cfg(feature = "induced-failure")]
     pub fn start_startup_experiment(&mut self) -> Result<(i64, i64), StoreError> {
+        self.store.database.ensure_construction_complete()?;
         let temp_store = self
             .store
             .connection()
@@ -665,6 +670,7 @@ impl<'a> Request<'a> {
             "startup_experiment_incomplete",
             1_i64,
         )?;
+        self.store.construction_marked = true;
         Ok((temp_store, temp_cache))
     }
 
@@ -684,11 +690,72 @@ impl<'a> Request<'a> {
         self.complete_startup_health_once()
     }
 
+    /// Lab-only, newly created, marked first construction. Marker creation
+    /// has already returned to autocommit before this can open a group.
+    #[cfg(feature = "induced-failure")]
+    pub fn begin_startup_construction(&mut self, group: usize) -> Result<(), StoreError> {
+        if !matches!(self.store.open_outcome(), crate::OpenOutcome::Created)
+            || !self.store.construction_marked
+        {
+            return Err(StoreError::Lifecycle {
+                operation: "starting lab construction",
+                path: self.store.database.path().to_path_buf(),
+                message: "a new marked store is required".into(),
+            });
+        }
+        self.store.database.begin_construction(group)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn finish_startup_construction(&mut self) -> Result<(), StoreError> {
+        self.store.database.finish_construction()?;
+        Ok(())
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn abandon_startup_construction(&mut self) -> Result<(), StoreError> {
+        self.store.construction_marked = false;
+        self.store.database.abandon_construction()?;
+        Ok(())
+    }
+
+    /// Counter-only checkpoint; no SQL, audits, physical probes, or reader.
+    #[cfg(feature = "induced-failure")]
+    pub fn startup_construction_work(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let Some(r) = self.store.database.construction_receipt() else {
+            return Default::default();
+        };
+        std::collections::BTreeMap::from([
+            ("construction_group", r.group as u64),
+            ("construction_commit_attempts", r.commit_attempts),
+            ("construction_commits", r.commits),
+            ("construction_rollback_attempts", r.rollback_attempts),
+            ("construction_rollbacks", r.rollbacks),
+            ("construction_automatic_rollbacks", r.automatic_rollbacks),
+            ("construction_document_changesets", r.document_changesets),
+            ("construction_health_resets", r.health_resets),
+            (
+                "construction_health_generation_groups",
+                r.health_generation_groups,
+            ),
+            ("construction_drain_changesets", r.drain_changesets),
+            ("construction_commits_documents", r.commits_documents),
+            ("construction_commits_health_reset", r.commits_health_reset),
+            (
+                "construction_commits_health_generation",
+                r.commits_health_generation,
+            ),
+            ("construction_commits_drain", r.commits_drain),
+        ])
+    }
+
     /// Clear the shared nonadoption guard without changing temporary storage.
     /// Health-once calls this after its heal, final health and watcher window;
     /// other experiments first restore their settings through the wrapper above.
     #[cfg(feature = "induced-failure")]
     pub fn complete_startup_health_once(&mut self) -> Result<(), StoreError> {
+        self.store.database.ensure_construction_complete()?;
         self.store
             .connection()
             .execute(
@@ -696,6 +763,8 @@ impl<'a> Request<'a> {
                 [],
             )
             .map_err(|error| error::sql("completing an experimental import", error))?;
+        self.store.database.seal_construction_receipt()?;
+        self.store.construction_marked = false;
         Ok(())
     }
 
@@ -2100,9 +2169,10 @@ pub(crate) fn check_finding_paths(finding: &FindingFacts) -> Result<(), StoreErr
 /// judgment in derivation files the findings that cite rules and judge
 /// values; every other producer's carry neither.
 pub(crate) fn write_finding(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     finding: &FindingFacts,
 ) -> Result<(), StoreError> {
+    norn_db::require_transaction(transaction)?;
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.write_finding");
     #[cfg(feature = "induced-failure")]
@@ -2213,10 +2283,11 @@ pub(crate) fn check_content_finding(finding: &FindingFacts) -> Result<(), StoreE
 /// The finding is a content finding: the changeset checked it before its
 /// transaction ([`check_content_finding`]).
 pub(crate) fn record_content_quarantine(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     finding: &FindingFacts,
     hash: &str,
 ) -> Result<(), StoreError> {
+    norn_db::require_transaction(transaction)?;
     transaction
         .prepare_cached(WriteStatement::RecordContentQuarantine.sql())
         .and_then(|mut record| record.execute(params![finding.path.as_str(), hash]))
@@ -2231,10 +2302,11 @@ pub(crate) fn record_content_quarantine(
 /// which tells every two sets apart however their names are spelled, and is
 /// held as that spelling alone: its names are read back off it.
 fn cited_rule_set(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     fingerprint: &str,
     rules: &BTreeSet<String>,
 ) -> Result<Option<i64>, StoreError> {
+    norn_db::require_transaction(transaction)?;
     if rules.is_empty() {
         return Ok(None);
     }
@@ -2263,10 +2335,11 @@ fn cited_rule_set(
 /// through a transaction a caller is composing rather than through the
 /// connection's autocommit.
 pub(crate) fn discard_about_in(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     path: &DocumentPath,
     scope: DiscardScope<'_>,
 ) -> Result<u64, StoreError> {
+    norn_db::require_transaction(transaction)?;
     transaction
         .execute(
             &subject_discard_sql(scope),
