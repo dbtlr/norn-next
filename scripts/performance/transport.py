@@ -79,7 +79,7 @@ def resources(pid: int) -> dict:
     result = {}
     for line in (proc / "status").read_text().splitlines():
         name, _, value = line.partition(":")
-        if name in ("VmRSS", "VmHWM"):
+        if name in ("VmRSS", "VmHWM", "RssAnon", "RssFile", "RssShmem"):
             result[name + "_bytes"] = int(value.split()[0]) * 1024
         elif name == "Threads":
             result["threads"] = int(value)
