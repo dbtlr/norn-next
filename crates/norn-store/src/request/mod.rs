@@ -681,6 +681,14 @@ impl<'a> Request<'a> {
             .connection()
             .pragma_update(Some("temp"), "cache_size", temp_settings.1)
             .map_err(|error| error::sql("restoring the temporary cache after import", error))?;
+        self.complete_startup_health_once()
+    }
+
+    /// Clear the shared nonadoption guard without changing temporary storage.
+    /// Health-once calls this after its heal, final health and watcher window;
+    /// other experiments first restore their settings through the wrapper above.
+    #[cfg(feature = "induced-failure")]
+    pub fn complete_startup_health_once(&mut self) -> Result<(), StoreError> {
         self.store
             .connection()
             .execute(

@@ -114,6 +114,21 @@ impl Reporter {
 }
 
 impl Observer for Reporter {
+    fn health_once_work(
+        &self,
+        finalized: bool,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        super::emit(
+            json!({"startup_stage": if finalized {"health-once-health"} else {"health-once-facts"},
+            "probe":"boundary", "stage_boundary_ns":self.began.elapsed().as_nanos(),
+            "query_host_ns":0, "queries_executed":false, "global_ready":false,
+            "simulation":"private-initial-build", "loading_mode":"health-once",
+            "mode_executed":true, "health_complete":finalized, "health_once_work":work}),
+        );
+        Ok(())
+    }
+
     fn canonical_work(
         &self,
         work: &std::collections::BTreeMap<&'static str, u64>,

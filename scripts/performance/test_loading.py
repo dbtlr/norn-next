@@ -4,6 +4,8 @@ import unittest
 import subprocess
 import sys
 import os
+import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 from transport import environment
 from pathlib import Path
@@ -11,6 +13,50 @@ from loading import validate_stage
 
 
 class LoadingChecks(unittest.TestCase):
+    def test_health_once_controller_checks_after_ready_and_restarts_in_ordinary_mode(self):
+        from loading import run_one
+        from transport import PREFIX
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "performance-token").write_text("token")
+            for stream in ("stdout", "stderr"):
+                (root / f"worker.{stream}.log").write_text("")
+            launches = []
+
+            def worker(_binary, _root, *, loading, profiling, stage_handler=None):
+                launches.append(loading)
+                stages = []
+                if len(launches) == 1:
+                    for name in ("health-once-facts", "health-once-health"):
+                        stage = {"startup_stage": name, "probe": "boundary",
+                                 "queries_executed": False, "stage_boundary_ns": 1,
+                                 "query_host_ns": 0}
+                        stages.append(stage)
+                        stage_handler(stage)
+                elif loading is not None:
+                    raise ValueError("health-once must refuse an existing index")
+                return SimpleNamespace(stages=stages, ready={"job_evidence": {}},
+                    process=SimpleNamespace(pid=1), call=lambda _: ({"host_ns": 0}, 0), close=lambda: None)
+
+            audit = {"semantic_sha256": "same", "store_epoch": "same", "write_generation": 1}
+            with patch("loading.Current", side_effect=worker), \
+                 patch("loading.READS", [("known_get", {"op": "get", "target": "first"})]), \
+                 patch("loading.validate_read") as checked, patch("loading.validate_work"), \
+                 patch("loading.resources", return_value={}), patch("loading.storage_bytes", return_value={}), \
+                 patch("loading.environment", return_value={}), \
+                 patch("loading.audit_store", return_value=audit), \
+                 patch("loading.subprocess.run", return_value=SimpleNamespace(
+                     stdout=PREFIX + '{"integrity_verified":true}', stderr="")):
+                result = run_one(Path("worker"), root, {"document_count": 1}, "health-once", profiling=False)
+            self.assertEqual(launches, ["health-once", None])
+            self.assertEqual(checked.call_count, 2)
+            self.assertTrue(result["verified"])
+
+    def test_health_once_has_only_counter_boundaries_and_no_partial_query_protocol(self):
+        from loading import expected_checkpoints
+        self.assertEqual(expected_checkpoints("health-once"), {
+            ("health-once-facts", "boundary"), ("health-once-health", "boundary")})
+
     def test_cold_run_can_disable_worker_profiling(self):
         from loading import run_one
         with patch.object(Path, "mkdir"), patch("loading.Current", side_effect=RuntimeError("worker started")) as worker:

@@ -22,6 +22,15 @@ pub enum Stage {
 
 /// Store reads at a checkpoint prove query cost without claiming host admission.
 pub trait Observer: Send + Sync {
+    /// Lab-only counter checkpoints; neither grants a reader nor claims readiness.
+    /// `finalized` means the one full-facts health pass has succeeded.
+    fn health_once_work(
+        &self,
+        _finalized: bool,
+        _work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Ordinary writer counters exclude every disposable phase.
     fn canonical_work(
         &self,
@@ -54,6 +63,7 @@ pub struct Experiment {
     separate_frontmatter: bool,
     canonical: bool,
     intake: bool,
+    pub(super) health_once: bool,
 }
 
 impl Experiment {
@@ -65,6 +75,7 @@ impl Experiment {
             separate_frontmatter: true,
             canonical: false,
             intake: false,
+            health_once: false,
         })
     }
 
@@ -76,6 +87,7 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: false,
             intake: false,
+            health_once: false,
         })
     }
 
@@ -91,6 +103,7 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: true,
             intake: false,
+            health_once: false,
         })
     }
 
@@ -106,6 +119,24 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: true,
             intake: true,
+            health_once: false,
+        })
+    }
+
+    /// Private, non-serving initial-construction experiment on disposable copies.
+    /// This deliberately violates ADR 0027's interim-changeset health rule.
+    /// Only health re-decision moves: ordinary walk, parsing, packing, SQL/FTS
+    /// maintenance and cleanup all run before the existing full-facts judgment.
+    /// Existing stores and subsequent attempts refuse; recovery never enters it.
+    pub fn health_once(observer: Arc<dyn Observer>) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: String::new(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: false,
+            intake: false,
+            health_once: true,
         })
     }
 
@@ -143,6 +174,9 @@ pub(super) fn run(
     progress: &Healing<'_, ProductionAttachment>,
     experiment: &Experiment,
 ) -> Result<(), JobFailure> {
+    if experiment.health_once {
+        return run_health_once(attachment, exclusions, policy, progress, experiment);
+    }
     if experiment.canonical {
         return canonical::run(attachment, exclusions, policy, progress, experiment);
     }
@@ -287,6 +321,62 @@ pub(super) fn run(
         .begin_request()
         .complete_startup_experiment(temp_settings)
         .map_err(store_effect)?;
+    attachment.skipped_links = account.links;
+    Ok(())
+}
+
+fn run_health_once(
+    attachment: &mut ProductionAttachment,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    experiment: &Experiment,
+) -> Result<(), JobFailure> {
+    let before = crate::evidence::startup_writer_work();
+    let store = &mut attachment.store;
+    // Persistent before the first deferred changeset. Attach clears this only
+    // after health AND the watcher heal window succeed. Errors/unwinds retain
+    // the existing nonadoption guard, including across ordinary process restart.
+    store
+        .begin_request()
+        .start_startup_experiment()
+        .map_err(store_effect)?;
+    let model = Arc::clone(Declaration::read(store)?.model.shared_content_model());
+    let mut account = Account {
+        defer_health: true,
+        ..Account::default()
+    };
+    super::heal_documents_accounted(
+        store,
+        &attachment.covered_root,
+        exclusions,
+        policy,
+        progress,
+        &mut account,
+    )?;
+    let checkpoint = |finalized| {
+        let work = crate::evidence::startup_writer_work()
+            .into_iter()
+            .map(|(key, value)| (key, value - before[key]))
+            .collect();
+        experiment
+            .observer
+            .health_once_work(finalized, &work)
+            .map_err(JobFailure::Environmental)
+    };
+    checkpoint(false)?;
+    {
+        // This routine commits a reset and one transaction per document
+        // generation. Those commits are outside changesets_applied: the lab
+        // factor includes all work of moving health to completed facts.
+        let _timing = norn_store::profiling::span("startup.final_health");
+        let mut request = store.begin_request();
+        request
+            .finish_startup_health(&model)
+            .map_err(store_effect)?;
+        count_increment_work(request.counters(), request.read_steps());
+    }
+    checkpoint(true)?;
     attachment.skipped_links = account.links;
     Ok(())
 }

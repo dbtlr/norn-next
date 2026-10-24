@@ -368,7 +368,12 @@ fn staged_final_index_and_advisories_match_on_malformed_and_linked_documents() {
 
 #[test]
 fn measurement_reporter_runs_every_query_including_the_section_shape() {
-    for mode in ["layered", "canonical-demand", "canonical-intake"] {
+    for mode in [
+        "layered",
+        "canonical-demand",
+        "canonical-intake",
+        "health-once",
+    ] {
         check_measurement_reporter(mode);
     }
 }
@@ -391,7 +396,9 @@ fn check_measurement_reporter(mode: &str) {
     let reporter = staged::Reporter::new(Instant::now(), vault.name().clone(), false);
     let host = vault.host_with_startup_experiment(
         norn_host::ProductionPolicy::new(128, 128).unwrap(),
-        if mode == "canonical-intake" {
+        if mode == "health-once" {
+            Experiment::health_once(Arc::new(reporter))
+        } else if mode == "canonical-intake" {
             Experiment::canonical_intake("small", Arc::new(reporter))
         } else if canonical {
             Experiment::canonical_demand("small", Arc::new(reporter))
@@ -408,7 +415,9 @@ fn check_measurement_reporter(mode: &str) {
     let reports = REPORTED.lock().unwrap();
     assert_eq!(
         reports.len(),
-        if mode == "canonical-intake" {
+        if mode == "health-once" {
+            2
+        } else if mode == "canonical-intake" {
             27
         } else if canonical {
             13
@@ -416,6 +425,19 @@ fn check_measurement_reporter(mode: &str) {
             12
         }
     );
+    if mode == "health-once" {
+        for record in reports.iter() {
+            assert_eq!(record["probe"], "boundary");
+            assert_eq!(record["queries_executed"], false);
+            assert_eq!(record["loading_mode"], "health-once");
+            assert_eq!(record["mode_executed"], true);
+            assert!(record.get("command").is_none());
+            assert!(record["health_once_work"].is_object());
+        }
+        assert_eq!(reports[0]["health_complete"], false);
+        assert_eq!(reports[1]["health_complete"], true);
+        return;
+    }
     if mode == "canonical-intake" {
         let early: Vec<_> = reports
             .iter()

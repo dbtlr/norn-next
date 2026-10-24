@@ -44,6 +44,8 @@ def expected_checkpoints(mode):
     """One protocol definition shared by cold and warm controllers."""
     if mode == "baseline":
         return set()
+    if mode == "health-once":
+        return {("health-once-facts", "boundary"), ("health-once-health", "boundary")}
     if mode in ("canonical-intake", "canonical-intake-silent"):
         return (CANONICAL_SILENT_EXPECTED | {("canonical-intake", "boundary")}
                 if mode.endswith("-silent") else CANONICAL_EXPECTED | INTAKE_PROBES)
@@ -194,7 +196,7 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
 
     def on_stage(stage):
         key = stage["startup_stage"], stage["probe"]
-        if mode.endswith("-silent"):
+        if mode.endswith("-silent") or mode == "health-once":
             if key not in expected or stage.get("queries_executed") is not False:
                 raise ValueError("a silent control emitted a query claim")
         else:
@@ -254,14 +256,17 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         raise ValueError("integrity worker did not confirm its check")
     result["integrity_verified"] = True
     result["store"] = audit_store(binary, root, manifest)
-    if mode != "baseline" and not mode.endswith("-silent"):
+    if mode not in ("baseline", "health-once") and not mode.endswith("-silent"):
         summary = next(s for s in result["stages"] if s["startup_stage"] == "health")
         total = sum(row["count"] for row in summary["answer"]["report"]["by_kind"])
         if total != result["store"]["counts"]["findings"]:
             raise ValueError("the health checkpoint preceded its complete findings")
     for stream in ("stdout", "stderr"):
         shutil.copy2(root / f"worker.{stream}.log", root / f"fresh.{stream}.log")
-    restart = Current(binary, root, profiling=profiling, loading=None if mode == "baseline" else mode)
+    # Health-once deliberately refuses all existing stores. Warm verification
+    # uses ordinary loading; no experimental observer can touch that history.
+    restart_loading = None if mode in ("baseline", "health-once") else mode
+    restart = Current(binary, root, profiling=profiling, loading=restart_loading)
     try:
         if restart.stages:
             raise ValueError("unchanged restart entered the initial loading experiment")
@@ -269,7 +274,8 @@ def run_one(binary, root, manifest, mode, *, profiling=True):
         for _, command in READS:
             answer, _ = restart.call(command)
             validate_read("current", command, answer, manifest)
-        result["restart"] = {"ready": restart.ready, "resources": resources(restart.process.pid)}
+        result["restart"] = {"ready": restart.ready, "resources": resources(restart.process.pid),
+                             "loading": restart_loading or "ordinary"}
     finally:
         restart.close()
     restarted = audit_store(binary, root, manifest)
@@ -287,7 +293,7 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--sizes", nargs="+", type=int, default=[300, 2000, 10000])
-    parser.add_argument("--modes", nargs="+", choices=["baseline", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "health-once", "layered", "layered-silent", "facts-once", "facts-once-silent", "canonical-demand", "canonical-demand-silent", "canonical-intake", "canonical-intake-silent"], default=["baseline", "layered", "layered-silent"])
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--no-profile", action="store_true", help="disable optional profiling spans in measured workers")
     args = parser.parse_args()

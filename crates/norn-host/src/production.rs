@@ -811,7 +811,12 @@ impl ProductionEntryOps {
         // watcher facts are inert; only an explicit vault reload can replace
         // the active pin.
         if work.batch.rescans().contains(&RescanScope::Vault) {
-            self.heal(attachment, progress)?;
+            self.heal(
+                attachment,
+                progress,
+                #[cfg(feature = "induced-failure")]
+                false,
+            )?;
             self.drain_semantic(name, attachment, progress);
             return Ok(());
         }
@@ -920,7 +925,12 @@ impl ProductionEntryOps {
         attachment.pin(&candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
+        self.heal_under_coverage(
+            attachment,
+            progress,
+            #[cfg(feature = "induced-failure")]
+            false,
+        )?;
         self.drain_semantic(name, attachment, progress);
         Ok(())
     }
@@ -975,7 +985,12 @@ impl ProductionEntryOps {
         attachment.controls = candidate;
         attachment.read_pinned_model()?;
         self.dispatch_config(attachment);
-        self.heal_under_coverage(attachment, progress)?;
+        self.heal_under_coverage(
+            attachment,
+            progress,
+            #[cfg(feature = "induced-failure")]
+            false,
+        )?;
         self.drain_semantic(name, attachment, progress);
         Ok(judgment)
     }
@@ -1224,6 +1239,7 @@ impl ProductionEntryOps {
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
+        #[cfg(feature = "induced-failure")] initial: bool,
     ) -> Result<(), JobFailure> {
         #[cfg(feature = "induced-failure")]
         let _timing = norn_store::profiling::span("host.heal");
@@ -1253,7 +1269,8 @@ impl ProductionEntryOps {
         }
         #[cfg(feature = "induced-failure")]
         if let Some(experiment) = &self.startup_experiment
-            && experiment.take_initial_attempt()
+            && (!experiment.health_once || initial)
+            && (experiment.health_once || experiment.take_initial_attempt())
             && !matches!(
                 attachment.store.open_outcome(),
                 norn_store::OpenOutcome::Reused
@@ -1309,13 +1326,19 @@ impl ProductionEntryOps {
         &self,
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
+        #[cfg(feature = "induced-failure")] initial: bool,
     ) -> Result<(), JobFailure> {
         attachment
             .subscription
             .as_ref()
             .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .begin_heal();
-        let result = self.heal(attachment, progress);
+        let result = self.heal(
+            attachment,
+            progress,
+            #[cfg(feature = "induced-failure")]
+            initial,
+        );
         let (settled_before_the_window, drain_failure) = attachment
             .subscription
             .as_ref()
@@ -1405,7 +1428,12 @@ impl ProductionEntryOps {
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         attachment.read_pinned_model()?;
         let derived = self
-            .heal_under_coverage(&mut attachment, progress)
+            .heal_under_coverage(
+                &mut attachment,
+                progress,
+                #[cfg(feature = "induced-failure")]
+                false,
+            )
             .and_then(|()| {
                 attachment
                     .store
@@ -1677,6 +1705,16 @@ impl EntryOps for ProductionEntryOps {
             )
             .map_err(store_effect)?
         };
+        #[cfg(feature = "induced-failure")]
+        if let Some(experiment) = &self.startup_experiment
+            && experiment.health_once
+            && (!matches!(store.open_outcome(), norn_store::OpenOutcome::Created)
+                || !experiment.take_initial_attempt())
+        {
+            return Err(environmental(
+                "health-once is lab-only and requires a new initial store",
+            ));
+        }
         store
             .set_count_retention(self.policy.count_retention)
             .map_err(store_effect)?;
@@ -1745,17 +1783,43 @@ impl EntryOps for ProductionEntryOps {
         let (attachment, healed) = startup_experiment::initial_heal(
             attachment,
             self.initial_import_cache.as_deref(),
-            |attachment| self.heal_under_coverage(attachment, progress),
+            |attachment| self.heal_under_coverage(attachment, progress, true),
         )?;
         #[cfg(not(feature = "induced-failure"))]
-        let healed = self.heal_under_coverage(&mut attachment, progress);
+        let healed = self.heal_under_coverage(
+            &mut attachment,
+            progress,
+            #[cfg(feature = "induced-failure")]
+            false,
+        );
         let mut attached = match healed {
             Ok(()) => Ok(attachment),
+            #[cfg(feature = "induced-failure")]
+            Err(failure)
+                if self
+                    .startup_experiment
+                    .as_ref()
+                    .is_some_and(|e| e.health_once) =>
+            {
+                Err(failure)
+            }
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
         }?;
         self.dispatch_config(&mut attached);
         self.drain_semantic(&registration.name, &mut attached, progress);
+        #[cfg(feature = "induced-failure")]
+        if self
+            .startup_experiment
+            .as_ref()
+            .is_some_and(|e| e.health_once)
+        {
+            attached
+                .store
+                .begin_request()
+                .complete_startup_health_once()
+                .map_err(store_effect)?;
+        }
         Ok(attached)
     }
 
@@ -2254,9 +2318,21 @@ fn heal_documents(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
 ) -> Result<SkippedLinks, JobFailure> {
+    let mut account = Account::default();
+    heal_documents_accounted(store, root, exclusions, policy, progress, &mut account)?;
+    Ok(account.links)
+}
+
+fn heal_documents_accounted(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    account: &mut Account,
+) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
-    let mut account = Account::default();
     merge_walk(
         store,
         root,
@@ -2266,10 +2342,9 @@ fn heal_documents(
         HealScope::Vault,
         policy,
         progress,
-        &mut account,
+        account,
     )?;
-    close_job(store, root, exclusions, policy, &mut account)?;
-    Ok(account.links)
+    close_job(store, root, exclusions, policy, account)
 }
 
 /// Converge the rows a scope addresses against the files a walk of it yields.
@@ -3667,6 +3742,9 @@ impl FreedRoots {
 /// rows every one of its flushes has already committed.
 #[derive(Default)]
 struct Account {
+    /// Only the unpublished lab initial heal sets this; cleanup shares the account.
+    #[cfg(feature = "induced-failure")]
+    defer_health: bool,
     rolling: bool,
     bytes_read: u64,
     misses: norn_wire::WatcherMisses,
@@ -4509,7 +4587,11 @@ impl<'s> Pending<'s> {
     fn flush(&mut self) -> Result<(), JobFailure> {
         self.flush_for_mode(
             #[cfg(feature = "induced-failure")]
-            norn_store::startup_experiment::WriteMode::Ordinary,
+            if self.account.defer_health {
+                norn_store::startup_experiment::WriteMode::DeferredHealth
+            } else {
+                norn_store::startup_experiment::WriteMode::Ordinary
+            },
         )
     }
 
@@ -5172,6 +5254,96 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn health_once_never_defers_warm_reconcile_or_recovery_even_if_not_previously_started() {
+        #[derive(Default)]
+        struct Probe(std::sync::atomic::AtomicUsize);
+        impl startup_experiment::Observer for Probe {
+            fn catalogue(
+                &self,
+                _: &norn_store::startup_experiment::Catalogue,
+                _: &ContentModel,
+            ) -> Result<(), String> {
+                panic!("health-once entered the catalogue");
+            }
+            fn indexed(
+                &self,
+                _: startup_experiment::Stage,
+                _: Arc<norn_store::SnapshotReader>,
+                _: Arc<ContentModel>,
+            ) -> Result<(), String> {
+                panic!("health-once exposed a reader");
+            }
+            fn health_once_work(
+                &self,
+                _: bool,
+                _: &BTreeMap<&'static str, u64>,
+            ) -> Result<(), String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let mut works = Vec::new();
+        for mode in ["ordinary", "initial", "unstarted"] {
+            let f = Fixture::new("health-once-warm");
+            fs::write(f.vault().join("first.md"), "[[later#Present]]\n").unwrap();
+            fs::write(f.vault().join("later.md"), "# Present\n").unwrap();
+            let (mut ops, name) = f.ops(1);
+            let probe = Arc::new(Probe::default());
+            let experiment = startup_experiment::Experiment::health_once(probe.clone());
+            if mode == "initial" {
+                ops = ops.with_startup_experiment(experiment.clone());
+            }
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            if mode == "unstarted" {
+                ops = ops.with_startup_experiment(experiment);
+            }
+            let before = ops.account().read();
+            fs::write(f.vault().join("later.md"), "# Changed\n").unwrap();
+            let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork {
+                    batch: norn_fs::Batch::vault_change(
+                        normalizer.normalize(Path::new("later.md")).unwrap(),
+                    ),
+                },
+                &progress,
+            )
+            .unwrap();
+            let findings = attachment
+                .store
+                .begin_request()
+                .stored_findings(&DocumentPath::new("first.md").unwrap())
+                .unwrap();
+            assert_eq!(
+                findings.len(),
+                1,
+                "warm writes must judge untouched incoming links immediately"
+            );
+            ops.recover(&name, &mut attachment, &progress).unwrap();
+            let after = ops.account().read().since(before);
+            works.push((
+                after.documents_derived,
+                after.changesets_applied,
+                after.documents_upserted,
+                after.links_redecided,
+                after.findings_written,
+                after.findings_discarded,
+            ));
+            assert_eq!(
+                probe.0.load(std::sync::atomic::Ordering::SeqCst),
+                if mode == "initial" { 2 } else { 0 }
+            );
+            ops.detach(&name, attachment);
+        }
+        assert_eq!(works[0], works[1]);
+        assert_eq!(works[0], works[2]);
+    }
+
     /// **An attach refused in the host's own data directory reaches a caller
     /// naming no file.** The data directory is an unusually spelled regular
     /// file, so the maintainer lock cannot be taken beneath it: the untrusted
@@ -5680,7 +5852,13 @@ mod tests {
 
         symlink(&next, &replacement).unwrap();
         fs::rename(&replacement, &registered).unwrap();
-        ops.heal(&mut attachment, &progress).unwrap();
+        ops.heal(
+            &mut attachment,
+            &progress,
+            #[cfg(feature = "induced-failure")]
+            false,
+        )
+        .unwrap();
 
         assert_eq!(stored_paths(&mut attachment.store), ["a.md"]);
         ops.detach(&registration.name, attachment);
@@ -17254,7 +17432,13 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
 
-        ops.heal_under_coverage(&mut attachment, &progress).unwrap();
+        ops.heal_under_coverage(
+            &mut attachment,
+            &progress,
+            #[cfg(feature = "induced-failure")]
+            false,
+        )
+        .unwrap();
 
         assert!(
             attachment
@@ -18182,7 +18366,12 @@ mod tests {
                     .map_err(watcher)?;
             attachment.subscription = Some(subscription);
             attachment.own_writes = own_writes;
-            self.inner.heal(attachment, progress)?;
+            self.inner.heal(
+                attachment,
+                progress,
+                #[cfg(feature = "induced-failure")]
+                false,
+            )?;
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             wait_until(

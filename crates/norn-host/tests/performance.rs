@@ -171,7 +171,8 @@ fn performance_worker() {
     #[cfg(feature = "induced-failure")]
     let experiment = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok(
-            mode @ ("layered"
+            mode @ ("health-once"
+            | "layered"
             | "layered-silent"
             | "facts-once"
             | "facts-once-silent"
@@ -185,7 +186,9 @@ fn performance_worker() {
                 vault.name().clone(),
                 mode.ends_with("-silent"),
             ));
-            let experiment = if mode.starts_with("canonical-intake") {
+            let experiment = if mode == "health-once" {
+                norn_host::startup_experiment::Experiment::health_once(reporter)
+            } else if mode.starts_with("canonical-intake") {
                 norn_host::startup_experiment::Experiment::canonical_intake("small", reporter)
             } else if mode.starts_with("canonical-demand") {
                 norn_host::startup_experiment::Experiment::canonical_demand("small", reporter)
