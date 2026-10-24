@@ -16,7 +16,7 @@ impl FrozenInput {
     pub fn invalidate(&self) {
         self.0.store(false, Ordering::SeqCst);
     }
-    fn intact(&self) -> bool {
+    pub(super) fn intact(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
 }
@@ -192,6 +192,7 @@ pub(super) fn run(
             source,
             catalogue,
             &mut capability,
+            experiment.observer.as_ref(),
         );
         if let Err(error) = prepared {
             capability.certificate.invalid =
@@ -219,6 +220,7 @@ fn prepare(
     source: &norn_fs::Vault,
     catalogue: &mut Catalogue,
     capability: &mut PrefixReader,
+    observer: &dyn Observer,
 ) -> Result<(), JobFailure> {
     catalogue.prepare_find_order().map_err(store_effect)?;
     let names = catalogue.document_prefix(CAP).map_err(store_effect)?;
@@ -284,6 +286,11 @@ fn prepare(
                     Some("unresolved prefix read; frozen-input certificate broken".into());
                 break;
             }
+            // The private observer can place a deterministic edit in this
+            // load/rehash window; ordinary loading has no such callback.
+            observer
+                .prefix_loaded(name)
+                .map_err(JobFailure::Environmental)?;
             let reobserved = match source.fact(Path::new(name)).map_err(effect)? {
                 norn_fs::WalkFact::File(file) if file.path().as_path() == Path::new(name) => {
                     file.read_optional().map_err(effect)?

@@ -129,6 +129,14 @@ impl Observer for Gates {
     }
     fn prefix(&self, reader: &PrefixReader) -> Result<(), String> {
         let mut attempts: Vec<_> = self.queries.iter().map(|q| reader.find(q)).collect();
+        for attempt in &attempts {
+            if let Some([_, _, after]) = attempt.read_budget {
+                assert_eq!(
+                    after.live_connections, after.idle_connections,
+                    "query grants must return before the sequential observer ACK"
+                );
+            }
+        }
         if let Some(cursor) = attempts[0].answer.as_ref().and_then(|a| a.next.clone()) {
             let continuation = reader.find(&self.queries[0].clone().with_after(cursor));
             assert!(
@@ -157,7 +165,13 @@ fn no_prefix_files(root: &std::path::Path) {
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .starts_with("intake-prefix-"),
+                    .starts_with("intake-prefix-")
+                    && !path.ancestors().any(|part| {
+                        matches!(
+                            part.file_name().and_then(|name| name.to_str()),
+                            Some("canonical-demand" | "canonical-intake")
+                        )
+                    }),
                 "prefix retained at pre-heal seam: {}",
                 path.display()
             );

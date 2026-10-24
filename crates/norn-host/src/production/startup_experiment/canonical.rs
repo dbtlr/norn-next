@@ -52,14 +52,9 @@ pub(super) fn run(
                     } else {
                         Ok(())
                     };
-                    if let Err(error) = recorded {
-                        if experiment.frozen_prefix.is_none() {
-                            return Err(store_effect(error));
-                        }
-                        catalogue_decline = Some(format!(
-                            "duplicate/colliding catalogue observation; frozen-input certificate broken: {error}"
-                        ));
-                    }
+                    // A failed catalogue write is a storage failure in every mode.
+                    // It cannot leave a projection eligible for an early claim.
+                    recorded.map_err(store_effect)?;
                 }
             }
             if page.complete {
@@ -94,17 +89,25 @@ pub(super) fn run(
                 .pin_vault_schema(&pin.bytes, &pin.fingerprint)
                 .map_err(store_effect)?;
         }
-        let prepared = prepare(
-            &mut projection,
-            &catalogue,
-            &source,
-            &root,
-            exclusions,
-            policy,
-            &experiment.get_target,
-        )?;
+        let frozen_valid = || {
+            experiment
+                .frozen_prefix
+                .as_ref()
+                .is_none_or(|frozen| frozen.intact() && catalogue_decline.is_none())
+        };
+        let prepared = frozen_valid()
+            && prepare(
+                &mut projection,
+                &catalogue,
+                &source,
+                &root,
+                exclusions,
+                policy,
+                &experiment.get_target,
+            )?;
         drop(timing);
         if prepared
+            && frozen_valid()
             && attachment.subscription.as_ref().is_some_and(|watch| {
                 matches!(watch.state(), norn_fs::SubscriptionState::Live)
                     && !watch.holds_a_settled_batch()
@@ -112,7 +115,7 @@ pub(super) fn run(
         {
             let reader = Arc::new(projection.reader_pool(&attachment.readers));
             let _retire = RetireReader(reader.clone());
-            if requested_class_exists(&reader, &model, &experiment.get_target)? {
+            if requested_class_exists(&reader, &model, &experiment.get_target)? && frozen_valid() {
                 notify(experiment, Stage::CanonicalDemand, &reader, &model)?;
             } else {
                 experiment

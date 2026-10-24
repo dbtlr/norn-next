@@ -38,6 +38,10 @@ pub trait Observer: Send + Sync {
     fn prefix(&self, _reader: &PrefixReader) -> Result<(), String> {
         Ok(())
     }
+    /// Private load/rehash window for deterministic consumed-byte mutation probes.
+    fn prefix_loaded(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
     /// Capped resources have been retired and dropped, before ordinary heal starts.
     fn prefix_retired(&self) -> Result<(), String> {
         Ok(())

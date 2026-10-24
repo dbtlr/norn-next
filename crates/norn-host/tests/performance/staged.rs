@@ -631,6 +631,13 @@ impl Observer for CappedPrefix {
         let command = json!({"op":"find"});
         let attempt = reader.find(&find_params(&reporter.address, &command));
         let elapsed = started.elapsed().as_nanos();
+        // This private phase has one sequential query. Its established grants
+        // must return before the observer emits a response and waits for ACK2.
+        if let Some([_, _, after]) = attempt.read_budget
+            && after.live_connections != after.idle_connections
+        {
+            return Err("query grants retained before sequential ACK2".into());
+        }
         let certificate = &attempt.certificate;
         let answer = attempt.answer.map(|answer| {
             let (unsatisfied, advisories, report) = answer.into_report();
@@ -671,7 +678,15 @@ impl Observer for CappedPrefix {
                     check(&path)?;
                 } else {
                     let name = path.file_name().unwrap().to_string_lossy();
-                    if name.starts_with("intake-") || name.starts_with("demand-") {
+                    if name.starts_with("intake-")
+                        || name.starts_with("demand-")
+                        || path.ancestors().any(|part| {
+                            matches!(
+                                part.file_name().and_then(|name| name.to_str()),
+                                Some("canonical-demand" | "canonical-intake")
+                            )
+                        })
+                    {
                         return Err(format!(
                             "projection retained before canonical heal: {}",
                             path.display()
