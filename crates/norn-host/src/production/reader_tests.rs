@@ -122,3 +122,31 @@ fn startup_sweeps_retain_every_actual_failure() {
     assert!(failures.contains("first-failure"), "{failures}");
     assert!(failures.contains("second-failure"), "{failures}");
 }
+
+#[test]
+fn cleanup_failure_history_keeps_recent_causes_and_counts_dropped_failures() {
+    let scratch = Scratch::new("cleanup-failure-history");
+    let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap();
+    let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+    for index in 0..1000 {
+        ops.record_cleanup_failure(format!("failure-{index:04}"));
+    }
+    let failures = ops.last_reader_cleanup_error().expect("recorded failures");
+    assert!(
+        failures.len() < 200,
+        "unbounded failure text: {} bytes",
+        failures.len()
+    );
+    assert!(
+        failures.contains("992 older failures dropped"),
+        "{failures}"
+    );
+    assert!(!failures.contains("failure-0991"), "{failures}");
+    for index in 992..1000 {
+        assert!(
+            failures.contains(&format!("failure-{index:04}")),
+            "{failures}"
+        );
+    }
+    assert!(failures.ends_with("failure-0999"), "{failures}");
+}

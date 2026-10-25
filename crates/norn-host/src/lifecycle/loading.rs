@@ -36,9 +36,38 @@ pub(crate) enum Operation {
     Find,
 }
 
+/// Cleanup and disposable-source causes share a bounded history across the host lifetime.
+#[derive(Default)]
+pub(crate) struct FailureHistory {
+    recent: std::collections::VecDeque<String>,
+    dropped: u64,
+}
+
+impl FailureHistory {
+    pub(crate) fn record(&mut self, detail: String) {
+        if self.recent.len() == 8 {
+            self.recent.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.recent.push_back(detail);
+    }
+
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.recent.is_empty() {
+            return None;
+        }
+        let recent = self.recent.iter().cloned().collect::<Vec<_>>().join("; ");
+        Some(if self.dropped == 0 {
+            recent
+        } else {
+            format!("{} older failures dropped; {recent}", self.dropped)
+        })
+    }
+}
+
 pub(crate) struct Diagnostics {
     pub(crate) description: String,
-    pub(crate) failures: Arc<Mutex<Option<String>>>,
+    pub(crate) failures: Arc<Mutex<FailureHistory>>,
 }
 
 pub(super) struct Source<R: ReadSource> {
@@ -110,10 +139,7 @@ impl<R: ReadSource> Source<R> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             let detail = format!("{}: {detail}", self.diagnostics.description);
-            *failures = Some(match failures.take() {
-                Some(prior) => format!("{prior}; {detail}"),
-                None => detail,
-            });
+            failures.record(detail);
         }
     }
 

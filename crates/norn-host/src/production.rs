@@ -193,7 +193,7 @@ impl std::error::Error for ProductionPolicyError {}
 /// and recoveries that follow read. Nothing here can name a vault the host does
 /// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
-    cleanup_error: Arc<Mutex<Option<String>>>,
+    cleanup_error: Arc<Mutex<crate::lifecycle::loading::FailureHistory>>,
     loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
     #[cfg(feature = "induced-failure")]
     loading_probe: Option<Arc<dyn loading::LoadingProbe>>,
@@ -652,7 +652,9 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
         let ops = Self {
-            cleanup_error: Arc::new(Mutex::new(None)),
+            cleanup_error: Arc::new(Mutex::new(
+                crate::lifecycle::loading::FailureHistory::default(),
+            )),
             loading_cleanup: Mutex::new(Vec::new()),
             #[cfg(feature = "induced-failure")]
             loading_probe: None,
@@ -669,25 +671,21 @@ impl ProductionEntryOps {
         ops
     }
 
-    /// The most recent residue-cleanup failure. Cleanup failure does not take
-    /// source reads out of service; fresh counts retain their fallback.
+    /// The eight most recent cleanup or disposable-source failures, with a dropped count.
+    /// Cleanup failure does not take source reads out of service; fresh counts retain their fallback.
     pub fn last_reader_cleanup_error(&self) -> Option<String> {
         self.collect_loading_cleanup();
         self.cleanup_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .summary()
     }
 
     fn record_cleanup_failure(&self, detail: String) {
-        let mut failures = self
-            .cleanup_error
+        self.cleanup_error
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *failures = Some(match failures.take() {
-            Some(prior) => format!("{prior}; {detail}"),
-            None => detail,
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(detail);
     }
 
     pub fn read_budget_census(&self) -> norn_store::ReadBudgetCensus {
