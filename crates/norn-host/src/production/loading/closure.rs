@@ -33,7 +33,7 @@ pub(in crate::production) fn prepare(
     else {
         return Ok(Preparation::Declined);
     };
-    // This prototype serves existing records; missing gets wait for ordinary readiness.
+    // Missing targets wait for ordinary readiness; the catalogue cannot certify absence.
     if demanded.is_empty() {
         return Ok(Preparation::Declined);
     }
@@ -109,7 +109,7 @@ pub(in crate::production) fn prepare(
         }
     }
     // Re-observe real bytes after closure construction, including invalid UTF-8
-    // candidates. A changed or removed member closes this simulation checkpoint.
+    // candidates. A changed or removed member declines this construction.
     for (name, hash) in observed {
         let norn_fs::WalkFact::File(file) = source.fact(Path::new(&name)).map_err(effect)? else {
             return Ok(Preparation::SourceChanged);

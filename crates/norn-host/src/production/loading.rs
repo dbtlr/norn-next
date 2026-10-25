@@ -15,6 +15,7 @@ pub(super) mod facts;
 #[cfg(feature = "induced-failure")]
 #[derive(Clone, Copy, Debug)]
 pub enum LoadingBoundary<'a> {
+    AuthorityCaptured,
     BeforeCatalogue,
     CatalogueRecord(&'a Path),
     CatalogueComplete,
@@ -70,14 +71,7 @@ impl ProductionEntryOps {
                     record.role,
                     record.receipt.paths()
                 );
-                let mut last = self
-                    .cleanup_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *last = Some(match last.take() {
-                    Some(prior) => format!("{prior}; {detail}"),
-                    None => detail,
-                });
+                self.record_cleanup_failure(detail);
                 false
             }
         });
@@ -98,15 +92,7 @@ impl ProductionEntryOps {
 
     /// Projections fail independently of the canonical store. Keep every physical cause.
     fn loading_failed(&self, role: &str, error: &JobFailure) {
-        let mut last = self
-            .cleanup_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let detail = format!("{role} construction: {error:?}");
-        *last = Some(match last.take() {
-            Some(prior) => format!("{prior}; {detail}"),
-            None => detail,
-        });
+        self.record_cleanup_failure(format!("{role} construction: {error:?}"));
     }
 
     pub(super) fn initial_loading_heal(
@@ -233,7 +219,10 @@ impl<'a> Construction<'a> {
             progress.decline_loading();
             return Ok(None);
         };
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::AuthorityCaptured);
         if !authority.check_root() || !progress.begin_loading(authority.clone()) {
+            progress.decline_loading();
             return Ok(None);
         }
         #[cfg(feature = "induced-failure")]

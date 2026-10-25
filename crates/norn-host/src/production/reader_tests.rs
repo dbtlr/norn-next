@@ -104,3 +104,21 @@ fn startup_reclaims_count_orphans_only_after_acquiring_maintainership() {
     );
     assert!(ops.last_reader_cleanup_error().is_none());
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Private derived-state fixtures.
+fn startup_sweeps_retain_every_actual_failure() {
+    let scratch = Scratch::new("startup-sweep-all-causes");
+    let dirs = ConfigDirs::new(scratch.join("config"), scratch.join("data")).unwrap();
+    for name in ["first-failure", "second-failure"] {
+        let derived = dirs.derived_dir(&VaultName::new(name).unwrap());
+        std::fs::create_dir_all(derived.join("store.count-results")).unwrap();
+        std::fs::create_dir(derived.join(MAINTAINER_LOCK_FILE)).unwrap();
+    }
+    let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+    let failures = ops
+        .last_reader_cleanup_error()
+        .expect("both failed lock acquisitions");
+    assert!(failures.contains("first-failure"), "{failures}");
+    assert!(failures.contains("second-failure"), "{failures}");
+}

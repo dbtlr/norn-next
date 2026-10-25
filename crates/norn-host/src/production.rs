@@ -675,9 +675,7 @@ impl ProductionEntryOps {
             semantic: None,
         };
         if let Err(error) = ops.sweep_count_orphans() {
-            *ops.cleanup_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            ops.record_cleanup_failure(error);
         }
         ops
     }
@@ -713,6 +711,17 @@ impl ProductionEntryOps {
             .clone()
     }
 
+    fn record_cleanup_failure(&self, detail: String) {
+        let mut failures = self
+            .cleanup_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *failures = Some(match failures.take() {
+            Some(prior) => format!("{prior}; {detail}"),
+            None => detail,
+        });
+    }
+
     pub fn read_budget_census(&self) -> norn_store::ReadBudgetCensus {
         self.readers.census()
     }
@@ -736,7 +745,10 @@ impl ProductionEntryOps {
                 Ok(())
             })();
             if let Err(error) = swept {
-                last_error = Some(error);
+                last_error = Some(match last_error.take() {
+                    Some(prior) => format!("{prior}; {error}"),
+                    None => error,
+                });
             }
         }
         last_error.map_or(Ok(()), Err)
@@ -944,10 +956,7 @@ impl ProductionEntryOps {
         )
         .map_err(effect)?;
         if let Err(error) = attachment.store.sweep_count_results() {
-            *self
-                .cleanup_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            self.record_cleanup_failure(error.to_string());
         }
         attachment.rolling.reset_after_rebuild();
         // The first point a recovery holds both the order its new coverage
@@ -1378,10 +1387,7 @@ impl ProductionEntryOps {
             return Ok(None);
         }
         if let Err(error) = Store::sweep_loading(&derived.join(STORE_FILE)) {
-            *self
-                .cleanup_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            self.record_cleanup_failure(error.to_string());
         }
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
@@ -1436,10 +1442,7 @@ impl ProductionEntryOps {
             .set_count_retention(self.policy.count_retention)
             .map_err(store_effect)?;
         if let Err(error) = store.sweep_count_results() {
-            *self
-                .cleanup_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            self.record_cleanup_failure(error.to_string());
         }
         {
             #[cfg(feature = "induced-failure")]
@@ -1858,6 +1861,7 @@ impl EntryOps for ProductionEntryOps {
     fn first_index_reads(&self) -> bool {
         true
     }
+
     #[allow(clippy::disallowed_methods)] // Observes only the derived store, never vault inputs.
     fn first_index_candidate(&self, registration: &Registration) -> bool {
         // A missing name is only a candidate. Existing, linked, foreign or unreadable

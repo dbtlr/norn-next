@@ -28,6 +28,7 @@ type GetAnswer = Result<
 >;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Point {
+    AuthorityCaptured,
     BeforeCatalogue,
     CatalogueRecord,
     CatalogueComplete,
@@ -89,6 +90,7 @@ impl Probe {
 impl LoadingProbe for Probe {
     fn at(&self, boundary: LoadingBoundary<'_>) {
         let point = match boundary {
+            LoadingBoundary::AuthorityCaptured => Point::AuthorityCaptured,
             LoadingBoundary::BeforeCatalogue => Point::BeforeCatalogue,
             LoadingBoundary::CatalogueRecord(_) => Point::CatalogueRecord,
             LoadingBoundary::CatalogueComplete => Point::CatalogueComplete,
@@ -1455,5 +1457,126 @@ fn a_real_first_index_overflow_withdraws_early_sources_and_still_reaches_complet
             after = page.last().map(|target| target.path.clone());
         }
         assert_eq!(files, norn_fs::watch::DIRTY_ROOT_CAP + 2);
+    });
+}
+
+#[test]
+fn an_established_public_get_discovers_root_loss_only_at_final_exposure() {
+    let mut fixture = Fixture::new("public-stage-final-root-check");
+    let ancestor = fixture.scratch.join("ancestor");
+    std::fs::create_dir(&ancestor).unwrap();
+    let registered = ancestor.join("vault");
+    std::fs::rename(&fixture.root, &registered).unwrap();
+    fixture.root = registered;
+    let construction = Probe::new([Point::MetadataComplete]);
+    let reads = Probe::new([Point::QueryBuilt]);
+    let host = fixture.host(Arc::new(SplitProbe {
+        construction: construction.clone(),
+        reads: reads.clone(),
+    }));
+    std::thread::scope(|scope| {
+        let _release_construction = Release(&construction);
+        let _release_reads = Release(&reads);
+        let result = spawn_get(scope, &host, "first");
+        reads.wait(Point::QueryBuilt);
+        construction.wait(Point::MetadataComplete);
+        // Moving an unwatched ancestor leaves the covered directory and all its
+        // files untouched. No other request or construction poll checks the root.
+        std::fs::rename(&ancestor, fixture.scratch.join("moved-ancestor")).unwrap();
+        reads.release();
+        let error = result.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
+        assert_eq!(error.code(), &ReasonCode::HostEntryNotReady);
+        construction.release();
+    });
+}
+
+#[test]
+fn a_later_attach_sweep_preserves_an_earlier_physical_cleanup_cause() {
+    for residue in ["loading", "count"] {
+        let fixture = Fixture::new("public-stage-cleanup-causes");
+        let earlier = fixture
+            .dirs
+            .derived_dir(&VaultName::new("earlier").unwrap());
+        std::fs::create_dir_all(earlier.join("store.count-results")).unwrap();
+        std::fs::create_dir(earlier.join("maintainer.lock")).unwrap();
+        let ops =
+            ProductionEntryOps::new(fixture.dirs.clone(), ProductionPolicy::new(2, 2).unwrap());
+        let prior = ops
+            .last_reader_cleanup_error()
+            .expect("actual startup lock failure");
+        assert!(prior.contains("earlier"), "{prior}");
+        let store = fixture.dirs.derived_dir(&name()).join("store.sqlite3");
+        let directory = if residue == "loading" {
+            norn_store::Store::loading_directory(&store)
+        } else {
+            store.with_extension("count-results")
+        };
+        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        std::fs::write(&directory, "a file cannot be swept as a residue namespace").unwrap();
+        let host = Host::new(
+            RegistryRead::from_entries([Registration::new(
+                name(),
+                VaultRoot::new(&fixture.root).unwrap(),
+            )]),
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(7200),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(25),
+                read_settle_bound: norn_host::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _demand = host.demand(&name()).unwrap();
+        ready(&host);
+        let diagnostic = host
+            .last_reader_cleanup_error()
+            .expect("both physical failures retained");
+        assert!(
+            diagnostic.starts_with(&prior),
+            "earlier cause erased: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&directory.display().to_string()),
+            "later failure absent: {diagnostic}"
+        );
+    }
+}
+
+#[test]
+fn root_loss_before_binding_declines_provisional_waiters_while_canonical_work_is_held() {
+    let fixture = Fixture::new("public-stage-declined-binding");
+    let registered = fixture.scratch.join("registered");
+    std::os::unix::fs::symlink(&fixture.root, &registered).unwrap();
+    let probe = Probe::new([Point::AuthorityCaptured, Point::CanonicalPage]);
+    let host = Host::new(
+        RegistryRead::from_entries([Registration::new(
+            name(),
+            VaultRoot::new(&registered).unwrap(),
+        )]),
+        ProductionEntryOps::new(fixture.dirs.clone(), ProductionPolicy::new(2, 2).unwrap())
+            .with_loading_probe(probe.clone()),
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(7200),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_millis(25),
+            read_settle_bound: norn_host::READ_SETTLE_BOUND,
+        },
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let _release = Release(&probe);
+        let result = spawn_get(scope, &host, "first");
+        probe.wait(Point::AuthorityCaptured);
+        waits(&host, 1);
+        // Coverage keeps its physical root; only the registered spelling is lost.
+        std::fs::remove_file(&registered).unwrap();
+        probe.release();
+        probe.wait(Point::CanonicalPage);
+        let error = result.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
+        assert_eq!(error.code(), &ReasonCode::HostEntryNotReady);
+        assert!(!error.message().contains("first time"));
+        assert_eq!(host.read_evidence().settle_expiries, 0);
+        probe.release();
     });
 }
