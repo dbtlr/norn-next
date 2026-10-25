@@ -45,8 +45,11 @@ impl FourStepLoading {
         requested: Vec<String>,
         observer: Arc<dyn FourStepObserver>,
     ) -> Result<Self, String> {
-        if bound == 0 || bound > MAX_CHANGESET_SIZE.min(norn_store::MAX_PAGE) {
-            return Err("four-step transaction bound must be in 1..=1024".into());
+        let maximum = MAX_CHANGESET_SIZE.min(norn_store::MAX_PAGE);
+        if bound == 0 || bound > maximum {
+            return Err(format!(
+                "four-step transaction bound must be in 1..={maximum}"
+            ));
         }
         let mut paths = Vec::new();
         for path in requested {

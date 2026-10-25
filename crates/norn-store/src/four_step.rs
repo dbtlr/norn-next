@@ -49,6 +49,9 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         ));
     }
     norn_db::meta::put_meta(&tx, MARKER, 1_i64)?;
+    // A valid empty body can equal the sentinel. Private progress state makes
+    // pull-ahead skipping unambiguous and retains source-line/append offsets;
+    // dropping it at completion preserves the production schema fingerprint.
     tx.execute_batch(&format!(
         "CREATE TABLE four_step_state (
         path TEXT PRIMARY KEY REFERENCES documents(path) ON DELETE CASCADE,
@@ -371,7 +374,11 @@ pub fn content(
                 .transpose()?;
             let body = if no_body { "" } else { &facts.body };
             let generation = norn_db::meta::next_generation(&tx)?;
-            let body_columns = if no_body { "" } else { "body = ?3, body_hash = ?4," };
+            let body_columns = if no_body {
+                ""
+            } else {
+                "body = ?3, body_hash = ?4,"
+            };
             tx.execute(&format!("UPDATE documents SET content_hash = ?1, byte_length = ?2, {body_columns}
                 body_offset = ?5, frontmatter = ?6, frontmatter_projection_hash = ?7,
                 frontmatter_diagnostic_count = ?8, generation = ?9, derived_at = ?10 WHERE id = ?11"),
@@ -626,4 +633,87 @@ pub fn forget(store: &mut Store, path: &DocumentPath) -> Result<StepCounters, St
             ..StepCounters::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn two_row_progress_pages_do_not_scan_completed_or_later_documents() {
+        for order in [
+            crate::StoredPathOrder::Sensitive,
+            crate::StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            let mut work = Vec::new();
+            for size in [1_000, 10_000] {
+                let scratch = norn_testkit::scratch::Scratch::under(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+                    "four-step-page-work",
+                )
+                .unwrap();
+                let mut store = Store::open(
+                    scratch.join("store.sqlite3"),
+                    order,
+                    crate::DerivationVersion::new(1),
+                )
+                .unwrap();
+                begin(&mut store).unwrap();
+                let model = ContentModel::none();
+                for start in (0..size).step_by(128) {
+                    let paths = (start..(start + 128).min(size))
+                        .map(|n| DocumentPath::new(&format!("d{n:05}.md")).unwrap())
+                        .collect::<Vec<_>>();
+                    names(&mut store, &paths, &[], &model).unwrap();
+                }
+                let mut readings = Vec::new();
+                for step in [Step::Content, Step::Structure, Step::Health] {
+                    if !matches!(step, Step::Content) {
+                        // Leave only the final two rows pending. A planner choosing
+                        // another phase's index would walk every completed row.
+                        store.connection().execute("UPDATE four_step_state SET content_done=1, structure_done=1, health_done=1", []).unwrap();
+                        let column = if matches!(step, Step::Structure) {
+                            "structure_done"
+                        } else {
+                            "health_done"
+                        };
+                        store
+                            .connection()
+                            .execute(
+                                &format!("UPDATE four_step_state SET {column}=0 WHERE path >= ?1"),
+                                [format!("d{:05}.md", size - 2)],
+                            )
+                            .unwrap();
+                    }
+                    let operations = Arc::new(AtomicU64::new(0));
+                    let observed = Arc::clone(&operations);
+                    store
+                        .connection()
+                        .progress_handler(
+                            1,
+                            Some(move || {
+                                observed.fetch_add(1, Ordering::Relaxed);
+                                false
+                            }),
+                        )
+                        .unwrap();
+                    assert_eq!(pending(&store, step, 2).unwrap().len(), 2);
+                    store
+                        .connection()
+                        .progress_handler(0, None::<fn() -> bool>)
+                        .unwrap();
+                    readings.push(operations.load(Ordering::Relaxed));
+                }
+                work.push(readings);
+            }
+            for (small, large) in work[0].iter().zip(&work[1]) {
+                assert!(
+                    *large <= small + 32,
+                    "a two-row {order:?} page grew with the vault: {work:?}"
+                );
+            }
+        }
+    }
 }
