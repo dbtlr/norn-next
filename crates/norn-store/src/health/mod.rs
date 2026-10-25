@@ -1330,6 +1330,69 @@ fn written(link: &LinkFact) -> String {
     format!("{protocol}{}{anchor}", link.target)
 }
 
+/// Lab final pass: one document at a time, with bounded link and finding pages.
+/// The ordinary reader and judge retain the single mapping and resolution rule.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn four_step_document(
+    transaction: &Transaction<'_>,
+    work: &ReadWork,
+    ignore: &AmbiguityIgnore,
+    path: &DocumentPath,
+) -> Result<(u64, u64), StoreError> {
+    let writer = OnWriter {
+        connection: transaction,
+        work,
+    };
+    let mut after = -1_i64;
+    let mut judged = 0;
+    let mut findings = 0;
+    let mut summaries = KeySummaries::default();
+    loop {
+        let mut statement = transaction
+            .prepare_cached(
+                "SELECT l.id, l.ordinal FROM documents d CROSS JOIN links l
+             WHERE d.path = ?1 AND l.document = d.id AND l.ordinal > ?2
+             ORDER BY l.ordinal LIMIT ?3",
+            )
+            .map_err(|e| crate::error::sql("preparing a four-step health page", e))?;
+        let rows = statement
+            .query_map(
+                norn_db::rusqlite::params![path.as_str(), after, LINK_HEALTH_CHUNK as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|e| crate::error::sql("reading a four-step health page", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| crate::error::sql("reading four-step link identities", e))?;
+        let Some((_, ordinal)) = rows.last() else {
+            break;
+        };
+        after = *ordinal;
+        let ids = serde_json::to_string(&rows.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+            .expect("integer link IDs encode as JSON");
+        let (mut links, _) = read_links(
+            &writer,
+            SuffixKey::Comparison,
+            Selected::Links,
+            vec![Value::Text(ids)],
+        )?;
+        links.retain(|held| LinkHealth::of_address(held.link.address, 0) != LinkHealth::NotJudged);
+        judged += links.len() as u64;
+        for finding in judge_links(transaction, work, ignore, &links, &mut summaries)? {
+            request::write_finding(transaction, &finding)?;
+            findings += 1;
+        }
+        // Bound all retained resolution data to this link page, including the
+        // filled-key totals ordinary incremental health retains for its act.
+        summaries.keep_only_keys_of(&links);
+        let held: BTreeSet<&Key> = links.iter().flat_map(|link| &link.keys).collect();
+        summaries.totals.retain(|key, _| held.contains(key));
+        if rows.len() < LINK_HEALTH_CHUNK {
+            break;
+        }
+    }
+    Ok((judged, findings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -138,6 +138,8 @@ mod faults;
 mod feed;
 mod fields;
 mod find;
+#[cfg(feature = "induced-failure")]
+pub mod four_step;
 mod get;
 mod hash;
 mod health;

@@ -2023,6 +2023,14 @@ impl norn_db::Client for StoreClient {
         // A loading source must be refused before either mode adoption or rebuilding.
         refuse_loading_source(connection, path)?;
         self.adopt_mode(connection, path)?;
+        #[cfg(feature = "induced-failure")]
+        if norn_db::meta::get_meta::<i64>(connection, crate::four_step::MARKER)?.is_some() {
+            return Ok(Adoption::Rebuild {
+                detail: "an interrupted four-step construction requires rebuilding from zero"
+                    .into(),
+            });
+        }
+
         let details: Vec<String> = [
             self.path_order_moved(connection)?,
             self.derivation_moved(connection)?,

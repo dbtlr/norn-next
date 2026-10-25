@@ -265,18 +265,7 @@ pub(crate) fn apply(
     }
     // Every bound is read before the transaction, so a refused finding costs no
     // lock and leaves nothing half applied.
-    for finding in findings {
-        request::check_callers_finding(&finding.facts)?;
-        if let Some(scope) = finding.replaces {
-            request::check_callers_discard(scope)?;
-        }
-        request::check_finding_bounds(&finding.facts)?;
-        request::check_finding_classes(&finding.facts)?;
-        request::check_finding_paths(&finding.facts)?;
-        if finding.bytes_hash.is_some() {
-            request::check_content_finding(&finding.facts)?;
-        }
-    }
+    check_derived_findings(findings)?;
 
     // The boundary between two acts: everything before this one has committed
     // whole, and this one has taken no lock and opened no transaction. A build
@@ -400,21 +389,7 @@ pub(crate) fn apply(
     // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
-    for DerivedFinding {
-        facts,
-        replaces,
-        bytes_hash,
-    } in findings
-    {
-        if let Some(scope) = replaces {
-            tally.findings_discarded +=
-                request::discard_about_in(&transaction, &facts.path, *scope)?;
-        }
-        request::write_finding(&transaction, facts)?;
-        if let Some(hash) = bytes_hash {
-            request::record_content_quarantine(&transaction, facts, hash)?;
-        }
-    }
+    tally.findings_discarded += write_derived_findings(&transaction, findings)?;
 
     // Link health, re-decided last, so every fact it reads is the one this
     // changeset leaves: the subject discard took the findings at each written
@@ -518,7 +493,7 @@ struct Tally {
 /// would compile the same SQL once per document, and holding the entries would
 /// make a changeset cost its own size in facts on top of the rows it writes —
 /// the iterator hands one over at a time and nothing here keeps it.
-struct Statements<'t> {
+pub(crate) struct Statements<'t> {
     upsert_file: CachedStatement<'t>,
     delete_file: CachedStatement<'t>,
     upsert_document: CachedStatement<'t>,
@@ -568,7 +543,7 @@ impl FindingsDiscard {
 }
 
 impl<'t> Statements<'t> {
-    fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
+    pub(crate) fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
         // Every statement but the three findings discards is taken from the
         // registry, which is the one place a write statement's text is spelled:
         // see [`crate::write_path`]. The discards are the plan seam's own
@@ -734,149 +709,7 @@ fn upsert(
         }
     }
 
-    for (ordinal, link) in facts.links.iter().enumerate() {
-        let (anchor, readings, block_ref) = match &link.anchor {
-            Some(LinkAnchor::Heading { written, readings }) => {
-                (Some(written), Some(readings), None)
-            }
-            Some(LinkAnchor::Block { id }) => (None, None, Some(id)),
-            None => (None, None, None),
-        };
-        let row: i64 = statements
-            .insert_link
-            .insert(params![
-                document,
-                ordinal as i64,
-                link.family.as_str(),
-                link.embed,
-                link.protocol,
-                link.target,
-                link.title,
-                anchor,
-                readings.map(|readings| &readings.text),
-                readings.and_then(|readings| readings.marked.as_ref()),
-                block_ref,
-                address_kind(link).as_str(),
-                link.span.map(|span| span.line),
-                link.span.map(|span| span.column),
-                link.span.map(|span| span.byte_offset),
-                link.field,
-            ])
-            .map_err(|error| error::sql("writing a link row", error))?;
-        for key in link_keys(link, &facts.path) {
-            statements
-                .insert_link_key
-                .execute(params![row, document, key.key, key.segments])
-                .map_err(|error| error::sql("writing a link key", error))?;
-        }
-    }
-
-    for (ordinal, heading) in facts.headings.iter().enumerate() {
-        statements
-            .insert_heading
-            .execute(params![
-                document,
-                ordinal as i64,
-                heading.text,
-                heading.reading,
-                heading.slug,
-                heading.level,
-                heading.span.line,
-                heading.span.column,
-                heading.span.byte_offset,
-                heading.body_offset,
-                heading.inside_container,
-            ])
-            .map_err(|error| error::sql("writing a heading row", error))?;
-    }
-
-    for (ordinal, block) in facts.blocks.iter().enumerate() {
-        statements
-            .insert_block
-            .execute(params![
-                document,
-                ordinal as i64,
-                block.block_id,
-                block.span.map(|span| span.line),
-                block.span.map(|span| span.column),
-                block.span.map(|span| span.byte_offset),
-            ])
-            .map_err(|error| error::sql("writing a block row", error))?;
-    }
-
-    for (ordinal, tag) in facts.tags.iter().enumerate() {
-        statements
-            .insert_tag
-            .execute(params![
-                document,
-                ordinal as i64,
-                facts.path.as_str(),
-                tag.name,
-                fold_tag(&tag.name),
-                tag.source.as_str(),
-                tag.span.map(|span| span.line),
-                tag.span.map(|span| span.column),
-                tag.span.map(|span| span.byte_offset),
-            ])
-            .map_err(|error| error::sql("writing a tag row", error))?;
-    }
-
-    for row in facts.fields().rows() {
-        let (container, raw, typed, least_raw, least_typed, offset, folded, value_type) = match row
-        {
-            FieldRow::Presence { container, .. } => (
-                Some(container.as_str()),
-                None,
-                None,
-                false,
-                false,
-                None,
-                None,
-                None,
-            ),
-            FieldRow::Value {
-                raw,
-                typed,
-                offset,
-                least_raw,
-                least_typed,
-                folded,
-                value_type,
-                ..
-            } => (
-                None,
-                raw.as_deref(),
-                typed.as_deref(),
-                *least_raw,
-                *least_typed,
-                *offset,
-                folded.as_deref(),
-                Some(value_type.as_str()),
-            ),
-        };
-        debug_assert_eq!(
-            row.path(),
-            facts.path.as_str(),
-            "a field row carries the path of the document it was derived for"
-        );
-        statements
-            .insert_field
-            .execute(params![
-                document,
-                row.key(),
-                row.ordinal(),
-                facts.path.as_str(),
-                container,
-                raw,
-                typed,
-                least_raw,
-                least_typed,
-                offset.map(OffsetSpelling::stated),
-                folded,
-                value_type,
-            ])
-            .map_err(|error| error::sql("writing a field row", error))?;
-    }
+    insert_fact_rows(statements, document, facts, FactPart::All, 0, 0)?;
 
     tally.documents_upserted += 1;
     tally.link_rows += facts.links.len() as u64;
@@ -944,7 +777,9 @@ fn record_death(
 /// turns every stored span into an offset outside it, and a byte length that
 /// disagrees with the body is a size a heal would compare against. This is the
 /// one write path for a document row, so it is where the check belongs.
-fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), StoreError> {
+pub(crate) fn refuse_a_document_that_does_not_add_up(
+    facts: &DocumentFacts,
+) -> Result<(), StoreError> {
     let accounted = facts.body_offset.saturating_add(facts.body.len() as u64);
     if accounted == facts.byte_length {
         return Ok(());
@@ -974,7 +809,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 /// carrier's fold are a function of the document alone, and a document derived
 /// under no declaration, or under a stale one that types none of its keys,
 /// writes the typed column as a pin leaves it — empty — for the walk to fill.
-fn refuse_typed_values_the_pin_does_not_derive(
+pub(crate) fn refuse_typed_values_the_pin_does_not_derive(
     pinned: Option<&str>,
     facts: &DocumentFacts,
 ) -> Result<(), StoreError> {
@@ -1103,6 +938,257 @@ fn discard_affected_paths(
             .execute(params![path.as_str()])
             .map_err(|error| error::sql("discarding a path key's findings", error))?
             as u64;
+    }
+    Ok(discarded)
+}
+
+/// Selects the facts already derived by the caller; ordinal offsets append body
+/// facts behind frontmatter facts without changing their shared row mapping.
+#[derive(Clone, Copy)]
+pub(crate) enum FactPart {
+    All,
+    #[cfg(feature = "induced-failure")]
+    Frontmatter,
+    #[cfg(feature = "induced-failure")]
+    Body,
+}
+impl FactPart {
+    fn frontmatter(self) -> bool {
+        match self {
+            Self::All => true,
+            #[cfg(feature = "induced-failure")]
+            Self::Frontmatter => true,
+            #[cfg(feature = "induced-failure")]
+            Self::Body => false,
+        }
+    }
+    fn body(self) -> bool {
+        match self {
+            Self::All => true,
+            #[cfg(feature = "induced-failure")]
+            Self::Frontmatter => false,
+            #[cfg(feature = "induced-failure")]
+            Self::Body => true,
+        }
+    }
+    fn links(self, link: &crate::LinkFact) -> bool {
+        if link.field.is_some() {
+            self.frontmatter()
+        } else {
+            self.body()
+        }
+    }
+    fn tags(self, tag: &crate::TagFact) -> bool {
+        if tag.source == crate::TagSource::Frontmatter {
+            self.frontmatter()
+        } else {
+            self.body()
+        }
+    }
+}
+
+pub(crate) fn insert_fact_rows(
+    statements: &mut Statements<'_>,
+    document: i64,
+    facts: &DocumentFacts,
+    part: FactPart,
+    link_offset: usize,
+    tag_offset: usize,
+) -> Result<u64, StoreError> {
+    let mut count = 0;
+    for (ordinal, link) in facts
+        .links
+        .iter()
+        .filter(|link| part.links(link))
+        .enumerate()
+    {
+        let (anchor, readings, block_ref) = match &link.anchor {
+            Some(LinkAnchor::Heading { written, readings }) => {
+                (Some(written), Some(readings), None)
+            }
+            Some(LinkAnchor::Block { id }) => (None, None, Some(id)),
+            None => (None, None, None),
+        };
+        let row: i64 = statements
+            .insert_link
+            .insert(params![
+                document,
+                (link_offset + ordinal) as i64,
+                link.family.as_str(),
+                link.embed,
+                link.protocol,
+                link.target,
+                link.title,
+                anchor,
+                readings.map(|readings| &readings.text),
+                readings.and_then(|readings| readings.marked.as_ref()),
+                block_ref,
+                address_kind(link).as_str(),
+                link.span.map(|span| span.line),
+                link.span.map(|span| span.column),
+                link.span.map(|span| span.byte_offset),
+                link.field,
+            ])
+            .map_err(|error| error::sql("writing a link row", error))?;
+        count += 1;
+        for key in link_keys(link, &facts.path) {
+            count += 1;
+            statements
+                .insert_link_key
+                .execute(params![row, document, key.key, key.segments])
+                .map_err(|error| error::sql("writing a link key", error))?;
+        }
+    }
+
+    for (ordinal, heading) in facts.headings.iter().filter(|_| part.body()).enumerate() {
+        count += 1;
+        statements
+            .insert_heading
+            .execute(params![
+                document,
+                ordinal as i64,
+                heading.text,
+                heading.reading,
+                heading.slug,
+                heading.level,
+                heading.span.line,
+                heading.span.column,
+                heading.span.byte_offset,
+                heading.body_offset,
+                heading.inside_container,
+            ])
+            .map_err(|error| error::sql("writing a heading row", error))?;
+    }
+
+    for (ordinal, block) in facts.blocks.iter().filter(|_| part.body()).enumerate() {
+        count += 1;
+        statements
+            .insert_block
+            .execute(params![
+                document,
+                ordinal as i64,
+                block.block_id,
+                block.span.map(|span| span.line),
+                block.span.map(|span| span.column),
+                block.span.map(|span| span.byte_offset),
+            ])
+            .map_err(|error| error::sql("writing a block row", error))?;
+    }
+
+    for (ordinal, tag) in facts.tags.iter().filter(|tag| part.tags(tag)).enumerate() {
+        count += 1;
+        statements
+            .insert_tag
+            .execute(params![
+                document,
+                (tag_offset + ordinal) as i64,
+                facts.path.as_str(),
+                tag.name,
+                fold_tag(&tag.name),
+                tag.source.as_str(),
+                tag.span.map(|span| span.line),
+                tag.span.map(|span| span.column),
+                tag.span.map(|span| span.byte_offset),
+            ])
+            .map_err(|error| error::sql("writing a tag row", error))?;
+    }
+
+    for row in facts.fields().rows().iter().filter(|_| part.frontmatter()) {
+        count += 1;
+        let (container, raw, typed, least_raw, least_typed, offset, folded, value_type) = match row
+        {
+            FieldRow::Presence { container, .. } => (
+                Some(container.as_str()),
+                None,
+                None,
+                false,
+                false,
+                None,
+                None,
+                None,
+            ),
+            FieldRow::Value {
+                raw,
+                typed,
+                offset,
+                least_raw,
+                least_typed,
+                folded,
+                value_type,
+                ..
+            } => (
+                None,
+                raw.as_deref(),
+                typed.as_deref(),
+                *least_raw,
+                *least_typed,
+                *offset,
+                folded.as_deref(),
+                Some(value_type.as_str()),
+            ),
+        };
+        debug_assert_eq!(
+            row.path(),
+            facts.path.as_str(),
+            "a field row carries the path of the document it was derived for"
+        );
+        statements
+            .insert_field
+            .execute(params![
+                document,
+                row.key(),
+                row.ordinal(),
+                facts.path.as_str(),
+                container,
+                raw,
+                typed,
+                least_raw,
+                least_typed,
+                offset.map(OffsetSpelling::stated),
+                folded,
+                value_type,
+            ])
+            .map_err(|error| error::sql("writing a field row", error))?;
+    }
+
+    Ok(count)
+}
+
+pub(crate) fn check_derived_findings(findings: &[DerivedFinding<'_>]) -> Result<(), StoreError> {
+    for finding in findings {
+        request::check_callers_finding(&finding.facts)?;
+        if let Some(scope) = finding.replaces {
+            request::check_callers_discard(scope)?;
+        }
+        request::check_finding_bounds(&finding.facts)?;
+        request::check_finding_classes(&finding.facts)?;
+        request::check_finding_paths(&finding.facts)?;
+        if finding.bytes_hash.is_some() {
+            request::check_content_finding(&finding.facts)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn write_derived_findings(
+    transaction: &Transaction<'_>,
+    findings: &[DerivedFinding<'_>],
+) -> Result<u64, StoreError> {
+    let mut discarded = 0;
+    for DerivedFinding {
+        facts,
+        replaces,
+        bytes_hash,
+    } in findings
+    {
+        if let Some(scope) = replaces {
+            discarded += request::discard_about_in(transaction, &facts.path, *scope)?;
+        }
+        request::write_finding(transaction, facts)?;
+        if let Some(hash) = bytes_hash {
+            request::record_content_quarantine(transaction, facts, hash)?;
+        }
     }
     Ok(discarded)
 }
