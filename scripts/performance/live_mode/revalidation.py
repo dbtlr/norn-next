@@ -373,8 +373,8 @@ def account(stages,ready):
     invoked=sum(s['builder_invoked'] for s in stages)
     unavailable=sum(not logical_available(s) for s in stages)
     return dict(logical_prefix_requests=2,canonical_suffix_requests=481,canonical_host_calls=483,
-        private_request_attempt_events=2,physical_request_attempt_events=485,total_sql_dispatches=483+invoked,
-        non_sql_declines=2-invoked,fallback_count=unavailable,
+        private_request_attempt_events=2,physical_request_attempt_events=485,total_builder_dispatches=483+invoked,
+        builder_not_invoked_attempts=2-invoked,fallback_count=unavailable,
         construction_eligibility_gets=len(ready['operator_prefix_receipt']['construction_eligibility_gets']))
 
 

@@ -702,11 +702,13 @@ impl Observer for CappedPrefix {
 
 /// The live selection reuses the operator rendezvous with phase-specific receipts.
 /// Catalogue and canonical-health observations deliberately perform no queries.
+#[allow(dead_code)] // The startup-experiment native harness compiles this shared module too.
 pub struct LivePrefix {
     operator: OperatorPrefix,
     attempts: Mutex<Vec<Value>>,
     eligibility: Mutex<Vec<Value>>,
 }
+#[allow(dead_code)]
 impl LivePrefix {
     pub fn new(began: Instant, name: VaultName, root: std::path::PathBuf) -> Self {
         Self {

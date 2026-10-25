@@ -22,6 +22,13 @@ and 120 confirming Gets. Both have 483 canonical calls; a successful candidate h
 485 physical requests, versus main's 483. Construction eligibility work is reported
 separately. No extra fallback query is issued.
 
+The physical account's `total_builder_dispatches` counts the 483 canonical calls
+plus private attempts whose builder was invoked. `builder_not_invoked_attempts`
+counts private attempts without a builder invocation. These are not SQL counts:
+snapshot acquisition can execute statements before a guard refuses the builder.
+Actual SQL work remains in the snapshot counters. These private output names apply
+to new records; historical measurement records retain their original schema.
+
 `controller.py` takes `--config` and `--output`. The configuration supplies source
 paths and hashes, worker paths and build receipts, compiler hash, fixture proofs,
 and tool-file hashes. `performance_tools` points to this repository's performance

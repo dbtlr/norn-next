@@ -105,8 +105,8 @@ def measurement_adapter(arm,manifest):
                     attempts=self.stages,physical_history=self.physical,canonical_revalidation=canonical,
                     physical_account=account(self.stages,self.ready) if live else dict(
                         logical_prefix_requests=2,canonical_suffix_requests=481,canonical_host_calls=483,
-                        private_request_attempt_events=0,physical_request_attempt_events=483,total_sql_dispatches=483,
-                        non_sql_declines=0,fallback_count=0,construction_eligibility_gets=0),
+                        private_request_attempt_events=0,physical_request_attempt_events=483,total_builder_dispatches=483,
+                        builder_not_invoked_attempts=0,fallback_count=0,construction_eligibility_gets=0),
                     first_get_validated_ns=self.rows[0]['parent_validated_ns'],first_find_validated_ns=self.rows[1]['parent_validated_ns'],
                     parent_ready_received_ns=parent_ready,parent_origin_monotonic_ns=self.prefix_began,
                     first_early_response_received_ns=self.stages[0]['parent_received_ns'] if live else None,

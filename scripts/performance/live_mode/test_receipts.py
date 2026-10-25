@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import copy
 import unittest
-from revalidation import validate_attempt, resolve_rows, live_answer, logical_available, FIND_WORK
+from revalidation import validate_attempt, resolve_rows, live_answer, logical_available, account, FIND_WORK
 
 class Receipts(unittest.TestCase):
     def decline(self, phase='get'):
@@ -16,6 +16,20 @@ class Receipts(unittest.TestCase):
                     disposition='construction-declined', builder_invoked=False, counters=None, counters_before_builder=None,
                     projection_epoch=None, projection_generation=None, typed_snapshot=None,
                     builder_work=None, answer=None, withdrawn_answer=None, reason='ineligible')
+    def test_account_counts_builders_even_when_acquisition_executes_sql(self):
+        declined=self.decline()
+        declined['counters']=dict(snapshots_opened=1,statements_executed=1,vm_steps=0,full_scan_steps=0)
+        ready=dict(operator_prefix_receipt=dict(construction_eligibility_gets=[{}]))
+        for other,dispatches,not_invoked,fallbacks in (
+                (self.served(),484,1,1), (self.decline('find'),483,2,2)):
+            with self.subTest(disposition=other['disposition']):
+                counts=account([declined,other],ready)
+                self.assertEqual(counts,dict(logical_prefix_requests=2,
+                    canonical_suffix_requests=481,canonical_host_calls=483,
+                    private_request_attempt_events=2,physical_request_attempt_events=485,
+                    total_builder_dispatches=dispatches,builder_not_invoked_attempts=not_invoked,
+                    fallback_count=fallbacks,construction_eligibility_gets=1))
+
     def test_phase_is_explicit_even_when_get_declines(self):
         event=self.decline()
         self.assertIsNone(validate_attempt(0,event))
