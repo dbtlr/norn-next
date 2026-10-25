@@ -27,14 +27,25 @@ not on a percentage of files processed or an optimistic readiness label.
 This draft records the approved public direction. Its detailed contract remains
 under review before implementation; ADR 0042 still governs the current runtime.
 
+The reader-capacity rationale from ADR 0042 also remains:
+
+One connection per entry serializes independent reads before SQL can run. Fixed
+pools per vault multiply idle caches and descriptors by the number of attached
+vaults. Expected traffic is bursts across few vaults, with occasional sustained
+concurrency. Capacity therefore follows active demand within one host-wide bound.
+Independent pages of one immutable count result have no SQL dependency on each
+other; a lock around its sole anonymous connection was an incidental storage limit.
+Concurrency is required here without waiting for a contention threshold.
+
 ## Source reader acquisition
 
 The store's one writer connection sits behind `&mut`, inside the attachment that every
 lifecycle job holds for its whole duration — so a wire read borrowing it would serialize
 behind every warm job that holds the store while trust stays `Ready` (polls, maintenance,
 plan application), and the timing-barred query shapes would measure orchestration where the
-acceptance contract bars SQL. Canonical acquisition waits for the first heal and drain;
-request-specific first-index capabilities may answer earlier under the rules below.
+acceptance contract bars SQL. Canonical acquisition is unavailable until the first heal
+and drain publish `Ready`; a canonical read meeting a never-served entry refuses at once.
+Request-specific first-index capabilities may answer earlier under the rules below.
 Every later heal takes trust out of `Ready`. A read waits out the heals that take in a
 change — a watcher batch's reconcile and a vault schema reload's — and refuses at once
 during the heals that follow withdrawn trust — a recovery's and a rebuild's. A shared
@@ -265,9 +276,12 @@ recorded going back with the next hold of the gate.**
 
 ### Known limit
 
-While a background maintenance scan holds the entry, the entry stays `Ready` and does not yet
-see an edit made moments before, so a read in that window can miss that edit; this is
-accepted as rare.
+While a background maintenance slice holds the entry, the entry stays `Ready` and does not
+yet see an edit made moments before, so a read in that window can miss that edit. This
+accepted observation gap is limited to one bounded slice, including a semantic slice;
+watcher batches drain before another slice starts. An entire semantic initialization
+backlog must not become one such interval. The bound is work-based, not a promise of
+wall-clock duration for an individual filesystem or model operation.
 
 ## Complete requests during first indexing
 
@@ -278,11 +292,16 @@ Get or supported field/path Find before global `Ready`. This permission belongs 
 current initial-attach claim and its synchronized watcher coverage. It does not admit
 reads during a recovery, rebuild, schema reload, park, or release that otherwise refuses.
 An existing canonical index keeps its ordinary attachment and read path.
+Only a newly created, initially empty canonical store qualifies. Reuse of an existing
+store and rebuilding an existing store inside the attach leg do not qualify. A later
+inline rebuild closes first-index admission; it cannot remint the earlier authority.
 
 A complete names catalogue precedes every early answer. Whole Get additionally requires
-complete derivation of the requested resolution class and its bounded naming/link
-context, including the ordinary body, fields, findings and resolved links. Ambiguity
-keeps its ordinary judgment. An incomplete catalogue or exceeded construction bound is
+complete derivation of the resolution candidates for the requested resolution target,
+including its ambiguity class and bounded naming/link context. That context includes
+linked document candidates' headings and blocks needed for ordinary link health. The
+ordinary body, fields, findings and resolved links are complete. Ambiguity keeps its
+ordinary judgment. An incomplete catalogue or exceeded construction bound is
 never a successful missing-document result. Complete metadata precedes field/path Find;
 only predicates, projections and ordering its existing guarded builders support are
 eligible. Missing or unsupported completeness stays on the ordinary loading path.
@@ -309,6 +328,11 @@ wait, source replacement and gate retakes share that deadline. No phase renews i
 Unsupported shapes and operations retain their existing loading behavior. Publication,
 withdrawal and closure of target admission wake affected waiters; progress counters
 alone are not an availability signal. No wait runs under the entry gate.
+Expiry while waiting for an early capability returns `host/entry-not-ready` with the
+current warming phase and counters and the message "this vault is still indexing for
+the first time". Resource and gate-acquisition failures keep their existing refusal
+rules. This adds a price: an eligible first-open caller can be held up to the ordinary
+bound, whereas a canonical first-open request still refuses at once.
 
 ### Source authority and publication
 
@@ -318,8 +342,10 @@ any accepted relevant filesystem fact or observed source contradiction invalidat
 authority. It cannot be restored by draining a batch, finishing a heal window or seeing a
 missing root return. Lost or overflowed coverage prevents early success.
 
-The authority includes facts held in the subscription's open heal window, its collected
-heal observations and its delivery slot. The entry's merged `pending.taken_in` counter
+The authority includes every relevant fact the subscription accepts after capture,
+wherever it is held: the coalescer's pending or unplaced batch, an open heal window,
+collected heal observations and the delivery slot are examples. The entry's merged
+`pending.taken_in` counter
 alone is not this boundary. A request fixes its requirement when it meets the entry;
 known facts cannot be omitted merely because the attach leg has not returned them yet.
 A withdrawn early capability yields to ordinary reconciliation rather than repeatedly
@@ -333,16 +359,23 @@ plan ground. It never sets `trust_unbroken_since_ready` or global `Ready`.
 
 A bounded root-identity check is permitted on this early acquisition path, outside the
 entry gate and watcher locks. It reads no document and runs no derivation. The canonical
-warm request path keeps its existing filesystem-check-free behavior. Bookkeeping-only
-claim, authority, source and deadline checks run under the establishing gate hold;
+warm request path keeps its existing filesystem-check-free behavior. This is a scoped
+exception to the architecture's request-path filesystem-check prohibition and the
+"never per request" alternative below; it does not permit other filesystem query work.
+Bookkeeping-only claim, authority, source and deadline checks run under the establishing gate hold;
 filesystem work, opening, waiting and cleanup do not. Watcher callbacks never take the
 entry gate, including when they invalidate authority or wake a waiter.
+The lock order is entry gate before watcher bookkeeping, never the reverse.
 
 After a cold open or capacity wait, acquisition rechecks the current claim, publication,
 authority, request shape and pinned model under the original deadline. A replaced source
 returns its grant and reselects. Before exposing an early result, the read checks that no
-known source or coverage contradiction withdrew its authority. Errors remain typed errors,
-not unsupported-shape declines. This is a watcher-fidelity guarantee, not filesystem
+known source or coverage contradiction withdrew its authority. Store, resource and
+environmental failures keep their types even when eligibility also moves.
+Every source-dependent refusal is an early result for this authority check: unknown or
+ambiguous target, cursor position/order refusals and other judgments derived from indexed
+data cannot bypass it by being represented as an error. Source-independent input errors
+retain their ordinary validation. This is a watcher-fidelity guarantee, not filesystem
 atomicity or proof that an unseen operating-system event did not occur.
 
 ### Lifetime, budget and promotion
@@ -351,6 +384,9 @@ Prepared sources remain available while later initial construction runs, so avai
 is not limited to a construction callback. Their writers close before immutable public
 readers use them. Store-owned temporary files outlive every established read that owns
 them. Failed and abandoned construction retains normal cleanup and interruption handling.
+These files live beside the canonical derived store, outside the vault and its shadow
+home. Recognized orphan files and their sidecars are swept only under the corresponding
+maintainer lock; a sweep never deletes storage held by another maintainer.
 A complete rich Get projection must retain rich derivation and ordinary link health;
 metadata's payload-omitting construction is not a complete Get source.
 
@@ -360,11 +396,18 @@ identity remains distinct for opening, epoch provenance and damage judgment. Ope
 active, idle and retired-but-held resources remain charged until actual closure. Supported
 Get and Find acquire source capacity, not retained-count scratch capacity.
 
-Promotion closes new early acquisitions in the gate hold that installs an admissible
-canonical replacement. Healthy promotion and administrative retirement do not invalidate
+Promotion closes new early acquisitions in the gate hold that publishes canonical
+`Ready` with its reader. If accumulated facts require reconciliation first, their
+acceptance has already withdrawn conservative early authority. Healthy promotion and
+administrative retirement do not invalidate
 an already established immutable read; its held proof and resources survive independently
-of new admission. Known source or coverage contradiction is different and can withdraw
-an early successful answer. Teardown never waits for a read, a cold open or physical
+of new admission. Explicit detach, unregister and host destruction count as administrative
+retirement, including the unsubscription they cause. Established authority must distinguish
+that administrative end from backend failure, overflow or root/source loss. Dropping the
+subscription alone does not erase the proof a held read already earned or permit new
+acquisition. Known source or coverage contradiction is different and withdraws
+the early result, including a source-dependent refusal. Teardown never waits for a read,
+a cold open or physical
 last-owner cleanup. Idle owners and replaced turns close outside the gate.
 
 Temporary-storage cleanup failures remain observable after the final owner releases;
@@ -388,7 +431,14 @@ reconciliation of the accumulated facts. Request-specific early permission does 
 that boundary. Canonical lexical/rich queries become useful at that boundary even while
 optional semantic initialization or feed consumption remains outstanding.
 
-Semantic work follows canonical publication through bounded existing host scheduling.
+Semantic initialization and feed consumption follow canonical publication. Consumption
+runs in bounded lifecycle-owned slices, with watcher batches drained between slices.
+No semantic slice runs between a lane-1 commit and publication of its `derived_through`
+or `Ready`, including on later reconcile, apply, recovery, rebuild and reload paths.
+The existing unbounded inline post-leg drain must be replaced accordingly; slice size
+and the concrete host scheduling carrier are implementation limits, not claims about
+mechanisms already present. Work with a single slow model operation still obeys the
+maintenance observation limit above, without converting the whole backlog into one turn.
 Config, sidecar ownership, feed epoch/generation, cancellation and teardown retain their
 lane-2 contracts. Status and search answers keep the engine's actual availability and
 watermarks. Semantic work neither writes correctness state nor blocks ordinary lexical
