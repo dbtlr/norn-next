@@ -51,6 +51,14 @@ class PublicReceipts(unittest.TestCase):
         row,_=event();row['query_host_ns']=0
         with self.assertRaises(ValueError):validate_attempt(0,row)
 
+    def test_elapsed_cost_matches_the_exact_positive_caller_interval(self):
+        row,_=event()
+        self.assertEqual(validate_attempt(0,row),row['answer'])
+        for cost in (1,19,21):
+            wrong=copy.deepcopy(row);wrong['query_host_ns']=cost
+            with self.subTest(cost=cost),self.assertRaises(ValueError):
+                validate_attempt(0,wrong)
+
     def test_full_content_and_cursor_are_preserved(self):
         row,manifest=event();row['answer']['report']['document']['body']['text']='wrong'
         with self.assertRaises(ValueError):public_answer(0,row,manifest)

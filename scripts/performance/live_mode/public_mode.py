@@ -33,7 +33,7 @@ def validate_attempt(index,event):
         raise ValueError('invalid public attempt identity or invented private observation')
     started,finished,cost,observed=(integer(event.get(k)) for k in
         ('query_started_ns','query_finished_ns','query_host_ns','state_observed_ns'))
-    if not started < finished <= observed or not 0 < cost <= finished-started:
+    if not started < finished <= observed or not 0 < cost == finished-started:
         raise ValueError('public attempt must retain real nonzero elapsed cost')
     after=trust(event.get('state_after_call'))
     answer=event.get('answer')
