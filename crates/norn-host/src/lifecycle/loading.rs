@@ -41,12 +41,12 @@ pub(crate) struct Diagnostics {
     pub(crate) failures: Arc<Mutex<Option<String>>>,
 }
 
-pub(crate) struct Source<R: ReadSource> {
-    pub(crate) reader: Arc<R>,
-    pub(crate) model: Arc<ContentModel>,
-    pub(crate) authority: FirstIndexObservation,
-    pub(crate) operation: Operation,
-    pub(crate) claim: u64,
+pub(super) struct Source<R: ReadSource> {
+    pub(super) reader: Arc<R>,
+    pub(super) model: Arc<ContentModel>,
+    pub(super) authority: FirstIndexObservation,
+    pub(super) operation: Operation,
+    pub(super) claim: u64,
     damaged: AtomicBool,
     diagnostics: Diagnostics,
     reported: AtomicBool,
@@ -54,7 +54,7 @@ pub(crate) struct Source<R: ReadSource> {
 }
 
 impl<R: ReadSource> Source<R> {
-    pub(crate) fn new(
+    fn new(
         reader: R,
         model: Arc<ContentModel>,
         authority: FirstIndexObservation,
@@ -403,8 +403,25 @@ impl<A: SnapshotSource> EntryState<A> {
 
 /// Owns a possibly restricted hold. It exposes operation execution, reading and counters only.
 pub(crate) struct QueryHold<O: EntryOps> {
-    pub(super) hold: ReadHold<O>,
-    pub(super) source: Option<Arc<Source<<O::Attachment as SnapshotSource>::Reader>>>,
+    hold: ReadHold<O>,
+    source: Option<Arc<Source<<O::Attachment as SnapshotSource>::Reader>>>,
+}
+
+impl<O: EntryOps> QueryHold<O> {
+    pub(super) fn new(
+        hold: ReadHold<O>,
+        source: Option<Arc<Source<<O::Attachment as SnapshotSource>::Reader>>>,
+    ) -> Self {
+        Self { hold, source }
+    }
+
+    pub(super) fn into_canonical(self) -> ReadHold<O> {
+        assert!(
+            self.source.is_none(),
+            "a restricted source cannot become an unrestricted hold"
+        );
+        self.hold
+    }
 }
 
 impl<O: EntryOps> QueryHold<O>

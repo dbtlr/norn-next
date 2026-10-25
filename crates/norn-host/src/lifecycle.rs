@@ -5711,7 +5711,7 @@ impl<O: EntryOps> Host<O> {
         need: norn_store::ReadNeed,
     ) -> Result<ReadHold<O>, ReadRefusal> {
         self.begin_query_read(name, need, loading::Request::Canonical)
-            .map(|acquired| acquired.hold)
+            .map(loading::QueryHold::into_canonical)
     }
 
     pub(crate) fn begin_query_read(
@@ -6103,9 +6103,8 @@ impl<O: EntryOps> Host<O> {
             .reads
             .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
-        Ok(loading::QueryHold {
-            source: early,
-            hold: ReadHold {
+        Ok(loading::QueryHold::new(
+            ReadHold {
                 entry,
                 reader,
                 snapshot: Some(established.snapshot),
@@ -6117,7 +6116,8 @@ impl<O: EntryOps> Host<O> {
                 plan_ground,
                 _lease: lease,
             },
-        })
+            early,
+        ))
     }
 
     /// Answer a read whose store found its derived data damaged: publish the
