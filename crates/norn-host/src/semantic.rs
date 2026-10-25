@@ -760,21 +760,18 @@ impl SemanticEngines {
     /// **An initialization installs only for the delivery, store lifetime and
     /// claim it began under.** It runs only where the entry's publishing gate
     /// hold committed this slot's delivery beside `feed`'s store epoch. The
-    /// open runs with no lock of this set held. The install then holds the
-    /// map lock and the slot's: the map must still hold this very slot — a
-    /// disable, a reload that replaced it, or a detach and re-attach under
-    /// the same section and store all leave another slot or none — its
-    /// published store must still be `feed`'s, and `still_claimed`, asked
-    /// once the open has returned and before those locks are taken, must
-    /// answer that the leg's lifecycle claim still stands. A refused result
-    /// is dropped once both locks are released, so a sidecar connection is
-    /// never closed under them.
+    /// open runs outside every metadata lock. `publish` validates the claim
+    /// and runs the install under one entry-gate hold, taking map then slot.
+    /// The map must still hold this very slot: disable, replacement and
+    /// detach/re-attach leave another slot or none. Its published store must
+    /// still be `feed`'s. Rejected resources close after publication returns,
+    /// outside the entry gate, map and slot locks.
     pub(crate) fn work(
         &self,
         vault: &VaultName,
         feed: &mut FeedRead<'_>,
         budget: SliceBudget,
-        still_claimed: impl Fn() -> bool,
+        publish: impl FnOnce(&mut dyn FnMut()),
     ) -> bool {
         let store_epoch = feed.epoch().to_string();
         let Some((engine_slot, published)) =
@@ -797,7 +794,7 @@ impl SemanticEngines {
                 // commits it is what lets the initialization run.
                 return true;
             }
-            self.initialize(vault, &engine_slot, &store_epoch, still_claimed);
+            self.initialize(vault, &engine_slot, &store_epoch, publish);
             return engine_slot.owed.load(Ordering::Acquire);
         }
         self.drain_slice(&engine_slot, feed, budget);
@@ -811,12 +808,12 @@ impl SemanticEngines {
         vault: &VaultName,
         engine_slot: &Arc<EngineSlot>,
         store_epoch: &str,
-        still_claimed: impl Fn() -> bool,
+        publish: impl FnOnce(&mut dyn FnMut()),
     ) {
         let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
         // The slot was delivered enabling settings, and the stub is the one
         // embedder this composition opens an engine with.
-        let opened = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
+        let mut refused = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
             Ok(engine) => Slot::Running {
                 engine: Some(Box::new(engine)),
                 last_drain_error: None,
@@ -827,12 +824,11 @@ impl SemanticEngines {
         };
         #[cfg(test)]
         self.hooks.run_before_install();
-        // Asked before the map lock: the claim is read under the entry gate,
-        // and the gate is taken ahead of this set's map elsewhere. A claim
-        // superseded after this answer belongs to a leg whose attachment goes
-        // back to a detach, which takes this slot out of the map.
-        let claimed = still_claimed();
-        let refused = {
+        // Keep resource ownership outside the callback: rejecting a retired
+        // claim must not drop an opened engine under the reporter's gate.
+        publish(&mut || {
+            #[cfg(test)]
+            self.hooks.run_inside_publication();
             let vaults = tolerant(&self.vaults);
             let current = vaults.get(vault).is_some_and(|delivery| {
                 delivery
@@ -842,24 +838,19 @@ impl SemanticEngines {
                     && delivery.published_store.as_deref() == Some(store_epoch)
             });
             let mut slot = tolerant(&engine_slot.slot);
-            if claimed && current && matches!(&*slot, Slot::Preparing) {
-                let installed = std::mem::replace(&mut *slot, opened);
+            if current && matches!(&*slot, Slot::Preparing) {
+                std::mem::swap(&mut *slot, &mut refused);
                 *tolerant(&engine_slot.report) = read_slot(&slot);
                 // A running engine owes the drain that converges it; an
                 // engine that did not open owes nothing until a delivery.
                 engine_slot
                     .owed
                     .store(matches!(&*slot, Slot::Running { .. }), Ordering::Release);
-                drop(slot);
-                drop(vaults);
-                installed
-            } else {
-                drop(slot);
-                drop(vaults);
-                opened
             }
-        };
+        });
         drop(refused);
+        #[cfg(test)]
+        self.hooks.run_as_install_ends();
     }
 
     /// One drain slice of `engine_slot`'s running engine over `feed`.
@@ -1063,6 +1054,8 @@ pub(crate) mod tests {
         drain_end: Mutex<Option<Arranged>>,
         delivery: Mutex<Option<Arranged>>,
         install: Mutex<Option<Arranged>>,
+        publication: Mutex<Option<Arranged>>,
+        install_end: Mutex<Option<Arranged>>,
     }
 
     impl Hooks {
@@ -1075,6 +1068,20 @@ pub(crate) mod tests {
 
         pub(super) fn run_as_drain_ends(&self) {
             let arranged = tolerant(&self.drain_end).take();
+            if let Some(arranged) = arranged {
+                arranged();
+            }
+        }
+
+        pub(super) fn run_inside_publication(&self) {
+            let arranged = tolerant(&self.publication).take();
+            if let Some(arranged) = arranged {
+                arranged();
+            }
+        }
+
+        pub(super) fn run_as_install_ends(&self) {
+            let arranged = tolerant(&self.install_end).take();
             if let Some(arranged) = arranged {
                 arranged();
             }
@@ -1114,6 +1121,18 @@ pub(crate) mod tests {
         /// with no lock of this set held.
         pub(crate) fn run_before_next_install(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.install) = Some(Box::new(arranged));
+        }
+
+        /// Pause after validating the real lifecycle claim, before map/slot
+        /// publication. A valid publication still holds the entry gate here.
+        pub(crate) fn run_inside_next_publication(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.publication) = Some(Box::new(arranged));
+        }
+
+        /// Run after initialization accepts or rejects its result, outside
+        /// metadata locks and before returning the attachment to lifecycle.
+        pub(crate) fn run_as_next_install_ends(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.install_end) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, as the next delivery to any vault returns,

@@ -784,7 +784,9 @@ impl ProductionEntryOps {
             return false;
         };
         let mut feed = attachment.store.feed_read();
-        semantic.work(name, &mut feed, SEMANTIC_SLICE, || progress.stands())
+        semantic.work(name, &mut feed, SEMANTIC_SLICE, |install| {
+            progress.publish_if_claimed(install);
+        })
     }
 
     /// Record where `attachment`'s lane-1 store stands through `progress`,
@@ -7673,6 +7675,149 @@ mod tests {
         use crate::semantic::{SemanticEngines, SemanticRefusal, SemanticStatus, freshness};
         use norn_wire::{EngineSection, Freshness};
 
+        /// Read the real lifecycle release while the semantic worker still
+        /// holds the attachment, so detach cannot hide a forbidden install.
+        fn wait_for_semantic_release(lease: &crate::DemandLease<ProductionEntryOps>) {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let completion = lease.completion();
+                if matches!(
+                    completion,
+                    crate::Demand::State(norn_wire::TrustState::Warming {
+                        phase: norn_wire::WarmingPhase::ReleasingCoverage,
+                        ..
+                    })
+                ) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "claim was not retired: {completion:?}"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        #[test]
+        fn semantic_publication_holds_claim_through_install_before_host_teardown() {
+            for fails_to_open in [false, true] {
+                let f = Fixture::new("semantic-publication-before-teardown");
+                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+                fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                if fails_to_open {
+                    let sidecar = sidecar_file(&f, &f.registration().name);
+                    fs::create_dir_all(sidecar).unwrap();
+                }
+                let (opened, opened_rx) = std::sync::mpsc::channel();
+                let (publish, publish_rx) = std::sync::mpsc::channel();
+                engines.run_before_next_install(move || {
+                    opened.send(()).unwrap();
+                    publish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                });
+                let (host, name, lease) = polling_ready_host(&f, ops);
+                opened_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                let committed = lease.review_committed_delivery();
+                assert_eq!(committed.reading().1, SemanticStatus::Preparing);
+                let (claimed, claimed_rx) = std::sync::mpsc::channel();
+                let (install, install_rx) = std::sync::mpsc::channel();
+                engines.run_inside_next_publication(move || {
+                    claimed.send(()).unwrap();
+                    install_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                });
+                let (installed, installed_rx) = std::sync::mpsc::channel();
+                let (finish, finish_rx) = std::sync::mpsc::channel();
+                let e = Arc::clone(&engines);
+                let n = name.clone();
+                let report = committed.clone();
+                engines.run_as_next_install_ends(move || {
+                    installed.send((e.status(&n), report.reading())).unwrap();
+                    finish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                });
+                publish.send(()).unwrap();
+                claimed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                // Probe the exact post-validation/pre-map gap. Do not wait for
+                // retirement here: the gate must prevent that retirement.
+                let gate_held_before_drop = lease.entry_gate_is_blocked();
+                let dropping = std::thread::spawn(move || drop(host));
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while !lease.host_shutdown_started() {
+                    assert!(Instant::now() < deadline, "host drop did not begin");
+                    std::thread::yield_now();
+                }
+                let gate_held_during_drop = lease.entry_gate_is_blocked();
+                let pending = committed.reading();
+                install.send(()).unwrap();
+                let observed = installed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                wait_for_semantic_release(&lease);
+                finish.send(()).unwrap();
+                dropping.join().unwrap();
+                eprintln!(
+                    "publication first: failed_open={fails_to_open}, entry gate held={gate_held_before_drop}/{gate_held_during_drop}, installed={observed:?}"
+                );
+                assert!(
+                    gate_held_before_drop && gate_held_during_drop,
+                    "claim validation and publication did not hold one uninterrupted entry gate"
+                );
+                assert_eq!(pending.1, SemanticStatus::Preparing);
+                assert_eq!(observed.0, observed.1.1);
+                assert_eq!(observed.1.0, EngineSection::enabled());
+                if fails_to_open {
+                    assert!(matches!(observed.0, SemanticStatus::SelfDisabled { .. }));
+                } else {
+                    assert!(matches!(observed.0, SemanticStatus::On { .. }));
+                }
+            }
+        }
+
+        #[test]
+        fn semantic_publication_rejects_result_after_host_teardown_retires_claim() {
+            for fails_to_open in [false, true] {
+                let f = Fixture::new("semantic-teardown-before-publication");
+                fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+                fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+                let (engines, ops) = engines_and_ops(&f);
+                if fails_to_open {
+                    fs::create_dir_all(sidecar_file(&f, &f.registration().name)).unwrap();
+                }
+                let (opened, opened_rx) = std::sync::mpsc::channel();
+                let (publish, publish_rx) = std::sync::mpsc::channel();
+                engines.run_before_next_install(move || {
+                    opened.send(()).unwrap();
+                    publish_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                });
+                let (host, name, lease) = polling_ready_host(&f, ops);
+                opened_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                let committed = lease.review_committed_delivery();
+                let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let r = Arc::clone(&reached);
+                engines.run_inside_next_publication(move || {
+                    r.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let (installed, installed_rx) = std::sync::mpsc::channel();
+                let e = Arc::clone(&engines);
+                let n = name.clone();
+                let report = committed.clone();
+                engines.run_as_next_install_ends(move || {
+                    installed.send((e.status(&n), report.reading())).unwrap();
+                });
+                let dropping = std::thread::spawn(move || drop(host));
+                wait_for_semantic_release(&lease);
+                publish.send(()).unwrap();
+                let observed = installed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                dropping.join().unwrap();
+                eprintln!("teardown first: failed_open={fails_to_open}, rejected={observed:?}");
+                assert!(!reached.load(std::sync::atomic::Ordering::SeqCst));
+                assert_eq!(
+                    observed,
+                    (
+                        SemanticStatus::Preparing,
+                        (EngineSection::enabled(), SemanticStatus::Preparing)
+                    )
+                );
+            }
+        }
+
         fn engines_and_ops(f: &Fixture) -> (Arc<SemanticEngines>, ProductionEntryOps) {
             let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
             let engines = SemanticEngines::new(dirs.clone());
@@ -7711,7 +7856,7 @@ mod tests {
                     name,
                     &mut attachment.store.feed_read(),
                     SEMANTIC_SLICE,
-                    || true,
+                    |install| install(),
                 ) {
                     return units;
                 }
@@ -7760,7 +7905,7 @@ mod tests {
                 &name,
                 &mut attachment.store.feed_read(),
                 SEMANTIC_SLICE,
-                || true,
+                |install| install(),
             );
             assert_eq!(
                 engines.status(&name),
@@ -7776,7 +7921,7 @@ mod tests {
                     &name,
                     &mut attachment.store.feed_read(),
                     SEMANTIC_SLICE,
-                    || { true }
+                    |install| install()
                 ),
                 "the initialization owes the drain that converges it"
             );
@@ -9090,7 +9235,7 @@ mod tests {
                     &name,
                     &mut attachment.store.feed_read(),
                     SEMANTIC_SLICE,
-                    || true,
+                    |install| install(),
                 )
             }));
 
@@ -9225,7 +9370,11 @@ mod tests {
                 name,
                 &mut attachment.store.feed_read(),
                 SEMANTIC_SLICE,
-                || claimed,
+                |install| {
+                    if claimed {
+                        install();
+                    }
+                },
             );
         }
 
@@ -9352,7 +9501,10 @@ mod tests {
                 &name,
                 &mut attachment.store.feed_read(),
                 SEMANTIC_SLICE,
-                || ProgressReporter::<ProductionAttachment>::disconnected().stands(),
+                |install| {
+                    ProgressReporter::<ProductionAttachment>::disconnected()
+                        .publish_if_claimed(install)
+                },
             );
             assert_eq!(engines.status(&name), SemanticStatus::Preparing);
 

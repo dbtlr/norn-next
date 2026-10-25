@@ -691,14 +691,26 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
-    /// Whether this job's claim still stands at the entry: the check a
-    /// result the job computed off the gate is installed under, where the
-    /// claim is all it needs, not the quiet a new duty starts under.
+    /// Whether this job's claim stands at this instant. This reading does
+    /// not reserve the claim for a later publication.
     pub fn stands(&self) -> bool {
         self.entry.upgrade().is_some_and(|entry| {
             let state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.stands_at(self.epoch)
         })
+    }
+
+    /// Publish a result only while this job's claim stands, keeping the
+    /// entry gate from validation through publication. The callback takes
+    /// map and slot locks after this gate; it must not open or close resources.
+    pub(crate) fn publish_if_claimed(&self, publish: impl FnOnce()) {
+        let Some(entry) = self.entry.upgrade() else {
+            return;
+        };
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        if state.claim.stands_at(self.epoch) {
+            publish();
+        }
     }
 
     /// Recheck the claim immediately before starting a quiet-only duty.
@@ -4278,6 +4290,34 @@ impl<O: EntryOps> Deref for DemandLease<O> {
 impl<O: EntryOps> DemandLease<O> {
     pub fn outcome(&self) -> &Demand {
         &self.outcome
+    }
+
+    /// Clone the actual entry-committed report before a test pauses its gate.
+    #[cfg(test)]
+    pub(crate) fn review_committed_delivery(&self) -> crate::semantic::DeliveredEngine {
+        let shared = self.held.as_ref().unwrap();
+        let entry = shared.entries.get(&self.name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        state.delivered_engine.clone().unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_gate_is_blocked(&self) -> bool {
+        let shared = self.held.as_ref().unwrap();
+        let entry = shared.entries.get(&self.name).unwrap();
+        matches!(
+            entry.gate.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_shutdown_started(&self) -> bool {
+        self.held
+            .as_ref()
+            .unwrap()
+            .shutting_down
+            .load(Ordering::SeqCst)
     }
 
     /// The current completion of the asynchronous demand that created this
