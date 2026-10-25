@@ -76,13 +76,15 @@ pub fn prefix(
             && answer["reading"]["trust"]["state"] == "warming"
             && state != TrustState::Ready;
         let probe = ["whole_slug", "active_page"][index];
-        super::emit(json!({"startup_stage":["public-get","public-find"][index],
+        super::emit(
+            json!({"startup_stage":(["public-get","public-find"][index]),
             "probe":probe,"operator_prefix_sequence":index+1,"command":command,
             "mode":"public","availability_scope":"public Host first-open requests",
             "disposition":disposition,"answer":answer,"error":error,
             "counters":counters,"builder_work":work,
             "query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
-            "state_after_call":state,"state_observed_ns":observed,"early_answer":early}));
+            "state_after_call":state,"state_observed_ns":observed,"early_answer":early}),
+        );
         assert_ne!(
             disposition, "error",
             "public operational refusal stops the cell"
