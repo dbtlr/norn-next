@@ -8704,7 +8704,7 @@ mod tests {
 
         /// **`doctor` reports each vault's engine health as its status
         /// reports its engine**: the delivered section beside what the slot
-        /// is doing.
+        /// is doing, once the unchanged fixture's engine has caught up.
         #[test]
         fn doctor_reports_an_enabled_engine_beside_its_section() {
             let f = Fixture::new("doctor-engine-enabled");
@@ -8712,7 +8712,7 @@ mod tests {
             let (_engines, ops) = engines_and_ops(&f);
             let (host, name, _lease) = polling_ready_host(&f, ops);
             wait_for_engine(&host, &name, |engine| {
-                matches!(engine, norn_wire::EngineStatus::On { .. })
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
             });
 
             let (section, engine) = engine_reported(&host, &name);
