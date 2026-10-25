@@ -211,9 +211,9 @@ pub struct ProductionEntryOps {
     evidence: Arc<JobEvidence>,
     engine_config_receivers: Vec<Arc<dyn EngineConfigReceiver>>,
     /// The semantic engines this host composes, where it composes them. Named
-    /// beside the generic receiver list because the ops also relay the
-    /// post-leg drain — the one engine seam the receiver dispatch cannot
-    /// carry, since a drain needs the leg's own store handle. A second engine
+    /// beside the generic receiver list because the ops also owe and run the
+    /// engine's slices — the one engine seam the receiver dispatch cannot
+    /// carry, since a slice needs a leg's own store handle. A second engine
     /// is what generalizes this field into a seam.
     semantic: Option<Arc<crate::semantic::SemanticEngines>>,
 }
@@ -810,7 +810,7 @@ impl ProductionEntryOps {
     /// failure is work no drain has reached. The coverage it leaves holds
     /// the engine its attachment was delivered, and a status judges that
     /// engine against this reading. A leg that succeeded recorded its
-    /// reading ahead of its drain. A host that composes no engine records
+    /// reading where it owed its slice. A host that composes no engine records
     /// nothing.
     fn leg_ended<T, E>(
         &self,
@@ -8910,17 +8910,18 @@ mod tests {
 
         /// **A status and a doctor are answered while a drain holds the
         /// engine, and report it trailing the work the leg committed**: the
-        /// leg records where the store stands before it drains, and the
+        /// leg records where the store stands where it owes the slice, and the
         /// engine is reported from the report its slot last left, so neither
         /// waits behind the drain and neither calls the engine caught up with
         /// a store that has moved on. Once the drain lands it trails by
         /// nothing.
         ///
-        /// The drain held is the one relayed by the leg that commits
-        /// `beta.md`. A leg that commits nothing still drains, and its engine
-        /// truthfully trails by nothing; on macOS fseventsd can deliver a
-        /// change made before the watch was established after the attach
-        /// published, which relays such a leg ahead of `beta.md`'s. A held
+        /// The drain held is the slice owed by the leg that commits
+        /// `beta.md`, once the engine has caught up with the attach. A leg
+        /// that commits nothing still owes a slice, and its engine truthfully
+        /// trails by nothing; on macOS fseventsd can deliver a change made
+        /// before the watch was established after the attach published, which
+        /// owes such a slice ahead of `beta.md`'s. A held
         /// drain that reports the engine caught up is that leg's: the hook is
         /// armed again before it is released, so the next drain is held too.
         #[test]
@@ -9537,6 +9538,7 @@ mod tests {
         #[test]
         fn semantic_slices_yield_to_watcher_facts_between_them() {
             type Shared = Arc<Mutex<Option<Arc<crate::Host<OverflowOnArm>>>>>;
+            type Injected = Arc<Mutex<Option<norn_fs::Batch>>>;
             let f = Fixture::new("semantic-slices-yield");
             fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
             many_documents(&f, 600);
@@ -9547,8 +9549,7 @@ mod tests {
             let rewritten = f.vault().join("omega.md");
             let shared: Shared = Arc::new(Mutex::new(None));
             let observed = Arc::new(Mutex::new(None));
-            let injected_cell: Arc<Mutex<Option<Arc<Mutex<Option<norn_fs::Batch>>>>>> =
-                Arc::new(Mutex::new(None));
+            let injected_cell: Arc<Mutex<Option<Injected>>> = Arc::new(Mutex::new(None));
             let (started, first_started) = std::sync::mpsc::channel::<()>();
             let (go, first_goes) = std::sync::mpsc::channel::<()>();
             let (second_entered, second_drain) = std::sync::mpsc::channel::<()>();

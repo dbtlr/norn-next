@@ -77,11 +77,42 @@ struct Serving {
 fn serve(vault: &attach::Vault) -> Serving {
     let (host, engines) = vault.host_with_semantic();
     let lease = attach::attach_and_wait(&host, vault.name());
-    Serving {
+    let serving = Serving {
         host,
         engines,
         _lease: lease,
-    }
+    };
+    settled_engine(&serving, vault);
+    serving
+}
+
+/// Wait until `vault`'s engine has left preparing and, where it stands, has
+/// caught up with the store the attach derived: the entry is `Ready` before
+/// its engine initializes, and the initialization and the drain after it are
+/// lifecycle slices that follow.
+fn settled_engine(serving: &Serving, vault: &attach::Vault) {
+    let params =
+        norn_wire::StatusParams::new().with_vault(VaultAddress::name(vault.name().clone()));
+    wait_until(
+        "the engine to leave preparing and catch up",
+        attach::read_budget(attach::READY_LIMIT),
+        || match serving.host.vault_status(&params) {
+            Ok(norn_wire::StatusReport::Vault { status, .. }) => match status.engine {
+                norn_wire::EngineStatus::Preparing {} => {
+                    Observed::pending("the engine is preparing".to_string())
+                }
+                norn_wire::EngineStatus::On {
+                    freshness: Some(Freshness::Trailing { generations: 0, .. }),
+                    ..
+                }
+                | norn_wire::EngineStatus::Off {}
+                | norn_wire::EngineStatus::SelfDisabled { .. } => Observed::Met(()),
+                other => Observed::pending(format!("the engine reports {other:?}")),
+            },
+            other => Observed::pending(format!("the status answered {other:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 fn searching(vault: &attach::Vault, query: &str) -> SearchParams {

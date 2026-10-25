@@ -671,8 +671,8 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     }
 
     /// Record `reading` as where this entry's lane-1 store stands: the reading
-    /// a leg takes where its lane-1 work has committed, ahead of the drain it
-    /// relays, or at its end where it failed, and `None` where that reading
+    /// a leg takes where its lane-1 work has committed, as it owes the
+    /// engine's slice, or at its end where it failed, and `None` where that reading
     /// could not be taken.
     ///
     /// It is what `vault status` and `doctor` judge the engine's watermarks

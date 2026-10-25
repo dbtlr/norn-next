@@ -3,11 +3,15 @@
 //! This is the crate-map edge `norn-host → norn-semantic`, and the whole of
 //! it. The host owns three things here and defines nothing past them:
 //!
-//! - **Delivery is the enable act.** The config dispatch hands this set the
-//!   vault's `[engine.semantic]` section; a section that parses opens the
-//!   engine eagerly at that delivery, an absent section (or `enabled =
-//!   false`) closes it, and a section the engine refuses — or an engine that
-//!   cannot open — leaves a typed self-disabled state a status read reports.
+//! - **Delivery records what the section asks for, and opens nothing.** The
+//!   config dispatch hands this set the vault's `[engine.semantic]` section;
+//!   a section that enables the engine leaves a preparing slot (or keeps the
+//!   running or preparing one it already has), an absent section (or
+//!   `enabled = false`) closes it, and a section the engine refuses leaves a
+//!   typed self-disabled state a status read reports. The sidecar open and
+//!   the model setup — the initialization — run later, as a lifecycle slice
+//!   after the publication that committed the delivery, and an engine that
+//!   cannot open is self-disabled there.
 //!   What the section *means* is the engine's own ([`norn_semantic::Settings`]).
 //!   The reading of the section itself — absent, disabled, malformed with the
 //!   engine's refusal, or enabled — is retained beside the slot at the same
@@ -15,18 +19,20 @@
 //!   stands carries the reading taken under the same lookup as the slot it
 //!   found missing, because "no engine stands" is answered differently for a
 //!   vault that asked for none and one whose section could not be read.
-//! - **The nudge is a post-leg pull.** Every leg that ends holding a
-//!   consistent lane-1 store relays the vault's feed handle here and the
-//!   engine drains on that same worker leg — the increments, every heal
-//!   (attach, recover, schema reload, and the store rebuild whose new epoch
-//!   is exactly what a cursor must not sleep through), and the config-only
-//!   reload, whose drain is what converges a corpus derived before its
-//!   engine existed. This is the nudge transport's floor: no thread, no
-//!   channel, no missable wake — a dedicated engine worker is the carve
-//!   drain cost forces, not this composition's obligation. A drain failure
-//!   never fails the leg: lane 2's contract is eventual consistency, so
-//!   engine trouble is retained as the slot's own diagnostic, and sidecar
-//!   damage resolves by the engine's rebuild floor right here.
+//! - **The nudge is owed work, run in bounded slices.** Every leg that ends
+//!   holding a consistent lane-1 store — the increments, every heal (attach,
+//!   recover, schema reload, and the store rebuild whose new epoch is exactly
+//!   what a cursor must not sleep through), and the config-only reload, whose
+//!   drain is what converges a corpus derived before its engine existed —
+//!   records that the slot owes a slice ([`SemanticEngines::owe`]) and runs
+//!   none of it, so its publication never waits for semantic work. Quiet
+//!   maintenance legs then run one unit each over the leg's own feed handle
+//!   ([`SemanticEngines::work`]): no thread, no channel, no missable wake —
+//!   a dedicated engine worker is the carve drain cost forces, not this
+//!   composition's obligation. A drain failure never fails the leg: lane 2's
+//!   contract is eventual consistency, so engine trouble is retained as the
+//!   slot's own diagnostic, and sidecar damage resolves by the engine's
+//!   rebuild floor, whose reset cursors the next slices drain.
 //! - **Answers come from the slot, gated by the slot alone.** A nearest
 //!   answer needs the engine and its sidecar, never the vault's store, so it
 //!   runs on the caller's thread and answers whenever a slot stands — the
@@ -45,9 +51,12 @@
 //!
 //! # Locking, and the guarantee it leans on
 //!
-//! The outer map lock covers lookup, delivery bookkeeping and teardown only
-//! — never an engine open, a sidecar close, a drain, or an answer — so one
-//! vault's work never holds another vault's. Within one vault, a slot's own lock serializes its
+//! The outer map lock covers lookup, delivery bookkeeping, publication and
+//! teardown only — never an engine open, a sidecar close, a drain, or an
+//! answer — so one vault's work never holds another vault's. The one place
+//! it is held with a slot's lock is an initialization's install, which moves
+//! an already-open engine into a preparing slot and does no I/O. It is taken
+//! after the entry gate where both are held, never before it. Within one vault, a slot's own lock serializes its
 //! drains and its answers against each other, and a drain holds it for the
 //! whole drain. The report beside each slot has a lock of its own, written
 //! while the slot's lock is held and read without it, so a status taken
@@ -55,7 +64,10 @@
 //! waiting for it to end ([`EngineSlot`]). Slot replacement at delivery
 //! is sound because the lifecycle admits one leg per vault at a time (the
 //! entry's custody claim); a lifecycle that relaxed that would need delivery
-//! to mutate in place rather than replace.
+//! to mutate in place rather than replace. An initialization does not lean
+//! on that alone: its result is installed only into the slot it opened for,
+//! while that slot is still the vault's, beside the store lifetime its
+//! publication committed, under a claim that still stands.
 //!
 //! Every slot lock tolerates poison: a panic that escaped the engine never
 //! becomes a second panic on a worker leg or a caller's thread. What it leaves
@@ -539,7 +551,7 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
 
 /// A vault's engine slot as `vault status` and `doctor` report it, judged
 /// against `store`: the lane-1 reading the vault's entry recorded where its
-/// last leg's lane-1 work committed, ahead of the drain that leg relays.
+/// last leg's lane-1 work committed, where that leg owed the engine's slice.
 ///
 /// A standing engine's freshness is [`freshness`] — the judgment a search's
 /// vector rung reports against its own snapshot's reading — of its watermarks
@@ -972,7 +984,7 @@ impl EngineConfigReceiver for SemanticEngines {
     /// not — and so is a slot still preparing under that configuration. An
     /// enabling section otherwise leaves a preparing slot, whose sidecar open
     /// and model setup run after the publication that commits it
-    /// ([`SemanticEngines::work`]). A refused or self-disabled slot is
+    /// (`SemanticEngines::work`). A refused or self-disabled slot is
     /// re-attempted from scratch, because a delivery is exactly the author's
     /// next try.
     ///
