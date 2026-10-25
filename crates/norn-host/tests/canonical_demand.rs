@@ -265,6 +265,16 @@ fn canonical_final_layout_and_ids_match_an_ordinary_heal() {
         };
         let cache = cached
             .then(|| norn_host::startup_experiment::InitialImportCache::new(8192, true).unwrap());
+        if mode == "ordinary" {
+            // Rebuilding a deliberately superseded empty store selects ordinary
+            // canonical construction, including the cache lane, without public
+            // Created-only metadata work in this canonical-phase comparison.
+            let order = machine.store().path_order();
+            let version = norn_store::DerivationVersion::new(
+                norn_host::DERIVATION_VERSION.get().checked_add(1).unwrap(),
+            );
+            drop(norn_store::Store::open(machine.database(), order, version).unwrap());
+        }
         let host = machine.host_with_loading_options(policy, experiment, cache.clone());
         let demand = host.demand(machine.name()).unwrap();
         wait_ready(&host, machine.name());
