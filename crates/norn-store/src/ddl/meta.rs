@@ -77,3 +77,6 @@ pub(crate) const PATH_ORDER: &str = "path_order";
 /// store that records none, or a value no build writes, is rebuilt as one that
 /// records another.
 pub(crate) const DERIVATION_VERSION: &str = "derivation_version";
+
+/// An owned first-index projection cannot be adopted as an ordinary store.
+pub(crate) const LOADING_SOURCE: &str = "loading_source";

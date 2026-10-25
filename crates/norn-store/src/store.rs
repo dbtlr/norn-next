@@ -1138,6 +1138,7 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
+        refuse_loading_source(database.connection(), database.path())?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
             intake_unsealed: false,
@@ -2019,6 +2020,8 @@ impl norn_db::Client for StoreClient {
     /// inputs are both read, and a store where both moved is rebuilt once for a
     /// reason that names both.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
+        // A loading source must be refused before either mode adoption or rebuilding.
+        refuse_loading_source(connection, path)?;
         self.adopt_mode(connection, path)?;
         let details: Vec<String> = [
             self.path_order_moved(connection)?,
@@ -2141,6 +2144,17 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
+}
+
+fn refuse_loading_source(connection: &Connection, path: &Path) -> Result<(), StoreError> {
+    if meta::get_meta::<i64>(connection, ddl::meta::LOADING_SOURCE)?.is_some() {
+        return Err(StoreError::Lifecycle {
+            operation: "opening a sealed loading source",
+            path: path.to_path_buf(),
+            message: "loading projections require their owned reader and cannot be adopted".into(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

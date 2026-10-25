@@ -84,6 +84,8 @@ impl IntakeBuilder {
                 derivation,
             },
         )?;
+        // Sealing completes a projection, never a canonical store.
+        meta::put_meta(connection, ddl::meta::LOADING_SOURCE, 1_i64)?;
         let (database, file) = temporary.into_database()?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Self {

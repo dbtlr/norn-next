@@ -56,11 +56,11 @@ fn a_rich_sealed_source_survives_retirement_and_refuses_ordinary_adoption() {
         matches!(
             Store::open_throwaway(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)),
             Err(norn_store::StoreError::Lifecycle {
-                operation: "using an incomplete startup experiment",
+                operation: "opening a sealed loading source",
                 ..
             })
         ),
-        "the lasting incomplete marker survives sealing"
+        "the loading-source marker survives sealing"
     );
     let snapshot = reader
         .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
@@ -533,7 +533,7 @@ fn sealed_disposable_cannot_be_rebuilt_into_an_ordinary_store() {
         matches!(
             result,
             Err(norn_store::StoreError::Lifecycle {
-                operation: "using an incomplete startup experiment",
+                operation: "opening a sealed loading source",
                 ..
             })
         ),
