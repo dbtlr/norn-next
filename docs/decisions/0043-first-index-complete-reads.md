@@ -1,11 +1,11 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-25
 ---
 
 # 0043 — First indexing may serve a request whose complete answer is already trustworthy
 
-Proposes to supersede [ADR 0042](0042-elastic-readers-and-concurrent-retained-results.md).
+Supersedes [ADR 0042](0042-elastic-readers-and-concurrent-retained-results.md).
 The elastic reader budget, canonical read acquisition, demand lease, recovery
 restraint, settling bound, teardown, and retained-count rules are restated below.
 The change permits complete Get and supported metadata Find during first indexing,
@@ -23,9 +23,6 @@ The chosen trade-off is bounded additional temporary construction and lifetime
 management in exchange for useful earlier answers. The same query builders and
 full-result requirements apply. Availability depends on a proven complete request,
 not on a percentage of files processed or an optimistic readiness label.
-
-This draft records the approved public direction. Its detailed contract remains
-under review before implementation; ADR 0042 still governs the current runtime.
 
 The reader-capacity rationale from ADR 0042 also remains:
 
@@ -464,7 +461,8 @@ and the concrete host scheduling carrier are implementation limits, not claims a
 mechanisms already present. Work with a single slow model operation still obeys the
 maintenance observation limit above, without converting the whole backlog into one turn.
 Apart from the explicit delivery/initialization split, config, sidecar ownership, feed
-epoch/generation, cancellation and teardown retain their lane-2 contracts. Status and search answers keep the engine's actual availability and
+epoch/generation, cancellation and teardown retain their lane-2 contracts.
+Status and search answers keep the engine's actual availability and
 watermarks. Semantic work neither writes correctness state nor blocks ordinary lexical
 readiness merely because it has more feed to consume. A model-free host makes no semantic
 availability claim, and scheduling tests do not establish real-model cost or quality.
@@ -478,6 +476,9 @@ and their metadata are retired after promotion; the canonical warm path does not
 vault-sized catalogue or a history of initial requests. Exact result and final-index
 correctness remain requirements. Operation-by-operation timing differences remain visible
 rather than being combined into an aggregate offset.
+An attachment that recreates its semantic engine can publish canonical `Ready` before
+the vector rung becomes usable, including a warm reattachment after idle detach.
+Status reports preparation during that interval; its duration is not promised here.
 
 Making the whole partial store publicly readable would make completeness depend on which
 rows happened to arrive. Serving directly from files would duplicate query, resolution
