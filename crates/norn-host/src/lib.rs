@@ -45,6 +45,8 @@ pub use evidence::{
 /// feature as the rest of [`Host`]'s harness-reachable readers.
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
+#[cfg(feature = "induced-failure")]
+pub use production::loading::{LoadingBoundary, LoadingProbe};
 
 /// **Which targets of a resolved plan the applier copies another target
 /// from**, unread, through the write kernel (`norn_fs::Content::CopyOf`):

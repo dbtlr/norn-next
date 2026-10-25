@@ -385,6 +385,32 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
+            false,
+        )
+    }
+
+    /// Only disposable metadata readers may observe rows with omitted bodies.
+    pub fn apply_intake_increment(
+        &mut self,
+        changes: impl IntoIterator<Item = Change>,
+        findings: &[DerivedFinding<'_>],
+        declared: &ContentModel,
+    ) -> Result<IncrementOutcome, StoreError> {
+        if !self.store.metadata_intake {
+            return Err(StoreError::Lifecycle {
+                operation: "writing loading metadata",
+                path: self.store.path().to_path_buf(),
+                message: "payload omission requires an owned metadata intake".into(),
+            });
+        }
+        increment::apply(
+            self.store,
+            &mut self.counters,
+            &self.read_work,
+            changes,
+            findings,
+            declared,
+            true,
         )
     }
 

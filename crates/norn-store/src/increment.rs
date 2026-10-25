@@ -242,6 +242,7 @@ pub(crate) fn apply(
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
+    metadata: bool,
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
@@ -353,6 +354,7 @@ pub(crate) fn apply(
                                 facts,
                                 admitting,
                                 &mut tally,
+                                metadata,
                             )
                         },
                     )
@@ -419,7 +421,8 @@ pub(crate) fn apply(
     // path and the path discard every finding keyed by a path this changeset
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
-    let redecided = match generation {
+    let run_health = !metadata;
+    let redecided = match generation.filter(|_| run_health) {
         Some(generation) => {
             #[cfg(feature = "induced-failure")]
             let _timing = norn_db::profiling::span("store.link_health");
@@ -663,10 +666,15 @@ fn upsert(
     facts: &DocumentFacts,
     admitting: usize,
     tally: &mut Tally,
+    metadata: bool,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.upsert");
     refuse_a_document_that_does_not_add_up(facts)?;
+    let body = facts.body.as_str();
+    // Validate the real bytes above, then omit only the disposable payload.
+    // Byte length and source hash keep their ordinary authority.
+    let body = if metadata { "" } else { body };
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
@@ -691,8 +699,8 @@ fn upsert(
                     i64::try_from(admitting).expect("a segment count fits i64"),
                     facts.content_hash,
                     facts.byte_length,
-                    facts.body,
-                    hash::sub_fingerprint(&facts.body),
+                    body,
+                    hash::sub_fingerprint(body),
                     facts.body_offset,
                     projection,
                     projection_hash,

@@ -1,6 +1,7 @@
 //! The engine: drain the feed, keep the sidecar converged, answer nearest.
 
 use std::collections::BinaryHeap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,6 +19,33 @@ use norn_db::{OpenOutcome as SidecarOutcome, RebuildReason};
 /// How many feed rows one page asks for. Bounded well under the store's page
 /// cap; the drain loops pages, so the bound shapes memory rather than reach.
 const DRAIN_PAGE: usize = 256;
+
+/// How many held paths one reconcile page checks against the store. The
+/// reconcile pages the way the feed does, so a sidecar the size of the vault
+/// is checked in bounded memory and bounded transactions.
+const RECONCILE_PAGE: usize = 256;
+
+/// How much one slice of a drain may do, counted in pages: a feed page that
+/// presented rows, or a reconcile page that checked held paths.
+///
+/// A page that comes back empty costs one query and is not counted, so a
+/// slice over a store with nothing new settles within any budget. The unit is
+/// work, not time: one page can hold up to a page of embeddings, and a single
+/// embedding or sidecar operation is not interrupted part way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SliceBudget {
+    pages: usize,
+}
+
+impl SliceBudget {
+    /// No bound: the slice drains until both feeds are complete.
+    pub const UNBOUNDED: SliceBudget = SliceBudget { pages: usize::MAX };
+
+    /// At most `pages` counted pages.
+    pub const fn pages(pages: NonZeroUsize) -> Self {
+        SliceBudget { pages: pages.get() }
+    }
+}
 
 /// The first lane-2 engine: a semantic sidecar converging on the lane-1
 /// record.
@@ -69,6 +97,10 @@ pub struct DrainReport {
     pub deferred: u64,
     /// Paths whose rows were retracted because the feed recorded a death.
     pub retracted: u64,
+    /// The slice's budget ran out before the reconcile and both feeds were
+    /// complete, so the next slice has work to resume from the positions this
+    /// one committed.
+    pub owed: bool,
 }
 
 impl DrainReport {
@@ -242,16 +274,30 @@ impl Engine {
     }
 
     /// Consume the store's change feed until both feeds are drained, and
-    /// converge the sidecar on what they said.
+    /// converge the sidecar on what they said: [`Engine::drain_bounded`]
+    /// with no bound.
+    pub fn drain(&mut self, feed: &mut FeedRead<'_>) -> Result<DrainReport, EngineError> {
+        self.drain_bounded(feed, SliceBudget::UNBOUNDED)
+    }
+
+    /// Consume the store's change feed for at most `budget`, and converge the
+    /// sidecar on what the consumed pages said. A report whose
+    /// [`DrainReport::owed`] is set stopped at its budget; the next slice
+    /// resumes from the positions this one committed, and slices repeated
+    /// until one owes nothing settle where an unbounded drain would.
     ///
     /// # The protocol
     ///
-    /// 1. **Epoch first.** A store epoch that differs from the recorded one
+    /// 1. **Epoch first.** A store epoch that differs from the observed one
     ///    means the cursors name positions in a database that no longer
     ///    exists: reconcile away rows whose paths the store no longer holds
-    ///    (its tombstones did not survive into the new lifetime), reset both
-    ///    cursors, and record the new epoch — one transaction, so a crash
-    ///    replays the whole answer rather than half of it.
+    ///    (its tombstones did not survive into the new lifetime), a page of
+    ///    held paths at a time, each page committing its removals and its
+    ///    position together. Only the page that completes the pass resets
+    ///    both cursors and records the new epoch as observed, so a slice or
+    ///    a crash that stops part way leaves the old epoch observed and the
+    ///    next slice resumes the pass. A pass recorded for another lifetime
+    ///    than the store's starts over.
     /// 2. **Documents, triaged before fetched.** A feed row whose `body_hash`
     ///    equals the recorded `input_hash` is current and costs no body read.
     ///    A changed one is fetched; a fetch that comes back at a different
@@ -281,27 +327,48 @@ impl Engine {
     /// describe is the drain's own — the generation check carries it even
     /// against a writer interleaving through a store handle this borrow does
     /// not cover.
-    pub fn drain(&mut self, feed: &mut FeedRead<'_>) -> Result<DrainReport, EngineError> {
+    pub fn drain_bounded(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        budget: SliceBudget,
+    ) -> Result<DrainReport, EngineError> {
         let mut report = DrainReport::default();
+        let mut left = budget.pages;
         let store_epoch = feed.epoch().to_string();
-        let recorded: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
-        if recorded.as_deref() != Some(store_epoch.as_str()) {
+        let observed: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
+        let complete = (observed.as_deref() == Some(store_epoch.as_str()) || {
             report.rescan = true;
-            report.reconciled_away = self.reconcile(feed, &store_epoch)?;
-        }
+            self.reconcile(feed, &store_epoch, &mut left, &mut report)?
+        }) && self.drain_documents(feed, &store_epoch, &mut left, &mut report)?
+            && self.drain_tombstones(feed, &store_epoch, &mut left, &mut report)?;
+        report.owed = !complete;
+        Ok(report)
+    }
 
+    /// Drain the document feed within `left` counted pages, answering
+    /// whether the feed completed.
+    fn drain_documents(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        store_epoch: &str,
+        left: &mut usize,
+        report: &mut DrainReport,
+    ) -> Result<bool, EngineError> {
         let mut cursor = self.read_cursor(ddl::meta::DOCUMENT_CURSOR)?;
         loop {
+            if *left == 0 {
+                return Ok(false);
+            }
             let observed = feed.write_generation()?;
             let page = feed.changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
             let full = page.len() == DRAIN_PAGE;
             let completed = (!full).then(|| Watermark {
-                store_epoch: store_epoch.clone(),
+                store_epoch: store_epoch.to_string(),
                 generation: observed,
             });
             let Some((last, _)) = page.last() else {
                 self.advance_watermark(Feed::Documents, completed)?;
-                break;
+                return Ok(true);
             };
             let advanced = last.clone();
 
@@ -346,24 +413,38 @@ impl Engine {
             }
 
             self.commit_documents(&writes, &advanced, completed)?;
+            *left -= 1;
             cursor = Some(advanced);
             if !full {
-                break;
+                return Ok(true);
             }
         }
+    }
 
+    /// Drain the tombstone feed within `left` counted pages, answering
+    /// whether the feed completed.
+    fn drain_tombstones(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        store_epoch: &str,
+        left: &mut usize,
+        report: &mut DrainReport,
+    ) -> Result<bool, EngineError> {
         let mut cursor = self.read_cursor(ddl::meta::TOMBSTONE_CURSOR)?;
         loop {
+            if *left == 0 {
+                return Ok(false);
+            }
             let observed = feed.write_generation()?;
             let page = feed.changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
             let full = page.len() == DRAIN_PAGE;
             let completed = (!full).then(|| Watermark {
-                store_epoch: store_epoch.clone(),
+                store_epoch: store_epoch.to_string(),
                 generation: observed,
             });
             let Some((last, _)) = page.last() else {
                 self.advance_watermark(Feed::Tombstones, completed)?;
-                break;
+                return Ok(true);
             };
             let advanced = last.clone();
 
@@ -372,13 +453,12 @@ impl Engine {
                 .map(|(_, tombstone)| tombstone.path.as_str().to_string())
                 .collect();
             report.retracted += self.commit_retractions(&paths, &advanced, completed)?;
+            *left -= 1;
             cursor = Some(advanced);
             if !full {
-                break;
+                return Ok(true);
             }
         }
-
-        Ok(report)
     }
 
     /// Every row of this engine's model, in path order.
@@ -514,57 +594,117 @@ impl Engine {
         })
     }
 
-    /// Remove rows whose paths the store no longer holds, reset both cursors,
-    /// and record `store_epoch` — the one-transaction answer to an epoch that
-    /// moved. Counts the paths removed, the unit retraction counts in.
+    /// Reconcile the sidecar toward `store_epoch` within `left` counted pages,
+    /// answering whether the pass completed.
+    ///
+    /// Each page checks the next held paths in path order against the store
+    /// and commits the removal of those it no longer holds together with the
+    /// pass's position. The page that comes back short completes the pass: in
+    /// the same transaction it resets both cursors, records `store_epoch` as
+    /// observed and clears the position, so the observed epoch never moves
+    /// ahead of a whole pass. A recorded position is resumed only for the
+    /// lifetime it was recorded in.
     fn reconcile(
         &mut self,
         feed: &mut FeedRead<'_>,
         store_epoch: &str,
-    ) -> Result<u64, EngineError> {
-        let held: Vec<String> = {
-            let connection = self.database.connection();
-            let mut statement = connection
-                .prepare_cached("SELECT DISTINCT path FROM document_vectors ORDER BY path")
-                .map_err(|error| error::sql("preparing the reconcile read", error))?;
-            let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| error::sql("reading the held paths", error))?;
-            rows.collect::<Result<_, _>>()
-                .map_err(|error| error::sql("reading a held path", error))?
+        left: &mut usize,
+        report: &mut DrainReport,
+    ) -> Result<bool, EngineError> {
+        let target: Option<String> = self.get_meta(ddl::meta::RECONCILE_STORE_EPOCH)?;
+        let mut after: Option<String> = if target.as_deref() == Some(store_epoch) {
+            self.get_meta::<String>(ddl::meta::RECONCILE_CURSOR)?
+                .filter(|cursor| !cursor.is_empty())
+        } else {
+            None
         };
-
-        let mut dead: Vec<String> = Vec::new();
-        for path in held {
-            let parsed =
-                DocumentPath::new(&path).map_err(|problem| EngineError::SidecarDamaged {
-                    what: format!("`{path}` is held and is not a document path: {problem}"),
-                })?;
-            if feed.stored_document(&parsed)?.is_none() {
-                dead.push(path);
+        loop {
+            if *left == 0 {
+                return Ok(false);
             }
-        }
+            let held = self.held_paths_after(after.as_deref())?;
+            let full = held.len() == RECONCILE_PAGE;
+            let mut dead: Vec<&str> = Vec::new();
+            for path in &held {
+                let parsed =
+                    DocumentPath::new(path).map_err(|problem| EngineError::SidecarDamaged {
+                        what: format!("`{path}` is held and is not a document path: {problem}"),
+                    })?;
+                if feed.stored_document(&parsed)?.is_none() {
+                    dead.push(path);
+                }
+            }
 
-        let transaction = self
-            .database
-            .immediate_transaction("reconciling the sidecar")?;
-        for path in &dead {
+            let transaction = self
+                .database
+                .immediate_transaction("reconciling the sidecar")?;
+            for path in &dead {
+                transaction
+                    .execute(
+                        "DELETE FROM document_vectors WHERE path = ?1",
+                        params![path],
+                    )
+                    .map_err(|error| error::sql("reconciling a dead path away", error))?;
+            }
+            match held.last().filter(|_| full) {
+                Some(last) => {
+                    norn_db::meta::put_meta(
+                        &transaction,
+                        ddl::meta::RECONCILE_STORE_EPOCH,
+                        store_epoch,
+                    )?;
+                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, last)?;
+                }
+                None => {
+                    norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
+                    norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
+                    norn_db::meta::put_meta(
+                        &transaction,
+                        ddl::meta::OBSERVED_STORE_EPOCH,
+                        store_epoch,
+                    )?;
+                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_STORE_EPOCH, "")?;
+                    norn_db::meta::put_meta(&transaction, ddl::meta::RECONCILE_CURSOR, "")?;
+                }
+            }
+            let revision = norn_db::meta::next_generation(&transaction)?;
             transaction
-                .execute(
-                    "DELETE FROM document_vectors WHERE path = ?1",
-                    params![path],
-                )
-                .map_err(|error| error::sql("reconciling a dead path away", error))?;
+                .commit()
+                .map_err(|error| error::sql("committing the reconcile", error))?;
+            self.recorded.revision = revision;
+            report.reconciled_away += dead.len() as u64;
+            if !held.is_empty() {
+                *left -= 1;
+            }
+            if !full {
+                return Ok(true);
+            }
+            after = held.last().cloned();
         }
-        norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
-        norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
-        norn_db::meta::put_meta(&transaction, ddl::meta::OBSERVED_STORE_EPOCH, store_epoch)?;
-        let revision = norn_db::meta::next_generation(&transaction)?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing the reconcile", error))?;
-        self.recorded.revision = revision;
-        Ok(dead.len() as u64)
+    }
+
+    /// The next page of held paths after `after`, in path order, each once
+    /// whichever models hold rows at it. Separate first/after statements let
+    /// SQLite seek past the cursor without scanning the consumed prefix.
+    fn held_paths_after(&self, after: Option<&str>) -> Result<Vec<String>, EngineError> {
+        let connection = self.database.connection();
+        let mut statement = connection
+            .prepare_cached(match after {
+                None => "SELECT DISTINCT path FROM document_vectors ORDER BY path LIMIT ?1",
+                Some(_) => {
+                    "SELECT DISTINCT path FROM document_vectors
+                            WHERE path > ?1 ORDER BY path LIMIT ?2"
+                }
+            })
+            .map_err(|error| error::sql("preparing the reconcile read", error))?;
+        let path = |row: &norn_db::rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = match after {
+            None => statement.query_map(params![RECONCILE_PAGE as i64], path),
+            Some(after) => statement.query_map(params![after, RECONCILE_PAGE as i64], path),
+        }
+        .map_err(|error| error::sql("reading the held paths", error))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error::sql("reading a held path", error))
     }
 
     /// One page's writes and its advanced cursor, in one transaction, with the
@@ -797,4 +937,147 @@ fn decode(blob: &[u8], dimensions: i64) -> Result<Vec<f32>, EngineError> {
 /// shorter side rather than judging it a second time.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+#[cfg(test)]
+mod reconcile_query_tests {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use norn_db::rusqlite::{
+        StatementStatus,
+        trace::{TraceEvent, TraceEventCodes},
+    };
+    use norn_embed::StubEmbedder;
+    use norn_testkit::scratch::Scratch;
+
+    use super::{Engine, RECONCILE_PAGE};
+
+    thread_local! {
+        static QUERIES: RefCell<Vec<(String, i32, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Capture work from the statement the engine actually executed. The
+    /// profile event's elapsed time is deliberately unused.
+    fn capture_query(event: TraceEvent<'_>) {
+        if let TraceEvent::Profile(statement, _) = event
+            && statement
+                .sql()
+                .starts_with("SELECT DISTINCT path FROM document_vectors")
+        {
+            QUERIES.with_borrow_mut(|queries| {
+                queries.push((
+                    statement.expanded_sql().unwrap(),
+                    statement.get_status(StatementStatus::VmStep),
+                    statement.get_status(StatementStatus::FullscanStep),
+                ))
+            });
+        }
+    }
+
+    #[test]
+    fn reconcile_queries_seek_late_and_empty_pages_without_scanning_unrelated_prefixes() {
+        let mut samples = Vec::new();
+        for models in [1, 2] {
+            for count in [1024, 8192, 32768] {
+                let scratch = Scratch::new("semantic-reconcile-query-work");
+                let engine = Engine::open(
+                    scratch.join("semantic.sqlite3"),
+                    Arc::new(StubEmbedder::new()),
+                )
+                .unwrap();
+                let connection = engine.database.connection();
+                let transaction = connection.unchecked_transaction().unwrap();
+                {
+                    let mut insert = transaction
+                        .prepare(
+                            "INSERT INTO document_vectors VALUES (?1,?2,'1','hash',1,x'00000000')",
+                        )
+                        .unwrap();
+                    for n in 0..count {
+                        for model in 0..models {
+                            insert
+                                .execute(norn_db::rusqlite::params![
+                                    format!("docs/{n:06}.md"),
+                                    format!("model-{model}")
+                                ])
+                                .unwrap();
+                        }
+                    }
+                }
+                transaction.commit().unwrap();
+                connection.trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(capture_query));
+                let late = format!("docs/{:06}.md", count - RECONCILE_PAGE - 1);
+                let end = format!("docs/{:06}.md", count - 1);
+                for (boundary, after, expected) in [
+                    ("first", None, (0..RECONCILE_PAGE).collect::<Vec<_>>()),
+                    (
+                        "late",
+                        Some(late.as_str()),
+                        (count - RECONCILE_PAGE..count).collect(),
+                    ),
+                    ("empty", Some(end.as_str()), Vec::new()),
+                ] {
+                    // Each counter must cover one execution, including when
+                    // successive cursors reuse the same cached SQL shape.
+                    connection.flush_prepared_statement_cache();
+                    QUERIES.with_borrow_mut(Vec::clear);
+                    let paths = engine.held_paths_after(after).unwrap();
+                    assert_eq!(
+                        paths,
+                        expected
+                            .iter()
+                            .map(|n| format!("docs/{n:06}.md"))
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(paths.len() <= RECONCILE_PAGE);
+                    let queries = QUERIES.with_borrow_mut(std::mem::take);
+                    assert_eq!(queries.len(), 1);
+                    let (sql, steps, scans) = queries.into_iter().next().unwrap();
+                    let plan = connection
+                        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(3))
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    eprintln!(
+                        "models={models}, paths={count}, boundary={boundary}, rows={}, VM={steps}, fullscan={scans}, SQL={sql:?}, plan={plan:?}",
+                        paths.len()
+                    );
+                    samples.push((models, count, boundary, steps, scans, plan));
+                }
+            }
+        }
+        for (models, count, boundary, steps, scans, plan) in &samples {
+            let first = samples
+                .iter()
+                .find(|s| s.0 == *models && s.1 == *count && s.2 == "first")
+                .unwrap()
+                .3;
+            let small = samples
+                .iter()
+                .find(|s| s.0 == *models && s.1 == 1024 && s.2 == *boundary)
+                .unwrap()
+                .3;
+            assert!(
+                *steps <= 2 * first && *steps <= 2 * small,
+                "query work grew with an unrelated prefix: models={models}, count={count}, boundary={boundary}, VM={steps}, first={first}, small={small}"
+            );
+            if *boundary != "first" {
+                assert_eq!(
+                    *scans, 0,
+                    "a keyset page must seek, including an empty page"
+                );
+                assert!(
+                    plan.iter()
+                        .any(|detail| detail.contains("SEARCH") && detail.contains("path>?")),
+                    "{plan:?}"
+                );
+            }
+            assert!(
+                !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
 }

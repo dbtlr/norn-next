@@ -4,7 +4,9 @@
 #![allow(clippy::disallowed_methods)] // Measurement harness: isolated trees and JSONL readings.
 
 mod attach;
-
+#[cfg(feature = "induced-failure")]
+#[path = "performance/public.rs"]
+mod public;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -65,6 +67,17 @@ fn performance_audit() {
     emit(json!({"summary": summary}));
 }
 
+#[cfg(feature = "induced-failure")]
+fn performance_verify() {
+    let root = root();
+    let vault = attach::Vault::adopt(&root);
+    vault
+        .store()
+        .verify_integrity()
+        .expect("verify the completed measurement store");
+    emit(json!({"integrity_verified":true}));
+}
+
 fn performance_worker() {
     let root = root();
     let changeset_size = std::env::var("NORN_PERFORMANCE_CHANGESET_SIZE").map_or(128, |value| {
@@ -114,9 +127,29 @@ fn performance_worker() {
     });
     let began = Instant::now();
     let vault = attach::Vault::adopt(&root);
+    #[cfg(feature = "induced-failure")]
+    let operator_mode = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
+        Ok("operator-prefix-public") => Some("public"),
+        Err(std::env::VarError::NotPresent) => None,
+        mode => panic!("unsupported public loading mode: {mode:?}"),
+    };
+    #[cfg(not(feature = "induced-failure"))]
+    assert!(
+        std::env::var_os("NORN_PERFORMANCE_LOADING").is_none(),
+        "public prefix mode requires induced-failure"
+    );
+    #[cfg(feature = "induced-failure")]
+    assert!(
+        operator_mode.is_none() || !profiling,
+        "public prefix excludes profiling"
+    );
     let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
+    #[cfg(feature = "induced-failure")]
+    let public_ready = (operator_mode == Some("public"))
+        .then(|| public::prefix(&host, vault.name(), &root, began))
+        .flatten();
     let until = Instant::now() + std::time::Duration::from_secs(240);
     while host.state(vault.name()).expect("registered vault state") != norn_wire::TrustState::Ready
     {
@@ -124,6 +157,8 @@ fn performance_worker() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let ready_ns = began.elapsed().as_nanos();
+    #[cfg(feature = "induced-failure")]
+    let ready_ns = public_ready.unwrap_or(ready_ns);
     #[cfg(feature = "induced-failure")]
     let (timings, evidence) = {
         // Ready is published before the job folds its account; wait for that tail.
@@ -159,14 +194,31 @@ fn performance_worker() {
     };
     #[cfg(not(feature = "induced-failure"))]
     let (timings, evidence): (Option<Value>, Value) = (None, Value::Null);
-    emit(
-        json!({"ready": true, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
+    #[cfg(feature = "induced-failure")]
+    let evidence = if operator_mode.is_some() {
+        let mut evidence = evidence;
+        evidence["tombstones_recorded"] = json!(host.evidence().tombstones_recorded);
+        evidence
+    } else {
+        evidence
+    };
+    let ready = json!({"ready": true, "attach_ns": ready_ns, "startup_complete_ns": began.elapsed().as_nanos(),
                 "observed_ready_ns": ready_ns, "host_setup_ns": host_setup.as_nanos(),
                 "store_page_size": policy.store_page_size, "changeset_size": policy.changeset_size,
-                "timings": timings, "job_evidence": evidence}),
-    );
+                "timings": timings, "job_evidence": evidence});
+    #[cfg(feature = "induced-failure")]
+    let ready = if let Some(mode) = operator_mode {
+        let mut ready = ready;
+        ready["operator_prefix_mode"] = json!(mode);
+        ready["operator_prefix_receipt"] = json!({"mode":"public-host-prefix","logical_requests":2,
+            "dispatch":"caller thread through Host::get then Host::find",
+            "availability_scope":"public Host first-open requests"});
+        ready
+    } else {
+        ready
+    };
+    emit(ready);
     let address = VaultAddress::name(vault.name().clone());
-
     for line in std::io::stdin().lock().lines() {
         let line = line.expect("read a command");
         let command: Value = serde_json::from_str(&line).expect("a JSON command");
@@ -285,7 +337,8 @@ fn performance_worker() {
             }
             _ => panic!("unknown performance operation {op}"),
         };
-        emit(json!({"answer": answer, "host_ns": elapsed.as_nanos(), "counters": counters}));
+        let record = json!({"answer": answer, "host_ns": elapsed.as_nanos(), "counters": counters});
+        emit(record);
     }
 }
 
@@ -295,6 +348,8 @@ fn main() {
         Some("serve") => performance_worker(),
         #[cfg(feature = "induced-failure")]
         Some("audit") => performance_audit(),
+        #[cfg(feature = "induced-failure")]
+        Some("verify") => performance_verify(),
         _ => panic!("the performance worker requires generate or serve from its external runner"),
     }
 }

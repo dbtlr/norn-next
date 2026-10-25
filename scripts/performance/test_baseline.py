@@ -34,6 +34,40 @@ class FixtureTests(unittest.TestCase):
             self.assertEqual(tree_digest(root), manifest["tree_sha256"])
 
 
+class LoadingProtocolTests(unittest.TestCase):
+    def test_warm_controller_checks_the_requested_modes_checkpoint_set(self):
+        from baseline import run_worker
+        from types import SimpleNamespace
+        import io
+
+        class Accepted(Exception):
+            pass
+
+        class Worker:
+            def __init__(self, stages):
+                self.stages = [{"startup_stage": stage, "probe": probe} for stage, probe in stages]
+            def call(self, _command):
+                raise Accepted()
+            def close(self):
+                pass
+
+        for mode, stages in [
+            ("operator-prefix-public", [("public-get", "whole_slug"), ("public-find", "active_page")]),
+        ]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fixture = root / "fixture"
+                (fixture / "vault").mkdir(parents=True)
+                manifest = {"tree_sha256": tree_digest(fixture / "vault"), "document_count": 0, "probe_bodies": {}}
+                args = SimpleNamespace(output=root, current="unused", loading=mode)
+                with patch("baseline.Current", return_value=Worker(stages)):
+                    with self.assertRaises(Accepted):
+                        run_worker(args, "current", 0, 0, fixture, manifest, io.StringIO())
+                with patch("baseline.Current", return_value=Worker([("public-get", "whole_slug")])):
+                    with self.assertRaisesRegex(ValueError, "requested loading mode"):
+                        run_worker(args, "current", 0, 1, fixture, manifest, io.StringIO())
+
+
 class AnswerTests(unittest.TestCase):
     def test_a_successful_cached_read_does_not_prove_the_field_was_written(self):
         before = b"---\nstatus: draft\nperf_bucket: probe\n---\nKeep the body.\n"
@@ -206,6 +240,19 @@ class ProcessTests(unittest.TestCase):
                     worker.close()
             worker = Current(binary, root / "failed-shutdown")
             with self.assertRaisesRegex(RuntimeError, "did not shut down cleanly"):
+                worker.close()
+
+    def test_a_checkpoint_after_the_last_query_cannot_pass_shutdown_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "worker"
+            binary.write_text("#!/usr/bin/env python3\nimport sys\n"
+                              "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                              "sys.stdin.readline()\n"
+                              "print('NORN_PERFORMANCE {\"startup_stage\":\"get\"}', flush=True)\n")
+            binary.chmod(0o700)
+            worker = Current(binary, root / "late-stage")
+            with self.assertRaisesRegex(RuntimeError, "checkpoint arrived after readiness"):
                 worker.close()
 
     def test_cleanup_stops_descendants_after_the_leader_exits(self):

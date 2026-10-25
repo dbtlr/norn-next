@@ -3,7 +3,7 @@
 //! module is the engine owning its section's meaning, defaults, and
 //! validation.
 //!
-//! Delivery is the enable act: a section that parses enables the engine, an
+//! A delivered section that parses enables the engine, an
 //! absent section disables it, and a section this module refuses puts the
 //! engine into a typed refused state of its own — never an error the vault's
 //! lane-1 lifecycle sees.

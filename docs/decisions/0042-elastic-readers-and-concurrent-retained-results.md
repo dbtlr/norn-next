@@ -1,9 +1,11 @@
 ---
-status: accepted
+status: superseded
 date: 2026-10-23
 ---
 
 # 0042 — Reads share an elastic budget and retained results admit concurrent readers
+
+Superseded by [ADR 0043](0043-first-index-complete-reads.md).
 
 Supersedes [ADR 0041](0041-snapshot-readers-and-retained-count-results.md).
 The demand lease, recovery restraint, stance, acquisition bound, teardown rule,

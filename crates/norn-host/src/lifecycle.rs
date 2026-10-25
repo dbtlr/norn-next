@@ -33,6 +33,7 @@ use crate::{
 mod apply;
 mod claim;
 mod gate;
+pub(crate) mod loading;
 mod serving;
 
 pub(crate) use apply::{ApplyAnswer, not_run};
@@ -41,7 +42,7 @@ use apply::{ApplyQueue, QueuedApply, RunningApply};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
-use serving::ServingSet;
+use serving::{CanonicalStoreObservation, ServingSet};
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.
@@ -233,6 +234,7 @@ pub struct Established<S> {
 pub struct ReaderUnavailable {
     detail: String,
     damaged: bool,
+    source_lost: bool,
 }
 
 impl ReaderUnavailable {
@@ -240,12 +242,22 @@ impl ReaderUnavailable {
         ReaderUnavailable {
             detail: detail.into(),
             damaged: false,
+            source_lost: false,
         }
     }
     pub(crate) fn damaged(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
             damaged: true,
+            source_lost: false,
+        }
+    }
+
+    pub(crate) fn source_lost(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            damaged: false,
+            source_lost: true,
         }
     }
 
@@ -265,12 +277,31 @@ impl std::error::Error for ReaderUnavailable {}
 
 /// The effectful half of an entry lifecycle.
 pub trait EntryOps: Send + Sync + 'static {
+    /// Whether this adapter constructs request-specific first-index sources.
+    fn first_index_reads(&self) -> bool {
+        false
+    }
+
+    /// Conservative candidacy observed before serving a registration, outside entry gates.
+    /// This permits waiting only; the current attach must still prove Created-empty storage
+    /// and unchanged watcher coverage before publishing any first-index source.
+    /// Adapters wrapping production operations must forward this method too.
+    fn first_index_candidate(&self, _registration: &Registration) -> bool {
+        false
+    }
+
+    /// Harness timing after establishment or execution of an early query.
+    #[cfg(feature = "induced-failure")]
+    fn loading_read_boundary(&self, _completed: bool) {}
+
     /// Background release of idle read resources, outside every entry gate.
     fn trim_readers(&self, _now: Instant) {}
     type Attachment: SnapshotSource;
 
     /// Acquire maintainership, establish watcher coverage, and only then run
-    /// one full hash-authoritative heal. After this returns, the lifecycle
+    /// one full hash-authoritative heal. Fresh stores may publish complete,
+    /// request-specific sources before that canonical heal finishes.
+    /// After this returns, the lifecycle
     /// performs one nonblocking [`EntryOps::poll`] before it may publish Ready;
     /// raced and continuing facts then use ordinary coalesced reconciliation.
     ///
@@ -671,8 +702,8 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     }
 
     /// Record `reading` as where this entry's lane-1 store stands: the reading
-    /// a leg takes where its lane-1 work has committed, ahead of the drain it
-    /// relays, or at its end where it failed, and `None` where that reading
+    /// a leg takes where its lane-1 work has committed, as it owes the
+    /// engine's slice, or at its end where it failed, and `None` where that reading
     /// could not be taken.
     ///
     /// It is what `vault status` and `doctor` judge the engine's watermarks
@@ -691,11 +722,41 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
+    /// Whether this job's claim stands at this instant. This reading does
+    /// not reserve the claim for a later publication.
+    pub fn stands(&self) -> bool {
+        self.entry.upgrade().is_some_and(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            state.claim.stands_at(self.epoch)
+        })
+    }
+
+    /// Publish a result only while this job's claim stands, keeping the
+    /// entry gate from validation through publication. The callback takes
+    /// map and slot locks after this gate; it must not open or close resources.
+    pub(crate) fn publish_if_claimed(&self, publish: impl FnOnce()) {
+        self.with_claimed_state(|_| publish());
+    }
+
+    fn with_claimed_state<T>(&self, publish: impl FnOnce(&mut EntryState<A>) -> T) -> Option<T> {
+        let entry = self.entry.upgrade()?;
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        state
+            .claim
+            .stands_at(self.epoch)
+            .then(|| publish(&mut state))
+    }
+
     /// Recheck the claim immediately before starting a quiet-only duty.
+    ///
+    /// Quiet work runs only over an entry that publishes `Ready`: a leg that
+    /// committed lane-1 work publishes that, or what is left to derive,
+    /// before any quiet slice — a semantic one above all — may follow it.
     pub fn quiet_maintenance_allowed(&self) -> bool {
         self.entry.upgrade().is_some_and(|entry| {
             let state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.stands_at(self.epoch)
+                && state.trust == TrustState::Ready
                 && !state.owes_a_rung()
                 && state.applies.is_empty()
                 && state.pending.is_empty()
@@ -1014,12 +1075,19 @@ impl<A: SnapshotSource> Entry<A> {
     /// An entry serving `registration` and holding nothing, which is what a
     /// vault the host has never attached stands at, its claim standing at
     /// `epoch`.
-    fn unattached(registration: Registration, epoch: u64) -> Self {
+    fn unattached(
+        registration: Registration,
+        epoch: u64,
+        storage: CanonicalStoreObservation,
+    ) -> Self {
         let vault = registration.name.clone();
         Self {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
+                initial_attach_started: false,
+                initial_loading_candidate: storage == CanonicalStoreObservation::Absent,
+                loading: None,
                 trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
                 reader: None,
@@ -1067,6 +1135,9 @@ impl<A: SnapshotSource> Entry<A> {
 }
 
 struct EntryState<A: SnapshotSource> {
+    initial_attach_started: bool,
+    initial_loading_candidate: bool,
+    loading: Option<loading::Loading<A::Reader>>,
     trust: TrustState,
     /// Whether the entry's trust has stood unbroken since it last published
     /// `Ready`: no withdrawal of trust, no teardown, no new coverage and no
@@ -1078,7 +1149,7 @@ struct EntryState<A: SnapshotSource> {
     /// `Ready`, taking in a change over coverage it has served, and a read
     /// that meets it waits for that change ([`ReadStance::Settle`]); an entry
     /// healing without it entered warming from untrusted, or has never
-    /// served, and a read refuses at once.
+    /// served, and unrestricted canonical acquisition refuses at once.
     ///
     /// Set only by [`EntryState::end_hold`], as a hold ends at `Ready`.
     /// Cleared where trust breaks: by [`EntryState::withdraw_trust`], which is
@@ -1457,6 +1528,7 @@ enum ReadStance {
 struct ReadStanding {
     stance: ReadStance,
     derived_through: u64,
+    loading_revision: Option<u64>,
 }
 
 impl<A: SnapshotSource> Stanced for EntryState<A> {
@@ -1474,6 +1546,7 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
         ReadStanding {
             stance: self.read_stance(),
             derived_through: self.pending.derived_through,
+            loading_revision: self.loading.as_ref().map(|loading| loading.revision),
         }
     }
 
@@ -1501,6 +1574,18 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// later mints, and each queued apply is answered with the reader
     /// unavailable, as a read over the entry is refused.
     fn end_hold(&mut self) {
+        if self
+            .loading
+            .as_ref()
+            .is_some_and(|loading| !self.claim.stands_at(loading.claim) || loading.withdrawn())
+            || self.trust == TrustState::Ready
+            || self.stands_on_a_cause()
+            || self.owes_a_rung()
+        {
+            self.close_loading();
+        } else {
+            self.retire_damaged_loading_sources();
+        }
         if !self.applies.is_empty() && self.stands_on_a_cause() {
             self.answer_queued_applies();
         } else if !self.applies.is_empty() && self.serves_with_no_reader() {
@@ -2462,7 +2547,16 @@ impl DemandedWork {
 fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
     work.publish_scheduled(state);
-    state.claim.schedule(|epoch| work.job(name, epoch))
+    let job = state.claim.schedule(|epoch| work.job(name, epoch));
+    if matches!(work, DemandedWork::Attach) && !state.initial_attach_started {
+        state.initial_attach_started = true;
+        if state.initial_loading_candidate
+            && let Job::Attach(_, epoch) = &job
+        {
+            state.loading = Some(loading::Loading::provisional(*epoch));
+        }
+    }
+    job
 }
 
 fn schedule_due_detach<A: SnapshotSource>(
@@ -2668,6 +2762,7 @@ fn hand_on_carried_damage<A: SnapshotSource>(
 /// nothing, so nothing is withdrawn when it is dropped.
 fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O> {
     DemandLease {
+        loading_interest: None,
         outcome,
         name: name.clone(),
         held: None,
@@ -2741,7 +2836,11 @@ fn record_active_declaration<O: EntryOps>(
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
     state.plan_ground = ops.plan_ground(attachment).map(Arc::new);
-    state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
+    // The engine delivery is committed beside the store reading the leg
+    // recorded: the publication an owed engine initialization waits for.
+    state.delivered_engine = ops
+        .semantic()
+        .and_then(|engines| engines.publish_delivery(name, state.store_reading.as_ref()));
     record_advisories(state, ops, attachment);
 }
 
@@ -3837,7 +3936,12 @@ fn serve<O: EntryOps>(
     registration: Registration,
 ) -> Result<Demand, ServingRefusal> {
     let name = registration.name.clone();
-    shared.entries.insert(registration)?;
+    let storage = if shared.ops.first_index_candidate(&registration) {
+        CanonicalStoreObservation::Absent
+    } else {
+        CanonicalStoreObservation::NotKnownAbsent
+    };
+    shared.entries.insert(registration, storage)?;
     park_on_current_classification(shared, &name);
     Ok(shared
         .entries
@@ -3870,7 +3974,12 @@ fn serve_in_place<O: EntryOps>(
     moved: bool,
 ) -> Demand {
     let name = amended.name.clone();
-    shared.entries.replace(amended).expect(
+    let storage = if shared.ops.first_index_candidate(&amended) {
+        CanonicalStoreObservation::Absent
+    } else {
+        CanonicalStoreObservation::NotKnownAbsent
+    };
+    shared.entries.replace(amended, storage).expect(
         "the registration lock holds every change to the set, and the entry it replaces is \
          withdrawn under it",
     );
@@ -4200,7 +4309,7 @@ impl HoldReading {
 
 /// Why a read was not served.
 ///
-/// Three shapes. The first is a demand: a name the serving set does not hold,
+/// Four shapes. The first is a demand: a name the serving set does not hold,
 /// decided at that lookup before any entry gate is taken; or, under a hold of
 /// the entry's gate, the demand an entry that refuses at once publishes — a
 /// warming entry that has never served or is warming from untrusted, an
@@ -4210,7 +4319,8 @@ impl HoldReading {
 /// warming state of that attach. The second is the demand an entry taking in
 /// a change published when the read's settle bound ran out. The third is an
 /// entry serving every surface but this one, or a read another holder kept
-/// from the entry past its bound.
+/// from the entry past its bound. First-index availability expiry carries the
+/// current warming demand separately from an ordinary settle expiry.
 ///
 /// **No wire rendering is written here.** A demand renders through
 /// [`Demand::answer`], the one mapping every surface renders a demand
@@ -4229,6 +4339,8 @@ pub enum ReadRefusal {
     /// bound ran out, or, where another holder kept the entry's gate past the
     /// bound, what the read last read under it.
     Unsettled(Demand),
+    /// The first-index capability did not become available inside the read bound.
+    FirstIndex(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
     /// given it a handle failed, or the snapshot could not be established. A
     /// read whose way to the entry another holder kept past its bound — the
@@ -4239,6 +4351,8 @@ pub enum ReadRefusal {
 /// One client operation's lifecycle guard and immediate trust answer.
 /// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
+    /// The queue reservation expires with the same demand that owns this read.
+    loading_interest: Option<Arc<()>>,
     outcome: Demand,
     /// The vault this lease was demanded under. It is the lease's own whether
     /// or not an entry stands behind it, so a refusal answered here names the
@@ -4264,6 +4378,34 @@ impl<O: EntryOps> Deref for DemandLease<O> {
 impl<O: EntryOps> DemandLease<O> {
     pub fn outcome(&self) -> &Demand {
         &self.outcome
+    }
+
+    /// Clone the actual entry-committed report before a test pauses its gate.
+    #[cfg(test)]
+    pub(crate) fn review_committed_delivery(&self) -> crate::semantic::DeliveredEngine {
+        let shared = self.held.as_ref().unwrap();
+        let entry = shared.entries.get(&self.name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        state.delivered_engine.clone().unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_gate_is_blocked(&self) -> bool {
+        let shared = self.held.as_ref().unwrap();
+        let entry = shared.entries.get(&self.name).unwrap();
+        matches!(
+            entry.gate.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_shutdown_started(&self) -> bool {
+        self.held
+            .as_ref()
+            .unwrap()
+            .shutting_down
+            .load(Ordering::SeqCst)
     }
 
     /// The current completion of the asynchronous demand that created this
@@ -4304,6 +4446,7 @@ impl<O: EntryOps> DemandLease<O> {
     /// Give this lease back under a hold of its entry's gate the caller
     /// already has. The lease's own drop runs over nothing from here.
     fn give_back_under(mut self, state: &mut EntryState<O::Attachment>) {
+        self.loading_interest.take();
         if self.held.take().is_some() {
             give_back_demand(state, self.recovery_demand, Instant::now());
         }
@@ -4334,6 +4477,7 @@ impl<O: EntryOps> Drop for DemandLease<O> {
     /// hold runs the give-back.
     fn drop(&mut self) {
         let dropped_at = Instant::now();
+        self.loading_interest.take();
         let Some(shared) = self.held.take() else {
             return;
         };
@@ -4857,8 +5001,13 @@ impl<O: EntryOps> Host<O> {
         // host runs is served exactly as a vault read at startup is.
         let entries = ServingSet::new();
         for registration in registry.into_entries() {
+            let storage = if ops.first_index_candidate(&registration) {
+                CanonicalStoreObservation::Absent
+            } else {
+                CanonicalStoreObservation::NotKnownAbsent
+            };
             entries
-                .insert(registration)
+                .insert(registration, storage)
                 .expect("the registrations are keyed by name, so no two of them name one entry");
         }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
@@ -5441,6 +5590,7 @@ impl<O: EntryOps> Host<O> {
         if let Some(park) = state.parked() {
             drop(state);
             return Ok(DemandLease {
+                loading_interest: None,
                 outcome: park,
                 name: name.clone(),
                 held: Some(Arc::clone(&self.shared)),
@@ -5456,6 +5606,7 @@ impl<O: EntryOps> Host<O> {
             drop(state);
             dispatch_pending(&self.shared, &entry)?;
             return Ok(DemandLease {
+                loading_interest: None,
                 outcome: answer,
                 name: name.clone(),
                 held: Some(Arc::clone(&self.shared)),
@@ -5465,6 +5616,7 @@ impl<O: EntryOps> Host<O> {
         let answer = state.published_demand();
         drop(state);
         Ok(DemandLease {
+            loading_interest: None,
             outcome: answer,
             name: name.clone(),
             held: Some(Arc::clone(&self.shared)),
@@ -5594,6 +5746,16 @@ impl<O: EntryOps> Host<O> {
         name: &VaultName,
         need: norn_store::ReadNeed,
     ) -> Result<ReadHold<O>, ReadRefusal> {
+        self.begin_query_read(name, need, loading::Request::Canonical)
+            .map(loading::QueryHold::into_canonical)
+    }
+
+    pub(crate) fn begin_query_read(
+        &self,
+        name: &VaultName,
+        need: norn_store::ReadNeed,
+        request: loading::Request<'_>,
+    ) -> Result<loading::QueryHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
@@ -5644,6 +5806,7 @@ impl<O: EntryOps> Host<O> {
         // it owns, in the hold a refusal answers from, and an
         // [`AcquisitionOutsideTheGate`] lets the lease's own drop give it back.
         let lease = DemandLease {
+            loading_interest: None,
             outcome: state.published_demand(),
             name: name.clone(),
             held: Some(Arc::clone(&self.shared)),
@@ -5670,6 +5833,21 @@ impl<O: EntryOps> Host<O> {
             !scheduled || stance == ReadStance::Refuse,
             "a read scheduled work over an entry that then {stance:?}s"
         );
+        let staged =
+            state.loading.is_some() && self.shared.ops.first_index_reads() && request.eligible();
+        let interest = if staged {
+            state
+                .loading
+                .as_mut()
+                .and_then(|loading| loading.interested(request))
+        } else {
+            None
+        };
+        state
+            .lease
+            .as_mut()
+            .expect("read acquisition owns its lease")
+            .loading_interest = interest;
         if stance == ReadStance::Refuse && scheduled {
             // The dispatch is the demand's, and its one failure is the
             // worker pool being gone — which is the host coming down, and is
@@ -5680,10 +5858,18 @@ impl<O: EntryOps> Host<O> {
             // answers now, and a job it does not hand off is the dispatcher
             // tick's retry to send.
             let published = state.published_demand();
-            let outside = state.let_the_gate_go();
+            if !staged {
+                let outside = state.let_the_gate_go();
+                let _ = dispatch_pending_where_free(&self.shared, &entry);
+                drop(outside);
+                return Err(ReadRefusal::NotServing(published));
+            }
+            let (earlier, outside) = opening.let_the_gate_go(state);
             let _ = dispatch_pending_where_free(&self.shared, &entry);
-            drop(outside);
-            return Err(ReadRefusal::NotServing(published));
+            let Some(round) = rounds.take_the_gate_again(outside, earlier, deadline) else {
+                return Err(ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()));
+            };
+            (state, opening, stance) = round;
         }
         // What the mints this acquisition asked for ran, over every round.
         let mut mint_statements = 0;
@@ -5691,19 +5877,27 @@ impl<O: EntryOps> Host<O> {
         // is taking in: recorded under the first hold that finds the entry
         // settling, before any wait, and never moved after.
         let mut met_at = None;
-        let (turn, reader) = loop {
+        let (turn, reader, early) = loop {
+            let selected = staged.then(|| state.loading_source(request)).flatten();
+            let loading_wait = staged && selected.is_none() && state.waits_for_loading(request);
             if stance == ReadStance::Settle && met_at.is_none() {
                 met_at = Some(state.change_met_at());
             }
             match stance {
-                ReadStance::Refuse => {
+                ReadStance::Refuse if selected.is_none() && !loading_wait => {
                     return Err(ReadRefusal::NotServing(state.published_demand()));
                 }
-                ReadStance::Settle if !state.answers_a_read(met_at) => {
+                _ if loading_wait
+                    || (stance == ReadStance::Settle && !state.answers_a_read(met_at)) =>
+                {
                     let published = state.published_demand();
                     if Instant::now() >= deadline {
                         self.shared.reads.count_settle_expiry();
-                        return Err(ReadRefusal::Unsettled(published));
+                        return Err(if loading_wait {
+                            ReadRefusal::FirstIndex(published)
+                        } else {
+                            ReadRefusal::Unsettled(published)
+                        });
                     }
                     // The let-go reads the stance's generation under this
                     // hold, so every change published after the gate goes
@@ -5720,12 +5914,16 @@ impl<O: EntryOps> Host<O> {
                         rounds.take_the_gate_again_after_settling(outside, earlier, deadline)
                     else {
                         self.shared.reads.count_settle_expiry();
-                        return Err(ReadRefusal::Unsettled(published));
+                        return Err(if loading_wait {
+                            ReadRefusal::FirstIndex(published)
+                        } else {
+                            ReadRefusal::Unsettled(published)
+                        });
                     };
                     (state, opening, stance) = round;
                     continue;
                 }
-                ReadStance::Settle | ReadStance::Serve => {}
+                ReadStance::Refuse | ReadStance::Settle | ReadStance::Serve => {}
             }
             // An entry serving with an empty slot is one whose mint met the
             // environment and lost. The read asks for the mint again before
@@ -5735,25 +5933,36 @@ impl<O: EntryOps> Host<O> {
             // so it is accounted here rather than on the way out: every path
             // below this line is a path that already paid for it, the
             // refusals included.
-            let minted = state.remint_for_a_read();
-            mint_statements += minted.statements;
-            self.shared
-                .reads
-                .count_mint_under_the_gate(minted.statements, mint_statements);
-            let Some(reader) = minted.handle else {
-                let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
-                    ReaderUnavailable::new("this entry's coverage holds no read handle")
-                });
-                return Err(ReadRefusal::ReaderUnavailable(unavailable));
+            let reader = if let Some(source) = &selected {
+                Arc::clone(&source.reader)
+            } else {
+                let minted = state.remint_for_a_read();
+                mint_statements += minted.statements;
+                self.shared
+                    .reads
+                    .count_mint_under_the_gate(minted.statements, mint_statements);
+                let Some(reader) = minted.handle else {
+                    let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
+                        ReaderUnavailable::new("this entry's coverage holds no read handle")
+                    });
+                    return Err(ReadRefusal::ReaderUnavailable(unavailable));
+                };
+                reader
             };
             // The connection is free, so this hold is the hold that
             // establishes and the stance above is the one the answer carries.
-            if let Some(turn) = reader.try_take_for(need, deadline) {
-                break (turn, reader);
+            if selected.is_none()
+                && let Some(turn) = reader.try_take_for(need, deadline)
+            {
+                break (turn, reader, None);
             }
             // Capacity waits and cold opens run outside the gate, only within
             // the original deadline. A serving entry may lack shared capacity.
             if Instant::now() >= deadline {
+                if selected.is_some() {
+                    self.shared.reads.count_settle_expiry();
+                    return Err(ReadRefusal::FirstIndex(state.published_demand()));
+                }
                 return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
                     "reader capacity was unavailable past this read's bound",
                 )));
@@ -5767,11 +5976,29 @@ impl<O: EntryOps> Host<O> {
             // contended acquisition while it is still waiting rather than once
             // another read has let it through or its bound has run out.
             self.shared.reads.count_reader_wait();
-            let acquired = reader.acquire_for(need, deadline);
+            // Root identity is the only request-path filesystem check, and only for early sources.
+            let root_current = selected
+                .as_ref()
+                .is_none_or(|source| source.authority.check_root());
+            let acquired = if root_current {
+                reader.acquire_for(need, deadline)
+            } else {
+                Ok(None)
+            };
+            // A late disposable failure belongs to its physical source even if
+            // the deadline prevents another gate take. No canonical judgment runs.
+            let acquired = acquired.map_err(|error| match &selected {
+                Some(source) => source.unavailable(error),
+                None => error,
+            });
+            let root_current = root_current
+                && selected
+                    .as_ref()
+                    .is_none_or(|source| source.authority.check_root());
             let open_damage = acquired
                 .as_ref()
                 .err()
-                .filter(|error| error.damaged)
+                .filter(|error| selected.is_none() && error.damaged)
                 .map(|error| error.detail.clone());
             // What may have moved is the entry: the round reads its stance
             // afresh, and a handle waited for is checked to still be the
@@ -5797,12 +6024,24 @@ impl<O: EntryOps> Host<O> {
             // Every exit below can release the last replaced pool handle,
             // including a retired acquisition that returned no connection.
             state.retired_readers.push(Arc::clone(&reader));
-            let still_the_entrys = state
-                .reader
-                .as_ref()
-                .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
+            let still_the_entrys = if let Some(source) = &selected {
+                root_current
+                    && state
+                        .loading_source(request)
+                        .is_some_and(|standing| Arc::ptr_eq(&standing, source))
+                    && state.claim.stands_at(source.claim)
+                    && source.admits()
+            } else {
+                state
+                    .reader
+                    .as_ref()
+                    .is_some_and(|standing| Arc::ptr_eq(standing, &reader))
+            };
             let turn = match acquired {
                 Ok(turn) => turn,
+                Err(error) if selected.is_some() => {
+                    return Err(ReadRefusal::ReaderUnavailable(error));
+                }
                 Err(error) if error.damaged && still_the_entrys => {
                     let verdict = judge_damage_a_read_met(
                         &mut state,
@@ -5822,16 +6061,21 @@ impl<O: EntryOps> Host<O> {
                 }
                 Err(_) => None,
             };
-            // A wait the bound ended took no connection, and the loop answers
-            // the stance this round read: past the bound, every arm of it
-            // that would wait refuses instead.
+            // An exhausted capacity wait keeps its resource refusal while its
+            // early source still stands. Replacement or withdrawal is answered
+            // by the current stance on the next round.
             let Some(turn) = turn else {
+                if selected.is_some() && still_the_entrys && Instant::now() >= deadline {
+                    return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                        "reader capacity was unavailable past this read's bound",
+                    )));
+                }
                 continue;
             };
             // The connection is this read's from here, so nothing else can be
             // establishing on it.
-            if still_the_entrys && state.answers_a_read(met_at) {
-                break (turn, reader);
+            if still_the_entrys && (selected.is_some() || state.answers_a_read(met_at)) {
+                break (turn, reader, selected);
             }
             // A replaced pool's last handle can own result storage. The hold
             // drops these only after unlocking, including on a refusal.
@@ -5851,12 +6095,23 @@ impl<O: EntryOps> Host<O> {
         // is the one this hold answers under: `Ready`, or the healing of an
         // entry that has derived every fact this read met.
         let published = state.published_demand();
-        let content_model = Arc::clone(&state.active_content_model);
-        let plan_ground = state.plan_ground.clone();
+        let content_model = early.as_ref().map_or_else(
+            || Arc::clone(&state.active_content_model),
+            |source| Arc::clone(&source.model),
+        );
+        let plan_ground = if early.is_some() {
+            None
+        } else {
+            state.plan_ground.clone()
+        };
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
-                let verdict = unavailable.damaged.then(|| {
+                let unavailable = early.as_ref().map_or_else(
+                    || unavailable.clone(),
+                    |source| source.unavailable(unavailable.clone()),
+                );
+                let verdict = (early.is_none() && unavailable.damaged).then(|| {
                     judge_damage_a_read_met(
                         &mut state,
                         name,
@@ -5887,18 +6142,21 @@ impl<O: EntryOps> Host<O> {
             .reads
             .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
-        Ok(ReadHold {
-            entry,
-            reader,
-            snapshot: Some(established.snapshot),
-            reading: HoldReading {
-                published,
-                store: established.reading,
+        Ok(loading::QueryHold::new(
+            ReadHold {
+                entry,
+                reader,
+                snapshot: Some(established.snapshot),
+                reading: HoldReading {
+                    published,
+                    store: established.reading,
+                },
+                content_model,
+                plan_ground,
+                _lease: lease,
             },
-            content_model,
-            plan_ground,
-            _lease: lease,
-        })
+            early,
+        ))
     }
 
     /// Answer a read whose store found its derived data damaged: publish the
@@ -7458,6 +7716,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // maintenance an entry owes is therefore bounded by one
                         // reconcile turn rather than by the arrival of a quiet
                         // moment the entry may never get.
+                        //
+                        // What this turn left is published before the claim
+                        // moves on: `Ready` where it left nothing to derive,
+                        // exactly as the release below publishes it. The
+                        // maintenance then runs over a serving entry, as a
+                        // poll's does, so no quiet slice it takes — a semantic
+                        // slice the turn's commit owed above all — stands
+                        // between that commit and its publication.
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
                         let next = state
                             .claim
                             .hand_on(|epoch| Job::Maintenance(name.clone(), epoch));
@@ -26064,6 +26331,40 @@ mod tests {
         drop(lease);
     }
 
+    /// **A reconcile that leaves nothing to derive publishes `Ready` before
+    /// it hands the claim to due maintenance.** The maintenance leg's quiet
+    /// work — a semantic slice the turn's commit owed among it — runs over a
+    /// serving entry, as a poll's maintenance does, so it never stands
+    /// between the turn's commit and that publication.
+    #[test]
+    fn a_reconcile_publishes_ready_before_handing_on_to_due_maintenance() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+
+        ops.block_reconcile_at
+            .store(reconciles + 1, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+        let at_maintenance = host.state(&name);
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            at_maintenance,
+            answered(TrustState::Ready),
+            "the reconcile handed its claim to maintenance before publishing Ready"
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
     fn a_quiet_attached_vault_heals_dropped_events_through_maintenance_and_reports_misses() {
@@ -26236,6 +26537,40 @@ mod tests {
             assert_eq!(*ops.quiet_maintenances.lock().unwrap(), [!busy]);
             drop(lease);
         }
+    }
+
+    /// **Quiet work runs only over an entry that publishes `Ready`**: the
+    /// claim a maintenance leg holds over a serving entry allows quiet work,
+    /// and the same claim over an entry whose trust label is anything else —
+    /// a commit whose publication has not landed — does not.
+    #[test]
+    fn quiet_maintenance_is_refused_over_an_entry_that_is_not_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = entry.gate.lock().unwrap().claim.epoch();
+        let progress = reporter(&entry, epoch);
+        let allowed_when_ready = progress.quiet_maintenance_allowed();
+        entry.gate.lock().unwrap().trust = TrustState::warming(WarmingPhase::Healing, 1, Some(1));
+        let allowed_when_warming = progress.quiet_maintenance_allowed();
+        entry.gate.lock().unwrap().trust = TrustState::Ready;
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+        assert!(
+            allowed_when_ready,
+            "quiet work was refused over a Ready entry"
+        );
+        assert!(
+            !allowed_when_warming,
+            "quiet work was allowed before the entry published Ready"
+        );
+        drop(lease);
     }
 
     /// Wait for one maintenance leg to have run.
@@ -26419,7 +26754,10 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             host.shared
                 .entries
-                .insert(registration(&joined, &root))
+                .insert(
+                    registration(&joined, &root),
+                    CanonicalStoreObservation::NotKnownAbsent,
+                )
                 .expect("the set serves no such name");
 
             drop(host.demand(&joined).unwrap());
@@ -26498,10 +26836,10 @@ mod tests {
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             assert_eq!(
-                host.shared.entries.insert(registration(
-                    &name,
-                    std::path::Path::new("/tmp/norn-host-elsewhere")
-                )),
+                host.shared.entries.insert(
+                    registration(&name, std::path::Path::new("/tmp/norn-host-elsewhere")),
+                    CanonicalStoreObservation::NotKnownAbsent
+                ),
                 Err(ServingRefusal::AlreadyServed)
             );
             let standing = host.shared.entries.get(&name).expect("the vault is served");
@@ -26793,7 +27131,9 @@ mod tests {
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
             assert_eq!(
-                host.shared.entries.replace(edited),
+                host.shared
+                    .entries
+                    .replace(edited, CanonicalStoreObservation::NotKnownAbsent),
                 Err(ServingRefusal::Held),
                 "an entry holding its coverage was replaced"
             );
@@ -26818,7 +27158,12 @@ mod tests {
                 .clone()
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
-            assert_eq!(host.shared.entries.replace(edited.clone()), Ok(()));
+            assert_eq!(
+                host.shared
+                    .entries
+                    .replace(edited.clone(), CanonicalStoreObservation::NotKnownAbsent),
+                Ok(())
+            );
 
             let observed = replaced
                 .gate
@@ -27106,7 +27451,7 @@ mod tests {
 
             host.shared
                 .entries
-                .insert(joined.clone())
+                .insert(joined.clone(), CanonicalStoreObservation::NotKnownAbsent)
                 .expect("the set serves no such name");
 
             assert_eq!(
@@ -27197,7 +27542,7 @@ mod tests {
             let joined = registration("journal", &root("journal"));
             host.shared
                 .entries
-                .insert(joined.clone())
+                .insert(joined.clone(), CanonicalStoreObservation::NotKnownAbsent)
                 .expect("the set serves no such name");
             host.shared
                 .entries

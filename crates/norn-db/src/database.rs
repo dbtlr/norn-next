@@ -103,6 +103,9 @@ pub enum Attempt {
 #[derive(Debug)]
 pub struct Database {
     connection: Connection,
+    /// Disposable domain connections carry their file through every pool handoff.
+    /// Declared after the connection so SQLite closes before the owner can unlink.
+    pub(crate) temporary_file: Option<Arc<crate::TemporaryFile>>,
     path: PathBuf,
     epoch: String,
     /// Raised while this handle runs its own transaction control, and down
@@ -134,6 +137,11 @@ thread_local! {
 }
 
 impl Database {
+    #[cfg(feature = "induced-failure")]
+    pub fn retirement_check(&self) -> crate::RetirementCheck {
+        crate::RetirementCheck::database(&self.path)
+    }
+
     /// Bind an open connection to the file it was opened on, reading the epoch
     /// the database records.
     ///
@@ -171,6 +179,7 @@ impl Database {
         }
         Ok(Database {
             connection,
+            temporary_file: None,
             path: path.to_path_buf(),
             epoch,
             snapshot_control,
@@ -863,12 +872,7 @@ pub fn prepare_parent(path: &Path) -> Result<(), DbError> {
 #[allow(clippy::disallowed_methods)] // Discarding a database, and tearing a disposable one down.
 pub fn remove_database(path: &Path) -> Result<(), DbError> {
     refuse_a_name_that_is_not_a_file("removing the database", path)?;
-    for candidate in [
-        path.to_path_buf(),
-        sidecar(path, "-wal"),
-        sidecar(path, "-shm"),
-        sidecar(path, "-journal"),
-    ] {
+    for candidate in database_paths(path) {
         match std::fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -882,6 +886,15 @@ pub fn remove_database(path: &Path) -> Result<(), DbError> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn database_paths(path: &Path) -> [PathBuf; 4] {
+    [
+        path.to_path_buf(),
+        sidecar(path, "-wal"),
+        sidecar(path, "-shm"),
+        sidecar(path, "-journal"),
+    ]
 }
 
 /// The path SQLite writes a sidecar to: the database's own path with a suffix

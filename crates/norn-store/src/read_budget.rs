@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+/// Canonical registration identity for fair turns across its physical sources.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadGroup(pub(crate) PathBuf);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadNeed {
     Source,
@@ -559,5 +563,49 @@ impl Grant {
                 budget.put(scratch);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "induced-failure"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Observe the detached close batch's file lifetime.
+    fn a_detached_close_batch_retains_its_intake_file_and_budget_credit() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-detached-close");
+        let path = scratch.join("intake.sqlite3");
+        let budget = ReadBudget::new(ReadBudgetPolicy::default());
+        let reader = Arc::new(
+            crate::loading::IntakeBuilder::create(
+                &path,
+                crate::StoredPathOrder::Sensitive,
+                crate::DerivationVersion::new(1),
+            )
+            .unwrap()
+            .finish(&budget)
+            .unwrap(),
+        );
+        let snapshot = reader
+            .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap();
+        drop(snapshot);
+        reader.retire();
+        // Detach exactly the batch drain closes outside the budget lock. Reader
+        // destruction cannot see or wait for these connections on another stack.
+        let closing = std::mem::take(&mut budget.state.lock().unwrap().garbage);
+        assert_eq!(closing.len(), 1);
+        drop(reader);
+        assert!(
+            path.exists(),
+            "the detached connection keeps its source file"
+        );
+        assert_eq!(budget.census().live_connections, 1);
+        drop(closing);
+        assert!(!path.exists(), "the final close releases its source file");
+        assert_eq!(budget.census().live_connections, 0);
     }
 }

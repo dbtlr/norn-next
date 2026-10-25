@@ -165,6 +165,7 @@ pub(super) fn slice(
                     documents: DOCUMENT_BUDGET,
                     bytes: BYTE_BUDGET,
                 }),
+                None,
             );
             rolling.misses.changed += account.misses.changed;
             rolling.misses.created += account.misses.created;

@@ -42,10 +42,11 @@
 //!
 //! # Who calls this
 //!
-//! The host's composition: `norn-host` opens one engine per enabled vault at
-//! config delivery — the enable act — relays a drain after each leg that
-//! commits lane-1 work, and answers vector-nearest through its semantic
-//! capability. [`Settings`] is the engine owning what its
+//! The host's composition: `norn-host` opens one engine per enabled vault on
+//! a lifecycle slice after the publication that committed its config
+//! delivery, runs bounded drain slices ([`Engine::drain_bounded`]) after the
+//! legs that commit lane-1 work have published, and answers vector-nearest
+//! through its semantic capability. [`Settings`] is the engine owning what its
 //! `[engine.semantic]` section means; the host hands the table over and
 //! defines nothing past the handoff. What does not exist yet is the layer
 //! that composes that capability into a running product — the serving
@@ -56,6 +57,7 @@
 //! # Where to start
 //!
 //! - [`Engine`] — open, drain, nearest; the whole surface.
+//! - [`SliceBudget`] — how much one bounded drain may do, in pages.
 //! - [`Watermarks`] and [`SidecarRevision`] — how far the engine has drained
 //!   against the store, and which sidecar state it answers from.
 //! - [`DrainReport`] — what one drain did, and [`DrainReport::is_settled`].
@@ -68,7 +70,7 @@ mod progress;
 mod settings;
 mod sidecar;
 
-pub use engine::{DrainReport, Engine, Nearest, NearestWork, Neighbor, VectorRow};
+pub use engine::{DrainReport, Engine, Nearest, NearestWork, Neighbor, SliceBudget, VectorRow};
 pub use error::EngineError;
 pub use progress::{SidecarRevision, Watermark, Watermarks};
 pub use settings::{SectionError, Settings};

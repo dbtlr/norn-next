@@ -12,6 +12,7 @@
 //! shared fixtures in [`common`] are used in full and nothing needs a
 //! `dead_code` allow to hide what no case reaches.
 
+mod catalogue;
 mod common;
 
 mod count;

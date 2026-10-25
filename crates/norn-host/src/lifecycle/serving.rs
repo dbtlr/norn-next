@@ -46,6 +46,13 @@ use norn_fs::Identity;
 use super::{Entry, Service, SnapshotSource};
 use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
+/// What the caller established about the canonical store name before joining the set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalStoreObservation {
+    Absent,
+    NotKnownAbsent,
+}
+
 /// Why the serving set stands unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServingRefusal {
@@ -326,7 +333,11 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// singleton included. What a join into a *running* host owes beyond that
     /// is the classification of the incumbents, which is the lifecycle's move
     /// around this one.
-    pub(crate) fn insert(&self, registration: Registration) -> Result<(), ServingRefusal> {
+    pub(crate) fn insert(
+        &self,
+        registration: Registration,
+        storage: CanonicalStoreObservation,
+    ) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         if entries.contains_key(&registration.name) {
             return Err(ServingRefusal::AlreadyServed);
@@ -336,6 +347,7 @@ impl<A: SnapshotSource> ServingSet<A> {
             Arc::new(Entry::unattached(
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
+                storage,
             )),
         );
         Ok(())
@@ -403,7 +415,11 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// A name the set does not serve has nothing to replace, and the entry
     /// joins as a new one.
-    pub(crate) fn replace(&self, registration: Registration) -> Result<(), ServingRefusal> {
+    pub(crate) fn replace(
+        &self,
+        registration: Registration,
+        storage: CanonicalStoreObservation,
+    ) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         if let Some(entry) = entries.get(&registration.name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -419,6 +435,7 @@ impl<A: SnapshotSource> ServingSet<A> {
             Arc::new(Entry::unattached(
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
+                storage,
             )),
         );
         drop(entries);

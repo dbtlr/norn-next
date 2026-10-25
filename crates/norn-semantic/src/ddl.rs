@@ -101,4 +101,14 @@ pub(crate) mod meta {
     /// How far the tombstone feed was drained, spelled as
     /// [`DOCUMENT_WATERMARK`] is.
     pub(crate) const TOMBSTONE_WATERMARK: &str = "tombstone_watermark";
+    /// The store epoch a paged reconcile is reconciling toward, absent where
+    /// no reconcile is part way through. A pass recorded for another epoch
+    /// than the store's names a lifetime that no longer exists, and starts
+    /// over rather than resuming: paths it checked as standing there may be
+    /// gone here.
+    pub(crate) const RECONCILE_STORE_EPOCH: &str = "reconcile_store_epoch";
+    /// The last held path the paged reconcile checked, beside
+    /// [`RECONCILE_STORE_EPOCH`] and moved in the same transaction as the
+    /// page that checked it.
+    pub(crate) const RECONCILE_CURSOR: &str = "reconcile_cursor";
 }

@@ -16,9 +16,10 @@
 //! **Every hold ends in [`GateHold`]'s drop, and that is where the signal
 //! moves.** A hold reads the state's [`Stanced::stance`] as it is taken and
 //! again as it ends, and where the two differ it moves the gate's signal and
-//! wakes every waiter on it. The signal therefore moves exactly when a hold
-//! changed the stance, whatever that hold wrote: a publication that changes
-//! only counters inside one stance wakes nobody. The lock order is the gate,
+//! wakes every waiter on it. A publication that changes only counters inside
+//! one stance wakes nobody. First-index watcher withdrawal also moves the shared
+//! signal through an adapter that retains neither the gate nor coverage.
+//! The lock order is the gate,
 //! then the signal. A holder of the gate may take the signal; a waiter on the
 //! signal holds nothing else, so no holder of the signal waits for the gate.
 //!
@@ -35,7 +36,8 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::task::{Wake, Waker};
 use std::time::Instant;
 
 /// The part of a gated state a waiter outside the gate waits on.
@@ -71,9 +73,7 @@ pub(super) struct EntryGate<T> {
     /// The stance's generation: moved by every hold that ended at a stance
     /// other than the one it began at. Taken under the gate or by a waiter
     /// holding nothing else.
-    signal: Mutex<u64>,
-    /// Notified with every move of the signal.
-    moved: Condvar,
+    signal: Arc<StanceSignal>,
     /// The takers waiting for the gate by a deadline, and how many holds have
     /// ended while any of them waited.
     release: Mutex<Released>,
@@ -91,6 +91,35 @@ pub(super) struct EntryGate<T> {
     /// published there has to wake the read from.
     #[cfg(test)]
     let_go_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// Shared notification only. A watcher wake retains no entry or watcher state,
+/// and takes only this signal mutex, never an entry gate or coverage bookkeeping.
+#[derive(Default)]
+struct StanceSignal {
+    generation: Mutex<u64>,
+    moved: Condvar,
+}
+
+impl Wake for StanceSignal {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notify();
+    }
+}
+
+impl StanceSignal {
+    fn notify(&self) {
+        let mut generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        self.moved.notify_all();
+    }
 }
 
 /// A write left for the next hold of a gate.
@@ -113,8 +142,7 @@ struct Released {
 /// miss a change made after it let go. The takers waiting by a deadline are
 /// woken by the field after the guard, once the gate is back.
 pub(super) struct GateHold<'g, T: Stanced> {
-    signal: &'g Mutex<u64>,
-    moved: &'g Condvar,
+    signal: &'g StanceSignal,
     opened: T::Stance,
     guard: MutexGuard<'g, T>,
     /// Declared after the guard, so it drops once the gate is back. Nothing
@@ -171,10 +199,7 @@ impl<T: Stanced> Drop for GateHold<'_, T> {
     fn drop(&mut self) {
         self.guard.end_hold();
         if self.guard.stance() != self.opened {
-            let mut generation = self.signal.lock().unwrap_or_else(PoisonError::into_inner);
-            *generation = generation.wrapping_add(1);
-            drop(generation);
-            self.moved.notify_all();
+            self.signal.notify();
         }
         self.after_hold = self.guard.take_after_hold();
     }
@@ -185,8 +210,7 @@ impl<T> EntryGate<T> {
         EntryGate {
             state: Mutex::new(state),
             taken: AtomicU64::new(0),
-            signal: Mutex::new(0),
-            moved: Condvar::new(),
+            signal: Arc::new(StanceSignal::default()),
             release: Mutex::new(Released::default()),
             freed: Condvar::new(),
             deferred: Mutex::new(Vec::new()),
@@ -194,6 +218,10 @@ impl<T> EntryGate<T> {
             #[cfg(test)]
             let_go_hook: Mutex::new(None),
         }
+    }
+
+    pub(super) fn stance_waker(&self) -> Waker {
+        Waker::from(Arc::clone(&self.signal))
     }
 
     /// Run `hook` once, in the instant after the next read acquisition lets
@@ -234,7 +262,11 @@ impl<T> EntryGate<T> {
     /// gives the gate back, so a reading taken under the gate is behind every
     /// change made after that hold.
     pub(super) fn stance_generation(&self) -> u64 {
-        *self.signal.lock().unwrap_or_else(PoisonError::into_inner)
+        *self
+            .signal
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Wait until the stance's generation moves past `seen`, or until
@@ -245,9 +277,14 @@ impl<T> EntryGate<T> {
     /// so a holder of the gate that moves the signal is never waiting on this
     /// wait. A deadline already past answers at once.
     pub(super) fn wait_for_the_stance_to_move(&self, seen: u64, deadline: Instant) -> bool {
-        let generation = self.signal.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = self
+            .signal
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (generation, _) = self
+            .signal
             .moved
             .wait_timeout_while(generation, remaining, |generation| *generation == seen)
             .unwrap_or_else(PoisonError::into_inner);
@@ -400,7 +437,6 @@ impl<T: Stanced> EntryGate<T> {
     fn hold<'g>(&'g self, guard: MutexGuard<'g, T>) -> GateHold<'g, T> {
         let mut hold = GateHold {
             signal: &self.signal,
-            moved: &self.moved,
             opened: guard.stance(),
             guard,
             _freed: FreedOnDrop {

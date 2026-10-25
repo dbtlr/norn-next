@@ -6,7 +6,8 @@
 //! a [`VaultAnswer`] carrying the reading the hold was taken under. Every
 //! refusal on that path leaves as `norn-wire`'s one envelope: the address's,
 //! the hold's through [`ReadRefusal::answer`](crate::ReadRefusal::answer), and
-//! the builder's through [`page_refusal`]. A builder whose store finds its
+//! the builder's through [`page_refusal`]. First-index Get and Find use a closed,
+//! request-specific hold from the same acquisition core. A builder whose canonical store finds its
 //! derived data damaged is the one refusal the entry answers for: the damage
 //! is published on the entry, which owes the rebuild that resolves it, and the
 //! read is refused with what the entry then publishes.
@@ -28,9 +29,10 @@ use norn_wire::{
     ReadFailure, Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
 };
 
-use crate::lifecycle::{EntryOps, HoldReading, Host, ReadHold, ReadSource, SnapshotSource};
+use crate::lifecycle::{
+    EntryOps, HoldReading, Host, ReadHold, ReadRefusal, ReadSource, SnapshotSource,
+};
 use crate::refusal::{PageRefused, page_refusal};
-use crate::text::TextLayer;
 
 /// What a read builder answered on one snapshot: the parts of the request it
 /// could not apply, what the parts it applied assumed, the verb's report, and
@@ -77,8 +79,8 @@ impl HoldReading {
     /// entry published and the store reading its snapshot was established at.
     ///
     /// A hold is taken only under a published demand that answers a read —
-    /// `Ready`, or the healing of an entry that has derived every fact the
-    /// read met — so the demand answers with its state, and the trust an
+    /// `Ready`, the healing of an entry that has derived every fact the
+    /// read met, or claim-owned first-index warming — so the demand answers with its state, and the trust an
     /// answer carries is what the entry published at the instant its
     /// snapshot was established; one that did not would be refused with its
     /// own envelope, through the mapping every demand renders through. A
@@ -168,6 +170,66 @@ where
         })
     }
 
+    fn answer_query<R, W>(
+        &self,
+        address: &norn_wire::VaultAddress,
+        request: crate::lifecycle::loading::Request<'_>,
+        build: impl FnOnce(&crate::lifecycle::loading::QueryHold<O>) -> Result<Built<R, W>, PageRefusal>,
+    ) -> Result<Answered<R, W>, ErrorEnvelope> {
+        let name = address.registered_name();
+        let hold = self
+            .begin_query_read(name, norn_store::ReadNeed::Source, request)
+            .map_err(|refusal| refusal.answer(name))?;
+        let reading = hold.reading().answer_reading(name)?;
+        #[cfg(feature = "induced-failure")]
+        hold.query_boundary(self, false);
+        let result = build(&hold);
+        if let Err(refusal) = &result {
+            hold.record_page_failure(refusal);
+        }
+        #[cfg(feature = "induced-failure")]
+        hold.query_boundary(self, true);
+        // Storage/resource failures keep their actual type. Other refusals require
+        // the same final authority judgment as successful rows.
+        let depends_on_source = match &result {
+            Ok(_) => true,
+            Err(refusal) => match refusal {
+                PageRefusal::Store(_)
+                | PageRefusal::CountCursorExpired
+                | PageRefusal::CountResultBusy
+                | PageRefusal::CountResultStorageFull
+                | PageRefusal::CountResultCapacity { .. }
+                | PageRefusal::CountResultTooLarge { .. }
+                | PageRefusal::CountResultFailed { .. } => false,
+                PageRefusal::UnreadableBound { .. }
+                | PageRefusal::DeclarationNotPinned { .. }
+                | PageRefusal::OrderChanged(_)
+                | PageRefusal::CursorNotTaken { .. }
+                | PageRefusal::SummaryNotPaged
+                | PageRefusal::EmptyMembership { .. }
+                | PageRefusal::OutOfBound { .. }
+                | PageRefusal::UnknownPart { .. }
+                | PageRefusal::AmbiguousTarget(_)
+                | PageRefusal::UnknownTarget { .. }
+                | PageRefusal::UnknownRule { .. }
+                | PageRefusal::PartNotTaken { .. } => true,
+            },
+        };
+        if depends_on_source && !hold.current() {
+            return Err(ReadRefusal::FirstIndex(hold.reading().published().clone()).answer(name));
+        }
+        let built = result.map_err(|refusal| match page_refusal(refusal) {
+            PageRefused::Answered(envelope) => envelope,
+            PageRefused::Damaged(detail) => hold.damage(self, detail).answer(name),
+        })?;
+        Ok(Answered {
+            answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
+                .with_advisories(built.advisories),
+            work: built.work,
+            snapshot: hold.counters(),
+        })
+    }
+
     /// Answer a `count`: one page of the tallies `params` asks for, from the
     /// vault it addresses.
     pub fn count(
@@ -194,9 +256,11 @@ where
         &self,
         params: &FindParams,
     ) -> Result<Answered<FindReport, FindWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.find(params, declared)?.into())
-        })
+        self.answer_query(
+            &params.vault,
+            crate::lifecycle::loading::Request::Find(params),
+            |hold| Ok(hold.find(params)?.into()),
+        )
     }
 
     /// Answer a `validate`: one page of the findings `params` asks for, or
@@ -229,9 +293,11 @@ where
     /// snapshot holds of the document, so the text answered is the text the
     /// snapshot derived.
     pub fn get(&self, params: &GetParams) -> Result<Answered<GetReport, GetWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.get(params, declared, &TextLayer)?.into())
-        })
+        self.answer_query(
+            &params.vault,
+            crate::lifecycle::loading::Request::Get(params),
+            |hold| Ok(hold.get(params)?.into()),
+        )
     }
 }
 

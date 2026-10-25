@@ -11,3 +11,4 @@ mod lifecycle;
 mod model;
 mod nearest;
 mod progress;
+mod slices;
