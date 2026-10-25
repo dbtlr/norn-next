@@ -784,6 +784,28 @@ fn intake_answers_sparse_zero_and_unknown_fields_before_ordinary_heal() {
     }
     let scratch = norn_testkit::scratch::Scratch::new("canonical-intake-fields");
     let root = scratch.join("vault");
+    rich_metadata_fixture(&root);
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(IntakeProbe {
+        answers: Mutex::new(vec![]),
+        drains: Mutex::new(vec![]),
+        retired: Mutex::new(None),
+        held: Mutex::new(None),
+    });
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(2, 2).unwrap(),
+        Experiment::canonical_intake("first", probe.clone()),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, vault.name());
+    assert_eq!(probe.answers.lock().unwrap().len(), 3);
+    drop(demand);
+    drop(host);
+    assert_no_projection_files(scratch.root());
+    vault.store().verify_integrity().unwrap();
+}
+
+fn rich_metadata_fixture(root: &std::path::Path) {
     std::fs::create_dir_all(root.join(".norn")).unwrap();
     std::fs::write(
         root.join(".norn/schema.yaml"),
@@ -814,24 +836,6 @@ fn intake_answers_sparse_zero_and_unknown_fields_before_ordinary_heal() {
         )
         .unwrap();
     }
-    let vault = attach::Vault::adopt(scratch.root());
-    let probe = Arc::new(IntakeProbe {
-        answers: Mutex::new(vec![]),
-        drains: Mutex::new(vec![]),
-        retired: Mutex::new(None),
-        held: Mutex::new(None),
-    });
-    let host = vault.host_with_startup_experiment(
-        norn_host::ProductionPolicy::new(2, 2).unwrap(),
-        Experiment::canonical_intake("first", probe.clone()),
-    );
-    let demand = host.demand(vault.name()).unwrap();
-    wait_ready(&host, vault.name());
-    assert_eq!(probe.answers.lock().unwrap().len(), 3);
-    drop(demand);
-    drop(host);
-    assert_no_projection_files(scratch.root());
-    vault.store().verify_integrity().unwrap();
 }
 
 // Drain through each store's own cursors. Compare cursor keys and every answer
@@ -841,12 +845,51 @@ fn metadata_drains(
     count: impl Fn(&norn_wire::CountParams) -> norn_store::Counted,
     reading: &norn_store::StoreReading,
 ) -> Vec<serde_json::Value> {
-    use norn_wire::{
-        Column, CountParams, Direction, FindParams, GroupKey, Predicate, Sort, SortKey,
-    };
+    use norn_wire::{CountParams, GroupKey};
+    let address = VaultAddress::name(VaultName::new("notes").unwrap());
+    let mut answers = metadata_find_drains(|params| {
+        let found = find(params);
+        assert_eq!(found.snapshot.epoch, reading.epoch());
+        assert_eq!(found.snapshot.generation as i64, reading.write_generation());
+        found
+    });
+    for by in [
+        vec![],
+        vec![GroupKey::field("labels")],
+        vec![GroupKey::field("rank")],
+        vec![GroupKey::field("unknown")],
+        vec![GroupKey::field("labels"), GroupKey::field("rank")],
+    ] {
+        let mut params = CountParams::new(address.clone()).with_by(by).with_limit(2);
+        for page in 0..20 {
+            let (unsatisfied, advisories, report) = count(&params).into_report();
+            assert_eq!(report.counted_at.epoch, reading.epoch());
+            assert_eq!(
+                report.counted_at.generation as i64,
+                reading.write_generation()
+            );
+            assert!(report.moved.is_empty());
+            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.rows,"next_key":report.next.as_ref().map(|c| c.key())}));
+            params.after = report.next;
+            if params.after.is_none() {
+                break;
+            }
+            assert!(page < 19, "count did not terminate");
+        }
+    }
+    answers
+}
+
+fn metadata_find_drains(
+    find: impl Fn(&norn_wire::FindParams) -> norn_store::Found,
+) -> Vec<serde_json::Value> {
+    use norn_wire::{Column, Direction, FindParams, Predicate, Sort, SortKey};
     let address = VaultAddress::name(VaultName::new("notes").unwrap());
     let mut selections = vec![FindParams::new(address.clone())];
     for predicate in [
+        Predicate::equal_to("bucket", "rare"),
+        Predicate::equal_to("bucket", "absent"),
+        Predicate::equal_to("unknown", "absent"),
         Predicate::has("nothing"),
         Predicate::missing("nothing"),
         Predicate::in_any("labels", ["red".into(), "blue".into()]),
@@ -875,17 +918,25 @@ fn metadata_drains(
     for mut params in selections {
         params.limit = Some(2);
         params.columns = vec![Column::path(), Column::field("rank"), Column::fields()];
+        let mut seen = std::collections::BTreeSet::new();
         for page in 0..20 {
-            let (unsatisfied, advisories, report) = find(&params).into_report();
+            let found = find(&params);
+            assert!(!found.snapshot.epoch.is_empty());
+            assert!(found.snapshot.generation > 0);
+            if let Some(next) = &found.next {
+                assert_eq!(next.snapshot(), &found.snapshot);
+            }
+            let hashes = found.content_hashes.clone();
+            assert_eq!(hashes.len(), found.rows.len());
+            let (unsatisfied, advisories, report) = found.into_report();
             assert!(report.page.moved.is_empty());
-            if let Some(next) = &report.page.next {
-                assert_eq!(next.snapshot().epoch, reading.epoch());
-                assert_eq!(
-                    next.snapshot().generation as i64,
-                    reading.write_generation()
+            for row in &report.page.rows {
+                assert!(
+                    seen.insert(row.path.clone()),
+                    "duplicate document in a drain"
                 );
             }
-            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.page.rows,"next_key": report.page.next.as_ref().map(|c| c.key()), "rules":report.rule_sets}));
+            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.page.rows,"next_key": report.page.next.as_ref().map(|c| c.key()), "rules":report.rule_sets,"hashes":hashes}));
             params.after = report.page.next;
             if params.after.is_none() {
                 break;
@@ -893,29 +944,221 @@ fn metadata_drains(
             assert!(page < 19, "find did not terminate");
         }
     }
-    for by in [
-        vec![],
-        vec![GroupKey::field("labels")],
-        vec![GroupKey::field("rank")],
-        vec![GroupKey::field("unknown")],
-        vec![GroupKey::field("labels"), GroupKey::field("rank")],
-    ] {
-        let mut params = CountParams::new(address.clone()).with_by(by).with_limit(2);
-        for page in 0..20 {
-            let (unsatisfied, advisories, report) = count(&params).into_report();
-            assert_eq!(report.counted_at.epoch, reading.epoch());
-            assert_eq!(
-                report.counted_at.generation as i64,
-                reading.write_generation()
+    answers
+}
+
+#[test]
+fn live_complete_metadata_uses_existing_find_and_retires_before_ready() {
+    use norn_host::startup_experiment::{LiveFindReader, LiveFindRefusal};
+    use norn_wire::{Column, FindParams};
+    struct LiveProbe {
+        get: Mutex<Option<serde_json::Value>>,
+        drains: Mutex<Vec<serde_json::Value>>,
+        first: Mutex<Option<norn_store::Found>>,
+        retained: Mutex<Option<Arc<LiveFindReader>>>,
+    }
+    impl Observer for LiveProbe {
+        fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+            Ok(())
+        }
+        fn live_get(
+            &self,
+            reader: Arc<norn_host::startup_experiment::LiveGetReader>,
+        ) -> Result<(), String> {
+            let params = GetParams::new(
+                VaultAddress::name(VaultName::new("notes").unwrap()),
+                ResolutionTarget::new("first").unwrap(),
             );
-            assert!(report.moved.is_empty());
-            answers.push(serde_json::json!({"unsatisfied":unsatisfied,"advisories":advisories,"rows":report.rows,"next_key":report.next.as_ref().map(|c| c.key())}));
-            params.after = report.next;
-            if params.after.is_none() {
-                break;
+            let got = reader
+                .get(&params, Instant::now() + Duration::from_secs(5))
+                .unwrap();
+            assert!(got.unsatisfied.is_empty());
+            let report = serde_json::to_value(got.report).unwrap();
+            for finding in report["document"]["findings"]["items"].as_array().unwrap() {
+                assert!(finding["id"].as_u64().unwrap() > 0);
+                assert!(finding["generation"].as_u64().unwrap() <= got.snapshot.generation);
+                assert!(finding["generation"].as_u64().unwrap() > 0);
             }
-            assert!(page < 19, "count did not terminate");
+            *self.get.lock().unwrap() = Some(semantic_answer(report));
+            Ok(())
+        }
+        fn live_find(&self, reader: Arc<LiveFindReader>) -> Result<(), String> {
+            assert!(
+                self.get.lock().unwrap().is_some(),
+                "Get must precede complete metadata"
+            );
+            *self.drains.lock().unwrap() = metadata_find_drains(|params| {
+                reader
+                    .find(params, Instant::now() + Duration::from_secs(5))
+                    .unwrap()
+            });
+            let params = FindParams::new(VaultAddress::name(VaultName::new("notes").unwrap()))
+                .with_columns([Column::path(), Column::fields()])
+                .with_sort(norn_wire::Sort::new(
+                    norn_wire::SortKey::field("rank"),
+                    norn_wire::Direction::Ascending,
+                ))
+                .with_limit(2);
+            let found = reader
+                .find(&params, Instant::now() + Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(found.rows.len(), 2);
+            let cursor = found
+                .next
+                .as_ref()
+                .expect("complete metadata has more pages");
+            assert_eq!(cursor.snapshot(), &found.snapshot);
+            *self.first.lock().unwrap() = Some(found);
+            *self.retained.lock().unwrap() = Some(reader);
+            Ok(())
+        }
+        fn intake(
+            &self,
+            _: Arc<norn_host::startup_experiment::IntakeReader>,
+        ) -> Result<(), String> {
+            panic!("live metadata must not expose frozen snapshot acquisition")
+        }
+        fn indexed(
+            &self,
+            stage: Stage,
+            reader: Arc<SnapshotReader>,
+            model: Arc<ContentModel>,
+        ) -> Result<(), String> {
+            assert_eq!(stage, Stage::CanonicalHealth);
+            let snapshot = reader
+                .acquire(ReadNeed::Source, Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .establish()
+                .unwrap();
+            assert_eq!(
+                *self.drains.lock().unwrap(),
+                metadata_find_drains(|params| snapshot.find(params, &model).unwrap())
+            );
+            Ok(())
         }
     }
-    answers
+    let scratch = norn_testkit::scratch::Scratch::under(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "live-metadata",
+    )
+    .unwrap();
+    let root = scratch.join("vault");
+    rich_metadata_fixture(&root);
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(LiveProbe {
+        get: Mutex::new(None),
+        drains: Mutex::new(vec![]),
+        first: Mutex::new(None),
+        retained: Mutex::new(None),
+    });
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(2, 2).unwrap(),
+        Experiment::live_metadata("first", probe.clone()),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, vault.name());
+    let found = probe
+        .first
+        .lock()
+        .unwrap()
+        .take()
+        .expect("early Find offered");
+    let params = FindParams::new(VaultAddress::name(vault.name().clone()))
+        .with_columns([Column::path(), Column::fields()])
+        .with_sort(norn_wire::Sort::new(
+            norn_wire::SortKey::field("rank"),
+            norn_wire::Direction::Ascending,
+        ))
+        .with_limit(2);
+    let gotten = host
+        .get(&GetParams::new(
+            params.vault.clone(),
+            ResolutionTarget::new("first").unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        probe.get.lock().unwrap().take().unwrap(),
+        semantic_answer(serde_json::to_value(gotten.answer.report).unwrap())
+    );
+    assert_eq!(
+        found.rows,
+        host.find(&params).unwrap().answer.report.page.rows
+    );
+    let counted = host
+        .count(&norn_wire::CountParams::new(params.vault.clone()))
+        .unwrap()
+        .answer
+        .report;
+    assert_eq!(counted.rows, [norn_wire::Tally::new([], 8)]);
+    assert_ne!(counted.counted_at.epoch, found.snapshot.epoch);
+    let cursor = found.next.clone().unwrap();
+    let mut continued = params.clone();
+    continued.after = Some(cursor.clone());
+    let next = host.find(&continued).unwrap().answer.report.page;
+    assert_eq!(next.moved, [norn_wire::Moved::Epoch]);
+    assert_eq!(
+        continued.after.as_ref().unwrap(),
+        &cursor,
+        "never rewrite early authority"
+    );
+    let mut actual_suffix = next.rows;
+    continued.after = next.next;
+    while continued.after.is_some() {
+        let page = host.find(&continued).unwrap().answer.report.page;
+        assert!(page.moved.is_empty());
+        actual_suffix.extend(page.rows);
+        continued.after = page.next;
+    }
+    let mut all = params.clone();
+    all.limit = Some(100);
+    let canonical = host.find(&all).unwrap().answer.report.page.rows;
+    assert_eq!(actual_suffix, canonical[found.rows.len()..]);
+    assert_eq!(
+        canonical.len(),
+        8,
+        "invalid UTF-8 is quarantined; malformed frontmatter retains its row"
+    );
+    let mut wrong_order = params.clone();
+    wrong_order.sort = Some(norn_wire::Sort::new(
+        norn_wire::SortKey::path(),
+        norn_wire::Direction::Ascending,
+    ));
+    wrong_order.after = Some(cursor.clone());
+    assert_eq!(
+        host.find(&wrong_order).unwrap_err().code(),
+        &norn_wire::ReasonCode::VaultCursorOrderChanged
+    );
+    std::fs::write(
+        root.join(".norn/schema.yaml"),
+        "version: 1\nfields:\n  rank: { type: text }\n",
+    )
+    .unwrap();
+    let reload_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match host.reload(vault.name()) {
+            Ok(_) => break,
+            Err(norn_host::ReloadRefusal::Unavailable(_)) => {
+                assert!(Instant::now() < reload_deadline);
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("schema reload failed: {error:?}"),
+        }
+    }
+    wait_ready(&host, vault.name());
+    let mut changed_schema = params.clone();
+    changed_schema.after = Some(cursor);
+    assert_eq!(
+        host.find(&changed_schema).unwrap_err().code(),
+        &norn_wire::ReasonCode::VaultCursorOrderChanged
+    );
+    let reader = probe.retained.lock().unwrap().take().unwrap();
+    assert!(matches!(
+        reader.find(&params, Instant::now() + Duration::from_secs(5)),
+        Err(LiveFindRefusal::Unavailable)
+    ));
+    drop(demand);
+    drop(host);
+    assert_no_projection_files(scratch.root());
+    vault.store().verify_integrity().unwrap();
 }

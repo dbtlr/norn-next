@@ -25,7 +25,7 @@ pub(super) fn run(
         experiment,
         &mut PrefixEvidence::default(),
     )?;
-    let intake = if experiment.intake {
+    let intake = if experiment.intake && !experiment.live {
         Some(super::intake::prepare(
             attachment, exclusions, policy, experiment, &model,
         )?)
@@ -186,8 +186,18 @@ pub(super) fn prepare_prefix(
                 &model,
                 &source,
                 &catalogue,
-                observation.filter(|_| catalogue_decline.is_none()),
+                observation.clone().filter(|_| catalogue_decline.is_none()),
             )?;
+            if experiment.intake {
+                super::live::metadata(
+                    attachment,
+                    exclusions,
+                    policy,
+                    experiment,
+                    &model,
+                    observation.filter(|_| catalogue_decline.is_none()),
+                )?;
+            }
             return Ok(model);
         }
         let timing = norn_store::profiling::span("startup.canonical_demand");
@@ -436,6 +446,7 @@ pub(super) fn requested_class_exists(
     match get(&snapshot, &params, model) {
         Ok(_) | Err(norn_store::PageRefusal::AmbiguousTarget(_)) => Ok(true),
         Err(norn_store::PageRefusal::UnknownTarget { .. }) => Ok(false),
+        Err(norn_store::PageRefusal::Store(error)) => Err(store_effect(error)),
         Err(refusal) => Err(JobFailure::Environmental(format!(
             "demand eligibility: {refusal:?}"
         ))),

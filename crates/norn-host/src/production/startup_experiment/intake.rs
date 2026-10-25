@@ -1,4 +1,4 @@
-//! Frozen-copy metadata capability. The raw snapshot is deliberately private:
+//! Complete metadata construction and the frozen-copy capability. Raw snapshots stay private:
 //! omitted bodies and rich facts must never escape as complete document data.
 use super::*;
 use std::sync::Mutex;
@@ -49,7 +49,7 @@ impl IntakeReader {
 /// Only guarded field/path reads are exposed; Get and rich reads are unavailable.
 pub struct IntakeSnapshot {
     pub(super) snapshot: norn_store::Snapshot,
-    model: Arc<ContentModel>,
+    pub(super) model: Arc<ContentModel>,
 }
 
 /// A capability decline is separate from the ordinary builder's refusal.
@@ -144,8 +144,36 @@ pub(super) fn prepare(
     experiment: &Experiment,
     model: &Arc<ContentModel>,
 ) -> Result<Projection, JobFailure> {
+    let reader = Arc::new(IntakeReader::from_sealed(
+        build(attachment, exclusions, policy, None)?.ok_or_else(|| {
+            JobFailure::Environmental("frozen metadata construction declined".into())
+        })?,
+        model.clone(),
+    ));
+    let projection = Projection {
+        reader: reader.clone(),
+    };
+    {
+        let _probe = norn_store::profiling::span("startup.probes");
+        experiment
+            .observer
+            .intake(reader)
+            .map_err(JobFailure::Environmental)?;
+    }
+    Ok(projection)
+}
+
+// Frozen and live callers share every writer and sealing step. Only a live
+// eligibility decline returns None; storage and operation failures remain errors.
+pub(super) fn build(
+    attachment: &mut ProductionAttachment,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    live: Option<(&dyn Observer, &norn_fs::watch::Observation)>,
+) -> Result<Option<SnapshotReader>, JobFailure> {
     use std::hash::BuildHasher;
-    let timing = norn_store::profiling::span("startup.canonical_intake");
+    use std::os::unix::ffi::OsStrExt;
+    let _timing = norn_store::profiling::span("startup.canonical_intake");
     let root = &attachment.covered_root;
     let source = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
@@ -175,10 +203,13 @@ pub(super) fn prepare(
             .map_err(store_effect)?;
     }
     loop {
+        if live.is_some_and(|(_, guard)| !guard.is_current()) {
+            return Ok(None);
+        }
         let page = inventory.advance(policy.store_page_size).map_err(effect)?;
         // Quarantine bookkeeping is scoped to one page as well as the write
         // queue. Its rich diagnostics are outside this reader's capabilities.
-        builder.write(|store| {
+        let complete = builder.write(|store| {
             let mut account = Account::default();
             let mut pending =
                 Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
@@ -189,6 +220,14 @@ pub(super) fn prepare(
                     Depth::Metadata,
                     false,
                 )?;
+                if let Some((observer, guard)) = live {
+                    observer
+                        .metadata_loaded(Path::new(std::ffi::OsStr::from_bytes(&record.value)))
+                        .map_err(JobFailure::Environmental)?;
+                    if !guard.is_current() {
+                        return Ok(false);
+                    }
+                }
                 if pending.is_full() {
                     pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
                 }
@@ -196,34 +235,27 @@ pub(super) fn prepare(
             pending.flush_for_mode(norn_store::startup_experiment::WriteMode::Metadata)?;
             drop(pending);
             if !account.withheld.roots.is_empty() || account.withheld.rendered {
+                if let Some((_, guard)) = live {
+                    guard.invalidate();
+                    return Ok(false);
+                }
                 return Err(JobFailure::Environmental(
                     "metadata inventory could not read the complete frozen copy".into(),
                 ));
             }
-            Ok(())
+            Ok(true)
         })?;
+        if !complete {
+            return Ok(None);
+        }
         if page.complete {
             break;
         }
     }
-    let reader = Arc::new(IntakeReader {
-        reader: Mutex::new(Some(Arc::new(
-            builder.finish(&attachment.readers).map_err(store_effect)?,
-        ))),
-        model: model.clone(),
-    });
-    let projection = Projection {
-        reader: reader.clone(),
-    };
-    drop(timing);
-    {
-        let _probe = norn_store::profiling::span("startup.probes");
-        experiment
-            .observer
-            .intake(reader)
-            .map_err(JobFailure::Environmental)?;
-    }
-    Ok(projection)
+    builder
+        .finish(&attachment.readers)
+        .map(Some)
+        .map_err(store_effect)
 }
 
 #[cfg(test)]

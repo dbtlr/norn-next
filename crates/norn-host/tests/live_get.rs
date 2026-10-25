@@ -338,3 +338,113 @@ fn delayed_live_handle_cannot_serve_after_target_invalidation_or_root_loss() {
     movement(Point::Delayed);
     movement(Point::Root);
 }
+
+#[test]
+fn get_source_contradiction_closes_metadata_without_a_watcher_fact() {
+    struct Contradiction {
+        observation: Mutex<Option<norn_fs::watch::Observation>>,
+        declined: std::sync::atomic::AtomicBool,
+        offered: std::sync::atomic::AtomicBool,
+    }
+    impl Observer for Contradiction {
+        fn live_observation(
+            &self,
+            observation: &norn_fs::watch::Observation,
+        ) -> Result<(), String> {
+            *self.observation.lock().unwrap() = Some(observation.clone());
+            Ok(())
+        }
+        fn catalogue_replay(
+            &self,
+            path: &std::path::Path,
+            catalogue: &mut Catalogue,
+            model: &ContentModel,
+        ) -> Result<(), String> {
+            if path != std::path::Path::new("first.md") {
+                return Ok(());
+            }
+            // A stale catalogue name makes actual Get preparation see absence.
+            // No file is edited, so no OS delivery can mask a missing latch.
+            catalogue
+                .record_document(
+                    &norn_store::DocumentPath::new("ghost.md").unwrap(),
+                    model.ambiguity_ignore(),
+                )
+                .unwrap();
+            Ok(())
+        }
+        fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+            assert!(
+                self.observation
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .is_current()
+            );
+            Ok(())
+        }
+        fn declined(&self, _: &str) -> Result<(), String> {
+            self.declined
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn live_get(&self, _: Arc<LiveGetReader>) -> Result<(), String> {
+            panic!("the demanded catalogue name has no source")
+        }
+        fn live_find(
+            &self,
+            _: Arc<norn_host::startup_experiment::LiveFindReader>,
+        ) -> Result<(), String> {
+            self.offered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn indexed(
+            &self,
+            stage: Stage,
+            _: Arc<SnapshotReader>,
+            _: Arc<ContentModel>,
+        ) -> Result<(), String> {
+            assert_eq!(stage, Stage::CanonicalHealth);
+            Ok(())
+        }
+    }
+    let scratch = norn_testkit::scratch::Scratch::under(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "live-get-contradiction",
+    )
+    .unwrap();
+    let root = scratch.join("vault");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join("first.md"), "---\nstatus: draft\n---\nBody\n").unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(Contradiction {
+        observation: Mutex::new(None),
+        declined: std::sync::atomic::AtomicBool::new(false),
+        offered: std::sync::atomic::AtomicBool::new(false),
+    });
+    let host = vault.host_with_startup_experiment(
+        norn_host::ProductionPolicy::new(2, 2).unwrap(),
+        Experiment::live_metadata("ghost", probe.clone()),
+    );
+    let _demand = host.demand(vault.name()).unwrap();
+    attach::wait_for_ready(&host, vault.name(), Duration::from_secs(10));
+    assert!(probe.declined.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        !probe.offered.load(std::sync::atomic::Ordering::SeqCst),
+        "Get's known contradiction must close metadata too"
+    );
+    assert!(
+        !probe
+            .observation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_current()
+    );
+    let params = norn_wire::FindParams::new(VaultAddress::name(vault.name().clone()));
+    assert_eq!(host.find(&params).unwrap().answer.report.page.rows.len(), 1);
+}

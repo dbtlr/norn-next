@@ -559,6 +559,13 @@ pub struct Observation {
 
 #[cfg(any(test, feature = "induced-failure"))]
 impl Observation {
+    /// Withdraw this attempt's shared authority after a source contradiction,
+    /// even when no backend event reported it. Clones cannot restore eligibility.
+    pub fn invalidate(&self) {
+        self.invalid
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// A failed observation is permanently invalid, even if its root returns.
     pub fn is_current(&self) -> bool {
         use std::sync::atomic::Ordering;

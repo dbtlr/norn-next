@@ -30,6 +30,10 @@ pub trait Observer: Send + Sync {
     fn live_get(&self, _reader: Arc<LiveGetReader>) -> Result<(), String> {
         Ok(())
     }
+    /// Complete live metadata, with eligibility checked at each actual Find.
+    fn live_find(&self, _reader: Arc<LiveFindReader>) -> Result<(), String> {
+        Ok(())
+    }
     /// Ordinary writer counters exclude every disposable phase.
     fn canonical_work(
         &self,
@@ -37,8 +41,8 @@ pub trait Observer: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-    /// Called only after the complete metadata pass. Observers may retain the
-    /// bounded reader during ordinary construction; it retires before final publication.
+    /// Frozen-copy capability, called only after the complete metadata pass.
+    /// Observers may retain it during ordinary construction; it retires before publication.
     fn intake(&self, _reader: Arc<IntakeReader>) -> Result<(), String> {
         Ok(())
     }
@@ -52,6 +56,10 @@ pub trait Observer: Send + Sync {
     }
     /// Private Get load/rehash window for deterministic source movement probes.
     fn demand_loaded(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Private consumed-metadata boundary for deterministic source-change probes.
+    fn metadata_loaded(&self, _path: &Path) -> Result<(), String> {
         Ok(())
     }
     /// Inventory has named this entry; its anchored replay and record are next.
@@ -181,6 +189,20 @@ impl Experiment {
             separate_frontmatter: false,
             canonical: true,
             intake: false,
+            frozen_prefix: None,
+            live: true,
+        })
+    }
+
+    /// Private Get followed by complete metadata Find; no public first-open admission.
+    pub fn live_metadata(get_target: impl Into<String>, observer: Arc<dyn Observer>) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: true,
+            intake: true,
             frozen_prefix: None,
             live: true,
         })
@@ -683,4 +705,4 @@ mod helper;
 pub use helper::{HelperCause, HelperComplete, HelperControl, HelperFailure, run_prefix_helper};
 
 mod live;
-pub use live::{LiveGetReader, LiveGetRefusal};
+pub use live::{LiveFindReader, LiveFindRefusal, LiveGetReader, LiveGetRefusal, LiveRefusal};
