@@ -65,13 +65,14 @@
 //! the self-disabled state.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use norn_config::ConfigDirs;
 use norn_config::vault::EngineConfig;
 use norn_embed::{Model, StubEmbedder};
 use norn_semantic::{
-    Engine, NearestWork, Neighbor, Settings, SidecarRevision, Watermark, Watermarks,
+    Engine, NearestWork, Neighbor, Settings, SidecarRevision, SliceBudget, Watermark, Watermarks,
 };
 use norn_store::{FeedRead, StoreReading};
 use norn_wire::{
@@ -88,6 +89,11 @@ pub(crate) const SIDECAR_FILE: &str = "semantic.sqlite3";
 
 /// One vault's engine, or the typed reason it is not running.
 enum Slot {
+    /// The delivered section enables the engine and none is open yet. The
+    /// sidecar open and the model setup are owed: they run as a lifecycle
+    /// slice once the publication that committed this delivery has been
+    /// made ([`SemanticEngines::work`]), never at the delivery itself.
+    Preparing,
     Running {
         /// `None` only when a panic escaped the sidecar-damage rebuild, which
         /// takes the engine out of the slot to discard and reopen it; every
@@ -121,6 +127,9 @@ pub enum SemanticStatus {
     /// enables one, or the vault is not attached. A slot fact, not an
     /// authoring fact — the serving surface composes the config beside it.
     Off,
+    /// The delivered section enables an engine and it is not yet open: its
+    /// initialization follows the publication that committed the section.
+    Preparing,
     On {
         last_drain_error: Option<String>,
         /// The sidecar state the engine answers from now.
@@ -195,6 +204,9 @@ pub enum SemanticRefusal {
     /// `None` where no delivery stands — the vault is not attached, or was
     /// detached since.
     NoEngine { section: Option<EngineSection> },
+    /// The delivered section enables an engine whose initialization has not
+    /// yet run.
+    Preparing,
     /// The engine took itself out of service; the detail is the slot's.
     SelfDisabled { detail: String },
     /// The engine is running and this answer failed.
@@ -206,6 +218,9 @@ impl std::fmt::Display for SemanticRefusal {
         match self {
             SemanticRefusal::NoEngine { .. } => {
                 write!(f, "no semantic engine stands for this vault")
+            }
+            SemanticRefusal::Preparing => {
+                write!(f, "the semantic engine is preparing")
             }
             SemanticRefusal::SelfDisabled { detail } => {
                 write!(f, "the semantic engine is out of service: {detail}")
@@ -312,6 +327,13 @@ impl VectorRefusal {
                     detail: "no engine section was delivered".to_string(),
                 },
             },
+            // The section enables the engine and its initialization is still
+            // owed: unavailable for now, never disabled or failed.
+            SemanticRefusal::Preparing => VectorRefusal::Unavailable {
+                message: "this vault's engine is preparing, so it answers no vector rung yet"
+                    .to_string(),
+                detail: "the engine is preparing".to_string(),
+            },
             // The engine took itself out of service. What the section says is
             // not the fact any more: the engine was delivered and stood down.
             SemanticRefusal::SelfDisabled { detail } => VectorRefusal::Unavailable {
@@ -375,6 +397,11 @@ impl VectorRefusal {
 struct Delivery {
     section: EngineSection,
     slot: Option<Arc<EngineSlot>>,
+    /// The store lifetime the entry's publishing gate hold committed this
+    /// delivery beside, or `None` until a hold has committed it. An owed
+    /// initialization runs only after that publication, and only over the
+    /// store lifetime it names ([`SemanticEngines::publish_delivery`]).
+    published_store: Option<String>,
 }
 
 /// What one delivery left for a vault, as `vault status` and `doctor` report
@@ -418,19 +445,36 @@ impl DeliveredEngine {
 /// hold ends, however it ends — and a status reads the report alone. What a
 /// status reads is therefore the slot as the last act that held it left it:
 /// during a drain, the slot as it stood before that drain.
+///
+/// **The slot's identity is the delivery's.** A delivery that keeps a slot
+/// keeps this allocation, and one that replaces it makes another, so an
+/// initialization holding this slot installs only while the map still holds
+/// the same one: a detach and a re-attach under the same section and store
+/// deliver a new slot, and a result taken for the old one is refused.
 struct EngineSlot {
     slot: Mutex<Slot>,
     /// Shared with every [`DeliveredEngine`] an entry committed over this
     /// slot, which reads it and nothing else of the slot.
     report: Arc<Mutex<SemanticStatus>>,
+    /// The configuration this slot was delivered, which an initialization
+    /// opens the engine under.
+    settings: Settings,
+    /// Whether the slot owes a lifecycle slice: the initialization of a
+    /// preparing slot, or feed a leg may have committed past the engine's
+    /// positions. Read without the slot's lock, so the cheap check a
+    /// maintenance clock asks never waits behind a drain.
+    owed: AtomicBool,
 }
 
 impl EngineSlot {
-    fn new(slot: Slot) -> Arc<Self> {
+    fn new(slot: Slot, settings: Settings) -> Arc<Self> {
         let report = Arc::new(Mutex::new(read_slot(&slot)));
+        let owed = AtomicBool::new(matches!(slot, Slot::Preparing));
         Arc::new(EngineSlot {
             slot: Mutex::new(slot),
             report,
+            settings,
+            owed,
         })
     }
 
@@ -475,6 +519,7 @@ fn tolerant<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What `slot` is doing, as a status read reports it.
 fn read_slot(slot: &Slot) -> SemanticStatus {
     match slot {
+        Slot::Preparing => SemanticStatus::Preparing,
         Slot::Running {
             engine: Some(engine),
             last_drain_error,
@@ -507,6 +552,7 @@ fn read_slot(slot: &Slot) -> SemanticStatus {
 pub(crate) fn engine_status(status: SemanticStatus, store: Option<&StoreReading>) -> EngineStatus {
     match status {
         SemanticStatus::Off => EngineStatus::off(),
+        SemanticStatus::Preparing => EngineStatus::preparing(),
         SemanticStatus::On {
             last_drain_error,
             watermarks,
@@ -547,18 +593,28 @@ impl SemanticEngines {
             .map(|delivery| delivery.section.clone())
     }
 
-    /// What the delivery standing for `vault` left, for its entry to commit
-    /// as what a status reports, or `None` where no delivery stands.
+    /// Commit the delivery standing for `vault` as published beside `store`,
+    /// and answer what it left for its entry to commit as what a status
+    /// reports, or `None` where no delivery stands.
     ///
-    /// The section and the slot's report cell come from one delivery: the
-    /// map lock is held across finding them.
-    pub(crate) fn delivery(&self, vault: &VaultName) -> Option<DeliveredEngine> {
-        tolerant(&self.vaults)
-            .get(vault)
-            .map(|delivery| DeliveredEngine {
+    /// **This is the publication an owed initialization waits for.** It is
+    /// called in the gate hold that publishes a leg's declaration, so the
+    /// section, the slot's report cell and the store lifetime the entry
+    /// committed are one instant, and an initialization that follows runs for
+    /// this delivery over this store lifetime alone. It takes the map lock
+    /// and no slot lock, and does no I/O.
+    pub(crate) fn publish_delivery(
+        &self,
+        vault: &VaultName,
+        store: Option<&StoreReading>,
+    ) -> Option<DeliveredEngine> {
+        tolerant(&self.vaults).get_mut(vault).map(|delivery| {
+            delivery.published_store = store.map(|store| store.epoch().to_string());
+            DeliveredEngine {
                 section: delivery.section.clone(),
                 report: delivery.slot.as_ref().map(|slot| Arc::clone(&slot.report)),
-            })
+            }
+        })
     }
 
     /// The `limit` nearest paths to `text` in `vault` with the reading they
@@ -629,6 +685,7 @@ impl SemanticEngines {
             Some(Delivery {
                 section,
                 slot: None,
+                ..
             }) => {
                 return Err(SemanticRefusal::NoEngine {
                     section: Some(section.clone()),
@@ -640,6 +697,7 @@ impl SemanticEngines {
         };
         let slot = tolerant(&slot.slot);
         match &*slot {
+            Slot::Preparing => Err(SemanticRefusal::Preparing),
             Slot::Running {
                 engine: Some(engine),
                 ..
@@ -653,20 +711,150 @@ impl SemanticEngines {
         }
     }
 
-    /// Drain `vault`'s engine over `feed`, on the leg that just committed
-    /// lane-1 work.
+    /// Record that a leg holding `vault`'s attachment may have committed
+    /// lane-1 work the engine has not drained: the slot owes a slice. No
+    /// semantic work runs here — the slice follows on the lifecycle's quiet
+    /// maintenance, after the leg's own publication.
+    pub(crate) fn owe(&self, vault: &VaultName) {
+        if let Some(slot) = self.slot(vault) {
+            slot.owed.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether `vault`'s slot owes a slice that may run now: its delivery
+    /// is published and it owes initialization or feed. Cheap and
+    /// nonblocking — the map lock alone, never the slot's.
+    pub(crate) fn owes_work(&self, vault: &VaultName) -> bool {
+        tolerant(&self.vaults).get(vault).is_some_and(|delivery| {
+            delivery.published_store.is_some()
+                && delivery
+                    .slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.owed.load(Ordering::Acquire))
+        })
+    }
+
+    /// Run one bounded unit of `vault`'s owed semantic work over `feed`, on a
+    /// lifecycle leg that holds the vault's attachment, and answer whether
+    /// work is still owed.
     ///
-    /// Never an error to the leg: a drain failure is retained on the slot,
-    /// and sidecar damage resolves by the engine's own rebuild floor — the
-    /// rebuilt sidecar's reset cursors make the next drain recompute what
-    /// the discard emptied.
+    /// The unit is the initialization of a preparing slot — the sidecar open
+    /// or creation, its inspection or rebuild, and the model setup — or one
+    /// drain slice of `budget` for a running engine. Never an error to the
+    /// leg: a drain failure is retained on the slot, an open failure leaves
+    /// it self-disabled, and sidecar damage resolves by the engine's own
+    /// rebuild floor, whose reset cursors the next slice drains.
     ///
-    /// The slot's report is written as the drain's hold of the slot ends, on
-    /// every path out of it ([`Draining`]).
-    pub(crate) fn drain(&self, vault: &VaultName, feed: &mut FeedRead<'_>) {
-        let Some(engine_slot) = self.slot(vault) else {
-            return;
+    /// **An initialization installs only for the delivery, store lifetime and
+    /// claim it began under.** It runs only where the entry's publishing gate
+    /// hold committed this slot's delivery beside `feed`'s store epoch. The
+    /// open runs with no lock of this set held. The install then holds the
+    /// map lock and the slot's: the map must still hold this very slot — a
+    /// disable, a reload that replaced it, or a detach and re-attach under
+    /// the same section and store all leave another slot or none — its
+    /// published store must still be `feed`'s, and `still_claimed`, asked
+    /// once the open has returned and before those locks are taken, must
+    /// answer that the leg's lifecycle claim still stands. A refused result
+    /// is dropped once both locks are released, so a sidecar connection is
+    /// never closed under them.
+    pub(crate) fn work(
+        &self,
+        vault: &VaultName,
+        feed: &mut FeedRead<'_>,
+        budget: SliceBudget,
+        still_claimed: impl Fn() -> bool,
+    ) -> bool {
+        let store_epoch = feed.epoch().to_string();
+        let Some((engine_slot, published)) =
+            tolerant(&self.vaults).get(vault).and_then(|delivery| {
+                delivery
+                    .slot
+                    .clone()
+                    .map(|slot| (slot, delivery.published_store.clone()))
+            })
+        else {
+            return false;
         };
+        if !engine_slot.owed.load(Ordering::Acquire) {
+            return false;
+        }
+        let preparing = matches!(&*tolerant(&engine_slot.slot), Slot::Preparing);
+        if preparing {
+            if published.as_deref() != Some(store_epoch.as_str()) {
+                // Not yet committed beside this store: the publication that
+                // commits it is what lets the initialization run.
+                return true;
+            }
+            self.initialize(vault, &engine_slot, &store_epoch, still_claimed);
+            return engine_slot.owed.load(Ordering::Acquire);
+        }
+        self.drain_slice(&engine_slot, feed, budget);
+        engine_slot.owed.load(Ordering::Acquire)
+    }
+
+    /// Open the engine for `engine_slot` outside every lock, and install it
+    /// where the slot is still the current, published, claimed one.
+    fn initialize(
+        &self,
+        vault: &VaultName,
+        engine_slot: &Arc<EngineSlot>,
+        store_epoch: &str,
+        still_claimed: impl Fn() -> bool,
+    ) {
+        let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
+        // The slot was delivered enabling settings, and the stub is the one
+        // embedder this composition opens an engine with.
+        let opened = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
+            Ok(engine) => Slot::Running {
+                engine: Some(Box::new(engine)),
+                last_drain_error: None,
+            },
+            Err(error) => Slot::SelfDisabled {
+                detail: format!("the sidecar did not open: {}", engine_refusal_told(&error)),
+            },
+        };
+        #[cfg(test)]
+        self.hooks.run_before_install();
+        // Asked before the map lock: the claim is read under the entry gate,
+        // and the gate is taken ahead of this set's map elsewhere. A claim
+        // superseded after this answer belongs to a leg whose attachment goes
+        // back to a detach, which takes this slot out of the map.
+        let claimed = still_claimed();
+        let refused = {
+            let vaults = tolerant(&self.vaults);
+            let current = vaults.get(vault).is_some_and(|delivery| {
+                delivery
+                    .slot
+                    .as_ref()
+                    .is_some_and(|slot| Arc::ptr_eq(slot, engine_slot))
+                    && delivery.published_store.as_deref() == Some(store_epoch)
+            });
+            let mut slot = tolerant(&engine_slot.slot);
+            if claimed && current && matches!(&*slot, Slot::Preparing) {
+                let installed = std::mem::replace(&mut *slot, opened);
+                *tolerant(&engine_slot.report) = read_slot(&slot);
+                // A running engine owes the drain that converges it; an
+                // engine that did not open owes nothing until a delivery.
+                engine_slot
+                    .owed
+                    .store(matches!(&*slot, Slot::Running { .. }), Ordering::Release);
+                drop(slot);
+                drop(vaults);
+                installed
+            } else {
+                drop(slot);
+                drop(vaults);
+                opened
+            }
+        };
+        drop(refused);
+    }
+
+    /// One drain slice of `engine_slot`'s running engine over `feed`.
+    ///
+    /// The slot's report is written as the slice's hold of the slot ends, on
+    /// every path out of it ([`Draining`]).
+    fn drain_slice(&self, engine_slot: &EngineSlot, feed: &mut FeedRead<'_>, budget: SliceBudget) {
         let mut draining = Draining {
             slot: tolerant(&engine_slot.slot),
             report: &engine_slot.report,
@@ -679,30 +867,33 @@ impl SemanticEngines {
             last_drain_error,
         } = &mut *slot
         else {
+            engine_slot.owed.store(false, Ordering::Release);
             return;
         };
         let Some(running) = engine.as_mut() else {
             *slot = Slot::SelfDisabled {
                 detail: ABANDONED.to_string(),
             };
+            engine_slot.owed.store(false, Ordering::Release);
             return;
         };
-        match running.drain(feed) {
-            Ok(_) => *last_drain_error = None,
+        // A failed slice owes nothing more until the next leg commits: the
+        // rows it did not write are still owed by the cursor, and a retry on
+        // every quiet tick would only repeat the refusal.
+        let owed = match running.drain_bounded(feed, budget) {
+            Ok(report) => {
+                *last_drain_error = None;
+                report.owed
+            }
             Err(error) if error.sidecar_damage().is_some() => {
                 let taken = engine.take().expect("the engine this drain ran on");
                 match taken.discard_and_reopen() {
-                    Ok(mut rebuilt) => {
-                        let outcome = rebuilt.drain(feed);
+                    Ok(rebuilt) => {
                         *engine = Some(Box::new(rebuilt));
-                        *last_drain_error = match outcome {
-                            Ok(_) => None,
-                            Err(after) => Some(format!(
-                                "rebuilt after damage ({}), and the drain after it failed: {}",
-                                engine_refusal_told(&error),
-                                engine_refusal_told(&after)
-                            )),
-                        };
+                        *last_drain_error = None;
+                        // The rebuilt sidecar's reset cursors are the next
+                        // slice's to drain.
+                        true
                     }
                     Err(failed) => {
                         *slot = Slot::SelfDisabled {
@@ -712,11 +903,16 @@ impl SemanticEngines {
                                 engine_refusal_told(&failed)
                             ),
                         };
+                        false
                     }
                 }
             }
-            Err(error) => *last_drain_error = Some(engine_refusal_told(&error)),
-        }
+            Err(error) => {
+                *last_drain_error = Some(engine_refusal_told(&error));
+                false
+            }
+        };
+        engine_slot.owed.store(owed, Ordering::Release);
         #[cfg(test)]
         self.hooks.run_as_drain_ends();
     }
@@ -746,12 +942,16 @@ impl SemanticEngines {
     /// The delivery it replaces is dropped once the map lock is released, so
     /// a sidecar connection the replaced slot closes is never closed under
     /// that lock.
-    fn deliver(&self, vault: &VaultName, section: EngineSection, slot: Option<Slot>) {
+    ///
+    /// A new delivery is unpublished until the entry's next publishing gate
+    /// hold commits it.
+    fn deliver(&self, vault: &VaultName, section: EngineSection, slot: Option<Arc<EngineSlot>>) {
         let replaced = tolerant(&self.vaults).insert(
             vault.clone(),
             Delivery {
                 section,
-                slot: slot.map(EngineSlot::new),
+                slot,
+                published_store: None,
             },
         );
         drop(replaced);
@@ -763,19 +963,21 @@ impl EngineConfigReceiver for SemanticEngines {
         "semantic"
     }
 
-    /// Delivery is the enable act.
+    /// Delivery validates the section and records what it asks for; it no
+    /// longer opens anything.
     ///
-    /// A running engine re-delivered an enabling section is kept as it
-    /// stands — its sidecar, cursors and diagnostics are retained state, and
-    /// re-opening them would say a reload changed something it did not.
-    /// Keep-versus-reopen has no observable difference today (the sidecar is
-    /// adopted either way), so the choice is stated here rather than tested.
-    /// A refused or self-disabled slot is re-attempted from scratch, because
-    /// a delivery is exactly the author's next try.
+    /// A running engine re-delivered the configuration it runs under is kept
+    /// as it stands — its sidecar, cursors and diagnostics are retained
+    /// state, and re-opening them would say a reload changed something it did
+    /// not — and so is a slot still preparing under that configuration. An
+    /// enabling section otherwise leaves a preparing slot, whose sidecar open
+    /// and model setup run after the publication that commits it
+    /// ([`SemanticEngines::work`]). A refused or self-disabled slot is
+    /// re-attempted from scratch, because a delivery is exactly the author's
+    /// next try.
     ///
-    /// The map lock is never held across the engine open: the open touches
-    /// the filesystem, and holding the map through it would couple every
-    /// vault's answers to this one's enable.
+    /// No lock of this set is held across anything but the map's own
+    /// bookkeeping, and nothing here touches the filesystem.
     fn receive(&self, vault: &VaultName, config: Option<&EngineConfig>) {
         self.delivered(vault, config);
         #[cfg(test)]
@@ -798,7 +1000,10 @@ impl SemanticEngines {
                 self.deliver(
                     vault,
                     EngineSection::malformed(detail.clone()),
-                    Some(Slot::SelfDisabled { detail }),
+                    Some(EngineSlot::new(
+                        Slot::SelfDisabled { detail },
+                        Settings { enabled: false },
+                    )),
                 );
                 return;
             }
@@ -808,27 +1013,23 @@ impl SemanticEngines {
             return;
         }
         if let Some(slot) = self.slot(vault)
+            && slot.settings == settings
             && matches!(
                 &*tolerant(&slot.slot),
-                Slot::Running {
-                    engine: Some(_),
-                    ..
-                }
+                Slot::Preparing
+                    | Slot::Running {
+                        engine: Some(_),
+                        ..
+                    }
             )
         {
             return;
         }
-        let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
-        let slot = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
-            Ok(engine) => Slot::Running {
-                engine: Some(Box::new(engine)),
-                last_drain_error: None,
-            },
-            Err(error) => Slot::SelfDisabled {
-                detail: format!("the sidecar did not open: {}", engine_refusal_told(&error)),
-            },
-        };
-        self.deliver(vault, EngineSection::enabled(), Some(slot));
+        self.deliver(
+            vault,
+            EngineSection::enabled(),
+            Some(EngineSlot::new(Slot::Preparing, settings)),
+        );
     }
 }
 
@@ -849,6 +1050,7 @@ pub(crate) mod tests {
         drain: Mutex<Option<Arranged>>,
         drain_end: Mutex<Option<Arranged>>,
         delivery: Mutex<Option<Arranged>>,
+        install: Mutex<Option<Arranged>>,
     }
 
     impl Hooks {
@@ -861,6 +1063,13 @@ pub(crate) mod tests {
 
         pub(super) fn run_as_drain_ends(&self) {
             let arranged = tolerant(&self.drain_end).take();
+            if let Some(arranged) = arranged {
+                arranged();
+            }
+        }
+
+        pub(super) fn run_before_install(&self) {
+            let arranged = tolerant(&self.install).take();
             if let Some(arranged) = arranged {
                 arranged();
             }
@@ -886,6 +1095,13 @@ pub(crate) mod tests {
         /// slot, and while it still holds the slot.
         pub(crate) fn run_as_next_drain_ends(&self, arranged: impl FnOnce() + Send + 'static) {
             *tolerant(&self.hooks.drain_end) = Some(Box::new(arranged));
+        }
+
+        /// Run `arranged` once, inside the next initialization of any vault's
+        /// engine: once the engine has opened, before the install is judged,
+        /// with no lock of this set held.
+        pub(crate) fn run_before_next_install(&self, arranged: impl FnOnce() + Send + 'static) {
+            *tolerant(&self.hooks.install) = Some(Box::new(arranged));
         }
 
         /// Run `arranged` once, as the next delivery to any vault returns,
@@ -937,6 +1153,7 @@ mod composition_tests {
             .collect();
         refusals.extend([
             SemanticRefusal::NoEngine { section: None },
+            SemanticRefusal::Preparing,
             SemanticRefusal::SelfDisabled {
                 detail: "the engine stood down".to_string(),
             },
@@ -947,6 +1164,7 @@ mod composition_tests {
         for refusal in &refusals {
             match refusal {
                 SemanticRefusal::NoEngine { .. }
+                | SemanticRefusal::Preparing
                 | SemanticRefusal::SelfDisabled { .. }
                 | SemanticRefusal::Failed { .. } => {}
             }
@@ -964,6 +1182,9 @@ mod composition_tests {
             }
             SemanticRefusal::SelfDisabled { detail } => {
                 ErrorDetail::engine_unavailable(Rung::Vector, detail.clone())
+            }
+            SemanticRefusal::Preparing => {
+                ErrorDetail::engine_unavailable(Rung::Vector, "the engine is preparing")
             }
             SemanticRefusal::NoEngine {
                 section: Some(EngineSection::Absent {} | EngineSection::Disabled {}),
@@ -1163,14 +1384,18 @@ mod freshness_tests {
         );
     }
 
-    /// No engine standing and an engine out of service are reported as
-    /// themselves.
+    /// No engine standing, an engine still preparing and an engine out of
+    /// service are reported as themselves.
     #[test]
     fn an_engine_off_or_self_disabled_is_reported_as_itself() {
         let store = StoreReading::of("store", 10);
         assert_eq!(
             engine_status(SemanticStatus::Off, Some(&store)),
             EngineStatus::off()
+        );
+        assert_eq!(
+            engine_status(SemanticStatus::Preparing, Some(&store)),
+            EngineStatus::preparing()
         );
         assert_eq!(
             engine_status(

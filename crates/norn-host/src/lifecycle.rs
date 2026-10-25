@@ -691,6 +691,16 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
+    /// Whether this job's claim still stands at the entry: the check a
+    /// result the job computed off the gate is installed under, where the
+    /// claim is all it needs, not the quiet a new duty starts under.
+    pub fn stands(&self) -> bool {
+        self.entry.upgrade().is_some_and(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            state.claim.stands_at(self.epoch)
+        })
+    }
+
     /// Recheck the claim immediately before starting a quiet-only duty.
     pub fn quiet_maintenance_allowed(&self) -> bool {
         self.entry.upgrade().is_some_and(|entry| {
@@ -2741,7 +2751,11 @@ fn record_active_declaration<O: EntryOps>(
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
     state.plan_ground = ops.plan_ground(attachment).map(Arc::new);
-    state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
+    // The engine delivery is committed beside the store reading the leg
+    // recorded: the publication an owed engine initialization waits for.
+    state.delivered_engine = ops
+        .semantic()
+        .and_then(|engines| engines.publish_delivery(name, state.store_reading.as_ref()));
     record_advisories(state, ops, attachment);
 }
 
