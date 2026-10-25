@@ -21,10 +21,13 @@ def read(path):return json.loads(path.read_text())
 
 
 def configure(config):
-    """Use existing runner/oracle modules; only live envelopes have owned adaptations."""
+    """Bind the public content oracle before importing the pinned external runners."""
     here=Path(__file__).resolve().parent
     sys.path[:0]=[str(here),config['performance_tools'],config['existing_bundle'],
                   str(Path(config['existing_bundle'])/'runner'),config['prototype_tools']]
+    import results
+    if not hasattr(results,'validate_first_get_content'):
+        raise ValueError('public content oracle missing')
     import native_evidence
     native_evidence.configure({k:v['sha256'] for k,v in config['binaries'].items()})
 
