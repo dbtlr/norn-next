@@ -300,34 +300,50 @@ pub(super) fn metadata(
             .declined("live metadata eligibility unavailable; wait for ordinary readiness")
             .map_err(JobFailure::Environmental);
     };
-    let Some(reader) = super::intake::build(
-        attachment,
-        exclusions,
-        policy,
-        Some((experiment.observer.as_ref(), &observation)),
-    )?
-    else {
-        return experiment
-            .observer
-            .declined("live metadata changed during construction; wait for ordinary readiness")
-            .map_err(JobFailure::Environmental);
-    };
-    let reader = Arc::new(reader);
-    let capability = Arc::new(LiveFindReader {
-        guarded: LiveReader::new(reader, observation),
-        model: model.clone(),
-    });
-    let _retire = Retire(&capability.guarded);
-    let result = if capability.guarded.eligible() {
-        experiment.observer.live_find(capability.clone())
-    } else {
-        experiment
-            .observer
-            .declined("live metadata changed during construction; wait for ordinary readiness")
-    }
-    .map_err(JobFailure::Environmental);
-    capability.guarded.retire();
-    let mut failures = capability.guarded.take_failures();
+    let mut retirement = None;
+    let mut failures = Vec::new();
+    let result = (|| {
+        let Some(reader) = super::intake::build(
+            attachment,
+            exclusions,
+            policy,
+            Some((experiment.observer.as_ref(), &observation)),
+            Some(&mut retirement),
+        )?
+        else {
+            return experiment
+                .observer
+                .declined("live metadata changed during construction; wait for ordinary readiness")
+                .map_err(JobFailure::Environmental);
+        };
+        let reader = Arc::new(reader);
+        let capability = Arc::new(LiveFindReader {
+            guarded: LiveReader::new(reader, observation),
+            model: model.clone(),
+        });
+        let _retire = Retire(&capability.guarded);
+        let result = if capability.guarded.eligible() {
+            experiment.observer.live_find(capability.clone())
+        } else {
+            experiment
+                .observer
+                .declined("live metadata changed during construction; wait for ordinary readiness")
+        }
+        .map_err(JobFailure::Environmental);
+        capability.guarded.retire();
+        failures.extend(capability.guarded.take_failures());
+        result
+    })();
     failures.extend(result.err());
+    // The live phase has released its owners. A held read is reported as an
+    // outstanding owner, never preempted or waited out to claim physical cleanup.
+    if let Some(retirement) = retirement {
+        failures.extend(
+            retirement
+                .verify()
+                .map_err(|error| store_effect(error.into()))
+                .err(),
+        );
+    }
     finish(failures)
 }

@@ -145,7 +145,7 @@ pub(super) fn prepare(
     model: &Arc<ContentModel>,
 ) -> Result<Projection, JobFailure> {
     let reader = Arc::new(IntakeReader::from_sealed(
-        build(attachment, exclusions, policy, None)?.ok_or_else(|| {
+        build(attachment, exclusions, policy, None, None)?.ok_or_else(|| {
             JobFailure::Environmental("frozen metadata construction declined".into())
         })?,
         model.clone(),
@@ -170,6 +170,7 @@ pub(super) fn build(
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
     live: Option<(&dyn Observer, &norn_fs::watch::Observation)>,
+    retirement: Option<&mut Option<norn_store::startup_experiment::RetirementCheck>>,
 ) -> Result<Option<SnapshotReader>, JobFailure> {
     use std::hash::BuildHasher;
     use std::os::unix::ffi::OsStrExt;
@@ -188,6 +189,11 @@ pub(super) fn build(
         crate::DERIVATION_VERSION,
     )
     .map_err(store_effect)?;
+    // Capture the actual owner before any pin, loading, guard or sealing exit.
+    // A failed constructor has no captured check; its operation error still fails.
+    if let Some(retirement) = retirement {
+        *retirement = Some(builder.retirement_check());
+    }
     if let Some(pin) = attachment
         .store
         .begin_request()
