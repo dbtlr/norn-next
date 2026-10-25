@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private live adapter for the fixed worker workload; one declared cell per invocation."""
+"""Public and private live adapter for the fixed worker workload; one declared cell per invocation."""
 import argparse
 import copy
 import json
@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 sys.dont_write_bytecode=True
 from revalidation import MODE, COMMANDS, SCOPE
+from public_mode import MODE as PUBLIC_MODE, LOADING as PUBLIC_LOADING, SCOPE as PUBLIC_SCOPE
 
 
 def read(path):return json.loads(path.read_text())
@@ -70,7 +71,12 @@ def measurement_adapter(arm,manifest):
     from transport import Current, resources
     from baseline import append, write_json
     from revalidation import (canonical_prefix,live_answer,validate_ready,validate_history,account,logical_available)
-    live=arm==MODE
+    public=arm==PUBLIC_MODE
+    live=arm in (MODE,PUBLIC_MODE)
+    loading_mode=PUBLIC_LOADING if public else 'operator-prefix-live'
+    scope=PUBLIC_SCOPE if public else SCOPE
+    if public:
+        from public_mode import (public_answer as live_answer,validate_ready,validate_history,account,logical_available)
     class MeasuredCurrent(Current):
         def __init__(self,binary,root,**options):
             self.root_for_ack=root
@@ -81,7 +87,7 @@ def measurement_adapter(arm,manifest):
             self.suffix_count=0
             self.prefix_began=time.perf_counter_ns()
             if live:
-                if options.get('loading')!='operator-prefix-live':raise ValueError('wrong live selection')
+                if options.get('loading')!=loading_mode:raise ValueError('wrong live selection')
                 (root/'operator-prefix-acks').mkdir()
                 options['stage_handler']=self.prefix_stage
             try:
@@ -109,8 +115,9 @@ def measurement_adapter(arm,manifest):
                         builder_not_invoked_attempts=0,fallback_count=0,construction_eligibility_gets=0),
                     first_get_validated_ns=self.rows[0]['parent_validated_ns'],first_find_validated_ns=self.rows[1]['parent_validated_ns'],
                     parent_ready_received_ns=parent_ready,parent_origin_monotonic_ns=self.prefix_began,
-                    first_early_response_received_ns=self.stages[0]['parent_received_ns'] if live else None,
-                    availability_scope=SCOPE if live else 'ordinary Host after Ready',
+                    first_early_response_received_ns=(next((s['parent_received_ns'] for s in self.stages if s['early_answer']),None)
+                        if public else self.stages[0]['parent_received_ns'] if live else None),
+                    availability_scope=scope if live else 'ordinary Host after Ready',
                     warm_clocks_include_prefix=False,external_dispatch_identical=False)
                 write_json(root/'prefix.json',prefix)
                 write_json(root/'ready-validation.json',coverage)
@@ -131,19 +138,19 @@ def measurement_adapter(arm,manifest):
             received=time.perf_counter_ns()-self.prefix_began
             index=event.get('operator_prefix_sequence',0)-1
             if index!=len(self.physical):raise ValueError('missing, duplicate, or reordered phase')
-            append(self.physical_stream,dict(kind='private-stage',command=event.get('command'),native_stdout_index=index,
-                builder_invoked=event.get('builder_invoked'),disposition=event.get('disposition')))
+            details=dict(disposition=event.get('disposition'))
+            if not public:details['builder_invoked']=event.get('builder_invoked')
+            append(self.physical_stream,dict(kind='public-stage' if public else 'private-stage',command=event.get('command'),native_stdout_index=index,**details))
             normalized=live_answer(index,event,manifest)
             validated=time.perf_counter_ns()-self.prefix_began
-            self.physical.append(dict(operation=('get_attempt','find_attempt')[index],dispatch='private',command=COMMANDS[index],
-                builder_invoked=event['builder_invoked'],disposition=event['disposition']))
+            self.physical.append(dict(operation=('get_attempt','find_attempt')[index],dispatch='public' if public else 'private',command=COMMANDS[index],**details))
             event.update(parent_received_ns=received,parent_validated_ns=validated,verified=True,
                 resources_after_validation=resources(self.process.pid),
-                private_storage_at_validation={str(p.relative_to(self.root_for_ack)):p.stat().st_size for p in (self.root_for_ack/'data').rglob('*') if p.is_file()},
+                private_storage_at_validation=None if public else {str(p.relative_to(self.root_for_ack)):p.stat().st_size for p in (self.root_for_ack/'data').rglob('*') if p.is_file()},
                 construction_storage_high_water=None,construction_storage_high_water_unavailable='endpoint observations only; no continuous sampler')
             if logical_available(event):
                 self.rows[index]=dict(command=COMMANDS[index],answer=None,normalized_answer=normalized,
-                    parent_received_ns=received,parent_validated_ns=validated,dispatch='private observer on attachment thread',verified=True)
+                    parent_received_ns=received,parent_validated_ns=validated,dispatch='caller thread through Host' if public else 'private observer on attachment thread',verified=True)
             pending=self.root_for_ack/'operator-prefix-acks'/f'{index+1}.pending'
             write_json(pending,dict(sequence=index+1,probe=event['probe']))
             pending.replace(pending.with_suffix('.json'))
@@ -190,7 +197,8 @@ def validate_parent_clock(root,prefix):
         first_find_validated_ns=prefix['rows'][1]['parent_validated_ns'],
         parent_ready_received_ns=prefix['parent_ready_received_ns'])
     attempts=prefix.get('attempts',[])
-    expected['first_early_response_received_ns']=attempts[0]['parent_received_ns'] if attempts else None
+    expected['first_early_response_received_ns']=(next((s['parent_received_ns'] for s in attempts if s['early_answer']),None)
+        if prefix.get('mode')==PUBLIC_MODE else attempts[0]['parent_received_ns'] if attempts else None)
     canonical=prefix.get('canonical_revalidation',{})
     expected.update(canonical_revalidation_start_ns=canonical.get('parent_start_ns'),
                     canonical_revalidation_end_ns=canonical.get('parent_end_ns'))
@@ -222,8 +230,9 @@ def compare_cells(cells):
             raise ValueError('incomplete or unverified cell')
         value = {key:cell[key] for key in ('native_answers','normalized_prefix','source',
                  'semantic_sha256','canonical_identity_sha256','page_map_sha256','document_construction_sha256',
-                 'comparable_writer','history','canonical_prefix_answers','canonical_history')}
+                 'history','canonical_prefix_answers','canonical_history')}
         size = cell['cell']['background_documents']
+        if not any(c.get('arm')==PUBLIC_MODE for c in cells):value['comparable_writer']=cell['comparable_writer']
         if reference.setdefault(size,value) != value:
             raise ValueError('native answer/counter, source, semantics, writer, history or index identity differs')
 
@@ -240,13 +249,18 @@ def verify_cell(root,arm,fixtures,config,*,size=300):
     from work_account import WRITER_WORK
     records=[json.loads(line) for line in (root.parents[1]/'samples.jsonl').read_text().splitlines()]
     manifest=read(fixtures/str(size)/'manifest.json')
-    selected=dict(arm=arm,subject='candidate' if arm==MODE else 'baseline',loading='operator-prefix-live' if arm==MODE else None)
+    public=arm==PUBLIC_MODE
+    candidate_arm=arm in (MODE,PUBLIC_MODE)
+    if public:
+        from public_mode import public_answer as live_answer,validate_ready
+    selected=dict(arm=arm,subject='candidate' if candidate_arm else 'baseline',
+        loading=PUBLIC_LOADING if public else 'operator-prefix-live' if candidate_arm else None)
     audit=replay(root,selected,dict(background_documents=size),fixtures,manifest,read(root/'final-source.json'))
     native=validate_native_cell(root,records,manifest,audit,mode=arm)
     history=[json.loads(line) for line in (root/'request-history.jsonl').read_text().splitlines()]
     prefix=read(root/'prefix.json')
-    stages=read(root/'loading-checkpoints.json') if arm==MODE else []
-    coverage=validate_ready(stages,records[0]['ready'],manifest) if arm==MODE else validate_mode(arm,[],records[0]['ready'],manifest)
+    stages=read(root/'loading-checkpoints.json') if candidate_arm else []
+    coverage=validate_ready(stages,records[0]['ready'],manifest) if candidate_arm else validate_mode(arm,[],records[0]['ready'],manifest)
     if read(root/'ready-validation.json')!=coverage:raise ValueError('Ready receipt differs')
     ready=records[0]['ready']
     work=ready['operator_prefix_receipt']['canonical_work'] if arm==MODE else ready['job_evidence']
@@ -277,8 +291,9 @@ def verify_cell(root,arm,fixtures,config,*,size=300):
     quality={k:audit[k] for k in ('semantic_sha256','canonical_identity_sha256','page_map_sha256','document_construction_sha256')}
     if any(not isinstance(v,str) or len(v)!=64 for v in quality.values()):raise ValueError('missing final quality identity')
     return dict(completed=True,integrity_verified=True,native_answers=native,normalized_prefix=normalized,
-        source=read(root/'final-source.json'),comparable_writer={k:v for k,v in writer.items() if k!='tombstones_recorded'},
-        canonical_writer_work=writer,unreported_counters=unreported,history=history,**quality,
+        source=read(root/'final-source.json'),comparable_writer=None if public else {k:v for k,v in writer.items() if k!='tombstones_recorded'},
+        canonical_writer_work=None if public else writer,total_startup_writer_work=ready['job_evidence'],
+        canonical_writer_work_unavailable='public API exposes no canonical/private split' if public else None,unreported_counters=unreported,history=history,**quality,
         operations=frozen.summarize(records),measurement_clock=clock,physical_account=prefix['physical_account'],
         canonical_prefix_answers=[dict(answer=canonical_answer(i,row['answer'],manifest,
             expected=(audit['store_epoch'],audit['write_generation']-120))[0],counters=row['answer']['counters'])
@@ -288,9 +303,10 @@ def verify_cell(root,arm,fixtures,config,*,size=300):
 
 
 def plan(config,output,config_path=None):
+    candidate_mode=config.get('candidate_mode',MODE)
     cells=[]
-    for pair,size,arms in ((0,2000,('main-ordinary',MODE)),(0,10000,('main-ordinary',MODE)),
-                           (1,10000,(MODE,'main-ordinary')),(1,2000,(MODE,'main-ordinary'))):
+    for pair,size,arms in ((0,2000,('main-ordinary',candidate_mode)),(0,10000,('main-ordinary',candidate_mode)),
+                           (1,10000,(candidate_mode,'main-ordinary')),(1,2000,(candidate_mode,'main-ordinary'))):
         for arm in arms:
             index=len(cells)
             cells.append(dict(index=index,pair=pair,background_documents=size,documents=size+14,arm=arm,
@@ -302,7 +318,7 @@ def plan(config,output,config_path=None):
     return dict(cells=cells,n_pairs_per_size=2,workers_executed=False,
         outcome_policy='retain every outcome; stop at first failed/interrupted cell pending parent disposition; never repeat a completed cell',
         execution_policy='serial processes; close all owned heavy jobs before sampling; ambient T3 Git polling remains',
-        interpretation='descriptive only; cold gains and exact results mandatory; warm differences for judgment; no 1% gate, independent-call assumption, confidence intervals, A/A subtraction, or statistical pass',
+        interpretation='descriptive only; exact results mandatory; served Ready answers are not early gains; warm differences for judgment; no 1% gate, independent-call assumption, confidence intervals, A/A subtraction, or statistical pass',
         cache_policy='OS caches uncontrolled; no selective reruns',baseline_calls=483,successful_candidate_calls=485,
         canonical_calls_per_arm=483,unchanged_suffix_calls=481)
 
@@ -327,6 +343,15 @@ def run_cell(config,arm,output,*,size=300):
     output.mkdir(parents=True)
     summary=dict(completed=False,arm=arm,documents=size+14,clocks_qualifying=False,performance_claim=False,
         inputs=before,argv=sys.argv,started_monotonic_ns=time.perf_counter_ns())
+    from provenance import sha256
+    from native_evidence import environment_snapshot
+    import hashlib
+    write_json(output/'execution-before.json',dict(interpreter=str(Path(sys.executable).resolve()),
+        interpreter_sha256=sha256(Path(sys.executable)),python_version=sys.version,
+        cwd=str(Path.cwd()),argv=[sys.executable,*sys.argv],
+        environment=environment_snapshot(os.environ),
+        environment_sha256=hashlib.sha256(json.dumps(dict(os.environ),sort_keys=True).encode()).hexdigest(),
+        inputs=before,arm=arm,size=size,clocks_qualifying=False))
     original=baseline.Current
     try:
         fixture,manifest=baseline.prepare(SimpleNamespace(output=output,fixtures=Path(config['fixtures'])),size)
@@ -335,8 +360,8 @@ def run_cell(config,arm,output,*,size=300):
         candidate=Path(config['binaries']['candidate']['path']);main=Path(config['binaries']['baseline']['path'])
         with Capture(root,manifest['tree_sha256'],(candidate,main)) as capture:
             with (output/'samples.jsonl').open('x') as samples:
-                baseline.run_worker(SimpleNamespace(output=output,current=candidate if arm==MODE else main,
-                    loading='operator-prefix-live' if arm==MODE else None,warmups=5,samples=25),
+                baseline.run_worker(SimpleNamespace(output=output,current=candidate if arm in (MODE,PUBLIC_MODE) else main,
+                    loading=PUBLIC_LOADING if arm==PUBLIC_MODE else 'operator-prefix-live' if arm==MODE else None,warmups=5,samples=25),
                     'current',size,0,fixture,manifest,samples)
             capture.flush()
             summary['post_close_storage_bytes']=storage_bytes(root)
@@ -358,12 +383,13 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--arm',choices=('main-ordinary',MODE),default=MODE)
+    parser.add_argument('--arm',choices=('main-ordinary',MODE,PUBLIC_MODE),default=MODE)
     parser.add_argument('--prepare-plan',action='store_true')
     parser.add_argument('--size',type=int,choices=(300,2000,10000),default=300)
     parser.add_argument('--execute-functional',action='store_true')
     parser.add_argument('--execute-cell',action='store_true')
     parser.add_argument('--compare',nargs=2,type=Path)
+    parser.add_argument('--replay',nargs='+',type=Path)
     args=parser.parse_args()
     config=read(args.config.resolve());configure(config)
     if args.prepare_plan:
@@ -376,10 +402,29 @@ def main():
         summaries=[read(p/'run.json') for p in args.compare]
         compare_cells([s|{'cell':dict(background_documents=s['documents']-14)} for s in summaries])
         from baseline import write_json
-        write_json(args.output,dict(result='PASS',documents=summaries[0]['documents'],full_canonical_history_answers_counters_source_writer_and_four_identities_equal=True,
+        public=any(s['arm']==PUBLIC_MODE for s in summaries)
+        equality={'full_canonical_history_answers_counters_source_and_four_identities_equal':True}
+        if not public:equality={'full_canonical_history_answers_counters_source_writer_and_four_identities_equal':True}
+        write_json(args.output,dict(result='PASS',documents=summaries[0]['documents'],**equality,
+            startup_writer_totals=[s['total_startup_writer_work'] for s in summaries],
+            startup_writer_split_unavailable='public API exposes no canonical/private split' if public else None,
+            operations=[s['operations'] for s in summaries],
+            semantic_sha256_scope='logical-store identity, not semantic quality',
             cells=[str(p) for p in args.compare],performance_claim=False,clocks_qualifying=False))
         return
     state=input_state(config)
+    if args.replay:
+        if args.execute_functional or args.execute_cell:raise ValueError('replay launches no producers')
+        from baseline import write_json
+        if args.output.exists():raise ValueError('fresh replay result required')
+        for cell in args.replay:
+            saved=read(cell/'run.json')
+            actual=verify_cell(cell/'work'/f"{saved['documents']-14}-0-c",saved['arm'],Path(config['fixtures']),config,size=saved['documents']-14)
+            if any(saved.get(k)!=v for k,v in actual.items()):raise ValueError('replayed evidence differs from retained cell')
+        if input_state(config)!=state:raise ValueError('inputs changed around replay')
+        write_json(args.output,dict(result='PASS',cells=[str(c) for c in args.replay],workers_executed=False,
+            full_raw_replay=True,clocks_qualifying=False,performance_claim=False))
+        return
     if args.execute_functional and args.size!=300:raise ValueError('functional proof uses only 314 documents')
     if not (args.execute_functional or args.execute_cell):
         print(json.dumps(dict(preflight='PASS',workers_executed=False,inputs=state)))

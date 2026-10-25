@@ -167,7 +167,11 @@ def validate_native_cell(root, records, manifest, audit=None, *, mode=None):
                     or stage.get('operator_prefix_sequence') != index + 1):
                 raise ValueError(f'native startup stage {index} differs')
     from revalidation import MODE, validate_slice
-    if mode == MODE:
+    from public_mode import MODE as PUBLIC_MODE
+    if mode == PUBLIC_MODE:
+        from public_mode import validate_slice as validate_public_slice
+        responses = validate_public_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage)
+    elif mode == MODE:
         if audit is None:
             audit = json.loads((root / 'final-audit.json').read_text())
         responses = validate_slice(root, prefix, responses, stages, ready, history, manifest, audit, native_stage)

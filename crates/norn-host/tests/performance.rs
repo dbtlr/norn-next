@@ -8,6 +8,9 @@ mod attach;
 #[path = "performance/cache.rs"]
 mod cache;
 #[cfg(feature = "induced-failure")]
+#[path = "performance/public.rs"]
+mod public;
+#[cfg(feature = "induced-failure")]
 #[path = "performance/staged.rs"]
 mod staged;
 #[cfg(feature = "induced-failure")]
@@ -202,6 +205,7 @@ fn performance_worker() {
         Ok("operator-prefix") => Some("early"),
         Ok("operator-prefix-capped") => Some("capped"),
         Ok("operator-prefix-live") => Some("live"),
+        Ok("operator-prefix-public") => Some("public"),
         Ok("operator-prefix-ordinary") => Some("ordinary"),
         _ => None,
     };
@@ -301,7 +305,7 @@ fn performance_worker() {
                 };
                 Some(experiment)
             }
-            Ok("operator-prefix-ordinary") | Err(_) => None,
+            Ok("operator-prefix-ordinary" | "operator-prefix-public") | Err(_) => None,
             Ok(mode) => panic!("unknown startup experiment {mode}"),
         }
     };
@@ -317,12 +321,21 @@ fn performance_worker() {
             Ok("operator-prefix"
                 | "operator-prefix-ordinary"
                 | "operator-prefix-capped"
-                | "operator-prefix-live")
+                | "operator-prefix-live"
+                | "operator-prefix-public")
         ),
         "operator prefix modes require induced-failure"
     );
     #[cfg(feature = "induced-failure")]
-    let host = vault.host_with_loading_options(policy, experiment, cache_options.cache.clone());
+    let host = if operator_mode == Some("public") {
+        assert!(
+            experiment.is_none(),
+            "public requests use ordinary composition"
+        );
+        vault.host_with_policy(policy)
+    } else {
+        vault.host_with_loading_options(policy, experiment, cache_options.cache.clone())
+    };
     #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
     // Drop the diagnostic receiver before Host joins its attachment worker,
@@ -331,6 +344,10 @@ fn performance_worker() {
     let mut residency = residency;
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
+    #[cfg(feature = "induced-failure")]
+    let public_ready = (operator_mode == Some("public"))
+        .then(|| public::prefix(&host, vault.name(), &root, began))
+        .flatten();
     let until = Instant::now() + std::time::Duration::from_secs(240);
     while host.state(vault.name()).expect("registered vault state") != norn_wire::TrustState::Ready
     {
@@ -350,6 +367,8 @@ fn performance_worker() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let ready_ns = began.elapsed().as_nanos();
+    #[cfg(feature = "induced-failure")]
+    let ready_ns = public_ready.unwrap_or(ready_ns);
     #[cfg(feature = "induced-failure")]
     let (timings, evidence) = {
         // Ready is published before the job folds its account; wait for that tail.
@@ -417,7 +436,11 @@ fn performance_worker() {
     let ready = if let Some(mode) = operator_mode {
         let mut ready = ready;
         ready["operator_prefix_mode"] = json!(mode);
-        ready["operator_prefix_receipt"] = if let Some(observer) = &live_prefix {
+        ready["operator_prefix_receipt"] = if mode == "public" {
+            json!({"mode":"public-host-prefix","logical_requests":2,
+                "dispatch":"caller thread through Host::get then Host::find",
+                "availability_scope":"public Host first-open requests"})
+        } else if let Some(observer) = &live_prefix {
             observer.receipt()
         } else if let Some(observer) = &capped_prefix {
             observer.receipt()

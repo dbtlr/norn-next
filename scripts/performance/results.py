@@ -112,7 +112,7 @@ def distribution(values: list[int]) -> dict:
             "min_ms": ordered[0] / 1e6, "max_ms": ordered[-1] / 1e6}
 
 
-def whole_get_answer(stage):
+def whole_get_answer(stage, *, first_index=False):
     """Keep the complete record while comparing finding content across store epochs."""
     answer = copy.deepcopy(stage["answer"])
     report = answer["report"]
@@ -125,7 +125,9 @@ def whole_get_answer(stage):
     reading = answer.get("reading")
     if reading is not None:
         epoch, generation = reading.get("epoch"), reading.get("generation")
-        if reading.get("trust") != {"state": "ready"}:
+        if (reading.get("trust") != {"state": "ready"}
+                and not (first_index and reading.get("trust", {}).get("state") == "warming"
+                         and reading["trust"].get("phase") == "healing")):
             raise ValueError("whole-record answer provenance is not Ready")
         if "projection_epoch" in stage and (epoch != stage["projection_epoch"]
                 or generation != stage["projection_generation"]):
@@ -167,9 +169,9 @@ def validate_first_get(response, manifest, *, private=False):
     return validate_first_get_content(response, manifest)
 
 
-def validate_first_get_content(response, manifest):
+def validate_first_get_content(response, manifest, *, first_index=False):
     """Shared authored whole-record oracle after the caller validates its envelope."""
-    normalized = whole_get_answer(response)
+    normalized = whole_get_answer(response, first_index=first_index)
     validate_read("current", {"op": "get", "target": "bench/small.md"}, response, manifest)
     source = "---\nstatus: draft\nperf_bucket: probe\n---\n" + manifest["small_body"]
 

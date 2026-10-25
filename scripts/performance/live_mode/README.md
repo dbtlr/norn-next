@@ -1,4 +1,4 @@
-# Private live measurement adapter
+# Public and private first-open measurement adapter
 
 This adapter selects `Experiment::live_metadata("small", observer)` in the existing
 performance worker. It measures two private requests on the attachment thread:
@@ -61,3 +61,55 @@ stops execution pending parent disposition. Completed cells are never repeated.
 Owned heavy work closes before future sampling and processes run serially. OS
 caches remain uncontrolled and ambient T3 Git polling prevents a whole-host quiet
 claim.
+
+
+## Public Host mode
+
+`candidate-public-revalidated` selects `operator-prefix-public` in the existing
+worker. It composes `Vault::host_with_policy` and calls `Host::get` for whole
+`small`, then `Host::find` for the same complete metadata page as canonical P2.
+Targets enter through those calls. Construction receives no target or observer.
+Parent ACKs wait on the caller thread while attachment continues normally.
+
+Public events retain the genuine `VaultAnswer`, its actual trust, epoch and
+generation, snapshot counters, and `Answered.work`. Caller start and finish clocks
+exclude response serialization. A separate post-call state observation records
+when the caller first observes Ready. `early_answer` requires a warming answer
+and a post-call observation that is still warming. A Ready answer is served
+publicly and earns no early label. A warming hold that finishes after promotion
+also earns no early label when its post-call observation sees Ready. Publication
+itself has no timestamp in this API. Parent validation endpoints and worker
+observations remain separate clocks.
+
+A loading or withdrawal refusal retains its actual error envelope and elapsed
+cost. It supplies no answer, snapshot counters, or builder work. Other errors
+stop the cell. The single canonical P2 supplies every unavailable logical answer;
+there is no additional fallback request or renewed acquisition deadline.
+Every arm has 483 canonical calls, including the unchanged 481-call suffix.
+The public candidate adds exactly two public attempts regardless of disposition.
+Refusals expose neither builder execution counts nor before-builder counters.
+Those accounts remain unavailable. Public construction has no private eligibility
+Get receipt.
+
+`job_evidence` reports actual total startup work, including additional public
+construction. Its canonical and private components are unavailable. The pair
+compares exact canonical P2 and suffix answers and snapshot counters, source
+histories, and four final identities. Startup writer totals are reported for
+judgment, without asserting an unobservable split or equality. `semantic_sha256`
+is a logical-store identity and says nothing about semantic quality.
+
+Set `candidate_mode` to `candidate-public-revalidated` in the pinned configuration
+for the public eight-cell plan. `--replay CELL ...` rechecks retained raw producer
+streams, envelopes, counters, source mutations, and final audits without launching
+workers. The output path must be fresh. New producer receipts bind actual cwd and
+an exact environment fingerprint alongside the existing selected environment
+values. `execution-before.json` pins the controller interpreter, cwd, argv,
+environment fingerprint, and source and tool inputs before launching subjects.
+Environment fingerprints retain no secret values. Historical records keep their
+original schema.
+
+Public functional clocks remain permanently nonqualifying. Larger comparisons are
+descriptive: warm differences are judged per operation, with no hard percentage,
+equivalence, confidence, or statistical gate. Resource endpoints cannot establish
+continuous peaks or final byte I/O. There is no timed in-process sampler or
+full-tree observer. Ordinary baseline tombstone work remains unavailable.

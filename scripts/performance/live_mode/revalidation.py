@@ -120,14 +120,21 @@ def live_answer(index, event, manifest):
     # reading or paused/frozen label is manufactured for an old validator.
     response=copy.deepcopy(event)
     response['answer']=answer
+    return content_answer(index,response,manifest)
+
+
+def content_answer(index,response,manifest,*,first_index=False):
+    """Shared full content oracle; envelope provenance is validated by the caller."""
+    answer=response['answer']
     if index==0:
         from results import validate_first_get_content
-        normalized=validate_first_get_content(response,manifest)
+        normalized=validate_first_get_content(response,manifest,first_index=first_index)
     else:
         from results import validate_read
         from loading import metadata_answer
         validate_read('current',COMMANDS[1],response,manifest)
         normalized=metadata_answer(response)
+        normalized.pop('reading',None)
         fold=str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')
         ordered=sorted(manifest['active_paths'],key=lambda p:(p.translate(fold),p))
         report=answer['report'];page=report.get('page',{})
@@ -268,7 +275,7 @@ def canonical_prefix(worker,root,manifest,parent_ready):
     elapsed=lambda:time.perf_counter_ns()-worker.prefix_began
     prefix=dict(slice=SLICE,commands=list(COMMANDS),rows=[],parent_start_ns=elapsed(),resources_before=resources(worker.process.pid))
     expected=None
-    epochs=[s['projection_epoch'] for s in worker.stages if s['projection_epoch'] is not None]
+    epochs=[s['projection_epoch'] for s in worker.stages if s.get('mode')!='public' and s.get('projection_epoch') is not None]
     if len(set(epochs))!=len(epochs):raise ValueError('private projections must remain distinct')
     for i,command in enumerate(COMMANDS):
         requested=elapsed()
@@ -299,18 +306,24 @@ def canonical_prefix(worker,root,manifest,parent_ready):
     return prefix
 
 
-def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage):
+def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage,*,public=False):
     """Consume the exact canonical P2, retaining the existing full 481 validator."""
     from native_validation import validate_provenance
     load=lambda name:json.loads((root/name).read_text())
-    if prefix.get('mode')!=MODE or len(stages)!=2 or len(responses)!=483:
+    expected_mode=MODE
+    check_ready,check_history,physical_account,attempt_answer,available=validate_ready,validate_history,account,live_answer,logical_available
+    if public:
+        from public_mode import (MODE as expected_mode, validate_ready as check_ready,
+            validate_history as check_history, account as physical_account,
+            public_answer as attempt_answer, logical_available as available)
+    if prefix.get('mode')!=expected_mode or len(stages)!=2 or len(responses)!=483:
         raise ValueError('named live slice/native count differs')
-    coverage=validate_ready(stages,ready,manifest)
+    coverage=check_ready(stages,ready,manifest)
     attempts=load('loading-checkpoints.json')
     if prefix.get('attempts')!=attempts or [native_stage(s) for s in attempts]!=stages or load('ready-validation.json')!=coverage:
         raise ValueError('live native attempt/Ready receipts differ')
-    validate_history(attempts,ready,integer(prefix.get('parent_ready_received_ns')))
-    expected_account=account(attempts,ready)
+    check_history(attempts,ready,integer(prefix.get('parent_ready_received_ns')))
+    expected_account=physical_account(attempts,ready)
     if prefix.get('physical_account')!=expected_account:raise ValueError('live physical account differs')
     provenance=validate_provenance(root,history,responses[2:],audit)
     expected=(provenance['store_epoch'],provenance['initial_generation'])
@@ -321,14 +334,14 @@ def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,nat
     validate_resources(canonical['resources_before']);validate_resources(canonical['resources_after'])
     previous=integer(canonical['parent_start_ns'])
     if previous<prefix['parent_ready_received_ns']:raise ValueError('canonical P2 precedes Ready')
-    epochs=[s['projection_epoch'] for s in stages if s['projection_epoch'] is not None]
+    epochs=[] if public else [s['projection_epoch'] for s in stages if s['projection_epoch'] is not None]
     if len(set(epochs))!=len(epochs):raise ValueError('merged private projection epochs')
     ledger=[];physical=[]
     for i,event in enumerate(stages):
-        ledger.append(dict(kind='private-stage',command=COMMANDS[i],native_stdout_index=i,
-            builder_invoked=event['builder_invoked'],disposition=event['disposition']))
-        physical.append(dict(operation=('get_attempt','find_attempt')[i],dispatch='private',command=COMMANDS[i],
-            builder_invoked=event['builder_invoked'],disposition=event['disposition']))
+        details=dict(disposition=event['disposition'])
+        if not public:details['builder_invoked']=event['builder_invoked']
+        ledger.append(dict(kind='public-stage' if public else 'private-stage',command=COMMANDS[i],native_stdout_index=i,**details))
+        physical.append(dict(operation=('get_attempt','find_attempt')[i],dispatch='public' if public else 'private',command=COMMANDS[i],**details))
     for i,(command,response,row) in enumerate(zip(COMMANDS,responses[:2],canonical['rows'])):
         receipt=dict(slice=SLICE,logical_request=i+1,attempt='canonical-prefix',command=command,
             native_stdout_index=3+i,cell_token=(root/'performance-token').read_text(),root_identity=root_identity(root))
@@ -336,8 +349,12 @@ def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,nat
             raise ValueError('canonical P2 differs from native command/answer/root')
         validate_resources(row['resources_after_validation'])
         normalized,_=canonical_answer(i,response,manifest,expected=expected,private_epochs=epochs)
-        private=live_answer(i,stages[i],manifest)
-        fallback=not logical_available(stages[i])
+        private=attempt_answer(i,stages[i],manifest)
+        fallback=not available(stages[i])
+        if public and stages[i].get('answer') is not None and stages[i]['answer']['reading']['trust']=={'state':'ready'}:
+            reading=stages[i]['answer']['reading']
+            if (reading['epoch'],reading['generation'])!=expected:
+                raise ValueError('Ready public provenance differs from canonical P2')
         if private is not None and private!=normalized:raise ValueError('executed typed answer differs from canonical P')
         requested,received,validated=(integer(row.get(k)) for k in ('parent_requested_ns','parent_received_ns','parent_validated_ns'))
         dispatch='Host after Ready fallback' if fallback else 'Host after Ready canonical revalidation'

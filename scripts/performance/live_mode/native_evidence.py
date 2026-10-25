@@ -59,11 +59,13 @@ class Capture:
             # source. E writes final-source before its verify/audit commands.
             # Reuse those receipts here; do not scan/warm the corpus at spawn.
             source=self.initial_source if role=='worker' else json.loads((self.root/'final-source.json').read_text())['tree_sha256']
+            environment_sha256=hashlib.sha256(json.dumps(options['env'],sort_keys=True).encode()).hexdigest()
+            launch_cwd=str(Path(options['cwd']).resolve())
             process=self.original(command,*pos,**options)
             receipt=dict(schema='native-closed-producer-r2-v1',role=role,command=list(command),
                 binary_sha256=self.binary_hashes[command[0]],parent_pid=os.getpid(),pid=process.pid,
                 started_monotonic_ns=began,source_sha256=source,
-                environment=environment_snapshot(options['env']),**identity(self.root))
+                environment=environment_snapshot(options['env']),environment_sha256=environment_sha256,cwd=launch_cwd,**identity(self.root))
             self.observed.append((process,receipt))
             return process
         subprocess.Popen=launch
@@ -119,6 +121,16 @@ def validate_process(root,role,subject,source,loading=None,*,producer=None):
             or type(receipt.get('returncode')) is not int or receipt['returncode']!=0
             or receipt.get('process_closed') is not True or receipt.get('group_closed') is not True):
         raise ValueError(f'{role} actual native producer command/source/environment/status differs')
+    if 'cwd' in receipt and receipt['cwd']!=str(root.resolve()):raise ValueError('native producer cwd differs')
+    if 'environment_sha256' in receipt:
+        from transport import environment
+        env=environment(root,(root/'performance-token').read_text())
+        if role=='worker':
+            env.update(NORN_PERFORMANCE_CHANGESET_SIZE='128',NORN_PERFORMANCE_PROFILE='0')
+            if loading:env['NORN_PERFORMANCE_LOADING']=loading
+            if loading=='operator-prefix-capped':env['NORN_PERFORMANCE_FROZEN_INPUT']='frozen-fixture-v1'
+        if receipt['environment_sha256']!=hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest():
+            raise ValueError('exact native producer environment fingerprint differs')
     began=integer(receipt.get('started_monotonic_ns'));ended=integer(receipt.get('finished_monotonic_ns'))
     if not 0 < began <= ended or integer(receipt.get('pid'))==0 or integer(receipt.get('parent_pid'))==0:
         raise ValueError(f'{role} producer origin/completion differs')
