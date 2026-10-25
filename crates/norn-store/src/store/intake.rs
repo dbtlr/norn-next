@@ -108,15 +108,6 @@ impl IntakeBuilder {
         })
     }
 
-    /// Audit the actual owner and paths even if construction never reaches sealing.
-    #[cfg(feature = "induced-failure")]
-    pub fn retirement_check(&self) -> norn_db::RetirementCheck {
-        self.file
-            .as_ref()
-            .expect("a newly created intake owns its file")
-            .retirement_check()
-    }
-
     /// Observe final cleanup without keeping the file alive.
     pub fn cleanup_receipt(&self) -> norn_db::TemporaryCleanupReceipt {
         self.cleanup.clone()

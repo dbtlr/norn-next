@@ -95,6 +95,3 @@ pub use temporary::{
 
 #[cfg(feature = "induced-failure")]
 pub use temporary::RetirementCheck;
-
-#[cfg(feature = "induced-failure")]
-pub use database::database_is_absent;

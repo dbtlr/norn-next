@@ -1768,16 +1768,6 @@ impl Store {
             .map_err(|error| error::sql("digesting the schema", error))
     }
 
-    #[cfg(feature = "induced-failure")]
-    pub fn retirement_check(&self) -> norn_db::RetirementCheck {
-        assert_eq!(
-            self.mode,
-            StoreMode::Throwaway,
-            "only disposable stores retire"
-        );
-        self.database.retirement_check()
-    }
-
     /// Close the store, tearing a throwaway one down.
     ///
     /// A throwaway store tears itself down when dropped as well; this is the
