@@ -14,6 +14,7 @@ pub struct StepCounters {
     pub rows_inserted: u64,
     pub rows_rewritten: u64,
     pub rows_deleted: u64,
+    pub tombstones_discarded: u64,
     pub fact_rows_written: u64,
     pub links_judged: u64,
     pub findings_written: u64,
@@ -39,6 +40,7 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
     let empty: bool = tx
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM documents) AND NOT EXISTS(SELECT 1 FROM vault_files)
+         AND NOT EXISTS(SELECT 1 FROM tombstones)
          AND NOT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
             [MARKER],
             |r| r.get(0),
@@ -46,7 +48,7 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         .map_err(|e| error::sql("checking four-step eligibility", e))?;
     if !empty {
         return Err(refused(
-            "four-step construction requires empty documents and files",
+            "four-step construction requires empty documents, files and tombstones",
         ));
     }
     norn_db::meta::put_meta(&tx, MARKER, 1_i64)?;
@@ -607,11 +609,24 @@ pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
     require_complete(&tx, "content_done")?;
     require_complete(&tx, "structure_done")?;
     require_complete(&tx, "health_done")?;
+    // No construction state has been adoptable. Deaths the ordinary churn
+    // reconciliation observed are transient first-build history; a build from
+    // zero over the final tree has none. begin() refuses pre-existing deaths,
+    // so this cannot remove history from an adopted store.
+    let tombstones_discarded =
+        tx.execute("DELETE FROM tombstones", [])
+            .map_err(|e| error::sql("discarding construction-only tombstones", e))? as u64;
     tx.execute_batch("DROP TABLE four_step_state")
         .map_err(|e| error::sql("dropping four-step progress", e))?;
     tx.execute("DELETE FROM meta WHERE key = ?1", [MARKER])
         .map_err(|e| error::sql("clearing four-step construction marker", e))?;
-    committed(tx, StepCounters::default())
+    committed(
+        tx,
+        StepCounters {
+            tombstones_discarded,
+            ..StepCounters::default()
+        },
+    )
 }
 
 /// Discard an initial-build row whose source vanished or changed before it
@@ -645,6 +660,34 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn an_empty_document_set_with_existing_death_history_is_not_a_new_lab_store() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-existing-deaths",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        store
+            .begin_request()
+            .apply_increment(
+                crate::IncrementProvenance::Derived,
+                [crate::Change::Death {
+                    path: DocumentPath::new("prior.md").unwrap(),
+                    provenance: crate::Provenance::WatcherRemoval,
+                }],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+        assert!(begin(&mut store).is_err());
+    }
 
     #[test]
     fn the_marker_alone_prevents_adoption_even_when_the_production_schema_matches() {

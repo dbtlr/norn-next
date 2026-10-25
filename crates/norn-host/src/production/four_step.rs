@@ -657,6 +657,7 @@ pub(crate) fn readings(counters: &StepCounters) -> BTreeMap<&'static str, u64> {
         ("rows_inserted", counters.rows_inserted),
         ("rows_rewritten", counters.rows_rewritten),
         ("rows_deleted", counters.rows_deleted),
+        ("tombstones_discarded", counters.tombstones_discarded),
         ("fact_rows_written", counters.fact_rows_written),
         ("links_judged", counters.links_judged),
         ("findings_written", counters.findings_written),

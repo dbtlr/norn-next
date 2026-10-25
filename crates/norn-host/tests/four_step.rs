@@ -391,3 +391,55 @@ fn incomplete_lab_store_is_rebuilt_instead_of_adopted() {
             .is_none()
     );
 }
+
+struct DeleteAfterContent(std::path::PathBuf, Mutex<Option<FourStepReport>>);
+impl FourStepObserver for DeleteAfterContent {
+    fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
+        if matches!(event, FourStepEvent::ContentComplete) {
+            std::fs::remove_file(self.0.join("z-requested.md")).unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            while read.is_current() {
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if let FourStepEvent::Complete(report) = event {
+            *self.1.lock().unwrap() = Some(report.clone());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_document_removed_after_content_matches_an_ordinary_build_of_the_final_tree() {
+    for no_body in [false, true] {
+        let scratch = fixture("four-step-delete", false);
+        let vault = attach::Vault::adopt(scratch.root());
+        let lab = vault.beside(&scratch.join("lab"));
+        let probe = Arc::new(DeleteAfterContent(scratch.join("vault"), Mutex::new(None)));
+        let host = lab
+            .host_with_four_step(FourStepLoading::new(2, no_body, vec![], probe.clone()).unwrap());
+        let demand = host.demand(lab.name()).unwrap();
+        wait_ready(&host, &lab);
+        drop(demand);
+        drop(host);
+        assert_eq!(
+            probe.1.lock().unwrap().as_ref().unwrap().steps["relations"]["tombstones_discarded"],
+            u64::from(!no_body)
+        );
+        let ordinary = vault.beside(&scratch.join("ordinary-final"));
+        let host = ordinary.host();
+        let demand = host.demand(ordinary.name()).unwrap();
+        wait_ready(&host, &ordinary);
+        drop(demand);
+        drop(host);
+        let actual = norn_store::startup_audit::audit(&lab.database(), |_, _, _| Ok(())).unwrap();
+        let expected =
+            norn_store::startup_audit::audit(&ordinary.database(), |_, _, _| Ok(())).unwrap();
+        assert_eq!(
+            actual["semantic_sha256"], expected["semantic_sha256"],
+            "removed document, no_body={no_body}: tombstones lab={} ordinary={}",
+            actual["tables"]["tombstones"]["rows"], expected["tables"]["tombstones"]["rows"]
+        );
+    }
+}
