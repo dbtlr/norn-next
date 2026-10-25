@@ -431,16 +431,40 @@ reconciliation of the accumulated facts. Request-specific early permission does 
 that boundary. Canonical lexical/rich queries become useful at that boundary even while
 optional semantic initialization or feed consumption remains outstanding.
 
-Semantic initialization and feed consumption follow canonical publication. Consumption
-runs in bounded lifecycle-owned slices, with watcher batches drained between slices.
+Configuration interpretation and delivery still precede publication of the canonical
+declaration. Delivery validates the section and records its desired configuration identity
+and actual availability; it no longer eagerly opens a sidecar or initializes a model.
+Where initialization is owed, the delivered reading says it is pending, rather than
+claiming an enabled runnable engine, a disabled engine, or an initialization failure.
+An already running compatible engine may retain its actual availability without reopening.
+The publishing gate hold commits the declaration fingerprints, delivered section and that
+truthful availability reading together. This replaces the architecture's eager-enable
+meaning of config delivery while preserving declaration/delivery coupling.
+
+Initialization includes sidecar open or creation, inspection/rebuild and model setup;
+it is not another name for consuming the first feed page. Those operations follow the
+canonical publication that committed their configuration. Until an engine is usable,
+semantic requests follow the existing unavailable-rung behavior and status distinguishes
+pending initialization from disabled or failed configuration. Initialization success or
+failure is published only for the still-current configuration identity, store lifetime
+and lifecycle claim. Disable, reload, replacement and teardown retire obsolete pending
+work; a late result cannot install an engine for an older declaration or retired store.
+Its resources close outside the entry gate. No model or sidecar I/O runs under that gate.
+
+Semantic initialization, store-epoch reconciliation and feed consumption run in bounded
+lifecycle-owned slices, with watcher batches drained between slices. Vault-sized sidecar
+reconciliation is not exempt from that work and memory bound. Semantic slices yield to
+owed heal work, queued applies, pending watcher facts and due teardown, as other quiet
+maintenance does. Outstanding semantic work does not defer idle detach; remaining work
+can resume after a later attachment under the then-current configuration and store.
 No semantic slice runs between a lane-1 commit and publication of its `derived_through`
 or `Ready`, including on later reconcile, apply, recovery, rebuild and reload paths.
 The existing unbounded inline post-leg drain must be replaced accordingly; slice size
 and the concrete host scheduling carrier are implementation limits, not claims about
 mechanisms already present. Work with a single slow model operation still obeys the
 maintenance observation limit above, without converting the whole backlog into one turn.
-Config, sidecar ownership, feed epoch/generation, cancellation and teardown retain their
-lane-2 contracts. Status and search answers keep the engine's actual availability and
+Apart from the explicit delivery/initialization split, config, sidecar ownership, feed
+epoch/generation, cancellation and teardown retain their lane-2 contracts. Status and search answers keep the engine's actual availability and
 watermarks. Semantic work neither writes correctness state nor blocks ordinary lexical
 readiness merely because it has more feed to consume. A model-free host makes no semantic
 availability claim, and scheduling tests do not establish real-model cost or quality.
