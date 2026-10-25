@@ -1,9 +1,23 @@
 //! Eligibility observes accepted facts without consuming the heal or delivery.
+//!
+//! These bookkeeping and lifetime tests inject facts through `ingest` over real
+//! polling subscriptions. Their synchronous baseline provides unchanged coverage;
+//! native FSEvents may deliver setup/history facts even after becoming live.
+//! Native delivery and synchronization contracts remain in `tests/watcher.rs`.
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use norn_testkit::{isolation, scratch::Scratch, wait::Budget};
 
-fn fixture() -> (Scratch, Subscription, isolation::Lease) {
+/// Take the lease before creating the tree. Callers bind in this order so the
+/// subscription and scratch tree drop before the lease is released.
+fn fixture() -> (isolation::Lease, Scratch, Subscription) {
+    let lease = isolation::Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(Budget::new(
+            Duration::from_secs(15),
+            Duration::from_millis(250),
+        )),
+    );
     let scratch = Scratch::under(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guard-scratch"),
         "watch-observation",
@@ -14,21 +28,14 @@ fn fixture() -> (Scratch, Subscription, isolation::Lease) {
     let root = root.canonicalize().unwrap();
     let schema = root.join("schema.yaml");
     std::fs::write(&schema, "version: 1\n").unwrap();
-    let lease = isolation::Lease::hold(
-        isolation::REAL_WATCHER,
-        isolation::acquisition_budget(Budget::new(
-            Duration::from_secs(15),
-            Duration::from_millis(250),
-        )),
-    );
-    let (watch, _) = watch(&root, &schema).unwrap();
+    let (watch, _) = watch_polling(&root, &schema).unwrap();
     watch.synchronize(Duration::from_secs(5)).unwrap();
-    (scratch, watch, lease)
+    (lease, scratch, watch)
 }
 
 #[test]
 fn observation_accepts_unchanged_coverage_and_never_recovers_after_a_held_fact() {
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     let root = watch.covered_root().to_path_buf();
     watch.begin_heal();
     let guard = watch
@@ -51,7 +58,7 @@ fn observation_accepts_unchanged_coverage_and_never_recovers_after_a_held_fact()
         guard.is_current(),
         "accesses and excluded non-facts retain eligibility"
     );
-    let (foreign, _) = super::watch(&root, &root.join("schema.yaml")).unwrap();
+    let (foreign, _) = super::watch_polling(&root, &root.join("schema.yaml")).unwrap();
     foreign.synchronize(Duration::from_secs(5)).unwrap();
     let foreign_guard = foreign.unchanged_observation().unwrap();
     assert!(!watch.accepts_observation(&foreign_guard));
@@ -84,7 +91,7 @@ fn observation_accepts_unchanged_coverage_and_never_recovers_after_a_held_fact()
 
 #[test]
 fn observation_stays_invalid_after_terminal_consumption_and_revision_exhaustion() {
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
     let guard = watch.unchanged_observation().unwrap();
     ingest(
@@ -97,7 +104,7 @@ fn observation_stays_invalid_after_terminal_consumption_and_revision_exhaustion(
     assert!(!guard.is_current());
     assert!(watch.unchanged_observation().is_none());
 
-    let (second, _) = super::watch(
+    let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
     )
@@ -122,7 +129,7 @@ fn observation_stays_invalid_after_terminal_consumption_and_revision_exhaustion(
 
 #[test]
 fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
     let guard = watch.unchanged_observation().unwrap();
     ingest(
@@ -133,7 +140,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
     watch.finish_heal().unwrap();
     assert!(!guard.is_current());
 
-    let (second, _) = super::watch(
+    let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
     )
@@ -146,7 +153,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
     );
     assert!(!guard.is_current());
 
-    let (mut third, _) = super::watch(
+    let (mut third, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
     )
@@ -187,7 +194,7 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
 
 #[test]
 fn an_established_first_index_proof_survives_admin_close_but_records_late_contradictions() {
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     let proof = watch.first_index_observation().expect("unchanged coverage");
     assert!(proof.check_root());
     assert!(proof.admits());
@@ -213,7 +220,7 @@ fn an_established_first_index_proof_survives_admin_close_but_records_late_contra
 
 #[test]
 fn first_index_checks_separate_root_io_from_admission_and_never_recover() {
-    let (_scratch, mut watch, _lease) = fixture();
+    let (_lease, _scratch, mut watch) = fixture();
     watch.begin_heal();
     watch.watcher.take();
     let proof = watch.first_index_observation().unwrap();
@@ -241,7 +248,7 @@ fn first_index_checks_separate_root_io_from_admission_and_never_recover() {
 
 #[test]
 fn first_index_proofs_observe_accepted_facts_before_delivery_and_notify_late_registration() {
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     watch.begin_heal();
     let proof = watch.first_index_observation().unwrap();
     ingest(
@@ -258,7 +265,7 @@ fn first_index_proofs_observe_accepted_facts_before_delivery_and_notify_late_reg
 
 #[test]
 fn first_index_held_proof_owns_no_watcher_account_and_backend_failure_poison_survives_close() {
-    let (_scratch, watch, _lease) = fixture();
+    let (lease, scratch, watch) = fixture();
     let proof = watch.first_index_observation().unwrap();
     let weak = Arc::downgrade(&watch.state);
     drop(watch);
@@ -270,8 +277,9 @@ fn first_index_held_proof_owns_no_watcher_account_and_backend_failure_poison_sur
     proof.invalidate();
     assert!(!proof.held_is_current());
 
-    drop(_lease);
-    let (_other, watch, _lease2) = fixture();
+    drop(scratch);
+    drop(lease);
+    let (_lease2, _other, watch) = fixture();
     let proof = watch.first_index_observation().unwrap();
     ingest(
         &watch.state,
@@ -296,7 +304,7 @@ fn first_index_withdrawal_wakes_an_existing_condvar_and_racing_registration() {
             self.changed.notify_all();
         }
     }
-    let (_scratch, watch, _lease) = fixture();
+    let (_lease, _scratch, watch) = fixture();
     let proof = watch.first_index_observation().unwrap();
     let signal = Arc::new(Signal {
         notified: Mutex::new(false),
@@ -323,7 +331,7 @@ fn first_index_withdrawal_wakes_an_existing_condvar_and_racing_registration() {
     );
     // Race registration with withdrawal on another unchanged coverage, using
     // the same existing stance signal and no bridge worker.
-    let (second, _) = super::watch(
+    let (second, _) = super::watch_polling(
         watch.covered_root(),
         &watch.covered_root().join("schema.yaml"),
     )
