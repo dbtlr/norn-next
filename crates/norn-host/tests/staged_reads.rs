@@ -304,6 +304,7 @@ impl EntryOps for HeldAttach {
     }
 
     delegate! {
+        fn first_index_reads(&self) -> bool;
         fn trim_readers(&self, now: Instant);
         fn reconcile(&self, name: &VaultName, attachment: &mut Self::Attachment, work: ReconcileWork, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;
         fn recover(&self, name: &VaultName, attachment: &mut Self::Attachment, progress: &ProgressReporter<Self::Attachment>) -> Result<(), JobFailure>;

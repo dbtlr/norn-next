@@ -28,9 +28,10 @@ use norn_wire::{
     ReadFailure, Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
 };
 
-use crate::lifecycle::{EntryOps, HoldReading, Host, ReadHold, ReadSource, SnapshotSource};
+use crate::lifecycle::{
+    EntryOps, HoldReading, Host, ReadHold, ReadRefusal, ReadSource, SnapshotSource,
+};
 use crate::refusal::{PageRefused, page_refusal};
-use crate::text::TextLayer;
 
 /// What a read builder answered on one snapshot: the parts of the request it
 /// could not apply, what the parts it applied assumed, the verb's report, and
@@ -168,6 +169,47 @@ where
         })
     }
 
+    fn answer_query<R, W>(
+        &self,
+        address: &norn_wire::VaultAddress,
+        request: crate::lifecycle::loading::Request<'_>,
+        build: impl FnOnce(&crate::lifecycle::loading::QueryHold<O>) -> Result<Built<R, W>, PageRefusal>,
+    ) -> Result<Answered<R, W>, ErrorEnvelope> {
+        let name = address.registered_name();
+        let hold = self
+            .begin_query_read(name, norn_store::ReadNeed::Source, request)
+            .map_err(|refusal| refusal.answer(name))?;
+        let reading = hold.reading().answer_reading(name)?;
+        let result = build(&hold);
+        // Storage/resource failures keep their actual type. Known data-derived
+        // refusals require the same final authority judgment as successful rows.
+        let depends_on_source = match &result {
+            Ok(_) => true,
+            Err(refusal) => matches!(
+                refusal,
+                PageRefusal::UnknownTarget { .. }
+                    | PageRefusal::AmbiguousTarget(_)
+                    | PageRefusal::OrderChanged(_)
+                    | PageRefusal::CursorNotTaken { .. }
+                    | PageRefusal::DeclarationNotPinned { .. }
+                    | PageRefusal::UnknownRule { .. }
+            ),
+        };
+        if depends_on_source && !hold.current() {
+            return Err(ReadRefusal::FirstIndex(hold.reading().published().clone()).answer(name));
+        }
+        let built = result.map_err(|refusal| match page_refusal(refusal) {
+            PageRefused::Answered(envelope) => envelope,
+            PageRefused::Damaged(detail) => hold.damage(self, detail).answer(name),
+        })?;
+        Ok(Answered {
+            answer: VaultAnswer::new(reading, built.unsatisfied, built.report)
+                .with_advisories(built.advisories),
+            work: built.work,
+            snapshot: hold.counters(),
+        })
+    }
+
     /// Answer a `count`: one page of the tallies `params` asks for, from the
     /// vault it addresses.
     pub fn count(
@@ -194,9 +236,11 @@ where
         &self,
         params: &FindParams,
     ) -> Result<Answered<FindReport, FindWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.find(params, declared)?.into())
-        })
+        self.answer_query(
+            &params.vault,
+            crate::lifecycle::loading::Request::Find(params),
+            |hold| Ok(hold.find(params)?.into()),
+        )
     }
 
     /// Answer a `validate`: one page of the findings `params` asks for, or
@@ -229,9 +273,11 @@ where
     /// snapshot holds of the document, so the text answered is the text the
     /// snapshot derived.
     pub fn get(&self, params: &GetParams) -> Result<Answered<GetReport, GetWork>, ErrorEnvelope> {
-        self.answer_read(&params.vault, |_, snapshot, declared| {
-            Ok(snapshot.get(params, declared, &TextLayer)?.into())
-        })
+        self.answer_query(
+            &params.vault,
+            crate::lifecycle::loading::Request::Get(params),
+            |hold| Ok(hold.get(params)?.into()),
+        )
     }
 }
 

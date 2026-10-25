@@ -33,6 +33,7 @@ use crate::{
 mod apply;
 mod claim;
 mod gate;
+pub(crate) mod loading;
 mod serving;
 
 pub(crate) use apply::{ApplyAnswer, not_run};
@@ -265,6 +266,11 @@ impl std::error::Error for ReaderUnavailable {}
 
 /// The effectful half of an entry lifecycle.
 pub trait EntryOps: Send + Sync + 'static {
+    /// Whether this adapter constructs request-specific first-index sources.
+    fn first_index_reads(&self) -> bool {
+        false
+    }
+
     /// Background release of idle read resources, outside every entry gate.
     fn trim_readers(&self, _now: Instant) {}
     type Attachment: SnapshotSource;
@@ -704,13 +710,16 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     /// entry gate from validation through publication. The callback takes
     /// map and slot locks after this gate; it must not open or close resources.
     pub(crate) fn publish_if_claimed(&self, publish: impl FnOnce()) {
-        let Some(entry) = self.entry.upgrade() else {
-            return;
-        };
-        let state = entry.gate.lock().expect("entry gate poisoned");
-        if state.claim.stands_at(self.epoch) {
-            publish();
-        }
+        self.with_claimed_state(|_| publish());
+    }
+
+    fn with_claimed_state<T>(&self, publish: impl FnOnce(&mut EntryState<A>) -> T) -> Option<T> {
+        let entry = self.entry.upgrade()?;
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        state
+            .claim
+            .stands_at(self.epoch)
+            .then(|| publish(&mut state))
     }
 
     /// Recheck the claim immediately before starting a quiet-only duty.
@@ -1042,6 +1051,8 @@ impl<A: SnapshotSource> Entry<A> {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
+                initial_attach_started: false,
+                loading: None,
                 trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
                 reader: None,
@@ -1089,6 +1100,8 @@ impl<A: SnapshotSource> Entry<A> {
 }
 
 struct EntryState<A: SnapshotSource> {
+    initial_attach_started: bool,
+    loading: Option<loading::Loading<A::Reader>>,
     trust: TrustState,
     /// Whether the entry's trust has stood unbroken since it last published
     /// `Ready`: no withdrawal of trust, no teardown, no new coverage and no
@@ -1479,6 +1492,7 @@ enum ReadStance {
 struct ReadStanding {
     stance: ReadStance,
     derived_through: u64,
+    loading_revision: Option<u64>,
 }
 
 impl<A: SnapshotSource> Stanced for EntryState<A> {
@@ -1496,6 +1510,7 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
         ReadStanding {
             stance: self.read_stance(),
             derived_through: self.pending.derived_through,
+            loading_revision: self.loading.as_ref().map(|loading| loading.revision),
         }
     }
 
@@ -1523,6 +1538,16 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// later mints, and each queued apply is answered with the reader
     /// unavailable, as a read over the entry is refused.
     fn end_hold(&mut self) {
+        if self
+            .loading
+            .as_ref()
+            .is_some_and(|loading| !self.claim.stands_at(loading.claim))
+            || self.trust == TrustState::Ready
+            || self.stands_on_a_cause()
+            || self.owes_a_rung()
+        {
+            self.close_loading();
+        }
         if !self.applies.is_empty() && self.stands_on_a_cause() {
             self.answer_queued_applies();
         } else if !self.applies.is_empty() && self.serves_with_no_reader() {
@@ -2484,7 +2509,14 @@ impl DemandedWork {
 fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
     work.publish_scheduled(state);
-    state.claim.schedule(|epoch| work.job(name, epoch))
+    let job = state.claim.schedule(|epoch| work.job(name, epoch));
+    if matches!(work, DemandedWork::Attach) && !state.initial_attach_started {
+        state.initial_attach_started = true;
+        if let Job::Attach(_, epoch) = &job {
+            state.loading = Some(loading::Loading::provisional(*epoch));
+        }
+    }
+    job
 }
 
 fn schedule_due_detach<A: SnapshotSource>(
@@ -4255,6 +4287,8 @@ pub enum ReadRefusal {
     /// bound ran out, or, where another holder kept the entry's gate past the
     /// bound, what the read last read under it.
     Unsettled(Demand),
+    /// The first-index capability did not become available inside the read bound.
+    FirstIndex(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
     /// given it a handle failed, or the snapshot could not be established. A
     /// read whose way to the entry another holder kept past its bound — the
@@ -5648,6 +5682,16 @@ impl<O: EntryOps> Host<O> {
         name: &VaultName,
         need: norn_store::ReadNeed,
     ) -> Result<ReadHold<O>, ReadRefusal> {
+        self.begin_query_read(name, need, loading::Request::Canonical)
+            .map(|acquired| acquired.hold)
+    }
+
+    pub(crate) fn begin_query_read(
+        &self,
+        name: &VaultName,
+        need: norn_store::ReadNeed,
+        request: loading::Request<'_>,
+    ) -> Result<loading::QueryHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
@@ -5724,6 +5768,15 @@ impl<O: EntryOps> Host<O> {
             !scheduled || stance == ReadStance::Refuse,
             "a read scheduled work over an entry that then {stance:?}s"
         );
+        let staged = self.shared.ops.first_index_reads() && request.eligible();
+        let _interest = if staged {
+            state
+                .loading
+                .as_mut()
+                .and_then(|loading| loading.interested(request))
+        } else {
+            None
+        };
         if stance == ReadStance::Refuse && scheduled {
             // The dispatch is the demand's, and its one failure is the
             // worker pool being gone — which is the host coming down, and is
@@ -5734,10 +5787,18 @@ impl<O: EntryOps> Host<O> {
             // answers now, and a job it does not hand off is the dispatcher
             // tick's retry to send.
             let published = state.published_demand();
-            let outside = state.let_the_gate_go();
+            if !staged {
+                let outside = state.let_the_gate_go();
+                let _ = dispatch_pending_where_free(&self.shared, &entry);
+                drop(outside);
+                return Err(ReadRefusal::NotServing(published));
+            }
+            let (earlier, outside) = opening.let_the_gate_go(state);
             let _ = dispatch_pending_where_free(&self.shared, &entry);
-            drop(outside);
-            return Err(ReadRefusal::NotServing(published));
+            let Some(round) = rounds.take_the_gate_again(outside, earlier, deadline) else {
+                return Err(ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()));
+            };
+            (state, opening, stance) = round;
         }
         // What the mints this acquisition asked for ran, over every round.
         let mut mint_statements = 0;
@@ -5745,19 +5806,27 @@ impl<O: EntryOps> Host<O> {
         // is taking in: recorded under the first hold that finds the entry
         // settling, before any wait, and never moved after.
         let mut met_at = None;
-        let (turn, reader) = loop {
+        let (turn, reader, early) = loop {
+            let selected = staged.then(|| state.loading_source(request)).flatten();
+            let loading_wait = staged && selected.is_none() && state.waits_for_loading(request);
             if stance == ReadStance::Settle && met_at.is_none() {
                 met_at = Some(state.change_met_at());
             }
             match stance {
-                ReadStance::Refuse => {
+                ReadStance::Refuse if selected.is_none() && !loading_wait => {
                     return Err(ReadRefusal::NotServing(state.published_demand()));
                 }
-                ReadStance::Settle if !state.answers_a_read(met_at) => {
+                _ if loading_wait
+                    || (stance == ReadStance::Settle && !state.answers_a_read(met_at)) =>
+                {
                     let published = state.published_demand();
                     if Instant::now() >= deadline {
                         self.shared.reads.count_settle_expiry();
-                        return Err(ReadRefusal::Unsettled(published));
+                        return Err(if loading_wait {
+                            ReadRefusal::FirstIndex(published)
+                        } else {
+                            ReadRefusal::Unsettled(published)
+                        });
                     }
                     // The let-go reads the stance's generation under this
                     // hold, so every change published after the gate goes
@@ -5774,12 +5843,16 @@ impl<O: EntryOps> Host<O> {
                         rounds.take_the_gate_again_after_settling(outside, earlier, deadline)
                     else {
                         self.shared.reads.count_settle_expiry();
-                        return Err(ReadRefusal::Unsettled(published));
+                        return Err(if loading_wait {
+                            ReadRefusal::FirstIndex(published)
+                        } else {
+                            ReadRefusal::Unsettled(published)
+                        });
                     };
                     (state, opening, stance) = round;
                     continue;
                 }
-                ReadStance::Settle | ReadStance::Serve => {}
+                ReadStance::Refuse | ReadStance::Settle | ReadStance::Serve => {}
             }
             // An entry serving with an empty slot is one whose mint met the
             // environment and lost. The read asks for the mint again before
@@ -5789,21 +5862,28 @@ impl<O: EntryOps> Host<O> {
             // so it is accounted here rather than on the way out: every path
             // below this line is a path that already paid for it, the
             // refusals included.
-            let minted = state.remint_for_a_read();
-            mint_statements += minted.statements;
-            self.shared
-                .reads
-                .count_mint_under_the_gate(minted.statements, mint_statements);
-            let Some(reader) = minted.handle else {
-                let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
-                    ReaderUnavailable::new("this entry's coverage holds no read handle")
-                });
-                return Err(ReadRefusal::ReaderUnavailable(unavailable));
+            let reader = if let Some(source) = &selected {
+                Arc::clone(&source.reader)
+            } else {
+                let minted = state.remint_for_a_read();
+                mint_statements += minted.statements;
+                self.shared
+                    .reads
+                    .count_mint_under_the_gate(minted.statements, mint_statements);
+                let Some(reader) = minted.handle else {
+                    let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
+                        ReaderUnavailable::new("this entry's coverage holds no read handle")
+                    });
+                    return Err(ReadRefusal::ReaderUnavailable(unavailable));
+                };
+                reader
             };
             // The connection is free, so this hold is the hold that
             // establishes and the stance above is the one the answer carries.
-            if let Some(turn) = reader.try_take_for(need, deadline) {
-                break (turn, reader);
+            if selected.is_none()
+                && let Some(turn) = reader.try_take_for(need, deadline)
+            {
+                break (turn, reader, None);
             }
             // Capacity waits and cold opens run outside the gate, only within
             // the original deadline. A serving entry may lack shared capacity.
@@ -5821,7 +5901,19 @@ impl<O: EntryOps> Host<O> {
             // contended acquisition while it is still waiting rather than once
             // another read has let it through or its bound has run out.
             self.shared.reads.count_reader_wait();
-            let acquired = reader.acquire_for(need, deadline);
+            // Root identity is the only request-path filesystem check, and only for early sources.
+            let root_current = selected
+                .as_ref()
+                .is_none_or(|source| source.authority.check_root());
+            let acquired = if root_current {
+                reader.acquire_for(need, deadline)
+            } else {
+                Ok(None)
+            };
+            let root_current = root_current
+                && selected
+                    .as_ref()
+                    .is_none_or(|source| source.authority.check_root());
             let open_damage = acquired
                 .as_ref()
                 .err()
@@ -5838,7 +5930,11 @@ impl<O: EntryOps> Host<O> {
             // go, and only its read seam was taken. The turn, where the wait
             // took one, goes back as it drops.
             let Some(round) = rounds.take_the_gate_again(outside, earlier, deadline) else {
-                if let Some(detail) = open_damage {
+                if let Some(source) = &selected {
+                    if open_damage.is_some() {
+                        source.damage();
+                    }
+                } else if let Some(detail) = open_damage {
                     let ran_on = Arc::downgrade(&reader);
                     let name = name.clone();
                     entry.gate.run_under_the_next_hold(move |state| {
@@ -5851,12 +5947,27 @@ impl<O: EntryOps> Host<O> {
             // Every exit below can release the last replaced pool handle,
             // including a retired acquisition that returned no connection.
             state.retired_readers.push(Arc::clone(&reader));
-            let still_the_entrys = state
-                .reader
-                .as_ref()
-                .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
+            let still_the_entrys = if let Some(source) = &selected {
+                root_current
+                    && state
+                        .loading_source(request)
+                        .is_some_and(|standing| Arc::ptr_eq(&standing, source))
+                    && state.claim.stands_at(source.claim)
+                    && source.admits()
+            } else {
+                state
+                    .reader
+                    .as_ref()
+                    .is_some_and(|standing| Arc::ptr_eq(standing, &reader))
+            };
             let turn = match acquired {
                 Ok(turn) => turn,
+                Err(error) if selected.is_some() => {
+                    if error.damaged {
+                        selected.as_ref().unwrap().damage();
+                    }
+                    return Err(ReadRefusal::ReaderUnavailable(error));
+                }
                 Err(error) if error.damaged && still_the_entrys => {
                     let verdict = judge_damage_a_read_met(
                         &mut state,
@@ -5884,8 +5995,8 @@ impl<O: EntryOps> Host<O> {
             };
             // The connection is this read's from here, so nothing else can be
             // establishing on it.
-            if still_the_entrys && state.answers_a_read(met_at) {
-                break (turn, reader);
+            if still_the_entrys && (selected.is_some() || state.answers_a_read(met_at)) {
+                break (turn, reader, selected);
             }
             // A replaced pool's last handle can own result storage. The hold
             // drops these only after unlocking, including on a refusal.
@@ -5905,12 +6016,20 @@ impl<O: EntryOps> Host<O> {
         // is the one this hold answers under: `Ready`, or the healing of an
         // entry that has derived every fact this read met.
         let published = state.published_demand();
-        let content_model = Arc::clone(&state.active_content_model);
+        let content_model = early.as_ref().map_or_else(
+            || Arc::clone(&state.active_content_model),
+            |source| Arc::clone(&source.model),
+        );
         let plan_ground = state.plan_ground.clone();
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
-                let verdict = unavailable.damaged.then(|| {
+                if let Some(source) = &early
+                    && unavailable.damaged
+                {
+                    source.damage();
+                }
+                let verdict = (early.is_none() && unavailable.damaged).then(|| {
                     judge_damage_a_read_met(
                         &mut state,
                         name,
@@ -5941,17 +6060,20 @@ impl<O: EntryOps> Host<O> {
             .reads
             .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
-        Ok(ReadHold {
-            entry,
-            reader,
-            snapshot: Some(established.snapshot),
-            reading: HoldReading {
-                published,
-                store: established.reading,
+        Ok(loading::QueryHold {
+            source: early,
+            hold: ReadHold {
+                entry,
+                reader,
+                snapshot: Some(established.snapshot),
+                reading: HoldReading {
+                    published,
+                    store: established.reading,
+                },
+                content_model,
+                plan_ground,
+                _lease: lease,
             },
-            content_model,
-            plan_ground,
-            _lease: lease,
         })
     }
 

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 
+pub(crate) mod loading;
 #[cfg(test)]
 mod reader_tests;
 mod rolling;
@@ -200,6 +201,9 @@ pub struct ProductionEntryOps {
     #[cfg(feature = "induced-failure")]
     initial_import_cache: Option<Arc<startup_experiment::InitialImportCache>>,
     cleanup_error: Mutex<Option<String>>,
+    loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
+    #[cfg(feature = "induced-failure")]
+    loading_probe: Option<Arc<dyn loading::LoadingProbe>>,
     readers: Arc<norn_store::ReadBudget>,
     dirs: ConfigDirs,
     policy: ProductionPolicy,
@@ -650,6 +654,9 @@ impl ProductionEntryOps {
             #[cfg(feature = "induced-failure")]
             initial_import_cache: None,
             cleanup_error: Mutex::new(None),
+            loading_cleanup: Mutex::new(Vec::new()),
+            #[cfg(feature = "induced-failure")]
+            loading_probe: None,
             readers: norn_store::ReadBudget::new(policy.read_budget),
             dirs,
             policy,
@@ -689,6 +696,7 @@ impl ProductionEntryOps {
     /// The most recent residue-cleanup failure. Cleanup failure does not take
     /// source reads out of service; fresh counts retain their fallback.
     pub fn last_reader_cleanup_error(&self) -> Option<String> {
+        self.collect_loading_cleanup();
         self.cleanup_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -711,6 +719,7 @@ impl ProductionEntryOps {
                 {
                     Acquisition::Acquired(_guard) => {
                         Store::sweep_count_residue(&source).map_err(|error| error.to_string())?;
+                        Store::sweep_loading(&source).map_err(|error| error.to_string())?;
                     }
                     Acquisition::Contended { .. } => {}
                 }
@@ -1358,6 +1367,12 @@ impl ProductionEntryOps {
         if !admit(&derived.join(STORE_FILE))? {
             return Ok(None);
         }
+        if let Err(error) = Store::sweep_loading(&derived.join(STORE_FILE)) {
+            *self
+                .cleanup_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+        }
         // The lock and the shadow home are two mechanisms of one maintainership,
         // so both are keyed by the coordinates the derived directory is keyed
         // by: the lock by sitting in that directory, the home by carrying the
@@ -1821,8 +1836,12 @@ fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey 
 }
 
 impl EntryOps for ProductionEntryOps {
+    fn first_index_reads(&self) -> bool {
+        true
+    }
     fn trim_readers(&self, now: Instant) {
         self.readers.trim(now);
+        self.collect_loading_cleanup();
     }
     type Attachment = ProductionAttachment;
 
@@ -1848,17 +1867,31 @@ impl EntryOps for ProductionEntryOps {
         let (attachment, healed) = startup_experiment::initial_heal(
             attachment,
             self.initial_import_cache.as_deref(),
-            |attachment| self.heal_under_coverage(attachment, progress),
+            |attachment| {
+                if self.startup_experiment.is_some() {
+                    progress.decline_loading();
+                    self.heal_under_coverage(attachment, progress)
+                } else {
+                    Self::under_coverage(attachment, |attachment| {
+                        self.initial_loading_heal(attachment, progress)
+                    })
+                }
+            },
         )?;
         #[cfg(not(feature = "induced-failure"))]
         let (attachment, healed) = {
             let mut attachment = attachment;
-            let healed = self.heal_under_coverage(&mut attachment, progress);
+            let healed = Self::under_coverage(&mut attachment, |attachment| {
+                self.initial_loading_heal(attachment, progress)
+            });
             (attachment, healed)
         };
         let mut attached = match healed {
             Ok(()) => Ok(attachment),
-            Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
+            Err(JobFailure::StoreDamaged(_)) => {
+                progress.decline_loading();
+                self.rung_three(attachment, progress)
+            }
             Err(failure) => Err(failure),
         }?;
         self.dispatch_config(&mut attached);
@@ -2387,6 +2420,33 @@ fn heal_documents(
     Ok(account.links)
 }
 
+fn heal_documents_with_checkpoint(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    checkpoint: &mut dyn FnMut(),
+) -> Result<SkippedLinks, JobFailure> {
+    let walk = walk(root, exclusions).map_err(effect)?;
+    let sensitivity = walk.case_sensitivity();
+    let mut account = Account::default();
+    merge_walk_checkpoint(
+        store,
+        root,
+        exclusions,
+        walk,
+        sensitivity,
+        HealScope::Vault,
+        policy,
+        progress,
+        &mut account,
+        Some(checkpoint),
+    )?;
+    close_job(store, root, exclusions, policy, &mut account)?;
+    Ok(account.links)
+}
+
 /// Converge the rows a scope addresses against the files a walk of it yields.
 ///
 /// This is the one merge. The vault heal and every scoped subtree heal differ
@@ -2417,6 +2477,36 @@ fn merge_walk<I>(
 where
     I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
 {
+    merge_walk_checkpoint(
+        store,
+        root,
+        exclusions,
+        facts,
+        sensitivity,
+        scope,
+        policy,
+        progress,
+        account,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_walk_checkpoint<I>(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    facts: I,
+    sensitivity: norn_fs::CaseSensitivity,
+    scope: HealScope<'_>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    account: &mut Account,
+    checkpoint: Option<&mut dyn FnMut()>,
+) -> Result<(), JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
+{
     use std::os::unix::ffi::OsStrExt;
     let order = stored_path_order(sensitivity);
     let facts = facts.map(|fact| {
@@ -2437,6 +2527,7 @@ where
         account,
         None,
         None,
+        checkpoint,
     )
     .map(|_| ())
 }
@@ -2464,6 +2555,7 @@ fn merge_window<I>(
     account: &mut Account,
     vault: Option<&norn_fs::Vault>,
     limit: Option<MergeLimit>,
+    mut checkpoint: Option<&mut dyn FnMut()>,
 ) -> Result<MergeEnd, JobFailure>
 where
     I: Iterator<Item = Result<(Vec<u8>, norn_fs::WalkFact), norn_fs::WalkError>>,
@@ -2633,12 +2725,22 @@ where
             break;
         }
         checked += 1;
+        if checked.is_multiple_of(policy.store_page_size as u64)
+            && let Some(checkpoint) = checkpoint.as_mut()
+        {
+            checkpoint();
+        }
         if pending.is_full() {
             pending.flush()?;
         }
         if let Some(progress) = progress {
             progress.report(checked, None);
         }
+    }
+    if !checked.is_multiple_of(policy.store_page_size as u64)
+        && let Some(checkpoint) = checkpoint.as_mut()
+    {
+        checkpoint();
     }
     pending.flush()?;
     if pending.account.rolling {
@@ -4301,6 +4403,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
 /// it concluded second. A document that reads again is a plain upsert whose own
 /// discard clears the finding with no second mechanism.
 struct Pending<'s> {
+    metadata: bool,
     misses: norn_wire::WatcherMisses,
     store: &'s mut Store,
     /// The vault root every path in this scope is relative to, which is what a
@@ -4369,6 +4472,7 @@ impl<'s> Pending<'s> {
     ) -> Result<Self, JobFailure> {
         let declared = Declaration::read(store)?;
         Ok(Pending {
+            metadata: false,
             misses: norn_wire::WatcherMisses::default(),
             store,
             root,
@@ -4642,14 +4746,31 @@ impl<'s> Pending<'s> {
         }
         let mut request = self.store.begin_request();
         #[cfg(feature = "induced-failure")]
-        let outcome = if mode == norn_store::startup_experiment::WriteMode::Metadata {
+        let outcome =
+            if self.metadata || mode == norn_store::startup_experiment::WriteMode::Metadata {
+                request.apply_intake_increment(
+                    self.changes.drain(..),
+                    &findings,
+                    self.declared.model.content_model(),
+                )
+            } else if mode == norn_store::startup_experiment::WriteMode::DeferredHealth {
+                request.apply_startup_increment(
+                    self.changes.drain(..),
+                    &findings,
+                    self.declared.model.content_model(),
+                )
+            } else {
+                request.apply_increment(
+                    self.provenance,
+                    self.changes.drain(..),
+                    &findings,
+                    self.declared.model.content_model(),
+                )
+            }
+            .map_err(store_effect)?;
+        #[cfg(not(feature = "induced-failure"))]
+        let outcome = if self.metadata {
             request.apply_intake_increment(
-                self.changes.drain(..),
-                &findings,
-                self.declared.model.content_model(),
-            )
-        } else if mode == norn_store::startup_experiment::WriteMode::DeferredHealth {
-            request.apply_startup_increment(
                 self.changes.drain(..),
                 &findings,
                 self.declared.model.content_model(),
@@ -4663,15 +4784,6 @@ impl<'s> Pending<'s> {
             )
         }
         .map_err(store_effect)?;
-        #[cfg(not(feature = "induced-failure"))]
-        let outcome = request
-            .apply_increment(
-                self.provenance,
-                self.changes.drain(..),
-                &findings,
-                self.declared.model.content_model(),
-            )
-            .map_err(store_effect)?;
         self.account.misses.changed += self.misses.changed;
         self.account.misses.created += self.misses.created;
         self.account.misses.deleted += self.misses.deleted;

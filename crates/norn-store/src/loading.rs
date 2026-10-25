@@ -5,6 +5,7 @@ use std::path::Path;
 
 use norn_db::TemporaryDatabase;
 use norn_db::rusqlite::{params, params_from_iter};
+pub use norn_db::{TemporaryCleanupReceipt, TemporaryCleanupStatus};
 
 use crate::error;
 use crate::find::{compose_class_head, compose_class_total};

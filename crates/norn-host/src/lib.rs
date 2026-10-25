@@ -46,6 +46,8 @@ pub use evidence::{
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 #[cfg(feature = "induced-failure")]
+pub use production::loading::{LoadingBoundary, LoadingProbe};
+#[cfg(feature = "induced-failure")]
 pub use production::startup_experiment;
 
 /// **Which targets of a resolved plan the applier copies another target

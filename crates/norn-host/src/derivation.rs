@@ -923,8 +923,7 @@ pub(crate) fn plan_document(
     plan_document_parts(path, spelling, bytes, hash, stored, declared, case, true)
 }
 
-/// Read fields and body without deriving rich Markdown facts for a startup experiment.
-#[cfg(feature = "induced-failure")]
+/// Read fields and body without deriving rich Markdown facts for metadata construction.
 pub(crate) fn plan_base_document(
     path: &Path,
     spelling: &str,

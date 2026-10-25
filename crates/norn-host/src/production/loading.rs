@@ -1,0 +1,425 @@
+//! Fresh-store construction and bounded checkpoints. Canonical derivation stays ordinary.
+use super::*;
+use crate::lifecycle::loading::Operation;
+use norn_fs::walk::inventory::InventoryWalk;
+use norn_fs::watch::FirstIndexObservation;
+use norn_store::loading::{
+    Catalogue, GetBuilder, IntakeBuilder, TemporaryCleanupReceipt, TemporaryCleanupStatus,
+};
+#[cfg(feature = "induced-failure")]
+use std::os::unix::ffi::OsStrExt;
+
+pub(super) mod closure;
+pub(super) mod facts;
+
+#[cfg(feature = "induced-failure")]
+#[derive(Clone, Copy, Debug)]
+pub enum LoadingBoundary<'a> {
+    BeforeCatalogue,
+    CatalogueRecord(&'a Path),
+    CatalogueComplete,
+    GetLoaded(&'a str),
+    GetPublished(&'a str),
+    MetadataRecord(&'a Path),
+    MetadataComplete,
+    CanonicalPage,
+    CanonicalComplete,
+    SourceCreated { role: &'a str, paths: &'a [PathBuf] },
+}
+
+/// Deterministic construction timing only; hands out no query capability.
+#[cfg(feature = "induced-failure")]
+pub trait LoadingProbe: Send + Sync {
+    fn at(&self, boundary: LoadingBoundary<'_>);
+}
+
+pub(super) struct CleanupRecord {
+    role: String,
+    receipt: TemporaryCleanupReceipt,
+}
+
+impl ProductionEntryOps {
+    fn observe_loading(&self, role: &str, receipt: &TemporaryCleanupReceipt) {
+        self.loading_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(CleanupRecord {
+                role: role.into(),
+                receipt: receipt.clone(),
+            });
+        #[cfg(feature = "induced-failure")]
+        self.loading_boundary(LoadingBoundary::SourceCreated {
+            role,
+            paths: receipt.paths(),
+        });
+    }
+
+    pub(super) fn collect_loading_cleanup(&self) {
+        let mut records = self
+            .loading_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        records.retain(|record| match record.receipt.status() {
+            TemporaryCleanupStatus::Pending => true,
+            TemporaryCleanupStatus::Removed => false,
+            TemporaryCleanupStatus::Failed(error) => {
+                let detail = format!(
+                    "{} source {:?}: {error}",
+                    record.role,
+                    record.receipt.paths()
+                );
+                let mut last = self
+                    .cleanup_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *last = Some(match last.take() {
+                    Some(prior) => format!("{prior}; {detail}"),
+                    None => detail,
+                });
+                false
+            }
+        });
+    }
+
+    #[cfg(feature = "induced-failure")]
+    fn loading_boundary(&self, boundary: LoadingBoundary<'_>) {
+        if let Some(probe) = &self.loading_probe {
+            probe.at(boundary);
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn with_loading_probe(mut self, probe: Arc<dyn LoadingProbe>) -> Self {
+        self.loading_probe = Some(probe);
+        self
+    }
+
+    /// Projections fail independently of the canonical store. Keep every physical cause.
+    fn loading_failed(&self, role: &str, error: &JobFailure) {
+        let mut last = self
+            .cleanup_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let detail = format!("{role} construction: {error:?}");
+        *last = Some(match last.take() {
+            Some(prior) => format!("{prior}; {detail}"),
+            None => detail,
+        });
+    }
+
+    pub(super) fn initial_loading_heal(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        let mut loading = match Construction::begin(self, attachment, progress) {
+            Ok(loading) => loading,
+            Err(error) => {
+                self.loading_failed("catalogue", &error);
+                progress.decline_loading();
+                None
+            }
+        };
+        if let Some(construction) = loading.as_mut() {
+            construction.checkpoint();
+            if let Err(error) = construction.metadata() {
+                self.loading_failed("metadata", &error);
+            }
+        }
+        let healing = progress.healing();
+        let exclusions = exclusions_at(
+            &attachment.registration,
+            &attachment.shadows,
+            &attachment.covered_root,
+        );
+        attachment.skipped_links = heal_documents_with_checkpoint(
+            &mut attachment.store,
+            &attachment.covered_root,
+            &exclusions,
+            self.policy,
+            &healing,
+            &mut || {
+                if let Some(construction) = loading.as_mut() {
+                    construction.checkpoint();
+                }
+                #[cfg(feature = "induced-failure")]
+                self.loading_boundary(LoadingBoundary::CanonicalPage);
+            },
+        )?;
+        #[cfg(feature = "induced-failure")]
+        self.loading_boundary(LoadingBoundary::CanonicalComplete);
+        // Publications live in the entry, independently of this construction owner.
+        drop(loading);
+        self.collect_loading_cleanup();
+        Ok(())
+    }
+}
+
+struct Construction<'a> {
+    ops: &'a ProductionEntryOps,
+    progress: &'a ProgressReporter<ProductionAttachment>,
+    authority: FirstIndexObservation,
+    source: norn_fs::Vault,
+    catalogue: Catalogue,
+    root: PathBuf,
+    exclusions: Vec<PathBuf>,
+    directory: PathBuf,
+    order: StoredPathOrder,
+    group: norn_store::ReadGroup,
+    pin: Option<norn_store::VaultSchemaPin>,
+    model: Arc<ContentModel>,
+}
+
+impl<'a> Construction<'a> {
+    fn begin(
+        ops: &'a ProductionEntryOps,
+        attachment: &mut ProductionAttachment,
+        progress: &'a ProgressReporter<ProductionAttachment>,
+    ) -> Result<Option<Self>, JobFailure> {
+        // A rebuild, recovery or reused database can never earn this proof.
+        if !matches!(
+            attachment.store.open_outcome(),
+            norn_store::OpenOutcome::Created
+        ) {
+            progress.decline_loading();
+            return Ok(None);
+        }
+        let order = attachment.store.path_order();
+        if !HealScope::Vault
+            .page(&mut attachment.store, None, ops.policy, order)?
+            .is_empty()
+        {
+            progress.decline_loading();
+            return Ok(None);
+        }
+        let Some(authority) = attachment
+            .subscription
+            .as_ref()
+            .and_then(Subscription::first_index_observation)
+        else {
+            progress.decline_loading();
+            return Ok(None);
+        };
+        if !authority.check_root() || !progress.begin_loading(authority.clone()) {
+            return Ok(None);
+        }
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::BeforeCatalogue);
+        let root = attachment.covered_root.clone();
+        let exclusions = exclusions_at(&attachment.registration, &attachment.shadows, &root);
+        let source = norn_fs::Vault::open(&root, &exclusions).map_err(effect)?;
+        let directory = Store::loading_directory(attachment.store.path());
+        let model = Arc::clone(attachment.pinned.shared_content_model());
+        let mut catalogue = Catalogue::open_observed(&directory, |receipt| {
+            ops.observe_loading("catalogue", receipt)
+        })
+        .map_err(store_effect)?;
+        let mut inventory = InventoryWalk::from_vault(&source).map_err(effect)?;
+        loop {
+            if !authority.admits() {
+                progress.decline_loading();
+                return Ok(None);
+            }
+            let page = inventory
+                .advance(ops.policy.store_page_size)
+                .map_err(effect)?;
+            for record in page.records {
+                #[cfg(feature = "induced-failure")]
+                ops.loading_boundary(LoadingBoundary::CatalogueRecord(Path::new(
+                    std::ffi::OsStr::from_bytes(&record.value),
+                )));
+                let fact = inventory.replay(&record.value).map_err(effect)?;
+                if let norn_fs::WalkFact::Skipped(skip) = &fact
+                    && !skip.reason().stands()
+                {
+                    authority.invalidate();
+                }
+                if let norn_fs::WalkFact::File(file) = fact
+                    && let Ok(path) = document_path(file.path().as_path())
+                {
+                    if is_markdown(file.path().as_path()) {
+                        catalogue
+                            .record_document(&path, model.ambiguity_ignore())
+                            .map_err(store_effect)?;
+                    } else if path.is_vault_file() {
+                        catalogue
+                            .record_file(&path, model.ambiguity_ignore())
+                            .map_err(store_effect)?;
+                    }
+                }
+            }
+            if page.complete {
+                break;
+            }
+        }
+        catalogue.finish_inventory().map_err(store_effect)?;
+        #[cfg(feature = "induced-failure")]
+        ops.loading_boundary(LoadingBoundary::CatalogueComplete);
+        let pin = attachment
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .map_err(store_effect)?;
+        Ok(Some(Self {
+            ops,
+            progress,
+            authority,
+            source,
+            catalogue,
+            root,
+            exclusions,
+            directory,
+            order,
+            group: attachment.store.read_group(),
+            pin,
+            model,
+        }))
+    }
+
+    fn pin(&self, store: &mut Store) -> Result<(), JobFailure> {
+        if let Some(pin) = &self.pin {
+            store
+                .begin_request()
+                .pin_vault_schema(&pin.bytes, &pin.fingerprint)
+                .map_err(store_effect)?;
+        }
+        Ok(())
+    }
+
+    /// At most one preparation is spent at each metadata or canonical page checkpoint.
+    fn checkpoint(&mut self) {
+        if !self.authority.admits() {
+            return;
+        }
+        let Some(target) = self.progress.next_loading_target() else {
+            return;
+        };
+        let result = self.get(&target);
+        self.progress.loading_target_finished();
+        if let Err(error) = result {
+            self.ops.loading_failed(&format!("Get {target}"), &error);
+        }
+    }
+
+    fn get(&self, target: &str) -> Result<(), JobFailure> {
+        let mut builder = GetBuilder::create_in_observed(
+            &self.directory,
+            self.order,
+            crate::DERIVATION_VERSION,
+            |receipt| self.ops.observe_loading(&format!("Get {target}"), receipt),
+        )
+        .map_err(store_effect)?;
+        let prepared = builder.write(|store| {
+            self.pin(store)?;
+            closure::prepare(
+                store,
+                &self.catalogue,
+                &self.source,
+                &self.root,
+                &self.exclusions,
+                self.ops.policy,
+                target,
+                |_name| {
+                    #[cfg(feature = "induced-failure")]
+                    self.ops.loading_boundary(LoadingBoundary::GetLoaded(_name));
+                    Ok(())
+                },
+            )
+        })?;
+        if prepared == closure::Preparation::SourceChanged {
+            self.authority.invalidate();
+        }
+        if prepared != closure::Preparation::Ready || !self.authority.check_root() {
+            return Ok(());
+        }
+        let reader = builder
+            .finish_in_group(&self.ops.readers, &self.group)
+            .map_err(store_effect)?;
+        self.progress.publish_loading(
+            reader,
+            Arc::clone(&self.model),
+            self.authority.clone(),
+            Operation::Get(target.into()),
+        );
+        #[cfg(feature = "induced-failure")]
+        self.ops
+            .loading_boundary(LoadingBoundary::GetPublished(target));
+        Ok(())
+    }
+
+    fn metadata(&mut self) -> Result<(), JobFailure> {
+        if !self.authority.admits() {
+            return Ok(());
+        }
+        let mut builder = IntakeBuilder::create_in_observed(
+            &self.directory,
+            self.order,
+            crate::DERIVATION_VERSION,
+            |receipt| self.ops.observe_loading("metadata", receipt),
+        )
+        .map_err(store_effect)?;
+        builder.write(|store| self.pin(store))?;
+        let mut inventory = InventoryWalk::from_vault(&self.source).map_err(effect)?;
+        loop {
+            if !self.authority.admits() {
+                return Ok(());
+            }
+            let page = inventory
+                .advance(self.ops.policy.store_page_size)
+                .map_err(effect)?;
+            let complete = builder.write(|store| {
+                let mut account = Account::default();
+                let mut pending = Pending::new(
+                    store,
+                    self.ops.policy.changeset_size,
+                    &self.root,
+                    &self.exclusions,
+                    &mut account,
+                )?;
+                pending.metadata = true;
+                for record in page.records {
+                    facts::load_fact(
+                        &mut pending,
+                        inventory.replay(&record.value).map_err(effect)?,
+                        facts::Depth::Metadata,
+                        false,
+                    )?;
+                    #[cfg(feature = "induced-failure")]
+                    self.ops
+                        .loading_boundary(LoadingBoundary::MetadataRecord(Path::new(
+                            std::ffi::OsStr::from_bytes(&record.value),
+                        )));
+                    if pending.is_full() {
+                        pending.flush()?;
+                    }
+                }
+                pending.flush()?;
+                drop(pending);
+                Ok::<_, JobFailure>(account.withheld.roots.is_empty() && !account.withheld.rendered)
+            })?;
+            if !complete {
+                self.authority.invalidate();
+                return Ok(());
+            }
+            self.checkpoint();
+            if page.complete {
+                break;
+            }
+        }
+        if !self.authority.check_root() {
+            return Ok(());
+        }
+        let reader = builder
+            .finish_in_group(&self.ops.readers, &self.group)
+            .map_err(store_effect)?;
+        self.progress.publish_loading(
+            reader,
+            Arc::clone(&self.model),
+            self.authority.clone(),
+            Operation::Find,
+        );
+        #[cfg(feature = "induced-failure")]
+        self.ops.loading_boundary(LoadingBoundary::MetadataComplete);
+        Ok(())
+    }
+}

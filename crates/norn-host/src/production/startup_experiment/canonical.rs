@@ -2,13 +2,11 @@
 //! frozen-copy simulation or explicitly private live lab, never host admission
 //! or a trust stance.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
 use std::os::unix::ffi::OsStrExt;
 
 // A large neighborhood waits for ordinary readiness; a truncated head never
 // certifies absence. Residency follows this bound and one parsed document.
-const CLOSURE_BOUND: usize = 256;
 
 pub(super) fn run(
     attachment: &mut ProductionAttachment,
@@ -291,12 +289,7 @@ pub(super) fn prepare_prefix(
     Ok(model)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Preparation {
-    Ready,
-    Declined,
-    SourceChanged,
-}
+pub(super) use super::super::loading::closure::Preparation;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare(
@@ -308,112 +301,21 @@ pub(super) fn prepare(
     policy: ProductionPolicy,
     experiment: &Experiment,
 ) -> Result<Preparation, JobFailure> {
-    let target = &experiment.get_target;
-    // This capability covers whole-record default gets only. Other request
-    // shapes must wait; the ordinary external API is unchanged.
-    if target.contains('#') {
-        return Ok(Preparation::Declined);
-    }
-    let Some(demanded) = catalogue
-        .demand_names(target, CLOSURE_BOUND)
-        .map_err(store_effect)?
-    else {
-        return Ok(Preparation::Declined);
-    };
-    // This prototype serves existing records; missing gets wait for ordinary readiness.
-    if demanded.is_empty() {
-        return Ok(Preparation::Declined);
-    }
-    let demanded: BTreeSet<_> = demanded.into_iter().collect();
-    let mut remaining = demanded.clone();
-    let mut observed = BTreeMap::new();
-    let mut account = Account::default();
-    while let Some(name) = remaining.pop_first() {
-        if observed.contains_key(&name) {
-            continue;
-        }
-        if observed.len() >= CLOSURE_BOUND {
-            return Ok(Preparation::Declined);
-        }
-        let fact = source.fact(Path::new(&name)).map_err(effect)?;
-        if !matches!(fact, norn_fs::WalkFact::File(_)) {
-            return Ok(Preparation::SourceChanged);
-        }
-        let hash = {
-            let mut pending =
-                Pending::new(store, policy.changeset_size, root, exclusions, &mut account)?;
-            let hash = load_fact(&mut pending, fact, Depth::Rich, true)?;
-            pending.flush()?;
-            hash
-        };
-        if is_markdown(Path::new(&name)) && hash.is_none() {
-            return Ok(Preparation::SourceChanged);
-        }
-        experiment
-            .observer
-            .demand_loaded(&name)
-            .map_err(JobFailure::Environmental)?;
-        observed.insert(name.clone(), hash);
-        let path = document_path(Path::new(&name))
-            .map_err(|_| JobFailure::Environmental("catalogue path became invalid".into()))?;
-        // Complete the naming context for ambiguity heads and finding candidates.
-        // This does not follow neighbors' outgoing links.
-        for spelling in path.suffix_spellings() {
-            let Some(names) = catalogue
-                .demand_names(&spelling, CLOSURE_BOUND)
-                .map_err(store_effect)?
-            else {
-                return Ok(Preparation::Declined);
-            };
-            remaining.extend(
-                names
-                    .into_iter()
-                    .filter(|name| !observed.contains_key(name)),
-            );
-            if remaining.len() + observed.len() > CLOSURE_BOUND {
-                return Ok(Preparation::Declined);
-            }
-        }
-        if demanded.contains(&name)
-            && let Some(facts) = store
-                .begin_request()
-                .stored_facts(&path)
-                .map_err(store_effect)?
-        {
-            for link in &facts.links {
-                let Some(names) = catalogue
-                    .demand_link_names(&link.fact, &path, CLOSURE_BOUND)
-                    .map_err(store_effect)?
-                else {
-                    return Ok(Preparation::Declined);
-                };
-                remaining.extend(
-                    names
-                        .into_iter()
-                        .filter(|name| !observed.contains_key(name)),
-                );
-                if remaining.len() + observed.len() > CLOSURE_BOUND {
-                    return Ok(Preparation::Declined);
-                }
-            }
-        }
-    }
-    // Re-observe real bytes after closure construction, including invalid UTF-8
-    // candidates. A changed or removed member closes this simulation checkpoint.
-    for (name, hash) in observed {
-        let norn_fs::WalkFact::File(file) = source.fact(Path::new(&name)).map_err(effect)? else {
-            return Ok(Preparation::SourceChanged);
-        };
-        if let Some(hash) = hash {
-            let Some(read) = file.read_optional().map_err(effect)? else {
-                return Ok(Preparation::SourceChanged);
-            };
-            if read.content_hash().to_string() != hash {
-                return Ok(Preparation::SourceChanged);
-            }
-        }
-    }
-    Ok(Preparation::Ready)
+    super::super::loading::closure::prepare(
+        store,
+        catalogue,
+        source,
+        root,
+        exclusions,
+        policy,
+        &experiment.get_target,
+        |name| {
+            experiment
+                .observer
+                .demand_loaded(name)
+                .map_err(JobFailure::Environmental)
+        },
+    )
 }
 
 // Catalogue neighborhoods over-approximate eligibility: every name may be

@@ -484,6 +484,11 @@ impl ReadRefusal {
             ReadRefusal::Unsettled(demand) => {
                 refused_over(demand, name, "this vault is still indexing a change")
             }
+            ReadRefusal::FirstIndex(demand) => refused_over(
+                demand,
+                name,
+                "this vault is still indexing for the first time",
+            ),
             ReadRefusal::ReaderUnavailable(reason) => reader_unavailable(reason.detail()),
         }
     }
