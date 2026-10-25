@@ -229,6 +229,7 @@ impl Drift {
 ///
 /// On the wire an engine status is an object tagged `state`:
 /// `{"state":"off"}`,
+/// `{"state":"preparing"}`,
 /// `{"state":"on","last_drain_error":null,"freshness":null}`,
 /// `{"state":"self_disabled","detail":"…"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -238,6 +239,11 @@ pub enum EngineStatus {
     /// No engine stands for this vault here and now: the delivered section
     /// enables none, or the vault is not attached.
     Off {},
+    /// The delivered section enables an engine, and the engine is not yet
+    /// usable: its sidecar and model are initialized after the canonical
+    /// publication that committed the section, so until then a vector rung
+    /// is unavailable rather than disabled or failed.
+    Preparing {},
     /// An engine stands for this vault.
     #[non_exhaustive]
     On {
@@ -262,6 +268,11 @@ impl EngineStatus {
     /// No engine stands for this vault.
     pub const fn off() -> Self {
         EngineStatus::Off {}
+    }
+
+    /// The enabled engine is not yet usable.
+    pub const fn preparing() -> Self {
+        EngineStatus::Preparing {}
     }
 
     /// An engine stands, whose last drain refused with `last_drain_error` —

@@ -6241,6 +6241,7 @@ fn drifts() -> Vec<Drift> {
 fn engine_statuses() -> Vec<EngineStatus> {
     let mut statuses = vec![
         EngineStatus::off(),
+        EngineStatus::preparing(),
         EngineStatus::on(None, None),
         EngineStatus::on(Some("the drain refused".to_string()), None),
         EngineStatus::self_disabled("the slot took itself out of service"),
@@ -6602,6 +6603,7 @@ fn a_drift_is_an_object_tagged_state() {
 #[test]
 fn an_engine_status_carries_what_the_slot_is_doing() {
     assert_eq!(wire(&EngineStatus::off()), r#"{"state":"off"}"#);
+    assert_eq!(wire(&EngineStatus::preparing()), r#"{"state":"preparing"}"#);
     assert_eq!(
         wire(&EngineStatus::on(None, None)),
         r#"{"state":"on","last_drain_error":null,"freshness":null}"#

@@ -2747,7 +2747,7 @@ fn the_status_readings_advertise_their_tags() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<EngineStatus>(), "state")),
-        sorted(["off", "on", "self_disabled"])
+        sorted(["off", "preparing", "on", "self_disabled"])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<Advisory>(), "kind")),
