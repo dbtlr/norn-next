@@ -5943,6 +5943,10 @@ impl<O: EntryOps> Host<O> {
             // Capacity waits and cold opens run outside the gate, only within
             // the original deadline. A serving entry may lack shared capacity.
             if Instant::now() >= deadline {
+                if selected.is_some() {
+                    self.shared.reads.count_settle_expiry();
+                    return Err(ReadRefusal::FirstIndex(state.published_demand()));
+                }
                 return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
                     "reader capacity was unavailable past this read's bound",
                 )));
@@ -6041,10 +6045,15 @@ impl<O: EntryOps> Host<O> {
                 }
                 Err(_) => None,
             };
-            // A wait the bound ended took no connection, and the loop answers
-            // the stance this round read: past the bound, every arm of it
-            // that would wait refuses instead.
+            // An exhausted capacity wait keeps its resource refusal while its
+            // early source still stands. Replacement or withdrawal is answered
+            // by the current stance on the next round.
             let Some(turn) = turn else {
+                if selected.is_some() && still_the_entrys && Instant::now() >= deadline {
+                    return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                        "reader capacity was unavailable past this read's bound",
+                    )));
+                }
                 continue;
             };
             // The connection is this read's from here, so nothing else can be

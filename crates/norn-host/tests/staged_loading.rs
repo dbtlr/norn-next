@@ -450,6 +450,25 @@ fn incoming_targets_and_complete_find_remain_available_through_later_constructio
 }
 
 #[test]
+fn an_early_source_available_at_the_deadline_gets_first_index_expiry() {
+    let fixture = Fixture::new("public-stage-publication-deadline");
+    let probe = Probe::new([Point::MetadataComplete]);
+    let host = fixture.host_bound(probe.clone(), Duration::ZERO);
+    let _release = Release(&probe);
+    let _demand = host.demand(&name()).unwrap();
+    probe.wait(Point::MetadataComplete);
+    let error = host.find(&find()).unwrap_err();
+    assert_eq!(error.code(), &ReasonCode::HostEntryNotReady);
+    assert_eq!(
+        error.message(),
+        "this vault is still indexing for the first time"
+    );
+    assert_eq!(host.read_evidence().reader_waits, 0);
+    probe.release();
+    ready(&host);
+}
+
+#[test]
 fn expired_interests_release_reservations_without_renewing_the_original_deadline() {
     let fixture = Fixture::new("public-stage-expired");
     let probe = Probe::new([Point::BeforeCatalogue, Point::MetadataRecord]);
