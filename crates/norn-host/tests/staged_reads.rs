@@ -292,6 +292,10 @@ macro_rules! delegate {
 
 impl EntryOps for HeldAttach {
     type Attachment = <ProductionEntryOps as EntryOps>::Attachment;
+    #[cfg(feature = "induced-failure")]
+    fn loading_read_boundary(&self, completed: bool) {
+        self.inner.loading_read_boundary(completed);
+    }
 
     fn attach(
         &self,

@@ -200,7 +200,7 @@ pub struct ProductionEntryOps {
     startup_experiment: Option<Arc<startup_experiment::Experiment>>,
     #[cfg(feature = "induced-failure")]
     initial_import_cache: Option<Arc<startup_experiment::InitialImportCache>>,
-    cleanup_error: Mutex<Option<String>>,
+    cleanup_error: Arc<Mutex<Option<String>>>,
     loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
     #[cfg(feature = "induced-failure")]
     loading_probe: Option<Arc<dyn loading::LoadingProbe>>,
@@ -641,6 +641,16 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
     let detail = crate::refusal::store_refusal_told(error);
     if error.damage().is_some() {
         ReaderUnavailable::damaged(detail)
+    } else if matches!(
+        error,
+        StoreError::Lifecycle {
+            operation: "opening sealed loading source",
+            ..
+        }
+    ) {
+        // This store-owned operation reports a missing or replaced disposable owner,
+        // distinct from retryable environment failures and canonical damage.
+        ReaderUnavailable::source_lost(detail)
     } else {
         ReaderUnavailable::new(detail)
     }
@@ -653,7 +663,7 @@ impl ProductionEntryOps {
             startup_experiment: None,
             #[cfg(feature = "induced-failure")]
             initial_import_cache: None,
-            cleanup_error: Mutex::new(None),
+            cleanup_error: Arc::new(Mutex::new(None)),
             loading_cleanup: Mutex::new(Vec::new()),
             #[cfg(feature = "induced-failure")]
             loading_probe: None,
@@ -1836,6 +1846,15 @@ fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey 
 }
 
 impl EntryOps for ProductionEntryOps {
+    #[cfg(feature = "induced-failure")]
+    fn loading_read_boundary(&self, completed: bool) {
+        self.loading_boundary(if completed {
+            loading::LoadingBoundary::QueryBuilt
+        } else {
+            loading::LoadingBoundary::QueryEstablished
+        });
+    }
+
     fn first_index_reads(&self) -> bool {
         true
     }
@@ -20087,13 +20106,19 @@ mod tests {
                 .expect("the idle vault is unregistered");
 
             assert_eq!(report, UnregisterReport::new(notes(), true));
-            let left = fs::read_dir(&derived)
+            let mut left = fs::read_dir(&derived)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
+            left.sort();
+            let loading = Store::loading_directory(&dirs.derived_dir(&notes()).join(STORE_FILE));
+            assert!(
+                fs::read_dir(loading).unwrap().next().is_none(),
+                "discard retained loading state"
+            );
             assert_eq!(
                 left,
-                ["maintainer.lock"],
+                ["maintainer.lock", "store.sqlite3.loading"],
                 "the derived directory kept state, or lost its lock file"
             );
             assert!(
@@ -20746,13 +20771,19 @@ mod tests {
             let directory = VaultRoot::new(fs::canonicalize(&moved).unwrap()).unwrap();
             assert_eq!(report.registration.root, directory);
             assert_eq!(recorded(&dirs, &notes()), Some(report.registration));
-            let left = fs::read_dir(dirs.derived_dir(&notes()))
+            let mut left = fs::read_dir(dirs.derived_dir(&notes()))
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .collect::<Vec<_>>();
+            left.sort();
+            let loading = Store::loading_directory(&dirs.derived_dir(&notes()).join(STORE_FILE));
+            assert!(
+                fs::read_dir(loading).unwrap().next().is_none(),
+                "discard retained loading state"
+            );
             assert_eq!(
                 left,
-                ["maintainer.lock"],
+                ["maintainer.lock", "store.sqlite3.loading"],
                 "the old root's derived state outlived the move"
             );
             let (after, epoch_after) = attached_and_found(&host);

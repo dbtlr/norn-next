@@ -1522,8 +1522,9 @@ in review, and it stays that way until a rule can express it.
 **The vault filesystem is a shared surface.** People arrive through editors and sync tools,
 never through norn's own surface, so every change norn learns about late is a stretch of time
 in which the derived database answers from a stale world. High-fidelity change detection is
-therefore what buys the right to read SQLite and answer, with no filesystem check on the
-request path. The heal ladder is why imperfect detection cannot corrupt derived state;
+therefore what buys the right to read SQLite and answer. Canonical warm requests perform
+no filesystem check. First-index request-specific sources additionally check bounded root
+identity outside entry and watcher locks, as ADR 0043 permits. The heal ladder is why imperfect detection cannot corrupt derived state;
 detection fidelity is why that state is worth reading at all.
 
 Two mechanisms carry trust, and both are contract:
@@ -2306,8 +2307,8 @@ read reaches a reader only through a hold. A name the serving set does not hold 
 at that lookup, before any entry gate is taken: the acquisition refuses as an unknown vault
 and records nothing against anything. Over an entry, the acquisition reads the published
 demand and the entry's retained reader fact under a hold of that entry's gate, and mints a
-hold only where the demand is a serving state — `Ready`, or the healing of an entry that has
-derived every fact a settling read met — and a reader stands beside it; what the hold
+canonical unrestricted hold only where the demand is a serving state — `Ready`, or the healing of an entry that has
+derived every fact a settling read met — and a canonical reader stands beside it; what the hold
 carries with the handle is the published demand read in the gate hold that established its
 snapshot, never the trust label a park outranks. An acquisition over an entry that settles
 waits for it as the paragraph below states, and one that mints no hold serves nothing and
@@ -2327,12 +2328,74 @@ demand-lease paragraph below states.
 A park keeps its own code. Where the demand is serving, the refusal is reader-unavailable,
 which is an entry serving every surface but this one.
 
-**A read that meets a change waits for it, as [ADR
-0042](decisions/0042-elastic-readers-and-concurrent-retained-results.md) rules.** Warming splits
+**First indexing can answer a complete Get or supported metadata Find under [ADR
+0043](decisions/0043-first-index-complete-reads.md).** The same acquisition core owns
+registration judgment, demand, the original deadline, shared capacity and snapshot
+establishment. Public `begin_read` and `begin_read_for` remain canonical. Internal
+Get and Find holds expose their applicable builders, answer reading and counters.
+They expose no unrestricted snapshot, reader, count, rich query or plan ground.
+Actual execution checks the request shape again.
+
+Admission is provisional only during the initial attach prologue. Early sources
+require a newly Created, initially empty canonical store and synchronized watcher
+coverage captured before catalogue enumeration. Reused and rebuilt stores, recovery,
+reload and inline rung 3 do not mint early authority. A disk-backed complete catalogue
+supports sealed rich per-target projections. Whole Get targets come from actual
+requests through their demand leases. At most eight target preparations are spent
+per initial attach, with one preparation per metadata or canonical page checkpoint.
+Expired interests release queued reservations. Spent work does not renew, and healthy
+published sources are not evicted to admit more targets. Each name and link closure
+holds at most 256 names. Missing or over-bound construction yields ordinary loading,
+never a truncated answer or an invented absence.
+
+Complete metadata is constructed after the catalogue on every eligible fresh attach.
+Its ordinary guarded Find builder supports field and path predicates, projections and
+ordering. Get sources remain usable during metadata construction. Both source kinds
+remain usable during canonical construction. All other operations and unsupported
+shapes keep canonical admission. Availability waits, cold opens, capacity waits and
+gate retakes share the original five-second acquisition deadline. Availability expiry
+returns `host/entry-not-ready` with current warming counters and the message
+"this vault is still indexing for the first time". Gate and resource failures keep
+ordinary refusal rules.
+
+Publication binds source identity, operation, content model, watcher authority and
+attach claim under the entry gate. It neither replaces the canonical reader nor
+publishes global Ready. Publication revisions move the existing stance signal.
+Watcher notifications retain only that signal, never an entry gate or coverage.
+Entry-to-watcher and entry-to-signal bookkeeping are permitted. Watcher-to-entry and
+signal-to-entry acquisition are forbidden. No filesystem work, open, close or work
+wait runs under the entry gate. After an outside-gate acquisition, the establishing
+hold rechecks the exact source, claim, model, authority, request shape and deadline.
+
+Any accepted relevant watcher fact or observed source contradiction permanently
+withdraws this conservative authority. Root, backend and overflow failures also
+withdraw it. Successes and data-derived refusals receive a final authority check,
+including unknown or ambiguous targets and cursor judgments. Operational failures
+retain their actual types. Canonical Ready retires early admission in the same
+publishing hold. Healthy promotion and administrative teardown preserve established
+immutable reads. Known contradictions invalidate held results. Temporary files and
+budget charges survive until their last actual owner releases.
+
+Catalogue and projection files live in `Store::loading_directory` beside the canonical
+store. Startup and attach sweeps run only under won canonical maintainership.
+An empty loading namespace may remain after registration state is discarded.
+Every
+physical source pool shares `Store::read_group` with its canonical registration, while
+retaining its own identity and epoch. `finish_in_group` admits source capacity only.
+Cleanup receipts retain physical role and eventual outcome, including failed
+construction and late final-owner cleanup. Pending legitimate ownership is not an
+error. Disposable-source damage retires that source without condemning another
+canonical database. Diagnostic paths stay internal. Early answers carry actual
+warming trust, source epoch and committed generation. Find cursors continue through
+ordinary epoch, schema and order judgment without rewriting or retained-count promotion.
+
+**A canonical read that meets a change waits for it, as [ADR
+0043](decisions/0043-first-index-complete-reads.md) rules.** Warming splits
 by stance, read under the entry gate beside the published demand: an entry that entered
 warming from `Ready` with no withdrawal of trust in between — a polled batch, a reconcile
-turn, a schema reload — settles, and every other state refuses at once with its reason,
-including the warming of a recovery or a rebuild entered from untrusted, as above. The trust
+turn, a schema reload — settles. Every other state refuses canonical acquisition at once
+with its reason, including the warming of a recovery or a rebuild entered from untrusted.
+First-index Get and Find use the restricted admission above. The trust
 label does not say how warming was entered, so the entry's own state holds that fact: every
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
 moves the gate's stance signal where the hold changed the stance or how far the entry has
@@ -2377,7 +2440,7 @@ it. While a maintenance scan holds
 the entry, the entry stays `Ready` without yet seeing an edit made moments before, so a read
 in that window can miss it.
 
-**A read whose store finds its derived data damaged is answered by the entry.** After the
+**A canonical read whose store finds its derived data damaged is answered by the entry.** After the
 builder returns, where the read finds the entry gate free, one hold of it withdraws trust under
 the store-damaged-rebuilding reason, owes and schedules the rebuild, and reads the demand it
 published, so the read is refused as `host/entry-untrusted` with that reason and never as

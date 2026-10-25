@@ -1,6 +1,6 @@
 //! Fresh-store construction and bounded checkpoints. Canonical derivation stays ordinary.
 use super::*;
-use crate::lifecycle::loading::Operation;
+use crate::lifecycle::loading::{Diagnostics, Operation};
 use norn_fs::walk::inventory::InventoryWalk;
 use norn_fs::watch::FirstIndexObservation;
 use norn_store::loading::{
@@ -24,6 +24,8 @@ pub enum LoadingBoundary<'a> {
     MetadataComplete,
     CanonicalPage,
     CanonicalComplete,
+    QueryEstablished,
+    QueryBuilt,
     SourceCreated { role: &'a str, paths: &'a [PathBuf] },
 }
 
@@ -82,7 +84,7 @@ impl ProductionEntryOps {
     }
 
     #[cfg(feature = "induced-failure")]
-    fn loading_boundary(&self, boundary: LoadingBoundary<'_>) {
+    pub(super) fn loading_boundary(&self, boundary: LoadingBoundary<'_>) {
         if let Some(probe) = &self.loading_probe {
             probe.at(boundary);
         }
@@ -112,11 +114,40 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        let mut loading = match Construction::begin(self, attachment, progress) {
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        let healing = progress.healing();
+        let order = attachment.store.path_order();
+        // These reads belong to the canonical store. Their damage must reach
+        // the ordinary rung instead of being filed as disposable construction.
+        let fresh = matches!(
+            attachment.store.open_outcome(),
+            norn_store::OpenOutcome::Created
+        ) && HealScope::Vault
+            .page(&mut attachment.store, None, self.policy, order)?
+            .is_empty();
+        let pin = if fresh {
+            attachment
+                .store
+                .begin_request()
+                .vault_schema_pin()
+                .map_err(store_effect)?
+        } else {
+            None
+        };
+        let mut loading = match Construction::begin(self, attachment, progress, fresh, pin) {
             Ok(loading) => loading,
             Err(error) => {
                 self.loading_failed("catalogue", &error);
-                progress.decline_loading();
+                progress.loading_failed(
+                    ReaderUnavailable::new("first-index catalogue construction failed"),
+                    false,
+                );
                 None
             }
         };
@@ -124,9 +155,19 @@ impl ProductionEntryOps {
             construction.checkpoint();
             if let Err(error) = construction.metadata() {
                 self.loading_failed("metadata", &error);
+                progress.loading_failed(
+                    ReaderUnavailable::new("first-index metadata construction failed"),
+                    true,
+                );
             }
         }
-        let healing = progress.healing();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
         let exclusions = exclusions_at(
             &attachment.registration,
             &attachment.shadows,
@@ -175,23 +216,15 @@ impl<'a> Construction<'a> {
         ops: &'a ProductionEntryOps,
         attachment: &mut ProductionAttachment,
         progress: &'a ProgressReporter<ProductionAttachment>,
+        fresh: bool,
+        pin: Option<norn_store::VaultSchemaPin>,
     ) -> Result<Option<Self>, JobFailure> {
         // A rebuild, recovery or reused database can never earn this proof.
-        if !matches!(
-            attachment.store.open_outcome(),
-            norn_store::OpenOutcome::Created
-        ) {
+        if !fresh {
             progress.decline_loading();
             return Ok(None);
         }
         let order = attachment.store.path_order();
-        if !HealScope::Vault
-            .page(&mut attachment.store, None, ops.policy, order)?
-            .is_empty()
-        {
-            progress.decline_loading();
-            return Ok(None);
-        }
         let Some(authority) = attachment
             .subscription
             .as_ref()
@@ -255,11 +288,6 @@ impl<'a> Construction<'a> {
         catalogue.finish_inventory().map_err(store_effect)?;
         #[cfg(feature = "induced-failure")]
         ops.loading_boundary(LoadingBoundary::CatalogueComplete);
-        let pin = attachment
-            .store
-            .begin_request()
-            .vault_schema_pin()
-            .map_err(store_effect)?;
         Ok(Some(Self {
             ops,
             progress,
@@ -289,13 +317,19 @@ impl<'a> Construction<'a> {
     /// At most one preparation is spent at each metadata or canonical page checkpoint.
     fn checkpoint(&mut self) {
         if !self.authority.admits() {
+            self.progress.decline_loading();
             return;
         }
         let Some(target) = self.progress.next_loading_target() else {
             return;
         };
         let result = self.get(&target);
-        self.progress.loading_target_finished();
+        self.progress
+            .loading_target_finished(result.as_ref().err().map(|_| {
+                ReaderUnavailable::new(
+                    "the requested first-index Get source could not be constructed",
+                )
+            }));
         if let Err(error) = result {
             self.ops.loading_failed(&format!("Get {target}"), &error);
         }
@@ -332,6 +366,7 @@ impl<'a> Construction<'a> {
         if prepared != closure::Preparation::Ready || !self.authority.check_root() {
             return Ok(());
         }
+        let physical = builder.cleanup_receipt().paths()[0].clone();
         let reader = builder
             .finish_in_group(&self.ops.readers, &self.group)
             .map_err(store_effect)?;
@@ -340,6 +375,10 @@ impl<'a> Construction<'a> {
             Arc::clone(&self.model),
             self.authority.clone(),
             Operation::Get(target.into()),
+            Diagnostics {
+                description: format!("Get {target} source {}", physical.display()),
+                failures: Arc::clone(&self.ops.cleanup_error),
+            },
         );
         #[cfg(feature = "induced-failure")]
         self.ops
@@ -409,6 +448,7 @@ impl<'a> Construction<'a> {
         if !self.authority.check_root() {
             return Ok(());
         }
+        let physical = builder.cleanup_receipt().paths()[0].clone();
         let reader = builder
             .finish_in_group(&self.ops.readers, &self.group)
             .map_err(store_effect)?;
@@ -417,9 +457,26 @@ impl<'a> Construction<'a> {
             Arc::clone(&self.model),
             self.authority.clone(),
             Operation::Find,
+            Diagnostics {
+                description: format!("metadata source {}", physical.display()),
+                failures: Arc::clone(&self.ops.cleanup_error),
+            },
         );
         #[cfg(feature = "induced-failure")]
         self.ops.loading_boundary(LoadingBoundary::MetadataComplete);
         Ok(())
+    }
+}
+
+#[cfg(feature = "induced-failure")]
+impl crate::Host<ProductionEntryOps> {
+    /// Actual budget resources, including retired sources still held by a read.
+    pub fn read_budget_census(&self) -> norn_store::ReadBudgetCensus {
+        self.ops().read_budget_census()
+    }
+
+    /// Collect final loading cleanup outcomes without retaining their owners.
+    pub fn last_reader_cleanup_error(&self) -> Option<String> {
+        self.ops().last_reader_cleanup_error()
     }
 }

@@ -16,9 +16,10 @@
 //! **Every hold ends in [`GateHold`]'s drop, and that is where the signal
 //! moves.** A hold reads the state's [`Stanced::stance`] as it is taken and
 //! again as it ends, and where the two differ it moves the gate's signal and
-//! wakes every waiter on it. The signal therefore moves exactly when a hold
-//! changed the stance, whatever that hold wrote: a publication that changes
-//! only counters inside one stance wakes nobody. The lock order is the gate,
+//! wakes every waiter on it. A publication that changes only counters inside
+//! one stance wakes nobody. First-index watcher withdrawal also moves the shared
+//! signal through an adapter that retains neither the gate nor coverage.
+//! The lock order is the gate,
 //! then the signal. A holder of the gate may take the signal; a waiter on the
 //! signal holds nothing else, so no holder of the signal waits for the gate.
 //!

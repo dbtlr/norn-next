@@ -36,6 +36,11 @@ pub(crate) enum Operation {
     Find,
 }
 
+pub(crate) struct Diagnostics {
+    pub(crate) description: String,
+    pub(crate) failures: Arc<Mutex<Option<String>>>,
+}
+
 pub(crate) struct Source<R: ReadSource> {
     pub(crate) reader: Arc<R>,
     pub(crate) model: Arc<ContentModel>,
@@ -43,6 +48,9 @@ pub(crate) struct Source<R: ReadSource> {
     pub(crate) operation: Operation,
     pub(crate) claim: u64,
     damaged: AtomicBool,
+    diagnostics: Diagnostics,
+    reported: AtomicBool,
+    waker: Option<std::task::Waker>,
 }
 
 impl<R: ReadSource> Source<R> {
@@ -52,6 +60,8 @@ impl<R: ReadSource> Source<R> {
         authority: FirstIndexObservation,
         operation: Operation,
         claim: u64,
+        diagnostics: Diagnostics,
+        waker: Option<std::task::Waker>,
     ) -> Self {
         Self {
             reader: Arc::new(reader),
@@ -60,6 +70,9 @@ impl<R: ReadSource> Source<R> {
             operation,
             claim,
             damaged: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
+            diagnostics,
+            waker,
         }
     }
 
@@ -84,6 +97,32 @@ impl<R: ReadSource> Source<R> {
     pub(super) fn damage(&self) {
         self.damaged.store(true, Ordering::Release);
         self.reader.retire();
+        if let Some(waker) = &self.waker {
+            waker.wake_by_ref();
+        }
+    }
+
+    fn record_failure(&self, detail: &str) {
+        if !self.reported.swap(true, Ordering::AcqRel) {
+            let mut failures = self
+                .diagnostics
+                .failures
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let detail = format!("{}: {detail}", self.diagnostics.description);
+            *failures = Some(match failures.take() {
+                Some(prior) => format!("{prior}; {detail}"),
+                None => detail,
+            });
+        }
+    }
+
+    pub(super) fn unavailable(&self, error: ReaderUnavailable) -> ReaderUnavailable {
+        self.record_failure(error.detail());
+        if error.damaged || error.source_lost {
+            self.damage();
+        }
+        error
     }
 }
 
@@ -99,6 +138,9 @@ pub(super) struct Loading<R: ReadSource> {
     queue: Vec<Interest>,
     spent: Vec<String>,
     building: Option<String>,
+    failures: Vec<(String, ReaderUnavailable)>,
+    metadata_failure: Option<ReaderUnavailable>,
+    failure: Option<ReaderUnavailable>,
     pub(super) sources: Vec<Arc<Source<R>>>,
     pub(super) revision: u64,
 }
@@ -111,9 +153,18 @@ impl<R: ReadSource> Loading<R> {
             queue: Vec::new(),
             spent: Vec::new(),
             building: None,
+            failures: Vec::new(),
+            metadata_failure: None,
+            failure: None,
             sources: Vec::new(),
             revision: 0,
         }
+    }
+
+    pub(super) fn withdrawn(&self) -> bool {
+        self.authority
+            .as_ref()
+            .is_some_and(|authority| !authority.admits())
     }
 
     pub(super) fn interested(&mut self, request: Request<'_>) -> Option<Arc<()>> {
@@ -209,10 +260,27 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         .flatten()
     }
 
-    pub(crate) fn loading_target_finished(&self) {
+    pub(crate) fn loading_target_finished(&self, failure: Option<ReaderUnavailable>) {
         self.with_claimed_state(|state| {
             if let Some(loading) = state.loading.as_mut() {
-                loading.building = None;
+                if let Some(target) = loading.building.take()
+                    && let Some(failure) = failure
+                {
+                    loading.failures.push((target, failure));
+                }
+                loading.revision += 1;
+            }
+        });
+    }
+
+    pub(crate) fn loading_failed(&self, failure: ReaderUnavailable, metadata_only: bool) {
+        self.with_claimed_state(|state| {
+            if let Some(loading) = &mut state.loading {
+                if metadata_only {
+                    loading.metadata_failure = Some(failure);
+                } else {
+                    loading.failure = Some(failure);
+                }
                 loading.revision += 1;
             }
         });
@@ -224,9 +292,19 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         model: Arc<ContentModel>,
         authority: FirstIndexObservation,
         operation: Operation,
+        diagnostics: Diagnostics,
     ) {
         // All physical construction and the eventual last-owner drop are outside the gate.
-        let source = Arc::new(Source::new(reader, model, authority, operation, self.epoch));
+        let waker = self.entry.upgrade().map(|entry| entry.gate.stance_waker());
+        let source = Arc::new(Source::new(
+            reader,
+            model,
+            authority,
+            operation,
+            self.epoch,
+            diagnostics,
+            waker,
+        ));
         let published = self
             .with_claimed_state(|state| {
                 if state.stands_on_a_cause() || state.owes_a_rung() || !source.admits() {
@@ -261,11 +339,41 @@ impl<A: SnapshotSource> EntryState<A> {
         }
     }
 
+    pub(super) fn retire_damaged_loading_sources(&mut self) {
+        if let Some(loading) = &mut self.loading {
+            loading.sources.retain(|source| {
+                if source.damaged.load(Ordering::Acquire) {
+                    self.retired_readers.push(Arc::clone(&source.reader));
+                    loading.revision += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     pub(super) fn loading_source(&self, request: Request<'_>) -> Option<Arc<Source<A::Reader>>> {
         self.loading
             .as_ref()
             .filter(|loading| self.claim.stands_at(loading.claim))?
             .select(request)
+    }
+
+    pub(super) fn loading_failure(&self, request: Request<'_>) -> Option<ReaderUnavailable> {
+        let loading = self
+            .loading
+            .as_ref()
+            .filter(|loading| self.claim.stands_at(loading.claim))?;
+        loading.failure.clone().or_else(|| match request {
+            Request::Get(params) => loading
+                .failures
+                .iter()
+                .find(|(target, _)| target == params.target.address())
+                .map(|(_, failure)| failure.clone()),
+            Request::Find(_) => loading.metadata_failure.clone(),
+            Request::Canonical => None,
+        })
     }
 
     pub(super) fn waits_for_loading(&self, request: Request<'_>) -> bool {
@@ -303,6 +411,13 @@ impl<O: EntryOps> QueryHold<O>
 where
     <O::Attachment as SnapshotSource>::Reader: ReadSource<Snapshot = norn_store::Snapshot>,
 {
+    #[cfg(feature = "induced-failure")]
+    pub(crate) fn query_boundary(&self, host: &Host<O>, completed: bool) {
+        if self.source.is_some() {
+            host.shared.ops.loading_read_boundary(completed);
+        }
+    }
+
     pub(crate) fn reading(&self) -> &HoldReading {
         self.hold.reading()
     }
@@ -336,6 +451,14 @@ where
         self.hold.snapshot().find(params, self.hold.content_model())
     }
 
+    pub(crate) fn record_page_failure(&self, refusal: &norn_store::PageRefusal) {
+        if let Some(source) = &self.source
+            && let norn_store::PageRefusal::Store(error) = refusal
+        {
+            source.record_failure(&error.to_string());
+        }
+    }
+
     pub(crate) fn current(&self) -> bool {
         self.source
             .as_ref()
@@ -344,10 +467,12 @@ where
 
     pub(crate) fn damage(&self, host: &Host<O>, detail: String) -> ReadRefusal {
         if let Some(source) = &self.source {
-            source.damage();
-            ReadRefusal::ReaderUnavailable(ReaderUnavailable::damaged(detail))
+            ReadRefusal::ReaderUnavailable(source.unavailable(ReaderUnavailable::damaged(detail)))
         } else {
             host.withdraw_for_read_damage(&self.hold, detail)
         }
     }
 }
+
+#[cfg(all(test, feature = "induced-failure"))]
+mod tests;

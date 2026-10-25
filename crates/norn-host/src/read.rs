@@ -6,7 +6,8 @@
 //! a [`VaultAnswer`] carrying the reading the hold was taken under. Every
 //! refusal on that path leaves as `norn-wire`'s one envelope: the address's,
 //! the hold's through [`ReadRefusal::answer`](crate::ReadRefusal::answer), and
-//! the builder's through [`page_refusal`]. A builder whose store finds its
+//! the builder's through [`page_refusal`]. First-index Get and Find use a closed,
+//! request-specific hold from the same acquisition core. A builder whose canonical store finds its
 //! derived data damaged is the one refusal the entry answers for: the damage
 //! is published on the entry, which owes the rebuild that resolves it, and the
 //! read is refused with what the entry then publishes.
@@ -78,8 +79,8 @@ impl HoldReading {
     /// entry published and the store reading its snapshot was established at.
     ///
     /// A hold is taken only under a published demand that answers a read —
-    /// `Ready`, or the healing of an entry that has derived every fact the
-    /// read met — so the demand answers with its state, and the trust an
+    /// `Ready`, the healing of an entry that has derived every fact the
+    /// read met, or claim-owned first-index warming — so the demand answers with its state, and the trust an
     /// answer carries is what the entry published at the instant its
     /// snapshot was established; one that did not would be refused with its
     /// own envelope, through the mapping every demand renders through. A
@@ -180,7 +181,14 @@ where
             .begin_query_read(name, norn_store::ReadNeed::Source, request)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
+        #[cfg(feature = "induced-failure")]
+        hold.query_boundary(self, false);
         let result = build(&hold);
+        if let Err(refusal) = &result {
+            hold.record_page_failure(refusal);
+        }
+        #[cfg(feature = "induced-failure")]
+        hold.query_boundary(self, true);
         // Storage/resource failures keep their actual type. Known data-derived
         // refusals require the same final authority judgment as successful rows.
         let depends_on_source = match &result {
