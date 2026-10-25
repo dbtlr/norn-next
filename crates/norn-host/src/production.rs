@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 
+#[cfg(feature = "induced-failure")]
+pub(crate) mod four_step;
 pub(crate) mod loading;
 #[cfg(test)]
 mod reader_tests;
@@ -197,6 +199,8 @@ pub struct ProductionEntryOps {
     loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
     #[cfg(feature = "induced-failure")]
     loading_probe: Option<Arc<dyn loading::LoadingProbe>>,
+    #[cfg(feature = "induced-failure")]
+    four_step: Option<four_step::FourStepLoading>,
     readers: Arc<norn_store::ReadBudget>,
     dirs: ConfigDirs,
     policy: ProductionPolicy,
@@ -658,6 +662,8 @@ impl ProductionEntryOps {
             loading_cleanup: Mutex::new(Vec::new()),
             #[cfg(feature = "induced-failure")]
             loading_probe: None,
+            #[cfg(feature = "induced-failure")]
+            four_step: None,
             readers: norn_store::ReadBudget::new(policy.read_budget),
             dirs,
             policy,
@@ -4416,6 +4422,51 @@ struct Queued {
     bytes_hash: Option<String>,
 }
 
+impl Queued {
+    fn new(planned: PlannedFinding, bytes_hash: Option<String>) -> Self {
+        let PlannedFinding {
+            subject,
+            cause,
+            detail,
+            target,
+            severity,
+            rules,
+            value,
+            identity: _,
+        } = planned;
+        Self {
+            finding: FindingFacts {
+                kind: cause.kind(),
+                severity,
+                message: cause.message(&subject),
+                path: subject,
+                // No cause here is a reading of a resolution target, so the
+                // finding belongs to no ambiguity class and no class-scoped
+                // maintenance owns it. A tag breach names a tag and a rule
+                // breach a field rather than a link target, and neither is a
+                // path anything resolves. For the same reason no cause is
+                // about a path-addressed link, so the finding is keyed by no
+                // path either.
+                class_keys: BTreeSet::new(),
+                path_keys: BTreeSet::new(),
+                target,
+                span: None,
+                // Every cause here is about the document, not one of its links.
+                ordinal: None,
+                candidates: Vec::new(),
+                candidates_total: 0,
+                detail: Some(detail),
+                // A rule breach cites its rules and names its offending value;
+                // every other cause cites none and names none.
+                rules,
+                value,
+            },
+            cause,
+            bytes_hash,
+        }
+    }
+}
+
 impl<'s> Pending<'s> {
     fn new(
         store: &'s mut Store,
@@ -4575,49 +4626,12 @@ impl<'s> Pending<'s> {
     /// `bytes_hash` is the hash of the bytes a content finding was judged
     /// over, recorded beside it, and `None` for every other finding.
     fn file(&mut self, planned: PlannedFinding, bytes_hash: Option<String>) {
-        let PlannedFinding {
-            subject,
-            cause,
-            detail,
-            target,
-            severity,
-            rules,
-            value,
-            identity: _,
-        } = planned;
-        if cause.kind().scope() == FindingScope::Place {
-            self.account.filed.insert(&subject, cause.decided());
+        if planned.cause.kind().scope() == FindingScope::Place {
+            self.account
+                .filed
+                .insert(&planned.subject, planned.cause.decided());
         }
-        self.queued.push(Queued {
-            finding: FindingFacts {
-                kind: cause.kind(),
-                severity,
-                message: cause.message(&subject),
-                path: subject,
-                // No cause here is a reading of a resolution target, so the
-                // finding belongs to no ambiguity class and no class-scoped
-                // maintenance owns it. A tag breach names a tag and a rule
-                // breach a field rather than a link target, and neither is a
-                // path anything resolves. For the same reason no cause is
-                // about a path-addressed link, so the finding is keyed by no
-                // path either.
-                class_keys: BTreeSet::new(),
-                path_keys: BTreeSet::new(),
-                target,
-                span: None,
-                // Every cause here is about the document, not one of its links.
-                ordinal: None,
-                candidates: Vec::new(),
-                candidates_total: 0,
-                detail: Some(detail),
-                // A rule breach cites its rules and names its offending value;
-                // every other cause cites none and names none.
-                rules,
-                value,
-            },
-            cause,
-            bytes_hash,
-        });
+        self.queued.push(Queued::new(planned, bytes_hash));
     }
 
     /// Record a root a walk of this scope passed over and read nothing under.

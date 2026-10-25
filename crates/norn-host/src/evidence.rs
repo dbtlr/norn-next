@@ -69,6 +69,10 @@ use norn_store::{DerivationCounters, IncrementOutcome, SnapshotCounters};
 /// reading (`JobEvidence::read`) before and after it and subtracts.
 #[derive(Debug, Default)]
 pub struct JobEvidence {
+    #[cfg(feature = "induced-failure")]
+    four_step_steps: Mutex<
+        std::collections::BTreeMap<&'static str, std::collections::BTreeMap<&'static str, u64>>,
+    >,
     document_opens: AtomicU64,
     stats: AtomicU64,
     walk_dirents: AtomicU64,
@@ -449,6 +453,50 @@ impl JobEvidence {
             clock_reads: get(&self.clock_reads),
             rewrite_selection_steps: get(&self.rewrite_selection_steps),
         }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn four_step_steps(
+        &self,
+    ) -> std::collections::BTreeMap<&'static str, std::collections::BTreeMap<&'static str, u64>>
+    {
+        self.four_step_steps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub(crate) fn count_four_step_receipt(
+        &self,
+        step: &'static str,
+        counters: &norn_store::four_step::StepCounters,
+    ) {
+        let mut steps = self
+            .four_step_steps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let readings = steps.entry(step).or_default();
+        for (name, value) in crate::production::four_step::readings(counters) {
+            *readings.entry(name).or_default() += value;
+        }
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub(crate) fn count_four_step(
+        &self,
+        step: &'static str,
+        counters: &norn_store::four_step::StepCounters,
+    ) {
+        self.count_four_step_receipt(step, counters);
+        self.documents_upserted
+            .fetch_add(counters.rows_rewritten, Ordering::Relaxed);
+        self.findings_written
+            .fetch_add(counters.findings_written, Ordering::Relaxed);
+        self.findings_discarded
+            .fetch_add(counters.findings_discarded, Ordering::Relaxed);
+        self.links_redecided
+            .fetch_add(counters.links_judged, Ordering::Relaxed);
     }
 
     pub(crate) fn count_recovery(&self) {

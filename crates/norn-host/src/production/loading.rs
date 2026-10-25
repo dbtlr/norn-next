@@ -117,6 +117,11 @@ impl ProductionEntryOps {
         ) && HealScope::Vault
             .page(&mut attachment.store, None, self.policy, order)?
             .is_empty();
+        #[cfg(feature = "induced-failure")]
+        if fresh && let Some(loading) = &self.four_step {
+            progress.decline_loading();
+            return self.four_step_heal(attachment, &healing, loading);
+        }
         let pin = if fresh {
             attachment
                 .store

@@ -5,6 +5,9 @@
 
 mod attach;
 #[cfg(feature = "induced-failure")]
+#[path = "performance/four_step.rs"]
+mod four_step;
+#[cfg(feature = "induced-failure")]
 #[path = "performance/public.rs"]
 mod public;
 use std::collections::BTreeMap;
@@ -130,8 +133,10 @@ fn performance_worker() {
     #[cfg(feature = "induced-failure")]
     let operator_mode = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok("operator-prefix-public") => Some("public"),
+        Ok("four-step") => Some("four-step"),
+        Ok("four-step-no-body") => Some("four-step-no-body"),
         Err(std::env::VarError::NotPresent) => None,
-        mode => panic!("unsupported public loading mode: {mode:?}"),
+        mode => panic!("unsupported loading mode: {mode:?}"),
     };
     #[cfg(not(feature = "induced-failure"))]
     assert!(
@@ -140,9 +145,17 @@ fn performance_worker() {
     );
     #[cfg(feature = "induced-failure")]
     assert!(
-        operator_mode.is_none() || !profiling,
+        operator_mode != Some("public") || !profiling,
         "public prefix excludes profiling"
     );
+    #[cfg(feature = "induced-failure")]
+    let host = match operator_mode {
+        Some(mode @ ("four-step" | "four-step-no-body")) => {
+            vault.host_with_four_step_policy(policy, four_step::selection(mode, began))
+        }
+        _ => vault.host_with_policy(policy),
+    };
+    #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
@@ -188,6 +201,7 @@ fn performance_worker() {
             "findings_discarded": e.findings_discarded, "links_redecided": e.links_redecided,
             "link_health_keys_resolved": e.link_health_keys_resolved,
             "link_health_candidates_read": e.link_health_candidates_read,
+            "four_step_steps": host.four_step_steps(),
             "changeset_read_steps": e.changeset_read_steps, "recoveries_run": e.recoveries_run,
             "rebuilds_run": e.rebuilds_run, "watcher_polls": e.watcher_polls}),
         )
@@ -195,7 +209,7 @@ fn performance_worker() {
     #[cfg(not(feature = "induced-failure"))]
     let (timings, evidence): (Option<Value>, Value) = (None, Value::Null);
     #[cfg(feature = "induced-failure")]
-    let evidence = if operator_mode.is_some() {
+    let evidence = if operator_mode == Some("public") {
         let mut evidence = evidence;
         evidence["tombstones_recorded"] = json!(host.evidence().tombstones_recorded);
         evidence
@@ -207,12 +221,22 @@ fn performance_worker() {
                 "store_page_size": policy.store_page_size, "changeset_size": policy.changeset_size,
                 "timings": timings, "job_evidence": evidence});
     #[cfg(feature = "induced-failure")]
-    let ready = if let Some(mode) = operator_mode {
+    let ready = if let Some(mode @ "public") = operator_mode {
         let mut ready = ready;
         ready["operator_prefix_mode"] = json!(mode);
         ready["operator_prefix_receipt"] = json!({"mode":"public-host-prefix","logical_requests":2,
             "dispatch":"caller thread through Host::get then Host::find",
             "availability_scope":"public Host first-open requests"});
+        ready
+    } else {
+        ready
+    };
+    #[cfg(feature = "induced-failure")]
+    let ready = if let Some(mode @ ("four-step" | "four-step-no-body")) = operator_mode {
+        let mut ready = ready;
+        ready["loading_mode"] = json!(mode);
+        ready["loading_read_scope"] =
+            json!("lab canonical pooled hook; whole Get waits for global content eligibility");
         ready
     } else {
         ready

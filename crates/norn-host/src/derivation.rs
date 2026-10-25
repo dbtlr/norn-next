@@ -694,6 +694,8 @@ pub(crate) fn document_path(path: &Path) -> Result<DocumentPath, Quarantine> {
 pub(crate) struct Derived {
     pub(crate) facts: DocumentFacts,
     pub(crate) unread_frontmatter: Option<UnreadFrontmatter>,
+    #[cfg(feature = "induced-failure")]
+    body_origin: Option<norn_text::SourceSpan>,
 }
 
 /// Derive one document's facts from its bytes, the field rows' typed half
@@ -713,6 +715,17 @@ fn map_document_parts(
     hash: String,
     model: &ContentModel,
     rich: bool,
+) -> Result<Derived, Quarantine> {
+    map_document_read(path, bytes, hash, model, rich, false)
+}
+
+fn map_document_read(
+    path: &str,
+    bytes: &[u8],
+    hash: String,
+    model: &ContentModel,
+    rich: bool,
+    frontmatter_facts: bool,
 ) -> Result<Derived, Quarantine> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_store::profiling::span("host.parse_map");
@@ -758,48 +771,155 @@ fn map_document_parts(
         .count() as u32;
     if let Some(scan) = scan {
         facts.links = links_of(&document, &scan);
-        facts.headings = scan
-            .headings()
-            .iter()
-            .map(|h| HeadingFact {
-                level: h.level,
-                text: h.text.clone(),
-                reading: norn_text::heading_reading(&h.text),
-                slug: h.slug.clone(),
-                span: span(h.span),
-                body_offset: h.body_offset as u64,
-                inside_container: h.inside_container,
-            })
-            .collect();
-        facts.blocks = scan
-            .block_ids()
-            .into_iter()
-            .map(|b| BlockFact {
-                block_id: b.id,
-                span: Some(span(b.span)),
-            })
-            .collect();
-        // The file's order: the frontmatter stands before the body, so its tags
-        // come first, and a tag's ordinal is where the file writes it.
+        facts.headings = scan.headings().into_iter().map(map_heading).collect();
+        facts.blocks = scan.block_ids().into_iter().map(map_block).collect();
         facts.tags = document
             .frontmatter_tags()
             .into_iter()
-            .map(|t| TagFact {
-                name: t.name,
-                source: TagSource::Frontmatter,
-                span: t.span.map(span),
-            })
-            .chain(scan.tags().into_iter().map(|t| TagFact {
-                name: t.name,
-                source: TagSource::Body,
-                span: t.span.map(span),
-            }))
+            .map(|tag| map_tag(tag, TagSource::Frontmatter))
+            .chain(
+                scan.tags()
+                    .into_iter()
+                    .map(|tag| map_tag(tag, TagSource::Body)),
+            )
+            .collect();
+    } else if frontmatter_facts {
+        facts.links = document
+            .frontmatter_field_wikilinks()
+            .into_iter()
+            .map(map_frontmatter_link)
+            .collect();
+        facts.tags = document
+            .frontmatter_tags()
+            .into_iter()
+            .map(|tag| map_tag(tag, TagSource::Frontmatter))
             .collect();
     }
     Ok(Derived {
         facts,
         unread_frontmatter,
+        #[cfg(feature = "induced-failure")]
+        body_origin: frontmatter_facts
+            .then(|| norn_text::SourceSpan::at(source, document.body_start())),
     })
+}
+
+fn map_heading(heading: norn_text::Heading) -> HeadingFact {
+    HeadingFact {
+        level: heading.level,
+        reading: norn_text::heading_reading(&heading.text),
+        text: heading.text,
+        slug: heading.slug,
+        span: span(heading.span),
+        body_offset: heading.body_offset as u64,
+        inside_container: heading.inside_container,
+    }
+}
+
+fn map_block(block: norn_text::BlockId) -> BlockFact {
+    BlockFact {
+        block_id: block.id,
+        span: Some(span(block.span)),
+    }
+}
+
+fn map_tag(tag: norn_text::Tag, source: TagSource) -> TagFact {
+    TagFact {
+        name: tag.name,
+        source,
+        span: tag.span.map(span),
+    }
+}
+
+/// The lab content pass reads frontmatter and body boundaries without scanning Markdown.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn plan_four_step_content(
+    path: &DocumentPath,
+    bytes: &[u8],
+    hash: String,
+    declared: &Declared,
+    case: CaseFold,
+) -> (Plan, Option<norn_text::SourceSpan>) {
+    let mapped = map_document_read(
+        path.as_str(),
+        bytes,
+        hash,
+        declared.content_model(),
+        false,
+        true,
+    );
+    let origin = mapped.as_ref().ok().and_then(|derived| derived.body_origin);
+    // The provisional name is not a previously decoded document. Its removal
+    // must leave no tombstone, just as an ordinary build from zero does.
+    (
+        plan_mapped_document(
+            Path::new(path.as_str()),
+            mapped,
+            None,
+            declared,
+            case,
+            false,
+        ),
+        origin,
+    )
+}
+
+/// Reuse the ordinary fact mappings on a single scan of the canonical stored body.
+/// The small origin retained by step 2 preserves CR, CRLF and BOM coordinates
+/// without retaining or reconstructing the original frontmatter bytes.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn four_step_structure(facts: &mut DocumentFacts, origin: norn_text::SourceSpan) {
+    let scan = norn_text::BodyScan::new(&facts.body);
+    let rebase = |mut at: norn_text::SourceSpan| {
+        if at.line == 1 {
+            at.column += origin.column - 1;
+        }
+        at.line += origin.line - 1;
+        at.byte_offset += origin.byte_offset;
+        at
+    };
+    facts.links = scan
+        .links()
+        .into_iter()
+        .map(|mut link| {
+            link.span = link.span.map(rebase);
+            map_link(link)
+        })
+        .collect();
+    facts.headings = scan
+        .headings()
+        .iter()
+        .cloned()
+        .map(|mut heading| {
+            heading.span = rebase(heading.span);
+            heading.body_offset += origin.byte_offset;
+            map_heading(heading)
+        })
+        .collect();
+    facts.blocks = scan
+        .block_ids()
+        .into_iter()
+        .map(|mut block| {
+            block.span = rebase(block.span);
+            map_block(block)
+        })
+        .collect();
+    facts.tags = scan
+        .tags()
+        .into_iter()
+        .map(|mut tag| {
+            tag.span = tag.span.map(rebase);
+            map_tag(tag, TagSource::Body)
+        })
+        .collect();
+}
+
+#[cfg(feature = "induced-failure")]
+pub(crate) fn four_step_tag_findings(
+    facts: &DocumentFacts,
+    declared: &Declared,
+) -> Vec<PlannedFinding> {
+    plan_tag_facet(&facts.path, facts, declared.schema())
 }
 
 /// One finding a plan asks a job to file: the subject it stands at, the cause
@@ -954,6 +1074,17 @@ fn plan_document_parts(
     } else {
         map_document_parts(spelling, bytes, hash, declared.content_model(), false)
     };
+    plan_mapped_document(path, mapped, stored, declared, case, rich)
+}
+
+fn plan_mapped_document(
+    path: &Path,
+    mapped: Result<Derived, Quarantine>,
+    stored: Option<&DocumentPath>,
+    declared: &Declared,
+    case: CaseFold,
+    rich: bool,
+) -> Plan {
     match mapped {
         Ok(derived) => {
             let subject = derived.facts.path.clone();

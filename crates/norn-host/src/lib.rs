@@ -48,6 +48,11 @@ pub use lifecycle::WorkInFlight;
 #[cfg(feature = "induced-failure")]
 pub use production::loading::{LoadingBoundary, LoadingProbe};
 
+#[cfg(feature = "induced-failure")]
+pub use production::four_step::{
+    FourStepEvent, FourStepLoading, FourStepObserver, FourStepRead, FourStepReport,
+};
+
 /// **Which targets of a resolved plan the applier copies another target
 /// from**, unread, through the write kernel (`norn_fs::Content::CopyOf`):
 /// the files the plan carries byte for byte whose content another target

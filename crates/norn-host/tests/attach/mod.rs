@@ -325,6 +325,22 @@ impl Vault {
         self.serve_with_policy([self.name.clone()], None, policy, |ops| ops)
     }
 
+    #[cfg(feature = "induced-failure")]
+    pub fn host_with_four_step(&self, loading: norn_host::FourStepLoading) -> ServingHost {
+        self.host_with_four_step_policy(ProductionPolicy::new(2, 2).unwrap(), loading)
+    }
+
+    #[cfg(feature = "induced-failure")]
+    pub fn host_with_four_step_policy(
+        &self,
+        policy: ProductionPolicy,
+        loading: norn_host::FourStepLoading,
+    ) -> ServingHost {
+        self.serve_with_policy([self.name.clone()], None, policy, |ops| {
+            ops.with_four_step_loading(loading)
+        })
+    }
+
     /// A host serving this vault's root under each of `names`, holding the
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.
