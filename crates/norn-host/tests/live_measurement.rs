@@ -54,7 +54,15 @@ impl Observer for Probe {
         );
         let counters = attempt.evidence.counters.unwrap();
         assert_eq!(counters.snapshots_opened(), 1);
-        assert!(counters.statements_executed() > 0);
+        assert_eq!(
+            answer.work.statements,
+            counters.statements_executed()
+                - attempt
+                    .evidence
+                    .counters_before_builder
+                    .unwrap()
+                    .statements_executed()
+        );
         assert!(counters.vm_steps() > 0);
         assert_eq!(answer.rows.len(), 1);
         *self.served.lock().unwrap() = true;

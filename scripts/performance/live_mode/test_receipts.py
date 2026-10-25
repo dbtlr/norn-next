@@ -13,7 +13,7 @@ class Receipts(unittest.TestCase):
                     command=({'op':'get','target':'small','whole':True},{'op':'find'})[index],
                     operator_prefix_sequence=index+1, mode='live', global_ready=False,
                     availability_scope='private live capability availability',
-                    disposition='construction-declined', builder_invoked=False, counters=None,
+                    disposition='construction-declined', builder_invoked=False, counters=None, counters_before_builder=None,
                     projection_epoch=None, projection_generation=None, typed_snapshot=None,
                     builder_work=None, answer=None, withdrawn_answer=None, reason='ineligible')
     def test_phase_is_explicit_even_when_get_declines(self):
@@ -27,7 +27,8 @@ class Receipts(unittest.TestCase):
     def served(self):
         event=self.decline('find')
         event.update(disposition='served',reason=None,builder_invoked=True,
-            counters=dict(snapshots_opened=1,statements_executed=2,vm_steps=20,full_scan_steps=0),
+            counters=dict(snapshots_opened=1,statements_executed=3,vm_steps=20,full_scan_steps=0),
+            counters_before_builder=dict(snapshots_opened=1,statements_executed=1,vm_steps=0,full_scan_steps=0),
             projection_epoch='actual',projection_generation=2,
             typed_snapshot=dict(epoch='actual',generation=2,schema_fingerprint=None,sidecar_revision=None),
             builder_work={k:(2 if k=='find_statements' else 0) for k in FIND_WORK},
@@ -36,12 +37,12 @@ class Receipts(unittest.TestCase):
     def test_missing_or_misbound_provenance_and_counters_refused(self):
         event=self.served()
         validate_attempt(1,event)
-        for key,value in [('counters',None),('projection_epoch','other'),('projection_generation',None),('typed_snapshot',None),('builder_work',{})]:
+        for key,value in [('counters',None),('counters_before_builder',None),('projection_epoch','other'),('projection_generation',None),('typed_snapshot',None),('builder_work',{})]:
             wrong=copy.deepcopy(event);wrong[key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):validate_attempt(1,wrong)
         wrong=copy.deepcopy(event);wrong['counters'].pop('vm_steps')
         with self.assertRaises(ValueError):validate_attempt(1,wrong)
-        wrong=copy.deepcopy(event);wrong['counters']['statements_executed']=3
+        wrong=copy.deepcopy(event);wrong['counters']['statements_executed']=4
         with self.assertRaises(ValueError):validate_attempt(1,wrong)
     def test_withdrawn_is_executed_but_never_available(self):
         event=self.served()

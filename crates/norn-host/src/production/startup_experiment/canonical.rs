@@ -452,6 +452,7 @@ pub(super) fn requested_class_exists_observed(
         target,
     )
     .with_columns([Column::path()]);
+    let counters_before_builder = snapshot.counters();
     let result = get(&snapshot, &params, model);
     let observed = if let Some(observer) = observer {
         observer
@@ -459,6 +460,7 @@ pub(super) fn requested_class_exists_observed(
                 builder_invoked: true,
                 reading: Some(snapshot.reading().clone()),
                 counters: Some(snapshot.counters()),
+                counters_before_builder: Some(counters_before_builder),
             })
             .map_err(JobFailure::Environmental)
     } else {

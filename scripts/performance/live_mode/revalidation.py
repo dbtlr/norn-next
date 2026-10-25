@@ -47,6 +47,15 @@ def counters(value, *, executed):
         raise ValueError('one actual snapshot required')
 
 
+def builder_delta(event):
+    before=event.get('counters_before_builder')
+    counters(before,executed=False)
+    after=event['counters']
+    if any(after[k]<before[k] for k in COUNTERS) or after['snapshots_opened']!=before['snapshots_opened']:
+        raise ValueError('builder counter readings do not share one snapshot')
+    return {k:after[k]-before[k] for k in COUNTERS}
+
+
 def validate_attempt(index, event):
     """Validate disposition and real provenance before any content normalization."""
     from native_validation import provenance_epoch, nonnegative_generation, validate_cursor_provenance
@@ -63,9 +72,10 @@ def validate_attempt(index, event):
     if disposition not in ('served','withdrawn','construction-declined','unavailable','unsupported','error'):
         raise ValueError('unknown live disposition')
     epoch,generation=event.get('projection_epoch'),event.get('projection_generation')
-    if epoch is not None or generation is not None or event.get('counters') is not None:
+    if epoch is not None or generation is not None or event.get('counters') is not None or event.get('counters_before_builder') is not None:
         provenance_epoch(epoch);nonnegative_generation(generation)
         counters(event.get('counters'),executed=invoked)
+        if invoked or event.get('counters_before_builder') is not None:builder_delta(event)
     elif invoked:
         raise ValueError('builder execution lacks provenance/counters')
     if disposition=='construction-declined' and (invoked or epoch is not None):
@@ -84,7 +94,7 @@ def validate_attempt(index, event):
             raise ValueError('missing actual typed builder work')
         for value in work.values():integer(value)
         if (work['get_statements' if index==0 else 'find_statements']<=0
-                or work['get_statements' if index==0 else 'find_statements']!=event['counters']['statements_executed']):
+                or work['get_statements' if index==0 else 'find_statements']!=builder_delta(event)['statements_executed']):
             raise ValueError('typed builder and snapshot statement counts differ')
         answer=event.get('answer' if disposition=='served' else 'withdrawn_answer')
         if (not isinstance(answer,dict) or set(answer)!={'report','unsatisfied','advisories'}
@@ -208,6 +218,7 @@ def validate_ready(stages, ready, manifest):
         if e.get('builder_invoked') is not True:
             raise ValueError('eligibility receipt must describe an actual builder')
         counters(e.get('counters'),executed=True)
+        if builder_delta(e)['statements_executed']<=0:raise ValueError('eligibility Get lacks actual builder SQL')
         from native_validation import provenance_epoch, nonnegative_generation
         provenance_epoch(e.get('projection_epoch'));nonnegative_generation(e.get('projection_generation'))
         if stages[0]['projection_epoch'] is not None and (e['projection_epoch'],e['projection_generation'])!=(stages[0]['projection_epoch'],stages[0]['projection_generation']):

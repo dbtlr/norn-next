@@ -374,9 +374,9 @@ def main():
         return
     if args.compare:
         summaries=[read(p/'run.json') for p in args.compare]
-        compare_cells([s|{'cell':dict(background_documents=300)} for s in summaries])
+        compare_cells([s|{'cell':dict(background_documents=s['documents']-14)} for s in summaries])
         from baseline import write_json
-        write_json(args.output,dict(result='PASS',documents=314,full_canonical_history_answers_counters_source_writer_and_four_identities_equal=True,
+        write_json(args.output,dict(result='PASS',documents=summaries[0]['documents'],full_canonical_history_answers_counters_source_writer_and_four_identities_equal=True,
             cells=[str(p) for p in args.compare],performance_claim=False,clocks_qualifying=False))
         return
     state=input_state(config)

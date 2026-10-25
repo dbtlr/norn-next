@@ -54,6 +54,7 @@ pub struct LiveReadEvidence {
     pub builder_invoked: bool,
     pub reading: Option<norn_store::StoreReading>,
     pub counters: Option<norn_store::SnapshotCounters>,
+    pub counters_before_builder: Option<norn_store::SnapshotCounters>,
 }
 
 /// A successful builder may lose eligibility before publication. Its typed
@@ -126,6 +127,7 @@ impl LiveReader {
             if !self.eligible() {
                 return Err(LiveRefusal::Unavailable);
             }
+            evidence.counters_before_builder = Some(snapshot.counters());
             let (answer, invoked) = query(&snapshot);
             evidence.builder_invoked = invoked;
             evidence.counters = Some(snapshot.counters());

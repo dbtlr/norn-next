@@ -768,6 +768,7 @@ impl LivePrefix {
             "availability_scope":"private live capability availability",
             "disposition":disposition,"reason":reason,
             "builder_invoked":attempt.evidence.builder_invoked,
+            "counters_before_builder":attempt.evidence.counters_before_builder.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>()),
             "projection_epoch":attempt.evidence.reading.as_ref().map(|r| r.epoch()),
             "projection_generation":attempt.evidence.reading.as_ref().map(|r| r.write_generation()),
             "counters":attempt.evidence.counters.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>()),
@@ -810,7 +811,8 @@ impl Observer for LivePrefix {
         self.eligibility.lock().unwrap().push(json!({"builder_invoked":evidence.builder_invoked,
             "projection_epoch":evidence.reading.as_ref().map(|r| r.epoch()),
             "projection_generation":evidence.reading.as_ref().map(|r| r.write_generation()),
-            "counters":evidence.counters.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>())}));
+            "counters":evidence.counters.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>()),
+            "counters_before_builder":evidence.counters_before_builder.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>())}));
         Ok(())
     }
     fn live_declined(
@@ -832,7 +834,7 @@ impl Observer for LivePrefix {
         let record = json!({"startup_stage":stage,"probe":probe,"command":command,"operator_prefix_sequence":sequence,
             "mode":"live","global_ready":false,"availability_scope":"private live capability availability",
             "disposition":"construction-declined","reason":reason,"builder_invoked":false,
-            "projection_epoch":null,"projection_generation":null,"counters":null,"typed_snapshot":null,
+            "projection_epoch":null,"projection_generation":null,"counters":null,"counters_before_builder":null,"typed_snapshot":null,
             "builder_work":null,"answer":null,"withdrawn_answer":null,
             "stage_boundary_ns":now,"query_started_ns":now,"query_finished_ns":now,"query_host_ns":0});
         self.attempts.lock().unwrap().push(record.clone());
