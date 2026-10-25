@@ -105,7 +105,6 @@ pub struct Database {
     connection: Connection,
     /// Disposable domain connections carry their file through every pool handoff.
     /// Declared after the connection so SQLite closes before the owner can unlink.
-    #[cfg(feature = "induced-failure")]
     pub(crate) temporary_file: Option<Arc<crate::TemporaryFile>>,
     path: PathBuf,
     epoch: String,
@@ -180,7 +179,6 @@ impl Database {
         }
         Ok(Database {
             connection,
-            #[cfg(feature = "induced-failure")]
             temporary_file: None,
             path: path.to_path_buf(),
             epoch,

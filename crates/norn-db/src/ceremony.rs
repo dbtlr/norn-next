@@ -483,9 +483,8 @@ fn create<C: Client>(connection: &Connection, schema: &Schema, client: &C) -> Re
     Ok(())
 }
 
-/// Initialize a new disposable experimental schema using the ordinary ceremony.
+/// Initialize a new disposable schema using the ordinary ceremony.
 /// Its caller owns exclusive creation and must discard the whole file on error.
-#[cfg(feature = "induced-failure")]
 pub fn initialize_disposable<C: Client>(
     connection: &Connection,
     schema: &Schema,

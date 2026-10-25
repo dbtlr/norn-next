@@ -7,7 +7,7 @@ use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 use crate::EmittedPlan;
 use crate::database::{count_one_statement_begun, recording_reads};
@@ -40,6 +40,35 @@ pub struct TemporaryFile {
     path: PathBuf,
     #[cfg(unix)]
     identity: (u64, u64),
+    cleanup: TemporaryCleanupReceipt,
+}
+
+/// Final cleanup evidence independent of every file and connection owner.
+#[derive(Clone, Debug)]
+pub struct TemporaryCleanupReceipt {
+    paths: Arc<[PathBuf]>,
+    status: Arc<Mutex<TemporaryCleanupStatus>>,
+}
+
+/// Pending means a legitimate owner still exists; it is not a cleanup failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TemporaryCleanupStatus {
+    Pending,
+    Removed,
+    Failed(DbError),
+}
+
+impl TemporaryCleanupReceipt {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    pub fn status(&self) -> TemporaryCleanupStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// Loss of disposable storage is distinct from a failed attempt to inspect or read it.
@@ -119,6 +148,11 @@ impl RetirementCheck {
 }
 
 impl TemporaryFile {
+    /// Retain the eventual cleanup outcome without retaining this file.
+    pub fn cleanup_receipt(&self) -> TemporaryCleanupReceipt {
+        self.cleanup.clone()
+    }
+
     #[cfg(feature = "induced-failure")]
     pub fn retirement_check(self: &Arc<Self>) -> RetirementCheck {
         let mut check = RetirementCheck::database(&self.path);
@@ -126,8 +160,7 @@ impl TemporaryFile {
         check
     }
 
-    /// Experimental immutable source reads retain the ordinary snapshot seal.
-    #[cfg(feature = "induced-failure")]
+    /// Immutable source reads retain the ordinary snapshot seal.
     pub fn open_snapshot(self: &Arc<Self>) -> Result<crate::Database, TemporaryReadError> {
         let (database, _owner) = self.open_reader()?.into_database()?;
         Ok(database)
@@ -197,9 +230,60 @@ impl TemporaryFile {
 impl Drop for TemporaryFile {
     #[allow(clippy::disallowed_methods)] // Never remove a replacement at this name.
     fn drop(&mut self) {
-        if self.verify_identity().is_ok() {
-            let _ = fs::remove_file(&self.path);
-        }
+        let result = match self.verify_identity() {
+            Ok(()) => {
+                // No writer survives the final owner. Remove its necessary sidecars
+                // before the base name; a replaced base must protect all names.
+                self.cleanup
+                    .paths
+                    .iter()
+                    .skip(1)
+                    .chain(self.cleanup.paths.iter().take(1))
+                    .try_for_each(|path| match fs::remove_file(path) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(file_error("removing disposable storage", path, error)),
+                    })
+            }
+            Err(TemporaryReadError::Lost { .. }) => {
+                match fs::symlink_metadata(&self.path) {
+                    // A new maintainer may have swept a retired file. Held handles
+                    // finish independently. All necessary names must be absent.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        self.cleanup.paths.iter().skip(1).try_for_each(|path| {
+                            match fs::symlink_metadata(path) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                            Err(error) => {
+                                Err(file_error("checking disposable cleanup", path, error))
+                            }
+                            Ok(_) => Err(DbError::Lifecycle {
+                                operation: "checking disposable cleanup",
+                                path: path.clone(),
+                                message:
+                                    "a sidecar remains after the disposable main file was removed"
+                                        .into(),
+                            }),
+                        }
+                        })
+                    }
+                    Err(error) => Err(file_error("checking disposable cleanup", &self.path, error)),
+                    Ok(_) => Err(DbError::Lifecycle {
+                        operation: "removing disposable storage",
+                        path: self.path.clone(),
+                        message: "the disposable file was replaced; replacement retained".into(),
+                    }),
+                }
+            }
+            Err(TemporaryReadError::Failed(error)) => Err(error),
+        };
+        *self
+            .cleanup
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = match result {
+            Ok(()) => TemporaryCleanupStatus::Removed,
+            Err(error) => TemporaryCleanupStatus::Failed(error),
+        };
     }
 }
 
@@ -239,7 +323,6 @@ impl TemporaryDatabase {
     /// Hand a disposable domain writer to the ordinary database machinery.
     /// The database retains the file until its connection closes; the returned
     /// owner also permits reopening independently of that connection's lifetime.
-    #[cfg(feature = "induced-failure")]
     pub fn into_database(self) -> Result<(crate::Database, Arc<TemporaryFile>), DbError> {
         let file = self.file.ok_or_else(|| DbError::Sql {
             operation: "adopting disposable domain storage",
@@ -256,21 +339,43 @@ impl TemporaryDatabase {
         cache_kib: u32,
         max_bytes: Option<u64>,
     ) -> Result<Self, DbError> {
+        Self::create_in_observed(directory, cache_kib, max_bytes, |_| {})
+    }
+
+    /// Publish non-owning cleanup evidence as soon as exclusive creation succeeds,
+    /// including when later connection setup fails. The operation error is unchanged.
+    pub fn create_in_observed(
+        directory: &Path,
+        cache_kib: u32,
+        max_bytes: Option<u64>,
+        observe: impl FnOnce(&TemporaryCleanupReceipt),
+    ) -> Result<Self, DbError> {
         use std::hash::BuildHasher;
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let high = std::collections::hash_map::RandomState::new().hash_one(serial);
         let low = std::collections::hash_map::RandomState::new().hash_one(serial);
-        Self::create(
+        Self::create_observed(
             &directory.join(format!("result-{high:016x}{low:016x}.sqlite3")),
             cache_kib,
             max_bytes,
+            observe,
         )
     }
     /// Create private disposable storage without overwriting an existing name.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The substrate owns disposable SQLite files and opens.
     pub fn create(path: &Path, cache_kib: u32, max_bytes: Option<u64>) -> Result<Self, DbError> {
+        Self::create_observed(path, cache_kib, max_bytes, |_| {})
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Exclusive disposable-file creation is substrate-owned.
+    fn create_observed(
+        path: &Path,
+        cache_kib: u32,
+        max_bytes: Option<u64>,
+        observe: impl FnOnce(&TemporaryCleanupReceipt),
+    ) -> Result<Self, DbError> {
         if let Some(parent) = path.parent() {
             let mut builder = fs::DirBuilder::new();
             builder.recursive(true);
@@ -305,8 +410,13 @@ impl TemporaryDatabase {
             path: path.to_path_buf(),
             #[cfg(unix)]
             identity: (metadata.dev(), metadata.ino()),
+            cleanup: TemporaryCleanupReceipt {
+                paths: crate::database::database_paths(path).into(),
+                status: Arc::new(Mutex::new(TemporaryCleanupStatus::Pending)),
+            },
         });
         drop(created);
+        observe(&file.cleanup);
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -445,7 +555,11 @@ pub fn sweep_temporary_directory(directory: &Path) -> Result<usize, DbError> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some(token) = name
+        let base = ["-wal", "-shm", "-journal"]
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix))
+            .unwrap_or(name);
+        let Some(token) = base
             .strip_prefix("result-")
             .and_then(|name| name.strip_suffix(".sqlite3"))
         else {

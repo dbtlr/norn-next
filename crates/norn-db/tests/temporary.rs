@@ -238,3 +238,112 @@ fn a_temporary_results_capacity_refuses_without_affecting_another_result() {
         "durable opens still require a named file"
     );
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Arrange a replacement at the actual cleanup seam.
+fn last_owner_cleanup_reports_failure_without_retaining_the_file() {
+    use norn_db::TemporaryCleanupStatus;
+    let scratch = norn_testkit::scratch::Scratch::new("temporary-cleanup-receipt");
+    let path = scratch.join("result.sqlite3");
+    let writer = TemporaryDatabase::create(&path, 64, None).unwrap();
+    let receipt = writer.shared_file().unwrap().cleanup_receipt();
+    assert!(matches!(receipt.status(), TemporaryCleanupStatus::Pending));
+    std::fs::rename(&path, scratch.join("original.sqlite3")).unwrap();
+    std::fs::write(&path, "replacement must survive").unwrap();
+    drop(writer);
+    assert!(matches!(
+        receipt.status(),
+        TemporaryCleanupStatus::Failed(_)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "replacement must survive"
+    );
+    let clean = TemporaryDatabase::create(&scratch.join("clean.sqlite3"), 64, None).unwrap();
+    let receipt = clean.shared_file().unwrap().cleanup_receipt();
+    drop(clean);
+    assert!(matches!(receipt.status(), TemporaryCleanupStatus::Removed));
+    assert!(!scratch.join("clean.sqlite3").exists());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Recognized orphan names are arranged at the filesystem seam.
+fn a_sweep_removes_only_exclusive_names_and_their_necessary_sidecars() {
+    let scratch = norn_testkit::scratch::Scratch::new("loading-sidecar-sweep");
+    let directory = scratch.join("loading");
+    std::fs::create_dir(&directory).unwrap();
+    let stem = "result-0123456789abcdef0123456789abcdef.sqlite3";
+    for suffix in ["", "-wal", "-shm", "-journal", "-unrecognized"] {
+        std::fs::write(directory.join(format!("{stem}{suffix}")), "orphan").unwrap();
+    }
+    std::fs::write(directory.join("result-short.sqlite3-wal"), "keep").unwrap();
+    std::fs::create_dir(directory.join("result-ffffffffffffffffffffffffffffffff.sqlite3")).unwrap();
+    assert_eq!(sweep_temporary_directory(&directory).unwrap(), 4);
+    assert!(directory.join(format!("{stem}-unrecognized")).exists());
+    assert!(directory.join("result-short.sqlite3-wal").exists());
+    assert!(
+        directory
+            .join("result-ffffffffffffffffffffffffffffffff.sqlite3")
+            .is_dir()
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Force cleanup failure after exclusive creation, before setup returns.
+fn failed_construction_preserves_both_the_operation_error_and_cleanup_evidence() {
+    let scratch = norn_testkit::scratch::Scratch::new("failed-temporary-construction");
+    let mut receipt = None;
+    let failed =
+        TemporaryDatabase::create_in_observed(&scratch.join("loading"), 0, None, |created| {
+            std::fs::create_dir(&created.paths()[1]).unwrap();
+            receipt = Some(created.clone());
+        });
+    assert!(
+        matches!(failed, Err(norn_db::DbError::Sql { .. })),
+        "original setup failure keeps its type"
+    );
+    let receipt = receipt.expect("receipt published at exclusive creation");
+    assert!(matches!(
+        receipt.status(),
+        norn_db::TemporaryCleanupStatus::Failed(norn_db::DbError::Lifecycle { .. })
+    ));
+    assert!(
+        receipt.paths()[0].exists(),
+        "failed cleanup cannot claim removal"
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // External main-file loss must not hide remaining sidecars.
+fn missing_base_with_remaining_sidecars_is_not_successful_cleanup() {
+    let scratch = norn_testkit::scratch::Scratch::new("missing-disposable-base");
+    let path = scratch.join("result.sqlite3");
+    let writer = TemporaryDatabase::create(&path, 64, None).unwrap();
+    let receipt = writer.shared_file().unwrap().cleanup_receipt();
+    std::fs::write(&receipt.paths()[1], "residue").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    drop(writer);
+    assert!(
+        matches!(receipt.status(), norn_db::TemporaryCleanupStatus::Failed(_)),
+        "removing only the main name is not evidence of complete cleanup"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)] // Arrange links wholly within this test's scratch tree.
+fn temporary_sweeps_never_follow_namespace_or_recognized_file_links() {
+    let scratch = norn_testkit::scratch::Scratch::new("temporary-sweep-links");
+    let outside = scratch.join("outside");
+    let namespace = scratch.join("loading");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::create_dir(&namespace).unwrap();
+    let name = "result-0123456789abcdef0123456789abcdef.sqlite3-wal";
+    std::fs::write(outside.join(name), "keep").unwrap();
+    std::os::unix::fs::symlink(outside.join(name), namespace.join(name)).unwrap();
+    assert_eq!(sweep_temporary_directory(&namespace).unwrap(), 0);
+    let alias = scratch.join("linked-loading");
+    std::os::unix::fs::symlink(&outside, &alias).unwrap();
+    assert!(sweep_temporary_directory(&alias).is_err());
+    assert_eq!(std::fs::read_to_string(outside.join(name)).unwrap(), "keep");
+}

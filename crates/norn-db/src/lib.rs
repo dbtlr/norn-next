@@ -77,7 +77,6 @@ pub mod profiling;
 mod schema;
 mod temporary;
 
-#[cfg(feature = "induced-failure")]
 pub use ceremony::initialize_disposable;
 pub use ceremony::{
     Adoption, Client, OpenOutcome, Operations, RebuildReason, Schema, open, rebuild,
@@ -90,8 +89,8 @@ pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{ColumnRead, EmittedPlan, PlanStep};
 pub use schema::{digest, schema_digest};
 pub use temporary::{
-    TemporaryDatabase, TemporaryFile, TemporaryReadError, TemporarySetup,
-    sweep_temporary_directory, temporary_store_parents,
+    TemporaryCleanupReceipt, TemporaryCleanupStatus, TemporaryDatabase, TemporaryFile,
+    TemporaryReadError, TemporarySetup, sweep_temporary_directory, temporary_store_parents,
 };
 
 #[cfg(feature = "induced-failure")]
