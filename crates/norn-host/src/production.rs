@@ -10223,6 +10223,64 @@ mod tests {
             });
         }
 
+        /// **A reconcile publishes `Ready` before the semantic slice it
+        /// owes**: an edit's reconcile commits lane-1 work and owes the
+        /// engine a slice, and by the moment that slice starts the entry
+        /// already answers `Ready` and a lexical read finds the edit. The
+        /// slice is the one the edit owes because the engine had drained
+        /// everything before the edit landed.
+        #[test]
+        fn a_reconcile_publishes_ready_before_the_semantic_slice_it_owes() {
+            let f = Fixture::new("semantic-slice-after-ready");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let (host, name, _lease) = polling_ready_host(&f, ops);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            let host = Arc::new(host);
+            let watched = Arc::downgrade(&host);
+            let vault = name.clone();
+            let (seen, seen_at_slice) = std::sync::mpsc::channel();
+            engines.run_inside_next_drain(move || {
+                let Some(host) = watched.upgrade() else {
+                    return;
+                };
+                let state = host.state(&vault);
+                let params = norn_wire::SearchParams::new(
+                    norn_wire::VaultAddress::name(vault.clone()),
+                    "beta",
+                )
+                .with_rungs(norn_wire::RungSelection::exactly(
+                    norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
+                ));
+                let rows = host
+                    .search(&params)
+                    .map(|answer| answer.answer.report.page.rows.len());
+                seen.send((state, rows)).unwrap();
+            });
+
+            fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
+            let (state, rows) = seen_at_slice
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the semantic slice the edit owes");
+
+            assert_eq!(
+                state,
+                crate::lifecycle::answered(norn_wire::TrustState::Ready),
+                "a semantic slice ran before its reconcile published Ready"
+            );
+            assert_eq!(
+                rows,
+                Ok(1),
+                "a semantic slice ran before the edit was readable"
+            );
+            wait_for_engine(&*host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+        }
+
         /// **Outstanding semantic work holds no idle lease**: a vault whose
         /// backlog is still owed is reaped once its last demand is idle, and
         /// a later attachment resumes the backlog under the then-current

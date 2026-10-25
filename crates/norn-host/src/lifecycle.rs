@@ -748,10 +748,15 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     }
 
     /// Recheck the claim immediately before starting a quiet-only duty.
+    ///
+    /// Quiet work runs only over an entry that publishes `Ready`: a leg that
+    /// committed lane-1 work publishes that, or what is left to derive,
+    /// before any quiet slice — a semantic one above all — may follow it.
     pub fn quiet_maintenance_allowed(&self) -> bool {
         self.entry.upgrade().is_some_and(|entry| {
             let state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.stands_at(self.epoch)
+                && state.trust == TrustState::Ready
                 && !state.owes_a_rung()
                 && state.applies.is_empty()
                 && state.pending.is_empty()
@@ -7692,6 +7697,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // maintenance an entry owes is therefore bounded by one
                         // reconcile turn rather than by the arrival of a quiet
                         // moment the entry may never get.
+                        //
+                        // What this turn left is published before the claim
+                        // moves on: `Ready` where it left nothing to derive,
+                        // exactly as the release below publishes it. The
+                        // maintenance then runs over a serving entry, as a
+                        // poll's does, so no quiet slice it takes — a semantic
+                        // slice the turn's commit owed above all — stands
+                        // between that commit and its publication.
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
                         let next = state
                             .claim
                             .hand_on(|epoch| Job::Maintenance(name.clone(), epoch));
@@ -26298,6 +26312,40 @@ mod tests {
         drop(lease);
     }
 
+    /// **A reconcile that leaves nothing to derive publishes `Ready` before
+    /// it hands the claim to due maintenance.** The maintenance leg's quiet
+    /// work — a semantic slice the turn's commit owed among it — runs over a
+    /// serving entry, as a poll's maintenance does, so it never stands
+    /// between the turn's commit and that publication.
+    #[test]
+    fn a_reconcile_publishes_ready_before_handing_on_to_due_maintenance() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+
+        ops.block_reconcile_at
+            .store(reconciles + 1, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+        let at_maintenance = host.state(&name);
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            at_maintenance,
+            answered(TrustState::Ready),
+            "the reconcile handed its claim to maintenance before publishing Ready"
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
     fn a_quiet_attached_vault_heals_dropped_events_through_maintenance_and_reports_misses() {
@@ -26470,6 +26518,40 @@ mod tests {
             assert_eq!(*ops.quiet_maintenances.lock().unwrap(), [!busy]);
             drop(lease);
         }
+    }
+
+    /// **Quiet work runs only over an entry that publishes `Ready`**: the
+    /// claim a maintenance leg holds over a serving entry allows quiet work,
+    /// and the same claim over an entry whose trust label is anything else —
+    /// a commit whose publication has not landed — does not.
+    #[test]
+    fn quiet_maintenance_is_refused_over_an_entry_that_is_not_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        arrange_for(&ops.block_maintenance_at, &name);
+        arrange_for(&ops.maintenance_due_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = entry.gate.lock().unwrap().claim.epoch();
+        let progress = reporter(&entry, epoch);
+        let allowed_when_ready = progress.quiet_maintenance_allowed();
+        entry.gate.lock().unwrap().trust = TrustState::warming(WarmingPhase::Healing, 1, Some(1));
+        let allowed_when_warming = progress.quiet_maintenance_allowed();
+        entry.gate.lock().unwrap().trust = TrustState::Ready;
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+        assert!(
+            allowed_when_ready,
+            "quiet work was refused over a Ready entry"
+        );
+        assert!(
+            !allowed_when_warming,
+            "quiet work was allowed before the entry published Ready"
+        );
+        drop(lease);
     }
 
     /// Wait for one maintenance leg to have run.
