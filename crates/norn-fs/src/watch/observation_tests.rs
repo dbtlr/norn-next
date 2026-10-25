@@ -226,10 +226,14 @@ fn first_index_checks_separate_root_io_from_admission_and_never_recover() {
     let proof = watch.first_index_observation().unwrap();
     let root = watch.covered_root().to_path_buf();
     let moved = root.with_file_name("moved-for-proof");
-    std::fs::rename(&root, &moved).unwrap();
     // Admission reads bounded proof/control bookkeeping only, even if the big
-    // watcher account is locked and the name on disk no longer resolves.
+    // watcher account is locked and the name on disk no longer resolves. The
+    // account is locked before the rename: dropping the watcher does not join
+    // its polling thread, and a final scan that classified the rename would
+    // withdraw the proof, which is the conservative outcome but not this
+    // case's subject.
     let account = watch.state.lock().unwrap();
+    std::fs::rename(&root, &moved).unwrap();
     assert!(
         proof.admits(),
         "no filesystem work or State lock under entry gate"
