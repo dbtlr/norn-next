@@ -1158,14 +1158,14 @@ impl LoadingProbe for BrokenConstructor {
 }
 
 #[test]
-fn a_failed_constructor_keeps_its_operation_error_and_its_final_cleanup_receipt() {
+fn a_failed_constructor_waits_for_first_index_expiry_and_keeps_failure_receipts() {
     let fixture = Fixture::new("public-stage-constructor-failure");
     let construction = Probe::new([Point::MetadataComplete]);
     let failure = Arc::new(BrokenConstructor {
         inner: construction.clone(),
         broke: std::sync::atomic::AtomicBool::new(false),
     });
-    let host = fixture.host(failure.clone());
+    let host = fixture.host_bound(failure.clone(), Duration::from_millis(200));
     std::thread::scope(|scope| {
         let _release = Release(&construction);
         let first = spawn_get(scope, &host, "first");
@@ -1174,8 +1174,8 @@ fn a_failed_constructor_keeps_its_operation_error_and_its_final_cleanup_receipt(
         let error = first.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
         assert_eq!(
             error.code(),
-            &ReasonCode::HostReaderUnavailable,
-            "construction failure is an operational refusal, not an absent answer"
+            &ReasonCode::HostEntryNotReady,
+            "missing completeness stays on the ordinary loading path"
         );
         let paths = construction
             .files()
@@ -1201,6 +1201,31 @@ fn a_failed_constructor_keeps_its_operation_error_and_its_final_cleanup_receipt(
             host.last_reader_cleanup_error().is_some(),
             "successful final publication does not erase either failure"
         );
+    });
+}
+
+#[test]
+fn a_failed_constructor_waits_for_canonical_ready_within_the_original_bound() {
+    let fixture = Fixture::new("public-stage-constructor-ready");
+    let construction = Probe::new([Point::MetadataComplete]);
+    let failure = Arc::new(BrokenConstructor {
+        inner: construction.clone(),
+        broke: std::sync::atomic::AtomicBool::new(false),
+    });
+    let host = fixture.host(failure.clone());
+    std::thread::scope(|scope| {
+        let _release = Release(&construction);
+        let result = spawn_get(scope, &host, "first");
+        construction.wait(Point::MetadataComplete);
+        assert!(failure.broke.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            matches!(result.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "a construction failure must leave the request waiting for completeness"
+        );
+        construction.release();
+        assert!(result.recv_timeout(BUDGET.work()).unwrap().is_ok());
+        ready(&host);
+        assert!(host.last_reader_cleanup_error().is_some());
     });
 }
 

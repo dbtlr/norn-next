@@ -388,7 +388,8 @@ impl<A: SnapshotSource> EntryState<A> {
                         .is_none_or(FirstIndexObservation::admits)
                     && match request {
                         Request::Get(params) => {
-                            loading.building.as_deref() == Some(params.target.address())
+                            self.loading_failure(request).is_some()
+                                || loading.building.as_deref() == Some(params.target.address())
                                 || loading
                                     .queue
                                     .iter()

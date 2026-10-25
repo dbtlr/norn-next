@@ -5863,12 +5863,6 @@ impl<O: EntryOps> Host<O> {
         let mut met_at = None;
         let (turn, reader, early) = loop {
             let selected = staged.then(|| state.loading_source(request)).flatten();
-            if staged
-                && selected.is_none()
-                && let Some(failure) = state.loading_failure(request)
-            {
-                return Err(ReadRefusal::ReaderUnavailable(failure));
-            }
             let loading_wait = staged && selected.is_none() && state.waits_for_loading(request);
             if stance == ReadStance::Settle && met_at.is_none() {
                 met_at = Some(state.change_met_at());
