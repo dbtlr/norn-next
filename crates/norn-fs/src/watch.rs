@@ -26,6 +26,9 @@ use crate::write::{Act, AfterState};
 use crate::{Identity, PostState, path_identity};
 
 mod faults;
+mod first_index;
+pub use first_index::FirstIndexObservation;
+use first_index::FirstIndexProof;
 
 use faults::{Boundary, HealWindow, WatchFaults};
 
@@ -665,11 +668,10 @@ impl Subscription {
         let outcome =
             wait_for_synchronization(&self.control, self.faults.synchronization_wait(deadline));
         if let Err(error) = &outcome {
-            self.state
-                .lock()
-                .expect("watch state poisoned")
-                .terminal
-                .get_or_insert_with(|| error.clone());
+            let mut state = self.state.lock().expect("watch state poisoned");
+            state.first_index.invalidate();
+            state.terminal.get_or_insert_with(|| error.clone());
+            drop(state);
             // The coalescer is parked with nothing pending, so the recorded
             // failure reaches the stream on this wake rather than behind
             // whatever the backend reports next.
@@ -883,6 +885,7 @@ fn record_terminal(
             _ => detected,
         };
         state.terminal = Some(error.clone());
+        state.first_index.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             state.observation_revision = None;
@@ -939,6 +942,11 @@ impl Subscription {
     }
 
     fn close_owned(&mut self) -> Result<(), WatchError> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .first_index
+            .close_admission();
         self.watcher.take();
         // Disconnect the delivery slot before joining the worker. A terminal
         // send blocked on the full slot fails, and a coalescer holding a batch,
@@ -1674,6 +1682,7 @@ struct State {
     schema: SchemaLocation,
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
+    first_index: Arc<FirstIndexProof>,
     // Accepted observations outlive every pending/heal/delivery transfer. None
     // is terminal or an unrepresentable revision, and can never become zero.
     #[cfg(any(test, feature = "induced-failure"))]
@@ -1725,6 +1734,7 @@ impl State {
             schema,
             ledger,
             pending: None,
+            first_index: Arc::new(FirstIndexProof::new()),
             #[cfg(any(test, feature = "induced-failure"))]
             observation_revision: Some(0),
             terminal: None,
@@ -1737,6 +1747,7 @@ impl State {
         }
     }
     fn batch(&mut self) -> &mut Batch {
+        self.first_index.invalidate();
         #[cfg(any(test, feature = "induced-failure"))]
         {
             self.observation_revision = self.observation_revision.and_then(|n| n.checked_add(1));
@@ -1828,13 +1839,36 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
                 return state.terminal.clone();
             }
             for path in event.paths {
-                ingest_path(&mut state, event.kind, &path);
+                let effect = classify_path(&state, event.kind, &path);
+                let root_error = if effect.root_recheck {
+                    let anchor = RootAnchor {
+                        registered: state.registered_root.clone(),
+                        covered: state.root.clone(),
+                        identity: state.root_identity,
+                    };
+                    let proof = Arc::clone(&state.first_index);
+                    // Root identity performs I/O. The anchor is immutable, so
+                    // release bookkeeping until that check has finished.
+                    drop(state);
+                    let error = anchor.check().err();
+                    if error.is_some() {
+                        proof.invalidate();
+                    }
+                    state = shared.lock().expect("watch state poisoned");
+                    error
+                } else {
+                    None
+                };
+                ingest_effect(&mut state, event.kind, effect, root_error.as_ref());
             }
         }
     }
-    #[cfg(any(test, feature = "induced-failure"))]
     if state.terminal.is_some() {
-        state.observation_revision = None;
+        state.first_index.invalidate();
+        #[cfg(any(test, feature = "induced-failure"))]
+        {
+            state.observation_revision = None;
+        }
     }
     state.terminal.clone()
 }
@@ -1865,7 +1899,7 @@ fn names_only_the_directory_entry(kind: EventKind) -> bool {
 /// What one delivered path does to the watcher's account of the vault.
 ///
 /// **Classifying is separate from applying because two questions ask it.**
-/// [`ingest_path`] asks what to fold in; [`folds_into_a_batch`] asks whether
+/// [`ingest`] asks what to fold in; [`folds_into_a_batch`] asks whether
 /// there is anything to fold in at all, on behalf of the fault seam's stream
 /// arm, and it must not move any of the state the answer is read out of. One
 /// classification answers both.
@@ -2001,7 +2035,12 @@ fn reported_spelling(kind: EventKind) -> Spelling {
 }
 
 /// Fold one delivered path's effect into the batch this watcher is building.
-fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
+fn ingest_effect(
+    state: &mut State,
+    kind: EventKind,
+    effect: PathEffect,
+    root_error: Option<&WatchError>,
+) {
     let PathEffect {
         coverage_lost,
         root_recheck,
@@ -2009,22 +2048,10 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
         schema_rescan,
         schema_dirty,
         dirty_root,
-    } = classify_path(state, kind, path);
+    } = effect;
     if root_recheck {
-        match path_identity(&state.registered_root) {
-            Ok(Some(identity)) if identity == state.root_identity => {}
-            Ok(_) => {
-                let root = state.root.clone();
-                state.terminal = Some(preferred_terminal(
-                    state.terminal.as_ref(),
-                    WatchError::CoverageLost(root),
-                ));
-            }
-            Err(refusal) => {
-                state
-                    .terminal
-                    .get_or_insert_with(|| WatchError::Backend(refusal.to_string()));
-            }
+        if let Some(error) = root_error {
+            state.terminal = Some(preferred_terminal(state.terminal.as_ref(), error.clone()));
         }
         return;
     }
@@ -2149,6 +2176,9 @@ impl Drop for CoalescerExit<'_> {
         let mut locked = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         locked.closing = false;
         locked.coalescer_died |= thread::panicking();
+        if locked.coalescer_died {
+            locked.first_index.invalidate();
+        }
         self.handoff.notify_all();
     }
 }

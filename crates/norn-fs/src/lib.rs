@@ -140,8 +140,8 @@ pub use walk::{
     WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
-    Batch, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError,
-    watch, watch_polling,
+    Batch, FirstIndexObservation, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription,
+    SubscriptionState, WatchError, watch, watch_polling,
 };
 pub use write::{
     Act, AfterState, Confirmed, Content, Durability, Landed, Publication, Published,

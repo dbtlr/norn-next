@@ -184,3 +184,164 @@ fn observation_rejects_overflow_control_loss_and_a_replaced_root() {
     drop(second);
     drop(watch);
 }
+
+#[test]
+fn an_established_first_index_proof_survives_admin_close_but_records_late_contradictions() {
+    let (_scratch, watch, _lease) = fixture();
+    let proof = watch.first_index_observation().expect("unchanged coverage");
+    assert!(proof.check_root());
+    assert!(proof.admits());
+    let state = Arc::clone(&watch.state);
+    let root = watch.covered_root().to_path_buf();
+    drop(watch);
+    assert!(!proof.admits(), "administrative end closes acquisitions");
+    assert!(
+        proof.held_is_current(),
+        "healthy established read may finish"
+    );
+    ingest(
+        &state,
+        Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("late.md"))),
+    );
+    assert!(
+        !proof.held_is_current(),
+        "accepted late contradiction is retained"
+    );
+    drop(state);
+    assert!(!proof.held_is_current());
+}
+
+#[test]
+fn first_index_checks_separate_root_io_from_admission_and_never_recover() {
+    let (_scratch, mut watch, _lease) = fixture();
+    watch.begin_heal();
+    watch.watcher.take();
+    let proof = watch.first_index_observation().unwrap();
+    let root = watch.covered_root().to_path_buf();
+    let moved = root.with_file_name("moved-for-proof");
+    std::fs::rename(&root, &moved).unwrap();
+    // Admission reads bounded proof/control bookkeeping only, even if the big
+    // watcher account is locked and the name on disk no longer resolves.
+    let account = watch.state.lock().unwrap();
+    assert!(
+        proof.admits(),
+        "no filesystem work or State lock under entry gate"
+    );
+    drop(account);
+    assert!(!proof.check_root());
+    std::fs::rename(&moved, &root).unwrap();
+    assert!(!proof.check_root());
+    assert!(!proof.held_is_current());
+    assert!(watch.first_index_observation().is_none());
+    assert!(matches!(
+        watch.finish_heal(),
+        Err(WatchError::CoverageLost(_))
+    ));
+}
+
+#[test]
+fn first_index_proofs_observe_accepted_facts_before_delivery_and_notify_late_registration() {
+    let (_scratch, watch, _lease) = fixture();
+    watch.begin_heal();
+    let proof = watch.first_index_observation().unwrap();
+    ingest(
+        &watch.state,
+        Ok(Event::new(EventKind::Create(CreateKind::File))
+            .add_path(watch.covered_root().join("known-before-delivery.md"))),
+    );
+    assert!(!watch.holds_a_settled_batch());
+    assert!(!proof.admits());
+    assert!(!proof.held_is_current());
+    assert!(!watch.finish_heal().unwrap().is_empty());
+    assert!(watch.first_index_observation().is_none());
+}
+
+#[test]
+fn first_index_held_proof_owns_no_watcher_account_and_backend_failure_poison_survives_close() {
+    let (_scratch, watch, _lease) = fixture();
+    let proof = watch.first_index_observation().unwrap();
+    let weak = Arc::downgrade(&watch.state);
+    drop(watch);
+    assert!(
+        weak.upgrade().is_none(),
+        "proof owns no watcher/batch resources"
+    );
+    assert!(proof.held_is_current());
+    proof.invalidate();
+    assert!(!proof.held_is_current());
+
+    drop(_lease);
+    let (_other, watch, _lease2) = fixture();
+    let proof = watch.first_index_observation().unwrap();
+    ingest(
+        &watch.state,
+        Err(notify::Error::generic("backend contradiction")),
+    );
+    drop(watch);
+    assert!(!proof.held_is_current());
+}
+
+#[test]
+fn first_index_withdrawal_wakes_an_existing_condvar_and_racing_registration() {
+    struct Signal {
+        notified: Mutex<bool>,
+        changed: Condvar,
+    }
+    impl std::task::Wake for Signal {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            *self.notified.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+    let (_scratch, watch, _lease) = fixture();
+    let proof = watch.first_index_observation().unwrap();
+    let signal = Arc::new(Signal {
+        notified: Mutex::new(false),
+        changed: Condvar::new(),
+    });
+    let waker = std::task::Waker::from(Arc::clone(&signal));
+    proof.register_waker(&waker);
+    proof.invalidate();
+    let (notified, _) = signal
+        .changed
+        .wait_timeout_while(
+            signal.notified.lock().unwrap(),
+            Duration::from_secs(1),
+            |notified| !*notified,
+        )
+        .unwrap();
+    assert!(*notified, "withdrawal wakes the stance condition variable");
+    drop(notified);
+    *signal.notified.lock().unwrap() = false;
+    proof.register_waker(&waker);
+    assert!(
+        *signal.notified.lock().unwrap(),
+        "registration after withdrawal cannot lose the wake"
+    );
+    // Race registration with withdrawal on another unchanged coverage, using
+    // the same existing stance signal and no bridge worker.
+    let (second, _) = super::watch(
+        watch.covered_root(),
+        &watch.covered_root().join("schema.yaml"),
+    )
+    .unwrap();
+    second.synchronize(Duration::from_secs(5)).unwrap();
+    let racing = second.first_index_observation().unwrap();
+    *signal.notified.lock().unwrap() = false;
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            barrier.wait();
+            racing.register_waker(&waker);
+        });
+        barrier.wait();
+        racing.invalidate();
+    });
+    assert!(
+        *signal.notified.lock().unwrap(),
+        "racing registration must wake the existing waiter"
+    );
+}
