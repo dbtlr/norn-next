@@ -99,6 +99,12 @@ use crate::request::Request;
 mod intake;
 pub use intake::{GetBuilder, IntakeBuilder};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantPolicy {
+    CompleteRequest,
+    SourceOnly,
+}
+
 /// The read-only snapshot handle wire reads run on.
 ///
 /// Host requests use [`Store::reader_pool`], a zero-I/O handle whose independent
@@ -140,6 +146,7 @@ pub use intake::{GetBuilder, IntakeBuilder};
 /// }
 /// ```
 pub struct SnapshotReader {
+    grant_policy: GrantPolicy,
     intake_file: Option<Arc<norn_db::TemporaryFile>>,
     budget: Option<Arc<crate::ReadBudget>>,
     pool: Option<crate::read_budget::Pool>,
@@ -186,7 +193,7 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Option<ConnectionTurn> {
-        if self.intake_file.is_some() && need != crate::ReadNeed::Source {
+        if self.grant_policy == GrantPolicy::SourceOnly && need != crate::ReadNeed::Source {
             return None;
         }
         if let (Some(budget), Some(pool)) = (&self.budget, &self.pool) {
@@ -223,7 +230,7 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Result<Option<ConnectionTurn>, StoreError> {
-        if self.intake_file.is_some() && need != crate::ReadNeed::Source {
+        if self.grant_policy == GrantPolicy::SourceOnly && need != crate::ReadNeed::Source {
             return Err(StoreError::Sql {
                 operation: "acquiring a loading source",
                 condition: None,
@@ -1066,6 +1073,7 @@ impl Store {
     ) -> SnapshotReader {
         let reader = SnapshotReader {
             intake_file: None,
+            grant_policy: GrantPolicy::CompleteRequest,
             budget: Some(Arc::clone(budget)),
             pool: Some(budget.pool(group.0.clone(), crate::read_budget::Kind::Source)),
             source: Some(self.database.path().to_path_buf()),
@@ -1341,6 +1349,7 @@ impl Store {
             })
             .map(|database| SnapshotReader {
                 intake_file: None,
+                grant_policy: GrantPolicy::CompleteRequest,
                 budget: None,
                 pool: None,
                 source: None,

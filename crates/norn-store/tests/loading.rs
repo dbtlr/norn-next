@@ -541,3 +541,100 @@ fn sealed_disposable_cannot_be_rebuilt_into_an_ordinary_store() {
     );
     drop(reader);
 }
+
+#[test]
+fn sealed_source_grants_follow_the_finish_contract_on_cold_and_warm_reads() {
+    for kind in ["metadata", "get", "legacy"] {
+        let scratch = norn_testkit::scratch::Scratch::new("sealed-grant-policy");
+        let canonical = Store::open(
+            scratch.join("canonical.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        let budget = ReadBudget::new(ReadBudgetPolicy::default());
+        let directory = Store::loading_directory(&scratch.join("canonical.sqlite3"));
+        let (reader, receipt) = if kind == "get" {
+            let builder = GetBuilder::create_in(
+                &directory,
+                StoredPathOrder::Sensitive,
+                DerivationVersion::new(1),
+            )
+            .unwrap();
+            let receipt = builder.cleanup_receipt();
+            (
+                builder
+                    .finish_in_group(&budget, &canonical.read_group())
+                    .unwrap(),
+                receipt,
+            )
+        } else {
+            let builder = norn_store::loading::IntakeBuilder::create_in(
+                &directory,
+                StoredPathOrder::Sensitive,
+                DerivationVersion::new(1),
+            )
+            .unwrap();
+            let receipt = builder.cleanup_receipt();
+            let reader = if kind == "legacy" {
+                builder.finish(&budget).unwrap()
+            } else {
+                builder
+                    .finish_in_group(&budget, &canonical.read_group())
+                    .unwrap()
+            };
+            (reader, receipt)
+        };
+        let reader = Arc::new(reader);
+        let path = receipt.paths()[0].clone();
+        for warm in [false, true] {
+            let deadline = || Instant::now() + Duration::from_secs(5);
+            for need in [
+                ReadNeed::SourceAndScratch,
+                ReadNeed::SourceAndOptionalScratch,
+            ] {
+                if kind != "legacy" {
+                    assert!(reader.try_take_for(need, deadline()).is_none());
+                    assert!(reader.acquire(need, deadline()).is_err());
+                    assert_eq!(budget.census().live_connections, usize::from(warm));
+                } else {
+                    let turn = reader
+                        .try_take_for(need, deadline())
+                        .or_else(|| reader.acquire(need, deadline()).unwrap())
+                        .unwrap();
+                    let snapshot = turn.establish().unwrap();
+                    assert_eq!(budget.census().live_connections, 2);
+                    drop(snapshot);
+                }
+            }
+            let snapshot = reader
+                .acquire(ReadNeed::Source, deadline())
+                .unwrap()
+                .unwrap()
+                .establish()
+                .unwrap();
+            drop(snapshot);
+        }
+        let need = if kind == "legacy" {
+            ReadNeed::SourceAndScratch
+        } else {
+            ReadNeed::Source
+        };
+        let snapshot = reader
+            .acquire(need, Instant::now() + Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .establish()
+            .unwrap();
+        reader.retire();
+        drop(reader);
+        assert!(path.exists());
+        assert_eq!(
+            budget.census().live_connections,
+            if kind == "legacy" { 2 } else { 1 }
+        );
+        drop(snapshot);
+        assert_eq!(budget.census().live_connections, 0);
+        assert!(!path.exists());
+    }
+}

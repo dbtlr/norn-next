@@ -147,7 +147,9 @@ impl IntakeBuilder {
     }
 
     /// Build every deferred index before minting a reader, then close the writer.
+    /// Legacy experiments retain complete count grants under their own registration.
     /// FILE temp storage permits sorter spill; page cache size does not bound sorter RSS.
+    #[cfg(any(test, feature = "induced-failure"))]
     pub fn finish(self, budget: &Arc<crate::ReadBudget>) -> Result<SnapshotReader, StoreError> {
         let group = self
             .store
@@ -158,14 +160,23 @@ impl IntakeBuilder {
                 condition: None,
                 message: "the intake was abandoned after a failed write".into(),
             })?;
-        self.finish_in_group(budget, &group)
+        self.seal(budget, &group, GrantPolicy::CompleteRequest)
     }
 
-    /// Seal completely and charge this physical pool to its canonical registration.
+    /// Seal completely and charge this source-only pool to its canonical registration.
     pub fn finish_in_group(
+        self,
+        budget: &Arc<crate::ReadBudget>,
+        group: &crate::ReadGroup,
+    ) -> Result<SnapshotReader, StoreError> {
+        self.seal(budget, group, GrantPolicy::SourceOnly)
+    }
+
+    fn seal(
         mut self,
         budget: &Arc<crate::ReadBudget>,
         group: &crate::ReadGroup,
+        grant_policy: GrantPolicy,
     ) -> Result<SnapshotReader, StoreError> {
         let mut store = self.store.take().ok_or_else(|| StoreError::Sql {
             operation: "sealing loading source",
@@ -194,6 +205,7 @@ impl IntakeBuilder {
         store.intake_unsealed = false;
         let mut reader = store.reader_pool_in_group(budget, group);
         reader.intake_file = self.file.take();
+        reader.grant_policy = grant_policy;
         // No writer connection or statement cache survives into canonical heal.
         drop(store);
         Ok(reader)
