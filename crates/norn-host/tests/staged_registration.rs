@@ -148,29 +148,10 @@ fn probe_reused_store_first_attach_provisional_wait() {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let host = host(&dirs, &root, true, gate.clone());
     let params = GetParams::new(address.clone(), ResolutionTarget::new("doc1").unwrap());
-    let started = Instant::now();
     let get = host.get(&params);
-    let get_elapsed = started.elapsed();
-    let started = Instant::now();
     let find = host.find(&FindParams::new(address.clone()));
-    let find_elapsed = started.elapsed();
-    let started = Instant::now();
     let count = host.count(&norn_wire::CountParams::new(address.clone()));
-    let count_elapsed = started.elapsed();
     let waits = host.read_evidence().settle_waits;
-    println!(
-        "NQ reused-store held prologue: get {:?} in {get_elapsed:?}; find {:?} in {find_elapsed:?}; count {:?} in {count_elapsed:?}; settle_waits={waits}",
-        get.as_ref()
-            .map(|_| "ok")
-            .map_err(|e| serde_json::to_string(e).unwrap()),
-        find.as_ref()
-            .map(|_| "ok")
-            .map_err(|e| serde_json::to_string(e).unwrap()),
-        count
-            .as_ref()
-            .map(|_| "ok")
-            .map_err(|e| serde_json::to_string(e).unwrap())
-    );
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
     wait_until("second Ready", BUDGET, || match host.state(&name) {
@@ -179,6 +160,10 @@ fn probe_reused_store_first_attach_provisional_wait() {
     })
     .unwrap();
     assert!(host.get(&params).is_ok());
+    for error in [get.unwrap_err(), find.unwrap_err(), count.unwrap_err()] {
+        assert_eq!(error.code(), &norn_wire::ReasonCode::HostEntryNotReady);
+        assert!(!error.message().contains("first time"), "{error:?}");
+    }
     assert_eq!(
         waits, 0,
         "eligible requests waited during a reused store's first attach prologue"
