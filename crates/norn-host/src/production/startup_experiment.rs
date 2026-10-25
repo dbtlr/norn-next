@@ -22,6 +22,14 @@ pub enum Stage {
 
 /// Store reads at a checkpoint prove query cost without claiming host admission.
 pub trait Observer: Send + Sync {
+    /// Private live lab boundary, captured before the first catalogue enumeration.
+    fn live_observation(&self, _observation: &norn_fs::watch::Observation) -> Result<(), String> {
+        Ok(())
+    }
+    /// Whole-Get capability only: no raw early snapshot or reader escapes.
+    fn live_get(&self, _reader: Arc<LiveGetReader>) -> Result<(), String> {
+        Ok(())
+    }
     /// Ordinary writer counters exclude every disposable phase.
     fn canonical_work(
         &self,
@@ -81,6 +89,7 @@ pub struct Experiment {
     canonical: bool,
     intake: bool,
     frozen_prefix: Option<Arc<FrozenInput>>,
+    live: bool,
 }
 
 impl Experiment {
@@ -93,6 +102,7 @@ impl Experiment {
             canonical: false,
             intake: false,
             frozen_prefix: None,
+            live: false,
         })
     }
 
@@ -105,6 +115,7 @@ impl Experiment {
             canonical: false,
             intake: false,
             frozen_prefix: None,
+            live: false,
         })
     }
 
@@ -121,6 +132,7 @@ impl Experiment {
             canonical: true,
             intake: false,
             frozen_prefix: None,
+            live: false,
         })
     }
 
@@ -137,6 +149,7 @@ impl Experiment {
             canonical: true,
             intake: true,
             frozen_prefix: None,
+            live: false,
         })
     }
 
@@ -155,6 +168,21 @@ impl Experiment {
             canonical: true,
             intake: false,
             frozen_prefix: Some(frozen),
+            live: false,
+        })
+    }
+
+    /// Private conservative live experiment; ordinary first-open admission is unchanged.
+    pub fn live_whole_get(get_target: impl Into<String>, observer: Arc<dyn Observer>) -> Arc<Self> {
+        Arc::new(Self {
+            get_target: get_target.into(),
+            observer,
+            started: AtomicBool::new(false),
+            separate_frontmatter: false,
+            canonical: true,
+            intake: false,
+            frozen_prefix: None,
+            live: true,
         })
     }
 
@@ -653,3 +681,6 @@ pub use prefix::{FrozenInput, PrefixAttempt, PrefixCertificate, PrefixReader};
 
 mod helper;
 pub use helper::{HelperCause, HelperComplete, HelperControl, HelperFailure, run_prefix_helper};
+
+mod live;
+pub use live::{LiveGetReader, LiveGetRefusal};

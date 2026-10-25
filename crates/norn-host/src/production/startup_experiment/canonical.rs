@@ -1,5 +1,6 @@
 //! Disposable demand work preceding an unchanged ordinary heal. This is a
-//! frozen-copy, paused simulation, not live host admission or a trust stance.
+//! frozen-copy simulation or explicitly private live lab, never host admission
+//! or a trust stance.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
@@ -92,6 +93,22 @@ pub(super) fn prepare_prefix(
     experiment: &Experiment,
     evidence: &mut PrefixEvidence,
 ) -> Result<Arc<ContentModel>, JobFailure> {
+    // Capture before inventory construction: accepted facts during enumeration
+    // must invalidate just as facts during dependency loading do.
+    let observation = if experiment.live {
+        attachment
+            .subscription
+            .as_ref()
+            .and_then(|watch| watch.unchanged_observation())
+    } else {
+        None
+    };
+    if let Some(observation) = &observation {
+        experiment
+            .observer
+            .live_observation(observation)
+            .map_err(JobFailure::Environmental)?;
+    }
     let root = attachment.covered_root.clone();
     let source = norn_fs::Vault::open(&root, exclusions).map_err(effect)?;
     let declared = Declaration::read(&mut attachment.store)?;
@@ -118,17 +135,18 @@ pub(super) fn prepare_prefix(
                     )
                     .map_err(JobFailure::Environmental)?;
                 let fact = inventory.replay(&record.value).map_err(effect)?;
-                if experiment.frozen_prefix.is_some()
+                if (experiment.frozen_prefix.is_some() || experiment.live)
                     && let norn_fs::WalkFact::Skipped(skip) = &fact
                     && !skip.reason().stands()
                 {
                     if let Some(frozen) = &experiment.frozen_prefix {
                         frozen.invalidate();
                     }
-                    catalogue_decline = Some(
+                    catalogue_decline = Some(if experiment.live {
+                        "unresolved catalogue observation; live whole-Get eligibility unavailable"
+                    } else {
                         "unresolved catalogue observation; frozen-input certificate broken"
-                            .to_string(),
-                    );
+                    }.to_string());
                 }
                 if let norn_fs::WalkFact::File(file) = fact
                     && let Ok(path) = document_path(file.path().as_path())
@@ -158,6 +176,19 @@ pub(super) fn prepare_prefix(
                 .observer
                 .catalogue(&catalogue, &model)
                 .map_err(JobFailure::Environmental)?;
+        }
+        if experiment.live {
+            super::live::run(
+                attachment,
+                exclusions,
+                policy,
+                experiment,
+                &model,
+                &source,
+                &catalogue,
+                observation.filter(|_| catalogue_decline.is_none()),
+            )?;
+            return Ok(model);
         }
         let timing = norn_store::profiling::span("startup.canonical_demand");
         let nonce = std::collections::hash_map::RandomState::new().hash_one(std::process::id());
@@ -251,14 +282,14 @@ pub(super) fn prepare_prefix(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Preparation {
+pub(super) enum Preparation {
     Ready,
     Declined,
     SourceChanged,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare(
+pub(super) fn prepare(
     store: &mut norn_store::Store,
     catalogue: &Catalogue,
     source: &norn_fs::Vault,
@@ -378,7 +409,7 @@ fn prepare(
 // Catalogue neighborhoods over-approximate eligibility: every name may be
 // quarantined, ignored, or outside the requested suffix. The ordinary builder
 // decides this too. This prototype conservatively leaves empty classes to readiness.
-fn requested_class_exists(
+pub(super) fn requested_class_exists(
     reader: &Arc<SnapshotReader>,
     model: &ContentModel,
     target: &str,

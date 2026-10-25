@@ -537,10 +537,59 @@ pub struct Subscription {
 /// Watch backends cover the canonical directory. Callers keep using the
 /// registered path. The identity joins those names. Each subscription boundary
 /// detects a retarget that the canonical watch cannot observe.
+#[derive(Clone)]
 struct RootAnchor {
     registered: PathBuf,
     covered: PathBuf,
     identity: Identity,
+}
+
+/// Private-lab eligibility since coverage began, without draining watcher facts.
+/// This proves only the absence of accepted relevant observations, under the
+/// ordinary backend fidelity limits; it proves neither filesystem atomicity nor
+/// the absence of OS events the watcher has not yet seen.
+#[cfg(any(test, feature = "induced-failure"))]
+#[derive(Clone)]
+pub struct Observation {
+    state: Weak<Mutex<State>>,
+    control: Weak<(Mutex<SubscriptionState>, Condvar)>,
+    root: RootAnchor,
+    invalid: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(any(test, feature = "induced-failure"))]
+impl Observation {
+    /// A failed observation is permanently invalid, even if its root returns.
+    pub fn is_current(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.invalid.load(Ordering::SeqCst) {
+            return false;
+        }
+        let current = || {
+            // Filesystem checks and reader acquisition hold no watcher lock.
+            let state = self.state.upgrade()?;
+            let control = self.control.upgrade()?;
+            if let Err(error) = self.root.check() {
+                // Anchor loss belongs to the subscription, not just this token:
+                // restoration cannot mint fresh eligibility or resume coverage.
+                record_terminal(&state, &control, error);
+                return None;
+            }
+            let state = state.lock().ok()?;
+            let live = matches!(*control.0.lock().ok()?, SubscriptionState::Live);
+            Some(
+                live && state.observation_revision == Some(0)
+                    && state.terminal.is_none()
+                    && !state.unsubscribed
+                    && !state.coalescer_died,
+            )
+        };
+        if current() != Some(true) {
+            self.invalid.store(true, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
 }
 
 impl RootAnchor {
@@ -554,6 +603,25 @@ impl RootAnchor {
 }
 
 impl Subscription {
+    /// Mint only before any relevant fact has been accepted on this coverage.
+    /// The lab captures this before enumerating its complete names catalogue.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub fn unchanged_observation(&self) -> Option<Observation> {
+        let observation = Observation {
+            state: Arc::downgrade(&self.state),
+            control: Arc::downgrade(&self.control),
+            root: self.root_anchor.clone(),
+            invalid: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        observation.is_current().then_some(observation)
+    }
+
+    /// Reject a token minted by any other subscription, including the same root.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub fn accepts_observation(&self, observation: &Observation) -> bool {
+        observation.state.ptr_eq(&Arc::downgrade(&self.state)) && observation.is_current()
+    }
+
     /// The canonical directory this subscription covers.
     pub fn covered_root(&self) -> &Path {
         &self.root_anchor.covered
@@ -789,16 +857,33 @@ impl Subscription {
     }
 
     fn record_terminal(&self, detected: WatchError) -> WatchError {
-        let error = {
-            let mut state = self.state.lock().expect("watch state poisoned");
-            let detected = preferred_terminal(state.terminal.as_ref(), detected);
-            let error = self.recorded_terminal_cause(detected);
-            state.terminal = Some(error.clone());
-            error
-        };
-        publish_control(&self.control, SubscriptionState::Terminal(error.clone()));
-        error
+        record_terminal(&self.state, &self.control, detected)
     }
+}
+
+/// Record the subscription's terminal cause regardless of which observer found
+/// it. State and control retain it across delivery and heal-window consumption.
+fn record_terminal(
+    shared: &Arc<Mutex<State>>,
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+    detected: WatchError,
+) -> WatchError {
+    let error = {
+        let mut state = shared.lock().expect("watch state poisoned");
+        let detected = preferred_terminal(state.terminal.as_ref(), detected);
+        let error = match &*control.0.lock().expect("watch control state poisoned") {
+            SubscriptionState::Terminal(existing) => preferred_terminal(Some(existing), detected),
+            _ => detected,
+        };
+        state.terminal = Some(error.clone());
+        #[cfg(any(test, feature = "induced-failure"))]
+        {
+            state.observation_revision = None;
+        }
+        error
+    };
+    publish_control(control, SubscriptionState::Terminal(error.clone()));
+    error
 }
 
 fn wait_for_synchronization(
@@ -1582,6 +1667,10 @@ struct State {
     schema: SchemaLocation,
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
+    // Accepted observations outlive every pending/heal/delivery transfer. None
+    // is terminal or an unrepresentable revision, and can never become zero.
+    #[cfg(any(test, feature = "induced-failure"))]
+    observation_revision: Option<u64>,
     terminal: Option<WatchError>,
     healing: bool,
     /// The coalescer has taken the accumulation and is suppressing the batch
@@ -1629,6 +1718,8 @@ impl State {
             schema,
             ledger,
             pending: None,
+            #[cfg(any(test, feature = "induced-failure"))]
+            observation_revision: Some(0),
             terminal: None,
             healing: false,
             closing: false,
@@ -1639,6 +1730,10 @@ impl State {
         }
     }
     fn batch(&mut self) -> &mut Batch {
+        #[cfg(any(test, feature = "induced-failure"))]
+        {
+            self.observation_revision = self.observation_revision.and_then(|n| n.checked_add(1));
+        }
         let now = Instant::now();
         let pending = self.pending.get_or_insert_with(|| Pending {
             batch: Batch::default(),
@@ -1729,6 +1824,10 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
                 ingest_path(&mut state, event.kind, &path);
             }
         }
+    }
+    #[cfg(any(test, feature = "induced-failure"))]
+    if state.terminal.is_some() {
+        state.observation_revision = None;
     }
     state.terminal.clone()
 }
@@ -5960,3 +6059,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod observation_tests;
