@@ -8745,6 +8745,392 @@ mod tests {
             );
         }
 
+        type MaintenanceStep = Box<
+            dyn FnOnce(
+                    &ProductionEntryOps,
+                    &VaultName,
+                    &mut ProductionAttachment,
+                    bool,
+                    &ProgressReporter<ProductionAttachment>,
+                ) -> Result<(), JobFailure>
+                + Send,
+        >;
+
+        struct MaintenanceControl {
+            active: std::sync::atomic::AtomicBool,
+            steps: Mutex<std::sync::mpsc::Receiver<Option<MaintenanceStep>>>,
+        }
+
+        /// Drive real claimed maintenance legs without using elapsed time as
+        /// evidence. An active script asks the scheduler for another leg;
+        /// production maintain_quiet still decides whether any work may run.
+        struct MaintenanceScript {
+            control: Arc<MaintenanceControl>,
+            steps: std::sync::mpsc::Sender<Option<MaintenanceStep>>,
+            injected: Arc<Mutex<Option<norn_fs::Batch>>>,
+        }
+
+        struct PausedMaintenance<T> {
+            observed: T,
+            resume: std::sync::mpsc::Sender<()>,
+        }
+
+        impl<T> Drop for PausedMaintenance<T> {
+            fn drop(&mut self) {
+                let _ = self.resume.send(());
+            }
+        }
+
+        impl MaintenanceScript {
+            /// The worker pauses after action and before returning to the
+            /// lifecycle's real publication. Drop the result to release it.
+            fn pause<T: Send + 'static>(
+                &self,
+                action: impl FnOnce(
+                    &ProductionEntryOps,
+                    &VaultName,
+                    &mut ProductionAttachment,
+                    bool,
+                    &ProgressReporter<ProductionAttachment>,
+                ) -> T
+                + Send
+                + 'static,
+            ) -> PausedMaintenance<T> {
+                let (sample, sampled) = std::sync::mpsc::channel();
+                let (resume, resumed) = std::sync::mpsc::channel();
+                self.steps
+                    .send(Some(Box::new(
+                        move |ops, name, attachment, quiet, progress| {
+                            let observed = action(ops, name, attachment, quiet, progress);
+                            sample.send(observed).unwrap();
+                            resumed.recv_timeout(Duration::from_secs(30)).unwrap();
+                            Ok(())
+                        },
+                    )))
+                    .unwrap();
+                PausedMaintenance {
+                    observed: sampled.recv_timeout(Duration::from_secs(30)).unwrap(),
+                    resume,
+                }
+            }
+        }
+
+        impl Drop for MaintenanceScript {
+            fn drop(&mut self) {
+                self.control
+                    .active
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = self.steps.send(None);
+            }
+        }
+
+        fn scripted_semantic_host(
+            f: &Fixture,
+        ) -> (
+            crate::Host<OverflowOnArm>,
+            VaultName,
+            crate::DemandLease<OverflowOnArm>,
+            Arc<SemanticEngines>,
+            MaintenanceScript,
+        ) {
+            let (engines, inner) = engines_and_ops(f);
+            let (steps, receive) = std::sync::mpsc::channel();
+            let control = Arc::new(MaintenanceControl {
+                active: std::sync::atomic::AtomicBool::new(false),
+                steps: Mutex::new(receive),
+            });
+            let injected = Arc::new(Mutex::new(None));
+            let name = f.registration().name;
+            let host = crate::Host::new(
+                crate::RegistryRead::from_entries([f.registration()]),
+                OverflowOnArm {
+                    inner,
+                    armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    injected: Arc::clone(&injected),
+                    recoveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    maintenance_script: Some(Arc::clone(&control)),
+                },
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_millis(5),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
+                },
+            )
+            .unwrap();
+            let lease = host.demand(&name).unwrap();
+            wait_state(&host, &name, norn_wire::TrustState::Ready);
+            wait_for_engine(&host, &name, |engine| {
+                *engine == norn_wire::EngineStatus::on(None, Some(Freshness::trailing(0)))
+            });
+            control
+                .active
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            (
+                host,
+                name,
+                lease,
+                engines,
+                MaintenanceScript {
+                    control,
+                    steps,
+                    injected,
+                },
+            )
+        }
+
+        #[derive(Debug)]
+        struct MaintenanceObservation {
+            rolling_before: norn_wire::RollingHealStatus,
+            rolling_after: norn_wire::RollingHealStatus,
+            rolling_due_after: bool,
+            generation_before: i64,
+            generation_after: i64,
+            engine_before: SemanticStatus,
+            engine_after: SemanticStatus,
+            drains: usize,
+        }
+
+        fn observe_semantic_maintenance(
+            script: &MaintenanceScript,
+            engines: &Arc<SemanticEngines>,
+        ) -> PausedMaintenance<MaintenanceObservation> {
+            let engines = Arc::clone(engines);
+            script.pause(move |ops, name, attachment, quiet, progress| {
+                assert!(quiet && progress.quiet_maintenance_allowed());
+                let rolling_before = attachment.rolling.status();
+                let generation_before = attachment.store.feed_read().write_generation().unwrap();
+                let engine_before = engines.status(name);
+                let drains = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let attempts = Arc::clone(&drains);
+                engines.run_inside_next_drain(move || {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                });
+                ops.maintain_quiet(name, attachment, quiet, progress)
+                    .unwrap();
+                MaintenanceObservation {
+                    rolling_before,
+                    rolling_after: attachment.rolling.status(),
+                    rolling_due_after: attachment.rolling.due(),
+                    generation_before,
+                    generation_after: attachment.store.feed_read().write_generation().unwrap(),
+                    engine_before,
+                    engine_after: engines.status(name),
+                    drains: drains.load(std::sync::atomic::Ordering::SeqCst),
+                }
+            })
+        }
+
+        #[test]
+        fn a_failed_semantic_drain_waits_for_lane_one_work_instead_of_retrying_quiet_ticks() {
+            let f = Fixture::new("semantic-failure-retry-cadence");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::write(f.vault().join("alpha.md"), "alpha\n").unwrap();
+            let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
+            hold_the_sidecar(&f, &name);
+            let held = script.pause(|_, _, attachment, _, _| {
+                attachment.subscription.take();
+                attachment.rolling.due = Instant::now() + Duration::from_secs(3600);
+            });
+            fs::write(f.vault().join("beta.md"), "beta\n").unwrap();
+            *script.injected.lock().unwrap() = Some(dirty_batch(&f.vault(), &["beta.md"]));
+            // The real maintenance handoff drains this injected watcher fact,
+            // runs a real reconcile, and publishes it before the next step.
+            drop(held);
+            let failed = observe_semantic_maintenance(&script, &engines);
+            let observation = &failed.observed;
+            assert_eq!(
+                observation.drains, 1,
+                "the owed drain never attempted its write"
+            );
+            let SemanticStatus::On {
+                last_drain_error: Some(error),
+                sidecar,
+                watermarks,
+            } = &observation.engine_after
+            else {
+                panic!("the SQL refusal did not leave a running engine: {observation:?}");
+            };
+            let SemanticStatus::On {
+                sidecar: before_sidecar,
+                watermarks: before_watermarks,
+                ..
+            } = &observation.engine_before
+            else {
+                panic!("no running engine before the drain");
+            };
+            assert_eq!(
+                sidecar, before_sidecar,
+                "a refused write committed a revision"
+            );
+            assert_eq!(
+                watermarks, before_watermarks,
+                "a refused write claimed progress"
+            );
+            assert!(
+                watermarks.documents.as_ref().unwrap().generation < observation.generation_before
+            );
+            let reported = engine_reported(&host, &name).1;
+            assert!(matches!(
+                reported,
+                norn_wire::EngineStatus::On {
+                    last_drain_error: Some(_),
+                    ..
+                }
+            ));
+            eprintln!(
+                "failed drain: {observation:?}; actual Host engine={reported:?}; refusal={error}"
+            );
+            let failed_status = observation.engine_after.clone();
+            drop(failed);
+
+            for tick in 0..3 {
+                let idle = observe_semantic_maintenance(&script, &engines);
+                eprintln!(
+                    "quiet tick {tick}: actual drains={}; engine={:?}",
+                    idle.observed.drains, idle.observed.engine_after
+                );
+                assert_eq!(
+                    idle.observed.drains, 0,
+                    "a failed non-damage drain retried without new lane-1 work"
+                );
+                assert_eq!(idle.observed.engine_after, failed_status);
+                assert_eq!(
+                    idle.observed.generation_before,
+                    idle.observed.generation_after
+                );
+            }
+
+            let held = script.pause(|_, _, _, _, _| {});
+            match norn_db::connect(&sidecar_file(&f, &name)).unwrap() {
+                norn_db::Attempt::Connected(connection) => connection.execute_batch(
+                    "DROP TRIGGER held_delete; DROP TRIGGER held_insert; DROP TRIGGER held_update;"
+                ).unwrap(),
+                norn_db::Attempt::Unreadable { detail } => panic!("{detail}"),
+            }
+            fs::write(f.vault().join("gamma.md"), "gamma\n").unwrap();
+            *script.injected.lock().unwrap() = Some(dirty_batch(&f.vault(), &["gamma.md"]));
+            drop(held);
+            let resumed = observe_semantic_maintenance(&script, &engines);
+            let observation = &resumed.observed;
+            assert_eq!(
+                observation.drains, 1,
+                "new lane-1 work did not re-owe the failed feed"
+            );
+            let SemanticStatus::On {
+                last_drain_error: None,
+                watermarks,
+                ..
+            } = &observation.engine_after
+            else {
+                panic!("the re-owed drain did not recover: {observation:?}");
+            };
+            assert_eq!(
+                watermarks.documents.as_ref().unwrap().generation,
+                observation.generation_after
+            );
+            assert_eq!(
+                engines.nearest(&name, "gamma", 10).unwrap().neighbors.len(),
+                3
+            );
+            eprintln!("after new lane-1 publication: {observation:?}");
+        }
+
+        #[test]
+        fn a_rolling_maintenance_leg_yields_before_semantics_and_its_own_publication() {
+            let f = Fixture::new("semantic-rolling-publication");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            many_documents(&f, 130);
+            let (host, name, _lease, engines, script) = scripted_semantic_host(&f);
+            drop(script.pause(|_, _, attachment, _, _| {
+                // Make these real watcher misses; no backend timing decides
+                // which path derives them. Only the rolling heal can do so.
+                attachment.subscription.take();
+                for serial in 0..130 {
+                    fs::write(
+                        attachment.covered_root.join(format!("docs/{serial:03}.md")),
+                        format!("rewritten {serial}\n"),
+                    )
+                    .unwrap();
+                }
+                attachment.rolling.due = Instant::now();
+            }));
+            let mut saw_commit = false;
+            let mut completed = false;
+            let mut rolling_drains = 0;
+            for leg in 0..32 {
+                let held = observe_semantic_maintenance(&script, &engines);
+                let observed = &held.observed;
+                let published = super::status::status_of(&host, &name).rolling_heal.unwrap();
+                assert_eq!(
+                    published.pass, observed.rolling_before.pass,
+                    "a rolling leg published before returning to lifecycle"
+                );
+                rolling_drains += observed.drains;
+                eprintln!(
+                    "rolling leg {leg}: {observed:?}; actual published pass={:?}",
+                    published.pass
+                );
+                if observed.generation_after > observed.generation_before {
+                    let first_commit = !saw_commit;
+                    saw_commit = true;
+                    let checked = observed
+                        .rolling_after
+                        .pass
+                        .as_ref()
+                        .unwrap()
+                        .entries_checked;
+                    assert!(
+                        checked > 0 && (!first_commit || checked <= 64),
+                        "one rolling leg consumed the full pass rather than yielding"
+                    );
+                    assert_ne!(
+                        published.pass, observed.rolling_after.pass,
+                        "the committing rolling slice must still await its publication"
+                    );
+                    assert_eq!(
+                        observed.drains, 0,
+                        "semantic work ran after a rolling commit and before its publication"
+                    );
+                    assert_eq!(
+                        observed.engine_after, observed.engine_before,
+                        "the committing leg also advanced the semantic engine"
+                    );
+                }
+                let due = observed.rolling_due_after;
+                drop(held);
+                if !due {
+                    completed = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_commit && completed,
+                "the real rolling pass did not commit and finish"
+            );
+            assert_eq!(rolling_drains, 0, "a rolling leg also ran a semantic slice");
+            let held = observe_semantic_maintenance(&script, &engines);
+            let observed = &held.observed;
+            let published = super::status::status_of(&host, &name).rolling_heal.unwrap();
+            assert!(published.pass.is_none() && published.last_completed_unix_seconds.is_some());
+            assert_eq!(
+                observed.drains, 1,
+                "the later quiet leg must consume the owed feed"
+            );
+            let SemanticStatus::On {
+                watermarks,
+                last_drain_error: None,
+                ..
+            } = &observed.engine_after
+            else {
+                panic!("the semantic slice did not succeed: {observed:?}");
+            };
+            assert_eq!(
+                watermarks.documents.as_ref().unwrap().generation,
+                observed.generation_after
+            );
+        }
+
         /// Production ops whose poll reports a watcher overflow once the case
         /// arms it, or the facts a case injects, and reports nothing else, so
         /// the reconcile the case drives is one whole-vault rescan over the
@@ -8755,6 +9141,7 @@ mod tests {
             armed: Arc<std::sync::atomic::AtomicBool>,
             injected: Arc<Mutex<Option<norn_fs::Batch>>>,
             recoveries: Arc<std::sync::atomic::AtomicUsize>,
+            maintenance_script: Option<Arc<MaintenanceControl>>,
         }
 
         impl EntryOps for OverflowOnArm {
@@ -8848,7 +9235,10 @@ mod tests {
             }
 
             fn maintenance_due(&self, name: &VaultName, attachment: &Self::Attachment) -> bool {
-                self.inner.maintenance_due(name, attachment)
+                self.maintenance_script
+                    .as_ref()
+                    .is_some_and(|script| script.active.load(std::sync::atomic::Ordering::SeqCst))
+                    || self.inner.maintenance_due(name, attachment)
             }
 
             fn maintain_quiet(
@@ -8858,7 +9248,27 @@ mod tests {
                 quiet: bool,
                 progress: &ProgressReporter<Self::Attachment>,
             ) -> Result<(), JobFailure> {
+                if let Some(script) = &self.maintenance_script
+                    && script.active.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let step = script
+                        .steps
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(30))
+                        .unwrap();
+                    if let Some(step) = step {
+                        return step(&self.inner, name, attachment, quiet, progress);
+                    }
+                }
                 self.inner.maintain_quiet(name, attachment, quiet, progress)
+            }
+
+            fn rolling_heal(
+                &self,
+                attachment: &Self::Attachment,
+            ) -> Option<norn_wire::RollingHealStatus> {
+                self.inner.rolling_heal(attachment)
             }
 
             fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
@@ -8910,6 +9320,7 @@ mod tests {
                     armed: Arc::clone(&armed),
                     injected: Arc::clone(&injected),
                     recoveries: Arc::clone(&recoveries),
+                    maintenance_script: None,
                 },
                 crate::LifecyclePolicy {
                     idle_after: Duration::from_secs(60),
@@ -9479,6 +9890,65 @@ mod tests {
                     .expect("an answer")
                     .neighbors
                     .len(),
+                1
+            );
+            ops.detach(&name, attachment);
+        }
+
+        /// Internal-boundary defense: republish a different real store epoch
+        /// after work's early precheck, keeping the same configuration slot.
+        /// Actual Host attachment custody prevents this concurrent mutation;
+        /// this probe pins the final install check without claiming a Host race.
+        #[test]
+        fn the_install_boundary_rejects_a_store_epoch_changed_after_the_early_precheck() {
+            let f = Fixture::new("semantic-install-store-defense");
+            let (engines, ops, mut attachment) = published_preparing(&f);
+            let name = f.registration().name;
+            let committed = publish(&engines, &name, &mut attachment).unwrap();
+            let mut replacement = norn_store::Store::open(
+                f.root.join("replacement.sqlite3"),
+                norn_store::StoredPathOrder::Sensitive,
+                norn_store::DerivationVersion::new(1),
+            )
+            .unwrap();
+            let mut feed = replacement.feed_read();
+            assert_ne!(feed.epoch(), attachment.store.feed_read().epoch());
+            let generation = feed.write_generation().unwrap();
+            let changed_store = norn_store::StoreReading::of(feed.epoch(), generation);
+            let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let after_precheck = Arc::clone(&reached);
+            let republishing = Arc::clone(&engines);
+            let republished = name.clone();
+            engines.run_before_next_install(move || {
+                // Reaching this hook proves the early work() guard admitted
+                // and opened this result. publish_delivery changes no slot.
+                after_precheck.store(true, std::sync::atomic::Ordering::SeqCst);
+                republishing.publish_delivery(&republished, Some(&changed_store));
+            });
+            initialize_once(&engines, &name, &mut attachment, true);
+            let observed = (engines.status(&name), committed.reading());
+            eprintln!(
+                "internal install boundary: passed early precheck={}, actual result={observed:?}",
+                reached.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                observed,
+                (
+                    SemanticStatus::Preparing,
+                    (EngineSection::enabled(), SemanticStatus::Preparing)
+                ),
+                "the final install accepted a result for a different published store epoch"
+            );
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5),
+                Err(SemanticRefusal::Preparing)
+            );
+            // Restoring the actual attachment's delivery admits its own
+            // initialization and converges the same retained sidecar.
+            settle(&engines, &name, &mut attachment);
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5).unwrap().neighbors.len(),
                 1
             );
             ops.detach(&name, attachment);
