@@ -105,8 +105,11 @@ workers. The output path must be fresh. New producer receipts bind actual cwd an
 an exact environment fingerprint alongside the existing selected environment
 values. `execution-before.json` pins the controller interpreter, cwd, argv,
 environment fingerprint, and source and tool inputs before launching subjects.
-Environment fingerprints retain no secret values. Historical records keep their
-original schema.
+The complete fingerprint identifies the original launch environment. Replay
+checks the selected operational values and retains that original fingerprint; it
+does not substitute its own ambient environment, whose harness call ID can differ.
+Unselected environment values are not retained or reconstructed. Environment
+fingerprints retain no secret values. Historical records keep their original schema.
 
 Public functional clocks remain permanently nonqualifying. Larger comparisons are
 descriptive: warm differences are judged per operation, with no hard percentage,

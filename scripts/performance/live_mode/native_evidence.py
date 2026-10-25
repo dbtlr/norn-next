@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -122,15 +123,13 @@ def validate_process(root,role,subject,source,loading=None,*,producer=None):
             or receipt.get('process_closed') is not True or receipt.get('group_closed') is not True):
         raise ValueError(f'{role} actual native producer command/source/environment/status differs')
     if 'cwd' in receipt and receipt['cwd']!=str(root.resolve()):raise ValueError('native producer cwd differs')
-    if 'environment_sha256' in receipt:
-        from transport import environment
-        env=environment(root,(root/'performance-token').read_text())
-        if role=='worker':
-            env.update(NORN_PERFORMANCE_CHANGESET_SIZE='128',NORN_PERFORMANCE_PROFILE='0')
-            if loading:env['NORN_PERFORMANCE_LOADING']=loading
-            if loading=='operator-prefix-capped':env['NORN_PERFORMANCE_FROZEN_INPUT']='frozen-fixture-v1'
-        if receipt['environment_sha256']!=hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest():
-            raise ValueError('exact native producer environment fingerprint differs')
+    # The complete digest identifies the launch environment, including opaque
+    # harness call IDs. A later replay's ambient environment is a different
+    # observation. Operational values remain checked above against their pins.
+    if 'environment_sha256' in receipt and (
+            not isinstance(receipt['environment_sha256'],str)
+            or re.fullmatch('[0-9a-f]{64}',receipt['environment_sha256']) is None):
+        raise ValueError('invalid original producer environment fingerprint')
     began=integer(receipt.get('started_monotonic_ns'));ended=integer(receipt.get('finished_monotonic_ns'))
     if not 0 < began <= ended or integer(receipt.get('pid'))==0 or integer(receipt.get('parent_pid'))==0:
         raise ValueError(f'{role} producer origin/completion differs')

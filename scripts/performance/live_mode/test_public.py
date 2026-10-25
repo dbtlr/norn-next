@@ -116,4 +116,34 @@ class PublicReplay(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_slice(None,dict(mode='candidate-live-revalidated'),[],[],{},[],{},{},lambda x:x)
 
+class EnvironmentReplay(unittest.TestCase):
+    def test_closed_producer_environment_pin_survives_a_new_replay_context(self):
+        import hashlib
+        import shutil
+        import subprocess
+        import tempfile
+        from native_evidence import Capture, configure, validate_process
+        from transport import issue_root, environment
+        binary=Path(shutil.which('true')).resolve()
+        with binary.open('rb') as binary_stream:
+            digest=hashlib.file_digest(binary_stream,'sha256').hexdigest()
+        configure({'candidate':digest})
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);(root/'vault').mkdir()
+            env=environment(root,issue_root(root))
+            env.update(NORN_PERFORMANCE_CHANGESET_SIZE='128',NORN_PERFORMANCE_PROFILE='0',
+                NORN_PERFORMANCE_LOADING='operator-prefix-public',CODEX_TOOL_CALL_ID='producer-context')
+            with Capture(root,'authored-source',(binary,)):
+                with (root/'worker.stdout.log').open('w') as stdout, (root/'worker.stderr.log').open('w') as stderr:
+                    process=subprocess.Popen([str(binary),'serve'],cwd=root,env=env,
+                        stdout=stdout,stderr=stderr,start_new_session=True)
+                    self.assertEqual(process.wait(),0)
+            receipt=validate_process(root,'worker','candidate','authored-source','operator-prefix-public')
+            self.assertEqual(receipt['environment_sha256'],hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest())
+            # Operational environment values still bind the actual producer.
+            path=root/'worker-process.json';wrong=json.loads(path.read_text())
+            wrong['environment']['NORN_PERFORMANCE_LOADING']='operator-prefix-live'
+            path.write_text(json.dumps(wrong))
+            with self.assertRaises(ValueError):validate_process(root,'worker','candidate','authored-source','operator-prefix-public')
+
 if __name__=='__main__':unittest.main()
