@@ -487,9 +487,13 @@ fn threads() -> Vec<std::ffi::OsString> {
 
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "subprocess fixture invoked only by native lifecycle controls"]
 fn native_helper_worker() {
-    let root = PathBuf::from(std::env::var_os("NORN_PREFIX_HELPER_FIXTURE").unwrap());
+    // Like the repair-crash child, this is selected by its parent rather than
+    // adopted by an ignored-test lane. An inherited root alone is not a role.
+    let Some(root) = std::env::var_os("NORN_PREFIX_HELPER_FIXTURE") else {
+        return;
+    };
+    let root = attach::accepted_harness_root(&root, "NORN_PREFIX_HELPER_TOKEN");
     let vault = attach::Vault::adopt(&root).beside(&root.join("helper-machine"));
     let control = Arc::new(HelperControl::default());
     let descriptors_before = descriptors();
@@ -561,6 +565,7 @@ impl Child {
     }
     fn spawn_with_find(root: &Path, unsupported: bool) -> Self {
         use std::io::BufRead;
+        let token = attach::issue_harness_token(root);
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         if unsupported {
             command.env("NORN_PREFIX_HELPER_UNSUPPORTED_FIND", "1");
@@ -569,11 +574,11 @@ impl Child {
             .args([
                 "--exact",
                 "native_helper_worker",
-                "--ignored",
                 "--nocapture",
                 "--test-threads=1",
             ])
             .env("NORN_PREFIX_HELPER_FIXTURE", root)
+            .env("NORN_PREFIX_HELPER_TOKEN", token)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
