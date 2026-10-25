@@ -36,8 +36,8 @@ The default invocation checks inputs and starts no workers. `--execute-functiona
 executes exactly one fresh 314-document cell; `--arm` chooses `main-ordinary` or
 `candidate-live-revalidated`. `--compare MAIN_OUTPUT CANDIDATE_OUTPUT` compares
 both completed cells, including canonical P2 counters and the complete suffix.
-`--prepare-plan` writes the fixed eight-run plan and starts no subjects. Large-cell
-execution remains parent-owned and requires subsequent review.
+`--prepare-plan` writes the fixed eight-run plan and starts no subjects. `--size` and `--execute-cell` provide one planned cell per invocation.
+Large-cell execution remains parent-owned and requires subsequent review.
 
 All endpoints use one parent origin before transport. Worker clocks stay separate.
 Warm reads use default round-trip latency; mutations retain write plus confirming

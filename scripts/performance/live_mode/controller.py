@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private live adapter for the fixed worker workload; only 314-document functional execution."""
+"""Private live adapter for the fixed worker workload; one declared cell per invocation."""
 import argparse
 import copy
 import json
@@ -230,7 +230,7 @@ def compare_cells(cells):
 
 
 
-def verify_cell(root,arm,fixtures,config):
+def verify_cell(root,arm,fixtures,config,*,size=300):
     from native_evidence import replay
     from native_validation import validate_native_cell
     from provenance import sha256
@@ -239,9 +239,9 @@ def verify_cell(root,arm,fixtures,config):
     from full_intake_control import validate_mode
     from work_account import WRITER_WORK
     records=[json.loads(line) for line in (root.parents[1]/'samples.jsonl').read_text().splitlines()]
-    manifest=read(fixtures/'300/manifest.json')
+    manifest=read(fixtures/str(size)/'manifest.json')
     selected=dict(arm=arm,subject='candidate' if arm==MODE else 'baseline',loading='operator-prefix-live' if arm==MODE else None)
-    audit=replay(root,selected,dict(background_documents=300),fixtures,manifest,read(root/'final-source.json'))
+    audit=replay(root,selected,dict(background_documents=size),fixtures,manifest,read(root/'final-source.json'))
     native=validate_native_cell(root,records,manifest,audit,mode=arm)
     history=[json.loads(line) for line in (root/'request-history.jsonl').read_text().splitlines()]
     prefix=read(root/'prefix.json')
@@ -287,7 +287,7 @@ def verify_cell(root,arm,fixtures,config):
         native_stdout_sha256=sha256(root/'worker.stdout.log'),clocks_qualifying=False,performance_claim=False)
 
 
-def plan(config,output):
+def plan(config,output,config_path=None):
     cells=[]
     for pair,size,arms in ((0,2000,('main-ordinary',MODE)),(0,10000,('main-ordinary',MODE)),
                            (1,10000,(MODE,'main-ordinary')),(1,2000,(MODE,'main-ordinary'))):
@@ -295,7 +295,10 @@ def plan(config,output):
             index=len(cells)
             cells.append(dict(index=index,pair=pair,background_documents=size,documents=size+14,arm=arm,
                 output=str(output/f'cell-{index:02d}-{size+14}-{arm}'),
-                fixture=config['fixtures']+'/'+str(size),status='planned-not-executed'))
+                fixture=config['fixtures']+'/'+str(size),status='planned-not-executed',
+                argv=[sys.executable,str(Path(__file__).resolve()),'--config',str(config_path),
+                      '--output',str(output/f'cell-{index:02d}-{size+14}-{arm}'),'--arm',arm,
+                      '--size',str(size),'--execute-cell']))
     return dict(cells=cells,n_pairs_per_size=2,workers_executed=False,
         outcome_policy='retain every outcome; stop at first failed/interrupted cell pending parent disposition; never repeat a completed cell',
         execution_policy='serial processes; close all owned heavy jobs before sampling; ambient T3 Git polling remains',
@@ -304,7 +307,7 @@ def plan(config,output):
         canonical_calls_per_arm=483,unchanged_suffix_calls=481)
 
 
-def run_cell(config,arm,output):
+def run_cell(config,arm,output,*,size=300):
     import baseline
     import warm_compare as frozen
     from baseline import write_json
@@ -322,24 +325,24 @@ def run_cell(config,arm,output):
     if shutil.disk_usage(ancestor).free<50*1024**3:raise ValueError('50 GiB reserve required')
     before=input_state(config)
     output.mkdir(parents=True)
-    summary=dict(completed=False,arm=arm,documents=314,clocks_qualifying=False,performance_claim=False,
+    summary=dict(completed=False,arm=arm,documents=size+14,clocks_qualifying=False,performance_claim=False,
         inputs=before,argv=sys.argv,started_monotonic_ns=time.perf_counter_ns())
     original=baseline.Current
     try:
-        fixture,manifest=baseline.prepare(SimpleNamespace(output=output,fixtures=Path(config['fixtures'])),300)
+        fixture,manifest=baseline.prepare(SimpleNamespace(output=output,fixtures=Path(config['fixtures'])),size)
         baseline.Current=measurement_adapter(arm,manifest)
-        root=output/'work/300-0-c'
+        root=output/'work'/f'{size}-0-c'
         candidate=Path(config['binaries']['candidate']['path']);main=Path(config['binaries']['baseline']['path'])
         with Capture(root,manifest['tree_sha256'],(candidate,main)) as capture:
             with (output/'samples.jsonl').open('x') as samples:
                 baseline.run_worker(SimpleNamespace(output=output,current=candidate if arm==MODE else main,
                     loading='operator-prefix-live' if arm==MODE else None,warmups=5,samples=25),
-                    'current',300,0,fixture,manifest,samples)
+                    'current',size,0,fixture,manifest,samples)
             capture.flush()
             summary['post_close_storage_bytes']=storage_bytes(root)
             frozen.final_audit(candidate,root)
             capture.flush()
-        summary.update(verify_cell(root,arm,Path(config['fixtures']),config))
+        summary.update(verify_cell(root,arm,Path(config['fixtures']),config,size=size))
         if input_state(config)!=before:raise ValueError('inputs changed around functional cell')
     except BaseException as problem:
         summary.update(completed=False,failure=repr(problem))
@@ -357,15 +360,17 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--arm',choices=('main-ordinary',MODE),default=MODE)
     parser.add_argument('--prepare-plan',action='store_true')
+    parser.add_argument('--size',type=int,choices=(300,2000,10000),default=300)
     parser.add_argument('--execute-functional',action='store_true')
+    parser.add_argument('--execute-cell',action='store_true')
     parser.add_argument('--compare',nargs=2,type=Path)
     args=parser.parse_args()
     config=read(args.config.resolve());configure(config)
     if args.prepare_plan:
-        if args.execute_functional:raise ValueError('plan preparation launches no workers')
+        if args.execute_functional or args.execute_cell:raise ValueError('plan preparation launches no workers')
         from baseline import write_json
         if args.output.exists():raise ValueError('fresh plan file required')
-        write_json(args.output,plan(config,args.output.parent/'planned-cells'))
+        write_json(args.output,plan(config,args.output.parent/'planned-cells',args.config.resolve()))
         return
     if args.compare:
         summaries=[read(p/'run.json') for p in args.compare]
@@ -375,11 +380,12 @@ def main():
             cells=[str(p) for p in args.compare],performance_claim=False,clocks_qualifying=False))
         return
     state=input_state(config)
-    if not args.execute_functional:
+    if args.execute_functional and args.size!=300:raise ValueError('functional proof uses only 314 documents')
+    if not (args.execute_functional or args.execute_cell):
         print(json.dumps(dict(preflight='PASS',workers_executed=False,inputs=state)))
         return
-    run_cell(config,args.arm,args.output.resolve())
-    print('314-document functional cell PASS; clocks nonqualifying')
+    run_cell(config,args.arm,args.output.resolve(),size=args.size)
+    print(f'{args.size+14}-document cell PASS; descriptive clocks only')
 
 
 if __name__=='__main__':main()
