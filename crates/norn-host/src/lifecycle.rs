@@ -42,7 +42,7 @@ use apply::{ApplyQueue, QueuedApply, RunningApply};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
-use serving::ServingSet;
+use serving::{CanonicalStoreObservation, ServingSet};
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.
@@ -1075,14 +1075,18 @@ impl<A: SnapshotSource> Entry<A> {
     /// An entry serving `registration` and holding nothing, which is what a
     /// vault the host has never attached stands at, its claim standing at
     /// `epoch`.
-    fn unattached(registration: Registration, epoch: u64, initial_loading_candidate: bool) -> Self {
+    fn unattached(
+        registration: Registration,
+        epoch: u64,
+        storage: CanonicalStoreObservation,
+    ) -> Self {
         let vault = registration.name.clone();
         Self {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
                 initial_attach_started: false,
-                initial_loading_candidate,
+                initial_loading_candidate: storage == CanonicalStoreObservation::Absent,
                 loading: None,
                 trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
@@ -3932,8 +3936,12 @@ fn serve<O: EntryOps>(
     registration: Registration,
 ) -> Result<Demand, ServingRefusal> {
     let name = registration.name.clone();
-    let candidate = shared.ops.first_index_candidate(&registration);
-    shared.entries.insert(registration, candidate)?;
+    let storage = if shared.ops.first_index_candidate(&registration) {
+        CanonicalStoreObservation::Absent
+    } else {
+        CanonicalStoreObservation::NotKnownAbsent
+    };
+    shared.entries.insert(registration, storage)?;
     park_on_current_classification(shared, &name);
     Ok(shared
         .entries
@@ -3966,8 +3974,12 @@ fn serve_in_place<O: EntryOps>(
     moved: bool,
 ) -> Demand {
     let name = amended.name.clone();
-    let candidate = shared.ops.first_index_candidate(&amended);
-    shared.entries.replace(amended, candidate).expect(
+    let storage = if shared.ops.first_index_candidate(&amended) {
+        CanonicalStoreObservation::Absent
+    } else {
+        CanonicalStoreObservation::NotKnownAbsent
+    };
+    shared.entries.replace(amended, storage).expect(
         "the registration lock holds every change to the set, and the entry it replaces is \
          withdrawn under it",
     );
@@ -4989,9 +5001,13 @@ impl<O: EntryOps> Host<O> {
         // host runs is served exactly as a vault read at startup is.
         let entries = ServingSet::new();
         for registration in registry.into_entries() {
-            let candidate = ops.first_index_candidate(&registration);
+            let storage = if ops.first_index_candidate(&registration) {
+                CanonicalStoreObservation::Absent
+            } else {
+                CanonicalStoreObservation::NotKnownAbsent
+            };
             entries
-                .insert(registration, candidate)
+                .insert(registration, storage)
                 .expect("the registrations are keyed by name, so no two of them name one entry");
         }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
@@ -26738,7 +26754,10 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             host.shared
                 .entries
-                .insert(registration(&joined, &root), false)
+                .insert(
+                    registration(&joined, &root),
+                    CanonicalStoreObservation::NotKnownAbsent,
+                )
                 .expect("the set serves no such name");
 
             drop(host.demand(&joined).unwrap());
@@ -26819,7 +26838,7 @@ mod tests {
             assert_eq!(
                 host.shared.entries.insert(
                     registration(&name, std::path::Path::new("/tmp/norn-host-elsewhere")),
-                    false
+                    CanonicalStoreObservation::NotKnownAbsent
                 ),
                 Err(ServingRefusal::AlreadyServed)
             );
@@ -27112,7 +27131,9 @@ mod tests {
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
             assert_eq!(
-                host.shared.entries.replace(edited, false),
+                host.shared
+                    .entries
+                    .replace(edited, CanonicalStoreObservation::NotKnownAbsent),
                 Err(ServingRefusal::Held),
                 "an entry holding its coverage was replaced"
             );
@@ -27137,7 +27158,12 @@ mod tests {
                 .clone()
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
-            assert_eq!(host.shared.entries.replace(edited.clone(), false), Ok(()));
+            assert_eq!(
+                host.shared
+                    .entries
+                    .replace(edited.clone(), CanonicalStoreObservation::NotKnownAbsent),
+                Ok(())
+            );
 
             let observed = replaced
                 .gate
@@ -27425,7 +27451,7 @@ mod tests {
 
             host.shared
                 .entries
-                .insert(joined.clone(), false)
+                .insert(joined.clone(), CanonicalStoreObservation::NotKnownAbsent)
                 .expect("the set serves no such name");
 
             assert_eq!(
@@ -27516,7 +27542,7 @@ mod tests {
             let joined = registration("journal", &root("journal"));
             host.shared
                 .entries
-                .insert(joined.clone(), false)
+                .insert(joined.clone(), CanonicalStoreObservation::NotKnownAbsent)
                 .expect("the set serves no such name");
             host.shared
                 .entries

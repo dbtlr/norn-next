@@ -46,6 +46,13 @@ use norn_fs::Identity;
 use super::{Entry, Service, SnapshotSource};
 use crate::registry::{ResolveRefusal, RootReading, containing, reaching, recheck};
 
+/// What the caller established about the canonical store name before joining the set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalStoreObservation {
+    Absent,
+    NotKnownAbsent,
+}
+
 /// Why the serving set stands unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServingRefusal {
@@ -329,7 +336,7 @@ impl<A: SnapshotSource> ServingSet<A> {
     pub(crate) fn insert(
         &self,
         registration: Registration,
-        initial_loading_candidate: bool,
+        storage: CanonicalStoreObservation,
     ) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         if entries.contains_key(&registration.name) {
@@ -340,7 +347,7 @@ impl<A: SnapshotSource> ServingSet<A> {
             Arc::new(Entry::unattached(
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
-                initial_loading_candidate,
+                storage,
             )),
         );
         Ok(())
@@ -411,7 +418,7 @@ impl<A: SnapshotSource> ServingSet<A> {
     pub(crate) fn replace(
         &self,
         registration: Registration,
-        initial_loading_candidate: bool,
+        storage: CanonicalStoreObservation,
     ) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         if let Some(entry) = entries.get(&registration.name) {
@@ -428,7 +435,7 @@ impl<A: SnapshotSource> ServingSet<A> {
             Arc::new(Entry::unattached(
                 registration,
                 self.retired_epoch.load(Ordering::SeqCst),
-                initial_loading_candidate,
+                storage,
             )),
         );
         drop(entries);

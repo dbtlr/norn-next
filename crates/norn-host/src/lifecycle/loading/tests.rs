@@ -212,7 +212,7 @@ fn a_stale_loading_decline_cannot_close_a_successor() {
                 norn_config::registry::VaultRoot::new("/mock/vault").unwrap(),
             ),
             3,
-            true,
+            CanonicalStoreObservation::Absent,
         ),
     );
     let stale = ProgressReporter {
