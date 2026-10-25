@@ -214,13 +214,9 @@ fn find() -> FindParams {
     FindParams::new(address()).with_columns([Column::path(), Column::fields()])
 }
 fn ready(host: &Host<ProductionEntryOps>) {
-    wait_until("canonical Ready", BUDGET, || {
-        let state = host.state(&name()).unwrap();
-        if state == TrustState::Ready {
-            Observed::Met(())
-        } else {
-            Observed::pending(format!("{state:?}"))
-        }
+    wait_until("canonical Ready", BUDGET, || match host.state(&name()) {
+        Ok(TrustState::Ready) => Observed::Met(()),
+        reading => Observed::pending(format!("{reading:?}")),
     })
     .unwrap();
 }
@@ -1370,4 +1366,94 @@ fn early_capacity_waits_keep_the_budget_deadline_and_reselect_after_promotion_or
             );
         });
     }
+}
+
+#[test]
+fn a_real_first_index_overflow_withdraws_early_sources_and_still_reaches_complete_ready() {
+    let fixture = Fixture::new("public-stage-native-overflow");
+    std::fs::create_dir(fixture.root.join("overflow")).unwrap();
+    let construction = Probe::new([Point::MetadataComplete]);
+    let host = fixture.host_policy(
+        construction.clone(),
+        norn_host::READ_SETTLE_BOUND,
+        ProductionPolicy::new(128, 128).unwrap(),
+    );
+    std::thread::scope(|scope| {
+        let _release = Release(&construction);
+        let first = spawn_get(scope, &host, "first");
+        construction.wait(Point::MetadataComplete);
+        first.recv_timeout(BUDGET.work()).unwrap().unwrap();
+        // This is the watcher's authored cardinality boundary, not a timing load.
+        // The initial heal window retains accepted facts while construction pauses.
+        for index in 0..=norn_fs::watch::DIRTY_ROOT_CAP {
+            std::fs::write(
+                fixture.root.join(format!("overflow/file-{index:05}.txt")),
+                "file",
+            )
+            .unwrap();
+        }
+        wait_until(
+            "accepted overflow withdraws first-index queries",
+            BUDGET,
+            || {
+                if host.get(&get("first")).is_err() && host.find(&find()).is_err() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("early authority still stands")
+                }
+            },
+        )
+        .unwrap();
+        construction.release();
+        wait_until(
+            "ordinary overflow recovery is published",
+            BUDGET,
+            || match host.state(&name()) {
+                Err(error)
+                    if matches!(
+                        error.detail(),
+                        norn_wire::ErrorDetail::EntryUntrusted {
+                            reason: norn_wire::UntrustedReason::WatcherOverflow,
+                            ..
+                        }
+                    ) =>
+                {
+                    Observed::Met(())
+                }
+                reading => Observed::pending(format!("{reading:?}")),
+            },
+        )
+        .unwrap();
+        ready(&host);
+        assert!(host.get(&get("first")).is_ok());
+        let mut store = norn_store::Store::open(
+            fixture.dirs.derived_dir(&name()).join("store.sqlite3"),
+            norn_store::StoredPathOrder::Sensitive,
+            norn_host::DERIVATION_VERSION,
+        )
+        .unwrap();
+        store.verify_integrity().unwrap();
+        let mut after = None;
+        let mut files = 0;
+        loop {
+            let page = store
+                .begin_request()
+                .stored_targets_in_range_after_ordered(
+                    norn_store::SubjectScope::Vault,
+                    after.as_ref(),
+                    128,
+                    norn_store::StoredPathOrder::Sensitive,
+                )
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            files += page
+                .iter()
+                .filter(|target| target.document.is_none())
+                .count();
+            after = page.last().map(|target| target.path.clone());
+        }
+        assert_eq!(files, norn_fs::watch::DIRTY_ROOT_CAP + 2);
+    });
 }
