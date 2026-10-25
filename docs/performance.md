@@ -6,8 +6,9 @@ known-answer fixtures, executable identity, and a self-contained HTML report.
 
 These measurements describe the selected workflows. They are not acceptance
 thresholds, correctness oracles, CLI measurements, or long-duration leak tests.
-The current composition root has no serving surface yet. The current side uses
-an opt-in integration-test worker, which adds no product dependency or API.
+First-open Get and supported metadata Find use production admission under
+[ADR 0043](decisions/0043-first-index-complete-reads.md). The baseline uses an
+opt-in integration-test worker, which adds no product dependency or API.
 
 ## Build and run
 
