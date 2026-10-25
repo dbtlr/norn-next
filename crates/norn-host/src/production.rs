@@ -1858,6 +1858,16 @@ impl EntryOps for ProductionEntryOps {
     fn first_index_reads(&self) -> bool {
         true
     }
+    #[allow(clippy::disallowed_methods)] // Observes only the derived store, never vault inputs.
+    fn first_index_candidate(&self, registration: &Registration) -> bool {
+        // A missing name is only a candidate. Existing, linked, foreign or unreadable
+        // storage stays on the ordinary path; the maintainer still adjudicates the open.
+        matches!(
+            std::fs::symlink_metadata(self.derived(&registration.name).join(STORE_FILE)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
     fn trim_readers(&self, now: Instant) {
         self.readers.trim(now);
         self.collect_loading_cleanup();

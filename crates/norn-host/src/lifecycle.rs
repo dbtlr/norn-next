@@ -282,6 +282,14 @@ pub trait EntryOps: Send + Sync + 'static {
         false
     }
 
+    /// Conservative candidacy observed before serving a registration, outside entry gates.
+    /// This permits waiting only; the current attach must still prove Created-empty storage
+    /// and unchanged watcher coverage before publishing any first-index source.
+    /// Adapters wrapping production operations must forward this method too.
+    fn first_index_candidate(&self, _registration: &Registration) -> bool {
+        false
+    }
+
     /// Harness timing after establishment or execution of an early query.
     #[cfg(feature = "induced-failure")]
     fn loading_read_boundary(&self, _completed: bool) {}
@@ -1062,13 +1070,14 @@ impl<A: SnapshotSource> Entry<A> {
     /// An entry serving `registration` and holding nothing, which is what a
     /// vault the host has never attached stands at, its claim standing at
     /// `epoch`.
-    fn unattached(registration: Registration, epoch: u64) -> Self {
+    fn unattached(registration: Registration, epoch: u64, initial_loading_candidate: bool) -> Self {
         let vault = registration.name.clone();
         Self {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
                 initial_attach_started: false,
+                initial_loading_candidate,
                 loading: None,
                 trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
@@ -1118,6 +1127,7 @@ impl<A: SnapshotSource> Entry<A> {
 
 struct EntryState<A: SnapshotSource> {
     initial_attach_started: bool,
+    initial_loading_candidate: bool,
     loading: Option<loading::Loading<A::Reader>>,
     trust: TrustState,
     /// Whether the entry's trust has stood unbroken since it last published
@@ -2531,7 +2541,9 @@ fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultNam
     let job = state.claim.schedule(|epoch| work.job(name, epoch));
     if matches!(work, DemandedWork::Attach) && !state.initial_attach_started {
         state.initial_attach_started = true;
-        if let Job::Attach(_, epoch) = &job {
+        if state.initial_loading_candidate
+            && let Job::Attach(_, epoch) = &job
+        {
             state.loading = Some(loading::Loading::provisional(*epoch));
         }
     }
@@ -3915,7 +3927,8 @@ fn serve<O: EntryOps>(
     registration: Registration,
 ) -> Result<Demand, ServingRefusal> {
     let name = registration.name.clone();
-    shared.entries.insert(registration)?;
+    let candidate = shared.ops.first_index_candidate(&registration);
+    shared.entries.insert(registration, candidate)?;
     park_on_current_classification(shared, &name);
     Ok(shared
         .entries
@@ -3948,7 +3961,8 @@ fn serve_in_place<O: EntryOps>(
     moved: bool,
 ) -> Demand {
     let name = amended.name.clone();
-    shared.entries.replace(amended).expect(
+    let candidate = shared.ops.first_index_candidate(&amended);
+    shared.entries.replace(amended, candidate).expect(
         "the registration lock holds every change to the set, and the entry it replaces is \
          withdrawn under it",
     );
@@ -4970,8 +4984,9 @@ impl<O: EntryOps> Host<O> {
         // host runs is served exactly as a vault read at startup is.
         let entries = ServingSet::new();
         for registration in registry.into_entries() {
+            let candidate = ops.first_index_candidate(&registration);
             entries
-                .insert(registration)
+                .insert(registration, candidate)
                 .expect("the registrations are keyed by name, so no two of them name one entry");
         }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
@@ -26638,7 +26653,7 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             host.shared
                 .entries
-                .insert(registration(&joined, &root))
+                .insert(registration(&joined, &root), false)
                 .expect("the set serves no such name");
 
             drop(host.demand(&joined).unwrap());
@@ -26717,10 +26732,10 @@ mod tests {
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             assert_eq!(
-                host.shared.entries.insert(registration(
-                    &name,
-                    std::path::Path::new("/tmp/norn-host-elsewhere")
-                )),
+                host.shared.entries.insert(
+                    registration(&name, std::path::Path::new("/tmp/norn-host-elsewhere")),
+                    false
+                ),
                 Err(ServingRefusal::AlreadyServed)
             );
             let standing = host.shared.entries.get(&name).expect("the vault is served");
@@ -27012,7 +27027,7 @@ mod tests {
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
             assert_eq!(
-                host.shared.entries.replace(edited),
+                host.shared.entries.replace(edited, false),
                 Err(ServingRefusal::Held),
                 "an entry holding its coverage was replaced"
             );
@@ -27037,7 +27052,7 @@ mod tests {
                 .clone()
                 .with_poll_backend(norn_config::registry::PollBackend::Poll);
 
-            assert_eq!(host.shared.entries.replace(edited.clone()), Ok(()));
+            assert_eq!(host.shared.entries.replace(edited.clone(), false), Ok(()));
 
             let observed = replaced
                 .gate
@@ -27325,7 +27340,7 @@ mod tests {
 
             host.shared
                 .entries
-                .insert(joined.clone())
+                .insert(joined.clone(), false)
                 .expect("the set serves no such name");
 
             assert_eq!(
@@ -27416,7 +27431,7 @@ mod tests {
             let joined = registration("journal", &root("journal"));
             host.shared
                 .entries
-                .insert(joined.clone())
+                .insert(joined.clone(), false)
                 .expect("the set serves no such name");
             host.shared
                 .entries

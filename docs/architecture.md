@@ -2336,7 +2336,11 @@ Get and Find holds expose their applicable builders, answer reading and counters
 They expose no unrestricted snapshot, reader, count, rich query or plan ground.
 Actual execution checks the request shape again.
 
-Admission is provisional only during the initial attach prologue. Early sources
+Startup, registration and registration replacement observe the canonical store name
+outside entry gates before serving the entry. Only a missing name is a provisional
+candidate; existing, linked, foreign or unreadable storage retains ordinary first-open
+refusal without a capability wait. This observation permits waiting, never publication.
+Admission remains provisional only during the initial attach prologue. Early sources
 require a newly Created, initially empty canonical store and synchronized watcher
 coverage captured before catalogue enumeration. Reused and rebuilt stores, recovery,
 reload and inline rung 3 do not mint early authority. A disk-backed complete catalogue
