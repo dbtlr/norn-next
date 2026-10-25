@@ -48,9 +48,6 @@ use crate::{
 /// The derived database's file, inside the vault's derived directory.
 const STORE_FILE: &str = "store.sqlite3";
 
-#[cfg(feature = "induced-failure")]
-pub mod startup_experiment;
-
 /// The maintainer lock's file, inside the vault's derived directory. It is
 /// never removed: see [`norn_fs::Maintainership`].
 const MAINTAINER_LOCK_FILE: &str = "maintainer.lock";
@@ -196,10 +193,6 @@ impl std::error::Error for ProductionPolicyError {}
 /// and recoveries that follow read. Nothing here can name a vault the host does
 /// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
-    #[cfg(feature = "induced-failure")]
-    startup_experiment: Option<Arc<startup_experiment::Experiment>>,
-    #[cfg(feature = "induced-failure")]
-    initial_import_cache: Option<Arc<startup_experiment::InitialImportCache>>,
     cleanup_error: Arc<Mutex<Option<String>>>,
     loading_cleanup: Mutex<Vec<loading::CleanupRecord>>,
     #[cfg(feature = "induced-failure")]
@@ -659,10 +652,6 @@ fn reader_unavailable(error: &StoreError) -> ReaderUnavailable {
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
         let ops = Self {
-            #[cfg(feature = "induced-failure")]
-            startup_experiment: None,
-            #[cfg(feature = "induced-failure")]
-            initial_import_cache: None,
             cleanup_error: Arc::new(Mutex::new(None)),
             loading_cleanup: Mutex::new(Vec::new()),
             #[cfg(feature = "induced-failure")]
@@ -678,27 +667,6 @@ impl ProductionEntryOps {
             ops.record_cleanup_failure(error);
         }
         ops
-    }
-
-    /// Attach a disposable loading experiment to a harness-created host.
-    #[cfg(feature = "induced-failure")]
-    pub fn with_startup_experiment(
-        mut self,
-        experiment: Arc<startup_experiment::Experiment>,
-    ) -> Self {
-        self.startup_experiment = Some(experiment);
-        self
-    }
-
-    /// Give an isolated worker one induced-failure cache attempt on its first
-    /// `Created` or `RebuiltFromZero` store, only if empty. `Reused` stores skip it.
-    #[cfg(feature = "induced-failure")]
-    pub fn with_initial_import_cache(
-        mut self,
-        cache: Arc<startup_experiment::InitialImportCache>,
-    ) -> Self {
-        self.initial_import_cache = Some(cache);
-        self
     }
 
     /// The most recent residue-cleanup failure. Cleanup failure does not take
@@ -1308,35 +1276,6 @@ impl ProductionEntryOps {
             &attachment.shadows,
             &attachment.covered_root,
         );
-        #[cfg(feature = "induced-failure")]
-        if self.startup_experiment.is_some() {
-            attachment
-                .store
-                .ensure_startup_complete()
-                .map_err(store_effect)?;
-        }
-        #[cfg(feature = "induced-failure")]
-        if let Some(experiment) = &self.startup_experiment
-            && experiment.take_initial_attempt()
-            && !matches!(
-                attachment.store.open_outcome(),
-                norn_store::OpenOutcome::Reused
-            )
-        {
-            let order = attachment.store.path_order();
-            if HealScope::Vault
-                .page(&mut attachment.store, None, self.policy, order)?
-                .is_empty()
-            {
-                return startup_experiment::run(
-                    attachment,
-                    &exclusions,
-                    self.policy,
-                    &healing,
-                    experiment,
-                );
-            }
-        }
         // The caller pins the candidate before this walk, so every finding
         // below records the active schema fingerprint and every document is
         // judged under the declaration that fingerprint names.
@@ -1896,22 +1835,6 @@ impl EntryOps for ProductionEntryOps {
         // rather than being reported, because an attach that reported it would
         // be answered by another attach that opened the same file and met the
         // same page.
-        #[cfg(feature = "induced-failure")]
-        let (attachment, healed) = startup_experiment::initial_heal(
-            attachment,
-            self.initial_import_cache.as_deref(),
-            |attachment| {
-                if self.startup_experiment.is_some() {
-                    progress.decline_loading();
-                    self.heal_under_coverage(attachment, progress)
-                } else {
-                    Self::under_coverage(attachment, |attachment| {
-                        self.initial_loading_heal(attachment, progress)
-                    })
-                }
-            },
-        )?;
-        #[cfg(not(feature = "induced-failure"))]
         let (attachment, healed) = {
             let mut attachment = attachment;
             let healed = Self::under_coverage(&mut attachment, |attachment| {
@@ -4759,16 +4682,6 @@ impl<'s> Pending<'s> {
     /// reading here would be a reading per flush of an answer that does not
     /// change.
     fn flush(&mut self) -> Result<(), JobFailure> {
-        self.flush_for_mode(
-            #[cfg(feature = "induced-failure")]
-            norn_store::startup_experiment::WriteMode::Ordinary,
-        )
-    }
-
-    fn flush_for_mode(
-        &mut self,
-        #[cfg(feature = "induced-failure")] mode: norn_store::startup_experiment::WriteMode,
-    ) -> Result<(), JobFailure> {
         let findings = self.recordable()?;
         if self.changes.is_empty() && findings.is_empty() {
             return Ok(());
@@ -4778,30 +4691,6 @@ impl<'s> Pending<'s> {
             self.account.freed.absorb(&self.changes);
         }
         let mut request = self.store.begin_request();
-        #[cfg(feature = "induced-failure")]
-        let outcome =
-            if self.metadata || mode == norn_store::startup_experiment::WriteMode::Metadata {
-                request.apply_intake_increment(
-                    self.changes.drain(..),
-                    &findings,
-                    self.declared.model.content_model(),
-                )
-            } else if mode == norn_store::startup_experiment::WriteMode::DeferredHealth {
-                request.apply_startup_increment(
-                    self.changes.drain(..),
-                    &findings,
-                    self.declared.model.content_model(),
-                )
-            } else {
-                request.apply_increment(
-                    self.provenance,
-                    self.changes.drain(..),
-                    &findings,
-                    self.declared.model.content_model(),
-                )
-            }
-            .map_err(store_effect)?;
-        #[cfg(not(feature = "induced-failure"))]
         let outcome = if self.metadata {
             request.apply_intake_increment(
                 self.changes.drain(..),
@@ -5388,48 +5277,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[cfg(feature = "induced-failure")]
-    #[test]
-    fn recovery_refuses_a_retained_partial_startup_experiment() {
-        struct Stop;
-        impl startup_experiment::Observer for Stop {
-            fn catalogue(
-                &self,
-                _: &norn_store::startup_experiment::Catalogue,
-                _: &ContentModel,
-            ) -> Result<(), String> {
-                Ok(())
-            }
-            fn indexed(
-                &self,
-                stage: startup_experiment::Stage,
-                _: Arc<norn_store::SnapshotReader>,
-                _: Arc<ContentModel>,
-            ) -> Result<(), String> {
-                if stage == startup_experiment::Stage::Frontmatter {
-                    Err("interrupted after base facts".into())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-        let f = Fixture::new("startup-retained-recovery");
-        fs::write(f.vault().join(".norn/schema.yaml"), "version: 9\n").unwrap();
-        fs::write(f.vault().join("first.md"), "[[missing]] #tag\n").unwrap();
-        let (ops, name) = f.ops(2);
-        let ops = ops
-            .with_startup_experiment(startup_experiment::Experiment::new("first", Arc::new(Stop)));
-        let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        fs::write(f.vault().join(".norn/schema.yaml"), "version: 1\n").unwrap();
-        assert!(ops.recover(&name, &mut attachment, &progress).is_err());
-        assert!(
-            ops.recover(&name, &mut attachment, &progress).is_err(),
-            "ordinary recovery accepted partial derivation"
-        );
-        ops.detach(&name, attachment);
     }
 
     /// **An attach refused in the host's own data directory reaches a caller
@@ -13548,123 +13395,6 @@ mod tests {
             1,
             "the rebuild derived no finding, so the equality above compared none"
         );
-        ops.detach(&name, attachment);
-    }
-
-    #[cfg(feature = "induced-failure")]
-    fn damage_cache_writer_schema(store: &mut Store) {
-        norn_store::induced_failure::execute_out_of_band(
-            store,
-            "PRAGMA writable_schema=ON;
-             UPDATE sqlite_schema SET sql='invalid schema' WHERE name='documents';
-             PRAGMA writable_schema=OFF;
-             PRAGMA schema_version=123456;",
-        )
-        .unwrap();
-        let failure =
-            norn_store::induced_failure::execute_out_of_band(store, "SELECT * FROM documents")
-                .expect_err(
-                    "the next read meets the malformed schema and resets SQLite's schema cache",
-                );
-        assert!(matches!(store_effect(failure), JobFailure::StoreDamaged(_)));
-    }
-
-    #[cfg(feature = "induced-failure")]
-    #[test]
-    fn initial_cache_heal_damage_survives_failed_restore_and_reaches_rebuild() {
-        let f = Fixture::new("cache-heal-damage");
-        let (ops, name) = f.ops(64);
-        let progress = ProgressReporter::disconnected();
-        let attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
-        let epoch = attachment.store.epoch().to_string();
-        let (attachment, healed) =
-            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
-                damage_cache_writer_schema(&mut attachment.store);
-                Err(JobFailure::StoreDamaged("damage met by heal".into()))
-            })
-            .expect("damage must return the owned attachment to attach's recovery decision");
-        assert!(matches!(healed, Err(JobFailure::StoreDamaged(ref detail))
-            if detail == "damage met by heal"));
-        assert!(cache.receipt().is_none(), "restoration did not succeed");
-        fs::write(f.vault().join("arrived.md"), "# Arrived\n").unwrap();
-        let mut attachment = ops.rung_three(attachment, &progress).unwrap();
-        assert_ne!(attachment.store.epoch(), epoch);
-        assert_eq!(stored_paths(&mut attachment.store), ["arrived.md"]);
-        attachment.store.verify_integrity().unwrap();
-        ops.detach(&name, attachment);
-    }
-
-    #[cfg(feature = "induced-failure")]
-    #[test]
-    fn initial_cache_precheck_damage_returns_attachment_without_running_heal() {
-        let f = Fixture::new("cache-precheck-damage");
-        let (ops, name) = f.ops(64);
-        let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
-        damage_cache_writer_schema(&mut attachment.store);
-        let (attachment, healed) =
-            startup_experiment::initial_heal(attachment, Some(&cache), |_| {
-                panic!("cache precheck damage must reach rung three before any ordinary heal")
-            })
-            .expect("precheck damage must reach attach's existing recovery decision");
-        assert!(matches!(healed, Err(JobFailure::StoreDamaged(_))));
-        assert!(cache.receipt().is_none());
-        fs::write(f.vault().join("arrived.md"), "# Arrived\n").unwrap();
-        let mut attachment = ops.rung_three(attachment, &progress).unwrap();
-        assert_eq!(stored_paths(&mut attachment.store), ["arrived.md"]);
-        attachment.store.verify_integrity().unwrap();
-        ops.detach(&name, attachment);
-    }
-
-    #[cfg(feature = "induced-failure")]
-    #[test]
-    fn initial_cache_restore_damage_with_successful_heal_still_requires_rebuild() {
-        let f = Fixture::new("cache-restore-damage");
-        let (ops, name) = f.ops(64);
-        let progress = ProgressReporter::disconnected();
-        let attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
-        let (attachment, healed) =
-            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
-                damage_cache_writer_schema(&mut attachment.store);
-                Ok(())
-            })
-            .expect("restore damage must reach attach's recovery decision");
-        assert!(matches!(healed, Err(JobFailure::StoreDamaged(_))));
-        assert!(cache.receipt().is_none());
-        let attachment = ops.rung_three(attachment, &progress).unwrap();
-        attachment.store.verify_integrity().unwrap();
-        ops.detach(&name, attachment);
-    }
-
-    #[cfg(feature = "induced-failure")]
-    #[test]
-    fn initial_cache_unwind_with_failed_restore_closes_the_writer() {
-        let f = Fixture::new("cache-unwind-damage");
-        let (ops, name) = f.ops(64);
-        let progress = ProgressReporter::disconnected();
-        let attachment = ops.attach(&f.registration(), &progress).unwrap();
-        let cache = startup_experiment::InitialImportCache::new(8192, true).unwrap();
-        let epoch = attachment.store.epoch().to_string();
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            startup_experiment::initial_heal(attachment, Some(&cache), |attachment| {
-                damage_cache_writer_schema(&mut attachment.store);
-                panic!("stop import with a writer whose cache cannot be restored");
-            })
-        }));
-        let panic = unwound.err().expect("the import must unwind");
-        assert_eq!(
-            panic.downcast_ref::<&str>(),
-            Some(&"stop import with a writer whose cache cannot be restored")
-        );
-        assert!(cache.receipt().is_none());
-        // Reattach also proves the guard released maintainership after closing
-        // the damaged writer, instead of leaking its enlarged cache connection.
-        let attachment = ops.attach(&f.registration(), &progress).unwrap();
-        assert_ne!(attachment.store.epoch(), epoch);
-        attachment.store.verify_integrity().unwrap();
         ops.detach(&name, attachment);
     }
 

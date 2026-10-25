@@ -280,24 +280,6 @@ impl Vault {
         }
     }
 
-    #[cfg(feature = "induced-failure")]
-    pub fn prefix_helper(
-        &self,
-        experiment: &norn_host::startup_experiment::Experiment,
-        control: &norn_host::startup_experiment::HelperControl,
-    ) -> Result<
-        norn_host::startup_experiment::HelperComplete,
-        norn_host::startup_experiment::HelperFailure,
-    > {
-        let _lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
-        let registration = Entry::new(
-            self.name.clone(),
-            VaultRoot::new(&self.vault).expect("vault root"),
-        );
-        let ops = ProductionEntryOps::new(self.dirs(), ProductionPolicy::new(32, 32).unwrap());
-        norn_host::startup_experiment::run_prefix_helper(&ops, &registration, experiment, control)
-    }
-
     pub fn name(&self) -> &VaultName {
         &self.name
     }
@@ -341,33 +323,6 @@ impl Vault {
     /// Compose the measurement worker with explicit bounded maintenance settings.
     pub fn host_with_policy(&self, policy: ProductionPolicy) -> ServingHost {
         self.serve_with_policy([self.name.clone()], None, policy, |ops| ops)
-    }
-
-    #[cfg(feature = "induced-failure")]
-    pub fn host_with_startup_experiment(
-        &self,
-        policy: ProductionPolicy,
-        experiment: Arc<norn_host::startup_experiment::Experiment>,
-    ) -> ServingHost {
-        self.host_with_loading_options(policy, Some(experiment), None)
-    }
-
-    #[cfg(feature = "induced-failure")]
-    pub fn host_with_loading_options(
-        &self,
-        policy: ProductionPolicy,
-        experiment: Option<Arc<norn_host::startup_experiment::Experiment>>,
-        cache: Option<Arc<norn_host::startup_experiment::InitialImportCache>>,
-    ) -> ServingHost {
-        self.serve_with_policy([self.name.clone()], None, policy, |mut ops| {
-            if let Some(experiment) = experiment {
-                ops = ops.with_startup_experiment(experiment);
-            }
-            if let Some(cache) = cache {
-                ops = ops.with_initial_import_cache(cache);
-            }
-            ops
-        })
     }
 
     /// A host serving this vault's root under each of `names`, holding the

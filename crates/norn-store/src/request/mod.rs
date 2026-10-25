@@ -89,9 +89,6 @@ use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
 use crate::write_path::WriteStatement;
 
-#[cfg(feature = "induced-failure")]
-use crate::startup_experiment::{WriterCacheReceipt, WriterCacheSize, WriterCacheWindow};
-
 mod instrument;
 mod inventory;
 pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
@@ -388,27 +385,7 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            increment::WriteMode::Ordinary,
-        )
-    }
-
-    /// Experimental import seam for isolated, disposable startup simulations.
-    /// Partial results must not be published as an ordinary ready store.
-    #[cfg(feature = "induced-failure")]
-    pub fn apply_startup_increment(
-        &mut self,
-        changes: impl IntoIterator<Item = Change>,
-        findings: &[DerivedFinding<'_>],
-        declared: &ContentModel,
-    ) -> Result<IncrementOutcome, StoreError> {
-        increment::apply(
-            self.store,
-            &mut self.counters,
-            &self.read_work,
-            changes,
-            findings,
-            declared,
-            increment::WriteMode::DeferredHealth,
+            false,
         )
     }
 
@@ -433,14 +410,8 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            increment::WriteMode::Metadata,
+            true,
         )
-    }
-
-    /// Complete the deferred findings of an isolated startup experiment.
-    #[cfg(feature = "induced-failure")]
-    pub fn finish_startup_health(&mut self, declared: &ContentModel) -> Result<(), StoreError> {
-        increment::finish_startup_health(self.store, &mut self.counters, &self.read_work, declared)
     }
 
     /// Record one finding, with the head of its candidates.
@@ -643,131 +614,6 @@ impl<'a> Request<'a> {
             |row| stored_document(row, 0),
             "reading a document row",
         )
-    }
-
-    /// A matching hash cannot certify rich facts that an experiment has not written.
-    #[cfg(feature = "induced-failure")]
-    pub fn start_startup_experiment(&mut self) -> Result<(i64, i64), StoreError> {
-        let temp_store = self
-            .store
-            .connection()
-            .pragma_query_value(None, "temp_store", |row| row.get(0))
-            .map_err(|error| error::sql("reading the original temporary-storage policy", error))?;
-        let temp_cache = self
-            .store
-            .connection()
-            .pragma_query_value(Some("temp"), "cache_size", |row| row.get(0))
-            .map_err(|error| error::sql("reading the original temporary-cache policy", error))?;
-        norn_db::meta::put_meta(
-            self.store.connection(),
-            "startup_experiment_incomplete",
-            1_i64,
-        )?;
-        Ok((temp_store, temp_cache))
-    }
-
-    #[cfg(feature = "induced-failure")]
-    pub fn complete_startup_experiment(
-        &mut self,
-        temp_settings: (i64, i64),
-    ) -> Result<(), StoreError> {
-        self.store
-            .connection()
-            .pragma_update(None, "temp_store", temp_settings.0)
-            .map_err(|error| error::sql("restoring temporary storage after import", error))?;
-        self.store
-            .connection()
-            .pragma_update(Some("temp"), "cache_size", temp_settings.1)
-            .map_err(|error| error::sql("restoring the temporary cache after import", error))?;
-        self.store
-            .connection()
-            .execute(
-                "DELETE FROM meta WHERE key = 'startup_experiment_incomplete'",
-                [],
-            )
-            .map_err(|error| error::sql("completing an experimental import", error))?;
-        Ok(())
-    }
-
-    /// Only the initial attach may enter this window. The owner must restore it
-    /// on this same writer before readiness. Any error can leave the cache state
-    /// unknown; close or replace the writer rather than publish that attachment.
-    #[cfg(feature = "induced-failure")]
-    pub fn start_initial_import_cache(
-        &mut self,
-        size: WriterCacheSize,
-        diagnostics: bool,
-    ) -> Result<WriterCacheWindow, StoreError> {
-        let connection = self.store.connection();
-        let before: i64 = connection
-            .pragma_query_value(Some("main"), "cache_size", |row| row.get(0))
-            .map_err(|error| error::sql("reading the live writer cache", error))?;
-        let retained_cache_budget_kib = if diagnostics {
-            let page_size: u64 = connection
-                .pragma_query_value(Some("main"), "page_size", |row| row.get(0))
-                .map_err(|error| error::sql("reading the writer page size", error))?;
-            let original_kib = if before < 0 {
-                before.unsigned_abs()
-            } else {
-                (before as u64 * page_size).div_ceil(1024)
-            };
-            Some(original_kib.max(u64::from(size.0)))
-        } else {
-            None
-        };
-        connection
-            .pragma_update(Some("main"), "cache_size", -i64::from(size.0))
-            .map_err(|error| error::sql("setting the initial-import writer cache", error))?;
-        let mut window = WriterCacheWindow {
-            before,
-            during: None,
-            retained_cache_budget_kib,
-        };
-        if diagnostics {
-            match connection.pragma_query_value(Some("main"), "cache_size", |row| row.get(0)) {
-                Ok(during) => window.during = Some(during),
-                Err(error) => {
-                    self.restore_initial_import_cache(&window)?;
-                    return Err(error::sql("reading the import writer cache", error));
-                }
-            }
-        }
-        Ok(window)
-    }
-
-    /// Restore on the same writer that opened the window before ordinary readiness,
-    /// including an import that returned an error. On failure, close or replace it.
-    #[cfg(feature = "induced-failure")]
-    pub fn restore_initial_import_cache(
-        &mut self,
-        window: &WriterCacheWindow,
-    ) -> Result<WriterCacheReceipt, StoreError> {
-        let connection = self.store.connection();
-        connection
-            .pragma_update(Some("main"), "cache_size", window.before)
-            .map_err(|error| error::sql("restoring the initial-import writer cache", error))?;
-        let after = if window.during.is_some() {
-            let after = connection
-                .pragma_query_value(Some("main"), "cache_size", |row| row.get(0))
-                .map_err(|error| error::sql("checking the restored writer cache", error))?;
-            if after != window.before {
-                return Err(StoreError::Sql {
-                    operation: "checking the restored writer cache",
-                    condition: None,
-                    message: "the writer did not restore its original cache size".into(),
-                });
-            }
-            Some(after)
-        } else {
-            None
-        };
-        Ok(WriterCacheReceipt {
-            before: window.before,
-            during: window.during,
-            after,
-            retained_cache_budget_kib: window.retained_cache_budget_kib,
-            reclamation_verified: false,
-        })
     }
 
     /// The next bounded page of document rows in `order`.

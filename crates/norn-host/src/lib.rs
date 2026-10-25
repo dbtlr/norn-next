@@ -47,8 +47,6 @@ pub use evidence::{
 pub use lifecycle::WorkInFlight;
 #[cfg(feature = "induced-failure")]
 pub use production::loading::{LoadingBoundary, LoadingProbe};
-#[cfg(feature = "induced-failure")]
-pub use production::startup_experiment;
 
 /// **Which targets of a resolved plan the applier copies another target
 /// from**, unread, through the write kernel (`norn_fs::Content::CopyOf`):

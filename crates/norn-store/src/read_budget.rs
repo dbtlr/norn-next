@@ -577,7 +577,7 @@ mod tests {
         let path = scratch.join("intake.sqlite3");
         let budget = ReadBudget::new(ReadBudgetPolicy::default());
         let reader = Arc::new(
-            crate::startup_experiment::IntakeBuilder::create(
+            crate::loading::IntakeBuilder::create(
                 &path,
                 crate::StoredPathOrder::Sensitive,
                 crate::DerivationVersion::new(1),

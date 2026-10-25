@@ -1,12 +1,10 @@
-//! Shared document loading for production construction and retained experiments.
+//! Shared document loading for first-index construction.
 use super::super::*;
 use crate::derivation::plan_base_document;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(in crate::production) enum Depth {
     Rich,
-    #[cfg(feature = "induced-failure")]
-    Base,
     Metadata,
 }
 

@@ -84,8 +84,6 @@ impl IntakeBuilder {
                 derivation,
             },
         )?;
-        // Every disposable projection must refuse ordinary adoption after sealing.
-        meta::put_meta(connection, "startup_experiment_incomplete", 1_i64)?;
         let (database, file) = temporary.into_database()?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Self {
@@ -631,5 +629,88 @@ mod tests {
         drop(snapshot);
         assert_eq!(budget.census().live_connections, 0);
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod intake_tests {
+    use crate::{
+        Change, ContentModel, DerivationVersion, DocumentFacts, DocumentPath, Store,
+        StoredPathOrder,
+    };
+
+    #[test]
+    fn metadata_refuses_a_lasting_store_without_changing_it() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-lasting-refusal");
+        let path = scratch.join("lasting.sqlite3");
+        let mut store =
+            Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        let epoch = store.epoch().to_string();
+        let facts = DocumentFacts::new(DocumentPath::new("first.md").unwrap(), "hash", "body", 4);
+        assert!(
+            store
+                .begin_request()
+                .apply_intake_increment([Change::Upsert(facts)], &[], &ContentModel::none())
+                .is_err()
+        );
+        store.close().unwrap();
+        let mut reopened =
+            Store::open(&path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap();
+        assert_eq!(reopened.epoch(), epoch);
+        assert!(
+            reopened
+                .begin_request()
+                .stored_facts(&DocumentPath::new("first.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        reopened.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn metadata_omits_payload_after_validating_real_source_lengths() {
+        let scratch = norn_testkit::scratch::Scratch::new("intake-storage");
+        let mut builder = crate::loading::IntakeBuilder::create(
+            &scratch.join("metadata.sqlite3"),
+            StoredPathOrder::Sensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        builder
+            .write(|store| {
+                let path = DocumentPath::new("document.md").unwrap();
+                let model = ContentModel::none();
+                let facts =
+                    DocumentFacts::new(path.clone(), "real-source-hash", "uniquebodytoken", 99);
+                assert!(
+                    store
+                        .begin_request()
+                        .apply_intake_increment([Change::Upsert(facts.clone())], &[], &model)
+                        .is_err(),
+                    "an inconsistent real length must still fail"
+                );
+                let mut facts = facts;
+                facts.byte_length = 15;
+                store
+                    .begin_request()
+                    .apply_intake_increment([Change::Upsert(facts)], &[], &model)
+                    .unwrap();
+                let stored = store.begin_request().stored_facts(&path).unwrap().unwrap();
+                assert_eq!(stored.document.content_hash, "real-source-hash");
+                assert_eq!(stored.document.byte_length, 15);
+                assert!(stored.body.is_empty());
+                let matches: u64 = store
+            .database
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM documents_fts WHERE documents_fts MATCH 'uniquebodytoken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+                assert_eq!(matches, 0);
+                Ok::<_, crate::StoreError>(())
+            })
+            .unwrap();
     }
 }

@@ -1138,7 +1138,6 @@ impl Store {
             },
         )?;
         let database = Database::adopt(connection, path)?;
-        refuse_incomplete_startup(&database)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
             intake_unsealed: false,
@@ -1183,12 +1182,6 @@ impl Store {
     /// List candidate stores; maintainership must precede inspection of their storage.
     pub fn count_residue_stores(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
         norn_db::temporary_store_parents(root).map_err(StoreError::from)
-    }
-
-    /// Reject an interrupted experiment retained by recovery without reopening.
-    #[cfg(feature = "induced-failure")]
-    pub fn ensure_startup_complete(&self) -> Result<(), StoreError> {
-        refuse_incomplete_startup(&self.database)
     }
 
     /// The database file this store is holding.
@@ -2028,8 +2021,7 @@ impl norn_db::Client for StoreClient {
         Ok(())
     }
 
-    /// Refuse incomplete disposable adoption, then judge the mode, path order
-    /// and derivation version.
+    /// Judge the mode, path order and derivation version.
     ///
     /// Among those keys, the mode goes first because an open can refuse over it,
     /// and a refusal discards nothing: a throwaway open over a durable store
@@ -2037,9 +2029,6 @@ impl norn_db::Client for StoreClient {
     /// inputs are both read, and a store where both moved is rebuilt once for a
     /// reason that names both.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
-        // A sealed disposable projection is never a rebuild input for a lasting
-        // store, even when another order or derivation version requests the open.
-        refuse_incomplete_connection(connection, path)?;
         self.adopt_mode(connection, path)?;
         let details: Vec<String> = [
             self.path_order_moved(connection)?,
@@ -2162,22 +2151,6 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
-}
-
-// Content hashes alone cannot establish that experimental projections are complete.
-fn refuse_incomplete_startup(database: &Database) -> Result<(), StoreError> {
-    refuse_incomplete_connection(database.connection(), database.path())
-}
-
-fn refuse_incomplete_connection(connection: &Connection, path: &Path) -> Result<(), StoreError> {
-    if meta::get_meta::<i64>(connection, "startup_experiment_incomplete")?.is_some() {
-        return Err(StoreError::Lifecycle {
-            operation: "using an incomplete startup experiment",
-            path: path.to_path_buf(),
-            message: "discard this disposable experimental store before reusing it".to_string(),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

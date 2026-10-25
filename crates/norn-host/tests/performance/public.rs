@@ -89,13 +89,44 @@ pub fn prefix(
             disposition, "error",
             "public operational refusal stops the cell"
         );
-        super::staged::operator_ack(
+        operator_ack(
             root,
             (index + 1) as u64,
             probe,
-            super::staged::residency::PARENT_ACK_TIMEOUT,
+            std::time::Duration::from_secs(5),
         )
         .expect("bounded caller-only parent acknowledgement");
     }
     observed_ready
+}
+
+fn operator_ack(
+    root: &std::path::Path,
+    sequence: u64,
+    probe: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let path = root
+        .join("operator-prefix-acks")
+        .join(format!("{sequence}.json"));
+    let deadline = Instant::now() + timeout.min(std::time::Duration::from_secs(5));
+    loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let ack: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("invalid operator prefix ack: {e}"))?;
+                if ack["sequence"].as_u64() != Some(sequence) || ack["probe"] != probe {
+                    return Err("invalid operator prefix acknowledgement identity".into());
+                }
+                std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(format!("reading operator prefix ack: {e}")),
+        }
+        if Instant::now() >= deadline {
+            return Err("operator prefix parent acknowledgement timed out".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
