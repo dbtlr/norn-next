@@ -388,8 +388,7 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            #[cfg(feature = "induced-failure")]
-            crate::startup_experiment::WriteMode::Ordinary,
+            increment::WriteMode::Ordinary,
         )
     }
 
@@ -409,23 +408,22 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            crate::startup_experiment::WriteMode::DeferredHealth,
+            increment::WriteMode::DeferredHealth,
         )
     }
 
     /// Only disposable metadata readers may observe rows with omitted bodies.
-    #[cfg(feature = "induced-failure")]
     pub fn apply_intake_increment(
         &mut self,
         changes: impl IntoIterator<Item = Change>,
         findings: &[DerivedFinding<'_>],
         declared: &ContentModel,
     ) -> Result<IncrementOutcome, StoreError> {
-        if self.store.mode() != crate::StoreMode::Throwaway {
+        if !self.store.metadata_intake {
             return Err(StoreError::Lifecycle {
-                operation: "writing experimental metadata",
+                operation: "writing loading metadata",
                 path: self.store.path().to_path_buf(),
-                message: "metadata cannot enter a lasting store".into(),
+                message: "payload omission requires an owned metadata intake".into(),
             });
         }
         increment::apply(
@@ -435,7 +433,7 @@ impl<'a> Request<'a> {
             changes,
             findings,
             declared,
-            crate::startup_experiment::WriteMode::Metadata,
+            increment::WriteMode::Metadata,
         )
     }
 

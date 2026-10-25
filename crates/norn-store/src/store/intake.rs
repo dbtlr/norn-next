@@ -1,4 +1,4 @@
-//! Unpublished metadata construction for the frozen-copy startup experiment.
+//! Owned first-index construction. Only sealed sources may mint public readers.
 use super::*;
 
 /// A disposable metadata writer that seals its deferred indexes before reads.
@@ -7,6 +7,7 @@ pub struct IntakeBuilder {
     store: Option<Store>,
     file: Option<Arc<norn_db::TemporaryFile>>,
     indexes: Vec<String>,
+    cleanup: norn_db::TemporaryCleanupReceipt,
 }
 
 impl IntakeBuilder {
@@ -16,7 +17,49 @@ impl IntakeBuilder {
         order: StoredPathOrder,
         derivation: DerivationVersion,
     ) -> Result<Self, StoreError> {
-        let temporary = norn_db::TemporaryDatabase::create(path, 256, None)?;
+        Self::create_temporary(
+            norn_db::TemporaryDatabase::create(path, 256, None)?,
+            order,
+            derivation,
+            true,
+        )
+    }
+
+    /// Create an exclusive file in the canonical store's loading namespace.
+    pub fn create_in(
+        directory: &Path,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+    ) -> Result<Self, StoreError> {
+        Self::create_in_observed(directory, order, derivation, |_| {})
+    }
+
+    /// Retain cleanup evidence even when construction fails before returning a builder.
+    pub fn create_in_observed(
+        directory: &Path,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+        observe: impl FnOnce(&norn_db::TemporaryCleanupReceipt),
+    ) -> Result<Self, StoreError> {
+        Self::create_temporary(
+            norn_db::TemporaryDatabase::create_in_observed(directory, 256, None, observe)?,
+            order,
+            derivation,
+            true,
+        )
+    }
+
+    fn create_temporary(
+        temporary: norn_db::TemporaryDatabase,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+        metadata: bool,
+    ) -> Result<Self, StoreError> {
+        let cleanup = temporary
+            .shared_file()
+            .expect("named construction")
+            .cleanup_receipt();
+        let path = &cleanup.paths()[0];
         let connection = temporary.connection();
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -27,7 +70,8 @@ impl IntakeBuilder {
         // must stay bounded before sealing. UNIQUE indexes and constraints stay immediate.
         let (indexes, immediate): (Vec<_>, Vec<_>) =
             schema.statements.into_iter().partition(|statement| {
-                statement.starts_with("CREATE INDEX ")
+                metadata
+                    && statement.starts_with("CREATE INDEX ")
                     && !statement.starts_with("CREATE INDEX finding")
             });
         schema.statements = immediate;
@@ -40,13 +84,14 @@ impl IntakeBuilder {
                 derivation,
             },
         )?;
-        // Omitted payloads must also refuse ordinary adoption after sealing.
+        // Every disposable projection must refuse ordinary adoption after sealing.
         meta::put_meta(connection, "startup_experiment_incomplete", 1_i64)?;
         let (database, file) = temporary.into_database()?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Self {
             store: Some(Store {
                 intake_unsealed: true,
+                metadata_intake: metadata,
                 count_results: Arc::new(crate::count::CountResults::for_store(
                     crate::CountRetentionPolicy::default(),
                     path,
@@ -61,15 +106,22 @@ impl IntakeBuilder {
             }),
             file: Some(file),
             indexes,
+            cleanup,
         })
     }
 
     /// Audit the actual owner and paths even if construction never reaches sealing.
+    #[cfg(feature = "induced-failure")]
     pub fn retirement_check(&self) -> norn_db::RetirementCheck {
         self.file
             .as_ref()
             .expect("a newly created intake owns its file")
             .retirement_check()
+    }
+
+    /// Observe final cleanup without keeping the file alive.
+    pub fn cleanup_receipt(&self) -> norn_db::TemporaryCleanupReceipt {
+        self.cleanup.clone()
     }
 
     /// Run one bounded loading step through the ordinary store writer.
@@ -96,9 +148,27 @@ impl IntakeBuilder {
 
     /// Build every deferred index before minting a reader, then close the writer.
     /// FILE temp storage permits sorter spill; page cache size does not bound sorter RSS.
-    pub fn finish(mut self, budget: &Arc<crate::ReadBudget>) -> Result<SnapshotReader, StoreError> {
+    pub fn finish(self, budget: &Arc<crate::ReadBudget>) -> Result<SnapshotReader, StoreError> {
+        let group = self
+            .store
+            .as_ref()
+            .map(Store::read_group)
+            .ok_or_else(|| StoreError::Sql {
+                operation: "sealing loading metadata",
+                condition: None,
+                message: "the intake was abandoned after a failed write".into(),
+            })?;
+        self.finish_in_group(budget, &group)
+    }
+
+    /// Seal completely and charge this physical pool to its canonical registration.
+    pub fn finish_in_group(
+        mut self,
+        budget: &Arc<crate::ReadBudget>,
+        group: &crate::ReadGroup,
+    ) -> Result<SnapshotReader, StoreError> {
         let mut store = self.store.take().ok_or_else(|| StoreError::Sql {
-            operation: "sealing experimental metadata",
+            operation: "sealing loading source",
             condition: None,
             message: "the intake was abandoned after a failed write".into(),
         })?;
@@ -122,11 +192,56 @@ impl IntakeBuilder {
             .commit()
             .map_err(|error| error::sql("committing metadata indexes", error))?;
         store.intake_unsealed = false;
-        let mut reader = store.reader_pool(budget);
+        let mut reader = store.reader_pool_in_group(budget, group);
         reader.intake_file = self.file.take();
         // No writer connection or statement cache survives into canonical heal.
         drop(store);
         Ok(reader)
+    }
+}
+
+/// A sealed per-target rich source. Construction uses ordinary increments and health.
+/// The caller owns proving that the target's bounded name/link closure is complete.
+pub struct GetBuilder(IntakeBuilder);
+
+impl GetBuilder {
+    pub fn create_in(
+        directory: &Path,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+    ) -> Result<Self, StoreError> {
+        Self::create_in_observed(directory, order, derivation, |_| {})
+    }
+
+    /// Retain cleanup evidence even if schema construction fails.
+    pub fn create_in_observed(
+        directory: &Path,
+        order: StoredPathOrder,
+        derivation: DerivationVersion,
+        observe: impl FnOnce(&norn_db::TemporaryCleanupReceipt),
+    ) -> Result<Self, StoreError> {
+        Ok(Self(IntakeBuilder::create_temporary(
+            norn_db::TemporaryDatabase::create_in_observed(directory, 256, None, observe)?,
+            order,
+            derivation,
+            false,
+        )?))
+    }
+
+    pub fn write<T, E>(&mut self, write: impl FnOnce(&mut Store) -> Result<T, E>) -> Result<T, E> {
+        self.0.write(write)
+    }
+
+    pub fn cleanup_receipt(&self) -> norn_db::TemporaryCleanupReceipt {
+        self.0.cleanup_receipt()
+    }
+
+    pub fn finish_in_group(
+        self,
+        budget: &Arc<crate::ReadBudget>,
+        group: &crate::ReadGroup,
+    ) -> Result<SnapshotReader, StoreError> {
+        self.0.finish_in_group(budget, group)
     }
 }
 

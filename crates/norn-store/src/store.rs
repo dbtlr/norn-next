@@ -96,10 +96,8 @@ use crate::hash;
 use crate::read::{Ran, ReadFilter, ReadStatement, StatementFailure, Stepped};
 use crate::request::Request;
 
-#[cfg(feature = "induced-failure")]
 mod intake;
-#[cfg(feature = "induced-failure")]
-pub use intake::IntakeBuilder;
+pub use intake::{GetBuilder, IntakeBuilder};
 
 /// The read-only snapshot handle wire reads run on.
 ///
@@ -120,8 +118,9 @@ pub use intake::IntakeBuilder;
 ///
 /// The handle outlives the entry that minted it where a read is still running
 /// against it: the entry lets its own hold go at the teardown window, and the
-/// read goes on answering from the handle it took. Nothing promises the
-/// database file behind it survives that teardown.
+/// read goes on answering from the handle it took. Canonical throwaway teardown
+/// can unlink its file. A sealed loading source instead retains actual file
+/// ownership through every open connection and established snapshot.
 ///
 /// **The database file this handle reads is not reachable from it.** A handle
 /// is what a hold hands out, and a caller holding the file's path needs no
@@ -141,7 +140,6 @@ pub use intake::IntakeBuilder;
 /// }
 /// ```
 pub struct SnapshotReader {
-    #[cfg(feature = "induced-failure")]
     intake_file: Option<Arc<norn_db::TemporaryFile>>,
     budget: Option<Arc<crate::ReadBudget>>,
     pool: Option<crate::read_budget::Pool>,
@@ -188,6 +186,9 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Option<ConnectionTurn> {
+        if self.intake_file.is_some() && need != crate::ReadNeed::Source {
+            return None;
+        }
         if let (Some(budget), Some(pool)) = (&self.budget, &self.pool) {
             let grant = budget.try_grant(pool, need)?;
             return Some(self.ready_turn(grant, deadline));
@@ -222,6 +223,13 @@ impl SnapshotReader {
         need: crate::ReadNeed,
         deadline: Instant,
     ) -> Result<Option<ConnectionTurn>, StoreError> {
+        if self.intake_file.is_some() && need != crate::ReadNeed::Source {
+            return Err(StoreError::Sql {
+                operation: "acquiring a loading source",
+                condition: None,
+                message: "loading sources admit source-only reads".into(),
+            });
+        }
         let (Some(budget), Some(pool)) = (&self.budget, &self.pool) else {
             return Ok(self.wait_for_the_connection_until(deadline));
         };
@@ -238,12 +246,11 @@ impl SnapshotReader {
                     .adopted
                     .map_err(StoreError::from)
                 };
-                #[cfg(feature = "induced-failure")]
                 let database = if let Some(file) = &self.intake_file {
                     file.open_snapshot().map_err(|error| match error {
                         norn_db::TemporaryReadError::Failed(error) => StoreError::from(error),
                         norn_db::TemporaryReadError::Lost { path } => StoreError::Lifecycle {
-                            operation: "opening sealed experimental metadata",
+                            operation: "opening sealed loading source",
                             path,
                             message: "the disposable source is missing or replaced".into(),
                         },
@@ -251,8 +258,6 @@ impl SnapshotReader {
                 } else {
                     open_ordinary()?
                 };
-                #[cfg(not(feature = "induced-failure"))]
-                let database = open_ordinary()?;
                 if database.epoch() != self.epoch {
                     return Err(StoreError::Sql {
                         operation: "opening a snapshot reader",
@@ -289,8 +294,7 @@ impl SnapshotReader {
             pool.retire();
         }
     }
-    /// Frozen-copy intake retires outside the entry gate and closes idle scratch now.
-    #[cfg(feature = "induced-failure")]
+    /// Close disposable idle resources outside the entry gate.
     pub fn retire_intake(&self) {
         assert!(
             self.intake_file.is_some(),
@@ -434,7 +438,6 @@ impl SnapshotReader {
 
 impl Drop for SnapshotReader {
     fn drop(&mut self) {
-        #[cfg(feature = "induced-failure")]
         if self.intake_file.is_some() {
             self.retire_intake();
             return;
@@ -995,11 +998,9 @@ pub enum StoreMode {
     /// A registered vault's durable derived state. The file survives the
     /// process.
     Durable,
-    /// Disposable derivation over a store that is torn down when it is closed
-    /// or dropped: an ephemeral store for tests, whose derived state is not
-    /// there next time. No vault is served over one — every vault operation
-    /// requires a registration (ADR 0033), and a registered vault's derived
-    /// state is durable.
+    /// Disposable derivation. Ordinary throwaway stores unlink on close or drop.
+    /// Sealed first-index sources instead retain their file through every reader.
+    /// A registration's canonical derived state remains durable.
     Throwaway,
 }
 
@@ -1023,8 +1024,8 @@ impl StoreMode {
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
-    #[cfg(feature = "induced-failure")]
     intake_unsealed: bool,
+    pub(crate) metadata_intake: bool,
     count_results: Arc<crate::count::CountResults>,
     pub(crate) database: Database,
     mode: StoreMode,
@@ -1035,17 +1036,38 @@ pub struct Store {
 }
 
 impl Store {
+    /// This canonical store's fairness identity, independent of physical loading files.
+    pub fn read_group(&self) -> crate::ReadGroup {
+        crate::ReadGroup(self.database.path().to_path_buf())
+    }
+
+    /// Store-owned disposable namespace beside the canonical database.
+    pub fn loading_directory(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".loading");
+        PathBuf::from(name)
+    }
+
+    /// Sweep recognized loading orphans under the caller's existing maintainer lock.
+    pub fn sweep_loading(path: &Path) -> Result<usize, StoreError> {
+        norn_db::sweep_temporary_directory(&Self::loading_directory(path)).map_err(StoreError::from)
+    }
+
     /// Mint a zero-I/O handle. Layer 6 callers share one host-owned budget;
     /// private writer jobs continue to use the eager standalone mint.
     pub fn reader_pool(&self, budget: &Arc<crate::ReadBudget>) -> SnapshotReader {
+        self.reader_pool_in_group(budget, &self.read_group())
+    }
+
+    fn reader_pool_in_group(
+        &self,
+        budget: &Arc<crate::ReadBudget>,
+        group: &crate::ReadGroup,
+    ) -> SnapshotReader {
         let reader = SnapshotReader {
-            #[cfg(feature = "induced-failure")]
             intake_file: None,
             budget: Some(Arc::clone(budget)),
-            pool: Some(budget.pool(
-                self.database.path().to_path_buf(),
-                crate::read_budget::Kind::Source,
-            )),
+            pool: Some(budget.pool(group.0.clone(), crate::read_budget::Kind::Source)),
             source: Some(self.database.path().to_path_buf()),
             count_results: Arc::clone(&self.count_results),
             epoch: self.epoch().to_string(),
@@ -1053,7 +1075,6 @@ impl Store {
             connection: Mutex::new(None),
             returned: Condvar::new(),
         };
-        #[cfg(feature = "induced-failure")]
         if self.intake_unsealed {
             reader.retire();
         }
@@ -1112,8 +1133,8 @@ impl Store {
         refuse_incomplete_startup(&database)?;
         crate::resolve::register_functions(database.connection())?;
         Ok(Store {
-            #[cfg(feature = "induced-failure")]
             intake_unsealed: false,
+            metadata_intake: false,
             count_results: Arc::new(crate::count::CountResults::for_store(
                 crate::CountRetentionPolicy::default(),
                 path,
@@ -1294,7 +1315,6 @@ impl Store {
     /// the mint answers for those statements, and a mint that refused held
     /// that lock for the ones it ran before it refused.
     pub fn open_reader(&self) -> ReaderMint {
-        #[cfg(feature = "induced-failure")]
         if self.intake_unsealed {
             return ReaderMint {
                 reader: Err(StoreError::Sql {
@@ -1320,7 +1340,6 @@ impl Store {
                 Ok(database)
             })
             .map(|database| SnapshotReader {
-                #[cfg(feature = "induced-failure")]
                 intake_file: None,
                 budget: None,
                 pool: None,
@@ -2000,15 +2019,18 @@ impl norn_db::Client for StoreClient {
         Ok(())
     }
 
-    /// Take the verdict over the store's own keys: the mode, then the path
-    /// order and the derivation version.
+    /// Refuse incomplete disposable adoption, then judge the mode, path order
+    /// and derivation version.
     ///
-    /// The mode goes first because it is the one reading an open refuses over,
+    /// Among those keys, the mode goes first because an open can refuse over it,
     /// and a refusal discards nothing: a throwaway open over a durable store
     /// derived under another order is refused, not rebuilt. The two rebuild
     /// inputs are both read, and a store where both moved is rebuilt once for a
     /// reason that names both.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
+        // A sealed disposable projection is never a rebuild input for a lasting
+        // store, even when another order or derivation version requests the open.
+        refuse_incomplete_connection(connection, path)?;
         self.adopt_mode(connection, path)?;
         let details: Vec<String> = [
             self.path_order_moved(connection)?,
@@ -2135,10 +2157,14 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
 
 // Content hashes alone cannot establish that experimental projections are complete.
 fn refuse_incomplete_startup(database: &Database) -> Result<(), StoreError> {
-    if meta::get_meta::<i64>(database.connection(), "startup_experiment_incomplete")?.is_some() {
+    refuse_incomplete_connection(database.connection(), database.path())
+}
+
+fn refuse_incomplete_connection(connection: &Connection, path: &Path) -> Result<(), StoreError> {
+    if meta::get_meta::<i64>(connection, "startup_experiment_incomplete")?.is_some() {
         return Err(StoreError::Lifecycle {
             operation: "using an incomplete startup experiment",
-            path: database.path().to_path_buf(),
+            path: path.to_path_buf(),
             message: "discard this disposable experimental store before reusing it".to_string(),
         });
     }

@@ -229,6 +229,15 @@ pub struct IncrementOutcome {
     pub invalidated: Invalidation,
 }
 
+/// Derivation depth; only the lab can defer health. Metadata is disposable-only.
+#[derive(Clone, Copy, PartialEq)]
+pub enum WriteMode {
+    Ordinary,
+    #[cfg(feature = "induced-failure")]
+    DeferredHealth,
+    Metadata,
+}
+
 /// Apply one changeset with the findings its act derived, and report what it
 /// did.
 ///
@@ -242,7 +251,7 @@ pub(crate) fn apply(
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
     declared: &ContentModel,
-    #[cfg(feature = "induced-failure")] mode: crate::startup_experiment::WriteMode,
+    mode: WriteMode,
 ) -> Result<IncrementOutcome, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.increment");
@@ -354,10 +363,7 @@ pub(crate) fn apply(
                                 facts,
                                 admitting,
                                 &mut tally,
-                                #[cfg(feature = "induced-failure")]
-                                {
-                                    mode == crate::startup_experiment::WriteMode::Metadata
-                                },
+                                mode == WriteMode::Metadata,
                             )
                         },
                     )
@@ -424,10 +430,7 @@ pub(crate) fn apply(
     // path and the path discard every finding keyed by a path this changeset
     // changed, and the re-decision discards the findings under each class it
     // changed before it files one in that class.
-    #[cfg(feature = "induced-failure")]
-    let run_health = mode == crate::startup_experiment::WriteMode::Ordinary;
-    #[cfg(not(feature = "induced-failure"))]
-    let run_health = true;
+    let run_health = mode == WriteMode::Ordinary;
     let redecided = match generation.filter(|_| run_health) {
         Some(generation) => {
             #[cfg(feature = "induced-failure")]
@@ -732,7 +735,7 @@ fn upsert(
     facts: &DocumentFacts,
     admitting: usize,
     tally: &mut Tally,
-    #[cfg(feature = "induced-failure")] metadata: bool,
+    metadata: bool,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("store.upsert");
@@ -740,7 +743,6 @@ fn upsert(
     let body = facts.body.as_str();
     // Validate the real bytes above, then omit only the disposable payload.
     // Byte length and source hash keep their ordinary authority.
-    #[cfg(feature = "induced-failure")]
     let body = if metadata { "" } else { body };
     let projection = facts.frontmatter().map(json::canonical_json).transpose()?;
     let projection_hash = projection.as_deref().map(hash::sub_fingerprint);

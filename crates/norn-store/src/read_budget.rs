@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+/// Canonical registration identity for fair turns across its physical sources.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadGroup(pub(crate) PathBuf);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadNeed {
     Source,
