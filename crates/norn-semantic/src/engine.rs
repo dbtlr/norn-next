@@ -684,20 +684,25 @@ impl Engine {
     }
 
     /// The next page of held paths after `after`, in path order, each once
-    /// whichever models hold rows at it.
+    /// whichever models hold rows at it. Separate first/after statements let
+    /// SQLite seek past the cursor without scanning the consumed prefix.
     fn held_paths_after(&self, after: Option<&str>) -> Result<Vec<String>, EngineError> {
         let connection = self.database.connection();
         let mut statement = connection
-            .prepare_cached(
-                "SELECT DISTINCT path FROM document_vectors
-                 WHERE ?1 IS NULL OR path > ?1 ORDER BY path LIMIT ?2",
-            )
-            .map_err(|error| error::sql("preparing the reconcile read", error))?;
-        let rows = statement
-            .query_map(params![after, RECONCILE_PAGE as i64], |row| {
-                row.get::<_, String>(0)
+            .prepare_cached(match after {
+                None => "SELECT DISTINCT path FROM document_vectors ORDER BY path LIMIT ?1",
+                Some(_) => {
+                    "SELECT DISTINCT path FROM document_vectors
+                            WHERE path > ?1 ORDER BY path LIMIT ?2"
+                }
             })
-            .map_err(|error| error::sql("reading the held paths", error))?;
+            .map_err(|error| error::sql("preparing the reconcile read", error))?;
+        let path = |row: &norn_db::rusqlite::Row<'_>| row.get::<_, String>(0);
+        let rows = match after {
+            None => statement.query_map(params![RECONCILE_PAGE as i64], path),
+            Some(after) => statement.query_map(params![after, RECONCILE_PAGE as i64], path),
+        }
+        .map_err(|error| error::sql("reading the held paths", error))?;
         rows.collect::<Result<_, _>>()
             .map_err(|error| error::sql("reading a held path", error))
     }
@@ -932,4 +937,147 @@ fn decode(blob: &[u8], dimensions: i64) -> Result<Vec<f32>, EngineError> {
 /// shorter side rather than judging it a second time.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+#[cfg(test)]
+mod reconcile_query_tests {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use norn_db::rusqlite::{
+        StatementStatus,
+        trace::{TraceEvent, TraceEventCodes},
+    };
+    use norn_embed::StubEmbedder;
+    use norn_testkit::scratch::Scratch;
+
+    use super::{Engine, RECONCILE_PAGE};
+
+    thread_local! {
+        static QUERIES: RefCell<Vec<(String, i32, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Capture work from the statement the engine actually executed. The
+    /// profile event's elapsed time is deliberately unused.
+    fn capture_query(event: TraceEvent<'_>) {
+        if let TraceEvent::Profile(statement, _) = event
+            && statement
+                .sql()
+                .starts_with("SELECT DISTINCT path FROM document_vectors")
+        {
+            QUERIES.with_borrow_mut(|queries| {
+                queries.push((
+                    statement.expanded_sql().unwrap(),
+                    statement.get_status(StatementStatus::VmStep),
+                    statement.get_status(StatementStatus::FullscanStep),
+                ))
+            });
+        }
+    }
+
+    #[test]
+    fn reconcile_queries_seek_late_and_empty_pages_without_scanning_unrelated_prefixes() {
+        let mut samples = Vec::new();
+        for models in [1, 2] {
+            for count in [1024, 8192, 32768] {
+                let scratch = Scratch::new("semantic-reconcile-query-work");
+                let engine = Engine::open(
+                    scratch.join("semantic.sqlite3"),
+                    Arc::new(StubEmbedder::new()),
+                )
+                .unwrap();
+                let connection = engine.database.connection();
+                let transaction = connection.unchecked_transaction().unwrap();
+                {
+                    let mut insert = transaction
+                        .prepare(
+                            "INSERT INTO document_vectors VALUES (?1,?2,'1','hash',1,x'00000000')",
+                        )
+                        .unwrap();
+                    for n in 0..count {
+                        for model in 0..models {
+                            insert
+                                .execute(norn_db::rusqlite::params![
+                                    format!("docs/{n:06}.md"),
+                                    format!("model-{model}")
+                                ])
+                                .unwrap();
+                        }
+                    }
+                }
+                transaction.commit().unwrap();
+                connection.trace_v2(TraceEventCodes::SQLITE_TRACE_PROFILE, Some(capture_query));
+                let late = format!("docs/{:06}.md", count - RECONCILE_PAGE - 1);
+                let end = format!("docs/{:06}.md", count - 1);
+                for (boundary, after, expected) in [
+                    ("first", None, (0..RECONCILE_PAGE).collect::<Vec<_>>()),
+                    (
+                        "late",
+                        Some(late.as_str()),
+                        (count - RECONCILE_PAGE..count).collect(),
+                    ),
+                    ("empty", Some(end.as_str()), Vec::new()),
+                ] {
+                    // Each counter must cover one execution, including when
+                    // successive cursors reuse the same cached SQL shape.
+                    connection.flush_prepared_statement_cache();
+                    QUERIES.with_borrow_mut(Vec::clear);
+                    let paths = engine.held_paths_after(after).unwrap();
+                    assert_eq!(
+                        paths,
+                        expected
+                            .iter()
+                            .map(|n| format!("docs/{n:06}.md"))
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(paths.len() <= RECONCILE_PAGE);
+                    let queries = QUERIES.with_borrow_mut(std::mem::take);
+                    assert_eq!(queries.len(), 1);
+                    let (sql, steps, scans) = queries.into_iter().next().unwrap();
+                    let plan = connection
+                        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(3))
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    eprintln!(
+                        "models={models}, paths={count}, boundary={boundary}, rows={}, VM={steps}, fullscan={scans}, SQL={sql:?}, plan={plan:?}",
+                        paths.len()
+                    );
+                    samples.push((models, count, boundary, steps, scans, plan));
+                }
+            }
+        }
+        for (models, count, boundary, steps, scans, plan) in &samples {
+            let first = samples
+                .iter()
+                .find(|s| s.0 == *models && s.1 == *count && s.2 == "first")
+                .unwrap()
+                .3;
+            let small = samples
+                .iter()
+                .find(|s| s.0 == *models && s.1 == 1024 && s.2 == *boundary)
+                .unwrap()
+                .3;
+            assert!(
+                *steps <= 2 * first && *steps <= 2 * small,
+                "query work grew with an unrelated prefix: models={models}, count={count}, boundary={boundary}, VM={steps}, first={first}, small={small}"
+            );
+            if *boundary != "first" {
+                assert_eq!(
+                    *scans, 0,
+                    "a keyset page must seek, including an empty page"
+                );
+                assert!(
+                    plan.iter()
+                        .any(|detail| detail.contains("SEARCH") && detail.contains("path>?")),
+                    "{plan:?}"
+                );
+            }
+            assert!(
+                !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+    }
 }
