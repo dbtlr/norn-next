@@ -13,6 +13,7 @@ pub(crate) const MARKER: &str = "four_step_incomplete";
 pub struct StepCounters {
     pub rows_inserted: u64,
     pub rows_rewritten: u64,
+    pub rows_deleted: u64,
     pub fact_rows_written: u64,
     pub links_judged: u64,
     pub findings_written: u64,
@@ -423,8 +424,10 @@ pub fn content(
             return Err(refused("a completed content row cannot be quarantined"));
         }
         if done.is_some() {
-            tx.execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
-                .map_err(|e| error::sql("removing a provisional quarantine", e))?;
+            counters.rows_deleted += tx
+                .execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
+                .map_err(|e| error::sql("removing a provisional quarantine", e))?
+                as u64;
         }
     }
     counters.findings_discarded = crate::increment::write_derived_findings(&tx, findings)?;
@@ -623,12 +626,14 @@ pub fn forget(store: &mut Store, path: &DocumentPath) -> Result<StepCounters, St
     if current >= 4 {
         return Err(refused("final health has already begun"));
     }
-    tx.execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
-        .map_err(|e| error::sql("forgetting a provisional document", e))?;
+    let rows_deleted =
+        tx.execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
+            .map_err(|e| error::sql("forgetting a provisional document", e))? as u64;
     let findings_discarded = request::discard_about_in(&tx, path, crate::DiscardScope::EveryKind)?;
     committed(
         tx,
         StepCounters {
+            rows_deleted,
             findings_discarded,
             ..StepCounters::default()
         },
@@ -640,6 +645,54 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn the_marker_alone_prevents_adoption_even_when_the_production_schema_matches() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-marker-only",
+        )
+        .unwrap();
+        let path = scratch.join("store.sqlite3");
+        let mut store = Store::open(
+            &path,
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        begin(&mut store).unwrap();
+        let document = DocumentPath::new("unfinished.md").unwrap();
+        names(
+            &mut store,
+            std::slice::from_ref(&document),
+            &[],
+            &ContentModel::none(),
+        )
+        .unwrap();
+        // Isolate the persisted guard from schema-digest rebuilding: a removed
+        // progress table restores the production schema but not complete data.
+        store
+            .connection()
+            .execute_batch("DROP TABLE four_step_state")
+            .unwrap();
+        drop(store);
+        let mut reopened = Store::open(
+            &path,
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        assert!(
+            format!("{:?}", reopened.open_outcome()).contains("interrupted four-step construction")
+        );
+        assert!(
+            reopened
+                .begin_request()
+                .stored_document(&document)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn two_row_progress_pages_do_not_scan_completed_or_later_documents() {

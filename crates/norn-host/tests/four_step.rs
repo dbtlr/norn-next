@@ -98,8 +98,13 @@ fn fixture(label: &str, undecodable: bool) -> norn_testkit::scratch::Scratch {
     ] {
         std::fs::write(root.join(path), text).unwrap();
     }
+    std::os::unix::fs::symlink("hub.md", root.join("link.md")).unwrap();
     if undecodable {
         std::fs::write(root.join("a.md"), [0xff, 0xfe]).unwrap();
+        // Both spellings render onto x�.md. A provisional name must not
+        // withhold the refused spelling after its own bytes quarantine it.
+        std::fs::write(root.join("x\\.md"), "Refused spelling\n").unwrap();
+        std::fs::write(root.join("x�.md"), [0xff, 0xfe]).unwrap();
     }
     scratch
 }
@@ -159,6 +164,9 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
             .with_predicates([norn_wire::Predicate::equal_to("rating", "7")]);
         let ordinary_find =
             serde_json::to_value(host.find(&find_params).unwrap().answer.report).unwrap();
+        let ordinary_advisories =
+            format!("{:?}", host.inspect(ordinary.name()).unwrap().advisories);
+        assert!(ordinary_advisories.contains("SymlinkSkipped"));
         let ordinary_work = host.evidence();
         drop(demand);
         drop(host);
@@ -182,6 +190,10 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                 let host = machine.host_with_four_step(loading);
                 let demand = host.demand(machine.name()).unwrap();
                 wait_ready(&host, &machine);
+                assert_eq!(
+                    format!("{:?}", host.inspect(machine.name()).unwrap().advisories),
+                    ordinary_advisories
+                );
                 let work = host.evidence();
                 drop(demand);
                 drop(host);
@@ -211,6 +223,10 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     .clone()
                     .expect("completion counters");
                 assert_eq!(report.steps["relations"]["links_judged"], 17);
+                assert_eq!(
+                    report.steps["content"]["rows_deleted"],
+                    if undecodable { 2 } else { 0 }
+                );
                 assert_eq!(
                     report
                         .steps
@@ -314,6 +330,10 @@ fn source_changes_withdraw_early_reads_and_reconcile_the_final_tree() {
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
         assert!(probe.report.lock().unwrap().as_ref().unwrap().reconciled);
+        assert_eq!(
+            probe.report.lock().unwrap().as_ref().unwrap().steps["structure"]["rows_deleted"],
+            u64::from(no_body)
+        );
         let ordinary = vault.beside(&scratch.join("ordinary-final-tree"));
         let host = ordinary.host();
         let demand = host.demand(ordinary.name()).unwrap();

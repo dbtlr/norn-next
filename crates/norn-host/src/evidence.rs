@@ -491,6 +491,8 @@ impl JobEvidence {
         self.count_four_step_receipt(step, counters);
         self.documents_upserted
             .fetch_add(counters.rows_rewritten, Ordering::Relaxed);
+        self.documents_deleted
+            .fetch_add(counters.rows_deleted, Ordering::Relaxed);
         self.findings_written
             .fetch_add(counters.findings_written, Ordering::Relaxed);
         self.findings_discarded

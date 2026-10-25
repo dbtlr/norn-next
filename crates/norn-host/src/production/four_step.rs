@@ -216,6 +216,7 @@ impl ProductionEntryOps {
             }
             build.content(documents)?;
         }
+        attachment.skipped_links = build.refused_spellings()?;
         build.metadata_complete = true;
         build.report.content_complete_ns = build.began.elapsed().as_nanos();
         build.observe(FourStepEvent::ContentComplete, None)?;
@@ -370,9 +371,14 @@ impl Build<'_> {
 
             self.add("names", counters);
         }
-        // Refused spellings are replayed only as names, after every valid name
-        // stands, so ordinary place-finding withholding sees the complete set.
-        // This second walk never reads document bytes.
+        Ok(())
+    }
+
+    fn refused_spellings(&mut self) -> Result<SkippedLinks, JobFailure> {
+        // Withholding must see decoded eligibility, not provisional names:
+        // a refused spelling can render onto a name that content quarantines.
+        // This second name walk never reads document bytes. Churn that later
+        // forgets a row forces an ordinary reconciliation of the final tree.
         let mut account = Account::default();
         let mut pending = Pending::new(
             self.store,
@@ -422,15 +428,15 @@ impl Build<'_> {
             *self
                 .report
                 .steps
-                .entry("names")
+                .entry("content")
                 .or_default()
                 .entry(name)
                 .or_default() += count;
         }
         self.ops
             .evidence
-            .count_four_step_receipt("names", &counters);
-        Ok(())
+            .count_four_step_receipt("content", &counters);
+        Ok(account.links)
     }
 
     fn read(&mut self, path: &DocumentPath) -> Result<Option<norn_fs::ReadFile>, JobFailure> {
@@ -650,6 +656,7 @@ pub(crate) fn readings(counters: &StepCounters) -> BTreeMap<&'static str, u64> {
     BTreeMap::from([
         ("rows_inserted", counters.rows_inserted),
         ("rows_rewritten", counters.rows_rewritten),
+        ("rows_deleted", counters.rows_deleted),
         ("fact_rows_written", counters.fact_rows_written),
         ("links_judged", counters.links_judged),
         ("findings_written", counters.findings_written),
