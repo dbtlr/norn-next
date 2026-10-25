@@ -699,3 +699,179 @@ impl Observer for CappedPrefix {
         check(&self.operator.root.join("data"))
     }
 }
+
+/// The live selection reuses the operator rendezvous with phase-specific receipts.
+/// Catalogue and canonical-health observations deliberately perform no queries.
+pub struct LivePrefix {
+    operator: OperatorPrefix,
+    attempts: Mutex<Vec<Value>>,
+    eligibility: Mutex<Vec<Value>>,
+}
+impl LivePrefix {
+    pub fn new(began: Instant, name: VaultName, root: std::path::PathBuf) -> Self {
+        Self {
+            operator: OperatorPrefix::new(began, name, root),
+            attempts: Mutex::new(Vec::new()),
+            eligibility: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn receipt(&self) -> Value {
+        json!({"mode":"private-live-prefix","logical_requests":2,
+            "attempts":*self.attempts.lock().unwrap(),
+            "construction_eligibility_gets":*self.eligibility.lock().unwrap(),
+            "canonical_work":*self.operator.reporter.canonical_work.lock().unwrap(),
+            "dispatch":"private observer on attachment thread",
+            "availability_scope":"private live capability availability"})
+    }
+
+    fn send<T>(
+        &self,
+        phase: norn_host::startup_experiment::LivePhase,
+        boundary: u128,
+        started: u128,
+        attempt: norn_host::startup_experiment::LiveAttempt<T>,
+        encode: impl FnOnce(T) -> Value,
+    ) -> Result<(), String> {
+        use norn_host::startup_experiment::{LivePhase, LiveRefusal};
+        let reporter = &self.operator.reporter;
+        let finished = reporter.began.elapsed().as_nanos();
+        let (disposition, reason, answer, withdrawn) = match attempt.result {
+            Ok(answer) => ("served", None, Some(encode(answer)), None),
+            Err(error) => {
+                let disposition = match error {
+                    LiveRefusal::Unavailable if attempt.withdrawn.is_some() => "withdrawn",
+                    LiveRefusal::Unavailable => "unavailable",
+                    LiveRefusal::Unsupported => "unsupported",
+                    _ => "error",
+                };
+                (
+                    disposition,
+                    Some(format!("{error:?}")),
+                    None,
+                    attempt.withdrawn.map(encode),
+                )
+            }
+        };
+        let typed = answer.as_ref().or(withdrawn.as_ref());
+        let (sequence, probe, command, stage) = match phase {
+            LivePhase::Get => (
+                1,
+                "whole_slug",
+                json!({"op":"get","target":"small","whole":true}),
+                "live-get",
+            ),
+            LivePhase::Find => (2, "active_page", json!({"op":"find"}), "live-find"),
+        };
+        let record = json!({"startup_stage":stage,"probe":probe,"command":command,
+            "operator_prefix_sequence":sequence,"mode":"live","global_ready":false,
+            "availability_scope":"private live capability availability",
+            "disposition":disposition,"reason":reason,
+            "builder_invoked":attempt.evidence.builder_invoked,
+            "projection_epoch":attempt.evidence.reading.as_ref().map(|r| r.epoch()),
+            "projection_generation":attempt.evidence.reading.as_ref().map(|r| r.write_generation()),
+            "counters":attempt.evidence.counters.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>()),
+            "typed_snapshot":typed.map(|v| &v["snapshot"]),
+            "builder_work":typed.map(|v| &v["work"]),
+            "answer":answer.as_ref().map(|v| &v["answer"]),
+            "withdrawn_answer":withdrawn.as_ref().map(|v| &v["answer"]),
+            "stage_boundary_ns":boundary,"query_started_ns":started,"query_finished_ns":finished,
+            "query_host_ns":finished-started});
+        self.attempts.lock().unwrap().push(record.clone());
+        super::emit(record);
+        self.operator.acknowledged(sequence, probe)
+    }
+}
+impl Observer for LivePrefix {
+    fn catalogue(&self, _: &Catalogue, _: &ContentModel) -> Result<(), String> {
+        Ok(())
+    }
+    fn indexed(
+        &self,
+        stage: Stage,
+        _: Arc<SnapshotReader>,
+        _: Arc<ContentModel>,
+    ) -> Result<(), String> {
+        if stage != Stage::CanonicalHealth {
+            return Err("unexpected live stage".into());
+        }
+        Ok(())
+    }
+    fn canonical_work(
+        &self,
+        work: &std::collections::BTreeMap<&'static str, u64>,
+    ) -> Result<(), String> {
+        self.operator.reporter.canonical_work(work)
+    }
+    fn live_eligibility_get(
+        &self,
+        evidence: &norn_host::startup_experiment::LiveReadEvidence,
+    ) -> Result<(), String> {
+        self.eligibility.lock().unwrap().push(json!({"builder_invoked":evidence.builder_invoked,
+            "projection_epoch":evidence.reading.as_ref().map(|r| r.epoch()),
+            "projection_generation":evidence.reading.as_ref().map(|r| r.write_generation()),
+            "counters":evidence.counters.map(|c| c.readings().collect::<std::collections::BTreeMap<_,_>>())}));
+        Ok(())
+    }
+    fn live_declined(
+        &self,
+        phase: norn_host::startup_experiment::LivePhase,
+        reason: &str,
+    ) -> Result<(), String> {
+        use norn_host::startup_experiment::LivePhase;
+        let (sequence, probe, command, stage) = match phase {
+            LivePhase::Get => (
+                1,
+                "whole_slug",
+                json!({"op":"get","target":"small","whole":true}),
+                "live-get",
+            ),
+            LivePhase::Find => (2, "active_page", json!({"op":"find"}), "live-find"),
+        };
+        let now = self.operator.reporter.began.elapsed().as_nanos();
+        let record = json!({"startup_stage":stage,"probe":probe,"command":command,"operator_prefix_sequence":sequence,
+            "mode":"live","global_ready":false,"availability_scope":"private live capability availability",
+            "disposition":"construction-declined","reason":reason,"builder_invoked":false,
+            "projection_epoch":null,"projection_generation":null,"counters":null,"typed_snapshot":null,
+            "builder_work":null,"answer":null,"withdrawn_answer":null,
+            "stage_boundary_ns":now,"query_started_ns":now,"query_finished_ns":now,"query_host_ns":0});
+        self.attempts.lock().unwrap().push(record.clone());
+        super::emit(record);
+        self.operator.acknowledged(sequence, probe)
+    }
+    fn live_get(
+        &self,
+        reader: Arc<norn_host::startup_experiment::LiveGetReader>,
+    ) -> Result<(), String> {
+        let reporter = &self.operator.reporter;
+        let boundary = reporter.began.elapsed().as_nanos();
+        let params = GetParams::new(
+            reporter.address.clone(),
+            ResolutionTarget::new("small").unwrap(),
+        );
+        let started = reporter.began.elapsed().as_nanos();
+        let attempt = reader.get_measured(&params, Instant::now() + Duration::from_secs(5));
+        self.send(norn_host::startup_experiment::LivePhase::Get,boundary,started,attempt, |answer| {
+            let snapshot = answer.snapshot.clone();
+            let work = answer.work.readings().collect::<std::collections::BTreeMap<_,_>>();
+            let (unsatisfied,report) = answer.into_report();
+            json!({"snapshot":snapshot,"work":work,"answer":{"report":report,"unsatisfied":unsatisfied,"advisories":[]}})
+        })
+    }
+    fn live_find(
+        &self,
+        reader: Arc<norn_host::startup_experiment::LiveFindReader>,
+    ) -> Result<(), String> {
+        let reporter = &self.operator.reporter;
+        let boundary = reporter.began.elapsed().as_nanos();
+        let params = find_params(&reporter.address, &json!({"op":"find"}));
+        let started = reporter.began.elapsed().as_nanos();
+        let attempt = reader.find_measured(&params, Instant::now() + Duration::from_secs(5));
+        self.send(norn_host::startup_experiment::LivePhase::Find,boundary,started,attempt, |answer| {
+            let snapshot = answer.snapshot.clone();
+            let work = answer.work.readings().collect::<std::collections::BTreeMap<_,_>>();
+            let (unsatisfied,advisories,report) = answer.into_report();
+            json!({"snapshot":snapshot,"work":work,"answer":{"report":report,"unsatisfied":unsatisfied,"advisories":advisories}})
+        })
+    }
+}

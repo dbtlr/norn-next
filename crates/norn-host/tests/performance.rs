@@ -201,6 +201,7 @@ fn performance_worker() {
     let operator_mode = match std::env::var("NORN_PERFORMANCE_LOADING").as_deref() {
         Ok("operator-prefix") => Some("early"),
         Ok("operator-prefix-capped") => Some("capped"),
+        Ok("operator-prefix-live") => Some("live"),
         Ok("operator-prefix-ordinary") => Some("ordinary"),
         _ => None,
     };
@@ -235,7 +236,27 @@ fn performance_worker() {
         ))
     });
     #[cfg(feature = "induced-failure")]
-    let experiment = if let Some(observer) = &capped_prefix {
+    let live_prefix = (operator_mode == Some("live")).then(|| {
+        assert!(
+            residency.is_none()
+                && cache_options.kib.is_none()
+                && !cache_options.diagnostics
+                && !profiling,
+            "live prefix requires default cache options and no diagnostic or profiler"
+        );
+        std::sync::Arc::new(staged::LivePrefix::new(
+            began,
+            vault.name().clone(),
+            root.clone(),
+        ))
+    });
+    #[cfg(feature = "induced-failure")]
+    let experiment = if let Some(observer) = &live_prefix {
+        Some(norn_host::startup_experiment::Experiment::live_metadata(
+            "small",
+            observer.clone(),
+        ))
+    } else if let Some(observer) = &capped_prefix {
         Some(
             norn_host::startup_experiment::Experiment::capped_prefix_frozen(
                 "small",
@@ -293,7 +314,10 @@ fn performance_worker() {
     assert!(
         !matches!(
             std::env::var("NORN_PERFORMANCE_LOADING").as_deref(),
-            Ok("operator-prefix" | "operator-prefix-ordinary" | "operator-prefix-capped")
+            Ok("operator-prefix"
+                | "operator-prefix-ordinary"
+                | "operator-prefix-capped"
+                | "operator-prefix-live")
         ),
         "operator prefix modes require induced-failure"
     );
@@ -393,7 +417,9 @@ fn performance_worker() {
     let ready = if let Some(mode) = operator_mode {
         let mut ready = ready;
         ready["operator_prefix_mode"] = json!(mode);
-        ready["operator_prefix_receipt"] = if let Some(observer) = &capped_prefix {
+        ready["operator_prefix_receipt"] = if let Some(observer) = &live_prefix {
+            observer.receipt()
+        } else if let Some(observer) = &capped_prefix {
             observer.receipt()
         } else {
             operator_prefix

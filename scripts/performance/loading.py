@@ -44,6 +44,8 @@ def expected_checkpoints(mode):
     """One protocol definition shared by cold and warm controllers."""
     if mode in ("baseline", "operator-prefix-ordinary"):
         return set()
+    if mode == "operator-prefix-live":
+        return {("live-get", "whole_slug"), ("live-find", "active_page")}
     if mode == "operator-prefix-capped":
         return {("canonical-demand", "whole_slug"), ("canonical-prefix", "active_page")}
     if mode == "operator-prefix":

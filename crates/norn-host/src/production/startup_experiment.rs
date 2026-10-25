@@ -22,6 +22,14 @@ pub enum Stage {
 
 /// Store reads at a checkpoint prove query cost without claiming host admission.
 pub trait Observer: Send + Sync {
+    /// Live construction declines name their phase even when no query ran.
+    fn live_declined(&self, _phase: LivePhase, reason: &str) -> Result<(), String> {
+        self.declined(reason)
+    }
+    /// Actual construction eligibility work is separate from the logical Get.
+    fn live_eligibility_get(&self, _evidence: &LiveReadEvidence) -> Result<(), String> {
+        Ok(())
+    }
     /// Private live lab boundary, captured before the first catalogue enumeration.
     fn live_observation(&self, _observation: &norn_fs::watch::Observation) -> Result<(), String> {
         Ok(())
@@ -705,4 +713,7 @@ mod helper;
 pub use helper::{HelperCause, HelperComplete, HelperControl, HelperFailure, run_prefix_helper};
 
 mod live;
-pub use live::{LiveFindReader, LiveFindRefusal, LiveGetReader, LiveGetRefusal, LiveRefusal};
+pub use live::{
+    LiveAttempt, LiveFindReader, LiveFindRefusal, LiveGetReader, LiveGetRefusal, LivePhase,
+    LiveReadEvidence, LiveRefusal,
+};

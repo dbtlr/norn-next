@@ -41,6 +41,39 @@ pub enum LiveRefusal {
 pub type LiveGetRefusal = LiveRefusal;
 pub type LiveFindRefusal = LiveRefusal;
 
+/// Construction declines are independent for the two private capabilities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LivePhase {
+    Get,
+    Find,
+}
+
+/// Evidence is captured on the acquisition/query path, without evidence reads.
+#[derive(Debug, Default)]
+pub struct LiveReadEvidence {
+    pub builder_invoked: bool,
+    pub reading: Option<norn_store::StoreReading>,
+    pub counters: Option<norn_store::SnapshotCounters>,
+}
+
+/// A successful builder may lose eligibility before publication. Its typed
+/// answer remains measurable, but never becomes an available logical answer.
+pub struct LiveAttempt<T> {
+    pub result: Result<T, LiveRefusal>,
+    pub withdrawn: Option<T>,
+    pub evidence: LiveReadEvidence,
+}
+
+impl<T> LiveAttempt<T> {
+    fn refused(refusal: LiveRefusal) -> Self {
+        Self {
+            result: Err(refusal),
+            withdrawn: None,
+            evidence: LiveReadEvidence::default(),
+        }
+    }
+}
+
 // Get and Find share acquisition, eligibility, retirement and typed failures.
 // The observation is cloned from the one boundary preceding the catalogue.
 struct LiveReader {
@@ -69,28 +102,37 @@ impl LiveReader {
     fn run<T>(
         &self,
         deadline: Instant,
-        query: impl FnOnce(norn_store::Snapshot) -> Result<T, LiveRefusal>,
-    ) -> Result<T, LiveRefusal> {
-        if !self.eligible() || Instant::now() >= deadline {
-            return Err(LiveRefusal::Unavailable);
-        }
-        let reader = self
-            .reader
-            .lock()
-            .expect("live reader poisoned")
-            .clone()
-            .ok_or(LiveRefusal::Unavailable)?;
+        query: impl FnOnce(&norn_store::Snapshot) -> (Result<T, LiveRefusal>, bool),
+    ) -> LiveAttempt<T> {
+        let mut evidence = LiveReadEvidence::default();
+        let mut withdrawn = None;
         let run = || {
+            if !self.eligible() || Instant::now() >= deadline {
+                return Err(LiveRefusal::Unavailable);
+            }
+            let reader = self
+                .reader
+                .lock()
+                .expect("live reader poisoned")
+                .clone()
+                .ok_or(LiveRefusal::Unavailable)?;
             let turn = reader
                 .acquire(norn_store::ReadNeed::Source, deadline)
                 .map_err(LiveRefusal::Store)?
                 .ok_or(LiveRefusal::Unavailable)?;
             let snapshot = turn.establish().map_err(LiveRefusal::Store)?;
+            evidence.reading = Some(snapshot.reading().clone());
+            evidence.counters = Some(snapshot.counters());
             if !self.eligible() {
                 return Err(LiveRefusal::Unavailable);
             }
-            let answer = query(snapshot)?;
+            let (answer, invoked) = query(&snapshot);
+            evidence.builder_invoked = invoked;
+            evidence.counters = Some(snapshot.counters());
+            // An operation failure keeps its type even when eligibility moved.
+            let answer = answer?;
             if !self.eligible() {
+                withdrawn = Some(answer);
                 return Err(LiveRefusal::Unavailable);
             }
             Ok(answer)
@@ -105,7 +147,11 @@ impl LiveReader {
                 .expect("live failures poisoned")
                 .push(store_effect(error.clone()));
         }
-        result
+        LiveAttempt {
+            result,
+            withdrawn,
+            evidence,
+        }
     }
 
     fn retire(&self) {
@@ -130,6 +176,14 @@ impl LiveGetReader {
         params: &norn_wire::GetParams,
         deadline: Instant,
     ) -> Result<norn_store::Gotten, LiveGetRefusal> {
+        self.get_measured(params, deadline).result
+    }
+
+    pub fn get_measured(
+        &self,
+        params: &norn_wire::GetParams,
+        deadline: Instant,
+    ) -> LiveAttempt<norn_store::Gotten> {
         if params.target.address() != self.target
             || params.target.anchor().is_some()
             || !params.columns.is_empty()
@@ -137,10 +191,13 @@ impl LiveGetReader {
             || params.limit.is_some()
             || params.after.is_some()
         {
-            return Err(LiveRefusal::Unsupported);
+            return LiveAttempt::refused(LiveRefusal::Unsupported);
         }
         self.guarded.run(deadline, |snapshot| {
-            get(&snapshot, params, &self.model).map_err(LiveRefusal::Page)
+            (
+                get(snapshot, params, &self.model).map_err(LiveRefusal::Page),
+                true,
+            )
         })
     }
 }
@@ -153,15 +210,24 @@ impl LiveFindReader {
         params: &norn_wire::FindParams,
         deadline: Instant,
     ) -> Result<norn_store::Found, LiveFindRefusal> {
+        self.find_measured(params, deadline).result
+    }
+
+    pub fn find_measured(
+        &self,
+        params: &norn_wire::FindParams,
+        deadline: Instant,
+    ) -> LiveAttempt<norn_store::Found> {
         self.guarded.run(deadline, |snapshot| {
-            let intake = IntakeSnapshot {
-                snapshot,
-                model: self.model.clone(),
-            };
-            intake.find(params).map_err(|refusal| match refusal {
-                IntakeRefusal::Unsupported => LiveRefusal::Unsupported,
-                IntakeRefusal::Page(error) => LiveRefusal::Page(error),
-            })
+            if !super::intake::supports_find(params) {
+                return (Err(LiveRefusal::Unsupported), false);
+            }
+            (
+                snapshot
+                    .find(params, &self.model)
+                    .map_err(LiveRefusal::Page),
+                true,
+            )
         })
     }
 }
@@ -187,7 +253,10 @@ pub(super) fn run(
     let decline = || {
         experiment
             .observer
-            .declined("live whole-Get eligibility unavailable; wait for ordinary readiness")
+            .live_declined(
+                LivePhase::Get,
+                "live whole-Get eligibility unavailable; wait for ordinary readiness",
+            )
             .map_err(JobFailure::Environmental)
     };
     let Some(observation) = observation.filter(|guard| {
@@ -239,8 +308,12 @@ pub(super) fn run(
         }
         let reader = Arc::new(projection.reader_pool(&attachment.readers));
         let _retire_raw = RetireReader(reader.clone());
-        if !canonical::requested_class_exists(&reader, model, &experiment.get_target)?
-            || !observation.is_current()
+        if !canonical::requested_class_exists_observed(
+            &reader,
+            model,
+            &experiment.get_target,
+            Some(experiment.observer.as_ref()),
+        )? || !observation.is_current()
         {
             return decline();
         }
@@ -264,7 +337,7 @@ pub(super) fn run(
 }
 
 // Keep every operation/cleanup cause, including errors swallowed by observers.
-fn finish(mut failures: Vec<JobFailure>) -> Result<(), JobFailure> {
+pub(super) fn finish(mut failures: Vec<JobFailure>) -> Result<(), JobFailure> {
     if failures.len() == 1 {
         return Err(failures.pop().unwrap());
     }
@@ -297,7 +370,10 @@ pub(super) fn metadata(
     let Some(observation) = observation.filter(|guard| guard.is_current()) else {
         return experiment
             .observer
-            .declined("live metadata eligibility unavailable; wait for ordinary readiness")
+            .live_declined(
+                LivePhase::Find,
+                "live metadata eligibility unavailable; wait for ordinary readiness",
+            )
             .map_err(JobFailure::Environmental);
     };
     let mut retirement = None;
@@ -313,7 +389,10 @@ pub(super) fn metadata(
         else {
             return experiment
                 .observer
-                .declined("live metadata changed during construction; wait for ordinary readiness")
+                .live_declined(
+                    LivePhase::Find,
+                    "live metadata changed during construction; wait for ordinary readiness",
+                )
                 .map_err(JobFailure::Environmental);
         };
         let reader = Arc::new(reader);
@@ -325,9 +404,10 @@ pub(super) fn metadata(
         let result = if capability.guarded.eligible() {
             experiment.observer.live_find(capability.clone())
         } else {
-            experiment
-                .observer
-                .declined("live metadata changed during construction; wait for ordinary readiness")
+            experiment.observer.live_declined(
+                LivePhase::Find,
+                "live metadata changed during construction; wait for ordinary readiness",
+            )
         }
         .map_err(JobFailure::Environmental);
         capability.guarded.retire();
@@ -346,4 +426,60 @@ pub(super) fn metadata(
         );
     }
     finish(failures)
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod tests {
+    use super::*;
+    use norn_testkit::{isolation, scratch::Scratch, wait::Budget};
+    use std::time::Duration;
+
+    #[test]
+    fn executed_then_withdrawn_keeps_real_typed_result_and_sql_evidence() {
+        let scratch = Scratch::new("live-withdrawn-evidence");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        let _lease = isolation::Lease::hold(
+            isolation::REAL_WATCHER,
+            isolation::acquisition_budget(Budget::new(
+                Duration::from_secs(15),
+                Duration::from_millis(250),
+            )),
+        );
+        let (watch, _) = norn_fs::watch::watch(&root, &root.join("schema.yaml")).unwrap();
+        watch.synchronize(Duration::from_secs(5)).unwrap();
+        let observation = watch.unchanged_observation().unwrap();
+        let store = norn_store::Store::open_throwaway(
+            scratch.join("projection.sqlite3"),
+            norn_store::StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        let budget = norn_store::ReadBudget::new(norn_store::ReadBudgetPolicy::default());
+        let reader = LiveReader::new(Arc::new(store.reader_pool(&budget)), observation.clone());
+        let params = norn_wire::FindParams::new(norn_wire::VaultAddress::name(
+            norn_wire::VaultName::new("notes").unwrap(),
+        ));
+        let attempt = reader.run(Instant::now() + Duration::from_secs(5), |snapshot| {
+            let answer = snapshot
+                .find(&params, &ContentModel::none())
+                .map_err(LiveRefusal::Page);
+            observation.invalidate();
+            (answer, true)
+        });
+        assert!(matches!(attempt.result, Err(LiveRefusal::Unavailable)));
+        let withdrawn = attempt.withdrawn.unwrap();
+        assert_eq!(
+            withdrawn.snapshot.epoch,
+            attempt.evidence.reading.unwrap().epoch()
+        );
+        assert!(attempt.evidence.builder_invoked);
+        assert!(attempt.evidence.counters.unwrap().statements_executed() > 0);
+        assert!(withdrawn.rows.is_empty());
+        assert!(reader.take_failures().is_empty());
+        reader.retire();
+        drop(reader);
+        store.close().unwrap();
+    }
 }

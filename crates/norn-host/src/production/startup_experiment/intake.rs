@@ -74,24 +74,27 @@ fn metadata_predicate(predicate: &norn_wire::Predicate) -> bool {
     )
 }
 
+pub(super) fn supports_find(params: &norn_wire::FindParams) -> bool {
+    !(!params.predicates.iter().all(metadata_predicate)
+        || !params.columns.iter().all(|column| {
+            matches!(
+                column,
+                norn_wire::Column::Path { .. }
+                    | norn_wire::Column::Field { .. }
+                    | norn_wire::Column::Fields { .. }
+            )
+        })
+        || params.sort.as_ref().is_some_and(|sort| {
+            !matches!(
+                sort.key,
+                norn_wire::SortKey::Path { .. } | norn_wire::SortKey::Field { .. }
+            )
+        }))
+}
+
 impl IntakeSnapshot {
     pub fn find(&self, params: &norn_wire::FindParams) -> Result<norn_store::Found, IntakeRefusal> {
-        if !params.predicates.iter().all(metadata_predicate)
-            || !params.columns.iter().all(|column| {
-                matches!(
-                    column,
-                    norn_wire::Column::Path { .. }
-                        | norn_wire::Column::Field { .. }
-                        | norn_wire::Column::Fields { .. }
-                )
-            })
-            || params.sort.as_ref().is_some_and(|sort| {
-                !matches!(
-                    sort.key,
-                    norn_wire::SortKey::Path { .. } | norn_wire::SortKey::Field { .. }
-                )
-            })
-        {
+        if !supports_find(params) {
             return Err(IntakeRefusal::Unsupported);
         }
         self.snapshot

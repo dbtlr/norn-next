@@ -164,6 +164,11 @@ def validate_first_get(response, manifest, *, private=False):
             raise ValueError("private whole-record provenance is invalid")
     elif not isinstance(response.get("answer", {}).get("reading"), dict):
         raise ValueError("native whole-record provenance is missing")
+    return validate_first_get_content(response, manifest)
+
+
+def validate_first_get_content(response, manifest):
+    """Shared authored whole-record oracle after the caller validates its envelope."""
     normalized = whole_get_answer(response)
     validate_read("current", {"op": "get", "target": "bench/small.md"}, response, manifest)
     source = "---\nstatus: draft\nperf_bucket: probe\n---\n" + manifest["small_body"]

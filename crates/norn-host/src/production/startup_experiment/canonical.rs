@@ -424,6 +424,15 @@ pub(super) fn requested_class_exists(
     model: &ContentModel,
     target: &str,
 ) -> Result<bool, JobFailure> {
+    requested_class_exists_observed(reader, model, target, None)
+}
+
+pub(super) fn requested_class_exists_observed(
+    reader: &Arc<SnapshotReader>,
+    model: &ContentModel,
+    target: &str,
+    observer: Option<&dyn Observer>,
+) -> Result<bool, JobFailure> {
     use norn_wire::{Column, GetParams, ResolutionTarget, VaultAddress, VaultName};
     let _timing = norn_store::profiling::span("startup.canonical_demand");
     let Ok(target) = ResolutionTarget::new(target) else {
@@ -443,12 +452,32 @@ pub(super) fn requested_class_exists(
         target,
     )
     .with_columns([Column::path()]);
-    match get(&snapshot, &params, model) {
+    let result = get(&snapshot, &params, model);
+    let observed = if let Some(observer) = observer {
+        observer
+            .live_eligibility_get(&LiveReadEvidence {
+                builder_invoked: true,
+                reading: Some(snapshot.reading().clone()),
+                counters: Some(snapshot.counters()),
+            })
+            .map_err(JobFailure::Environmental)
+    } else {
+        Ok(())
+    };
+    let available = match result {
         Ok(_) | Err(norn_store::PageRefusal::AmbiguousTarget(_)) => Ok(true),
         Err(norn_store::PageRefusal::UnknownTarget { .. }) => Ok(false),
         Err(norn_store::PageRefusal::Store(error)) => Err(store_effect(error)),
         Err(refusal) => Err(JobFailure::Environmental(format!(
             "demand eligibility: {refusal:?}"
         ))),
+    };
+    match (available, observed) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(observed)) => {
+            super::live::finish(vec![error, observed])?;
+            unreachable!("nonempty failures always refuse")
+        }
     }
 }
