@@ -155,4 +155,4 @@ def validate_history(stages,ready,parent_ready):
 
 def validate_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage):
     from revalidation import validate_slice as shared_slice
-    return shared_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage,public=True)
+    return shared_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage)

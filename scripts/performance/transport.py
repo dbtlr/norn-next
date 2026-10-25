@@ -16,8 +16,7 @@ TIMEOUT = 300
 PREFIX = "NORN_PERFORMANCE "
 
 
-def environment(root: Path, token: str, *, initial_cache_kib: int | None = None,
-                cache_diagnostics: bool = False) -> dict:
+def environment(root: Path, token: str) -> dict:
     env = {key: value for key, value in os.environ.items() if not key.startswith("NORN_")}
     for kind in ("CACHE", "STATE", "CONFIG", "DATA"):
         path = root / kind.lower()
@@ -25,10 +24,6 @@ def environment(root: Path, token: str, *, initial_cache_kib: int | None = None,
         env[f"XDG_{kind}_HOME"] = str(path)
     env.update(NORN_CACHE_CHANNEL="dev", NORN_PERFORMANCE_ROOT=str(root),
                NORN_PERFORMANCE_TOKEN=token)
-    if initial_cache_kib is not None:
-        env["NORN_PERFORMANCE_INITIAL_CACHE_KIB"] = str(initial_cache_kib)
-    if cache_diagnostics:
-        env["NORN_PERFORMANCE_CACHE_DIAGNOSTICS"] = "1"
     return env
 
 
@@ -93,20 +88,13 @@ def resources(pid: int) -> dict:
 
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
-                 loading: str | None = None, stage_handler=None,
-                 initial_cache_kib: int | None = None, cache_diagnostics: bool = False,
-                 residency: str | None = None):
+                 loading: str | None = None, stage_handler=None):
         token = issue_root(root)
-        env = environment(root, token, initial_cache_kib=initial_cache_kib,
-                          cache_diagnostics=cache_diagnostics)
+        env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
         if loading is not None:
             env["NORN_PERFORMANCE_LOADING"] = loading
-            if loading == "operator-prefix-capped":
-                env["NORN_PERFORMANCE_FROZEN_INPUT"] = "frozen-fixture-v1"
-        if residency is not None:
-            env["NORN_PERFORMANCE_RESIDENCY"] = residency
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
@@ -126,11 +114,10 @@ class Current:
                 stage = self.ready
                 if stage_handler is not None:
                     stage_handler(stage)
-                if residency is None:
-                    # Prefix handlers publish ACK before returning. Keep the sample at
-                    # this endpoint, but distinguish it from the paused validation sample.
-                    key = "resources_after_handler" if "operator_prefix_sequence" in stage else "resources_when_observed"
-                    stage[key] = resources(self.process.pid)
+                # Prefix handlers publish ACK before returning. Keep the sample at
+                # this endpoint, but distinguish it from the paused validation sample.
+                key = "resources_after_handler" if "operator_prefix_sequence" in stage else "resources_when_observed"
+                stage[key] = resources(self.process.pid)
                 self.stages.append(stage)
                 self.ready = self.receive()
             if not self.ready.get("ready"):

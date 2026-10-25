@@ -101,14 +101,13 @@ def expected_environment(root,role,loading):
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE='128',NORN_PERFORMANCE_PROFILE='0')
         if loading:
             env['NORN_PERFORMANCE_LOADING']=loading
-            if loading=='operator-prefix-capped':env['NORN_PERFORMANCE_FROZEN_INPUT']='frozen-fixture-v1'
     return environment_snapshot(env)
 
 
 def validate_process(root,role,subject,source,loading=None,*,producer=None):
     from controller import read
     from provenance import sha256 as sha
-    from operator_prefix import integer
+    from revalidation import integer
     receipt=read(root/f'{role}-process.json')
     command=receipt.get('command')
     verb=next(k for k,v in ROLES.items() if v==role)

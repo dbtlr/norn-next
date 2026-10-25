@@ -142,77 +142,16 @@ def validate_native_cell(root, records, manifest, audit=None, *, mode=None):
     responses = transcript[at+1:]
     prefix = json.loads((root/'prefix.json').read_text())
     if len(prefix['rows']) != 2: raise ValueError('exactly two retained prefix receipts required')
-    # Ordinary prefix calls run after Ready; private calls are in stages. A
-    # declined private attempt adds exactly one actual Host fallback response.
-    from full_intake_control import PREFIX_COMMANDS
-    # These keys are added by the fixed parent adapters, never by the native
-    # stage. Strip only this vocabulary before requiring exact native equality.
-    parent_keys = {'parent_received_ns', 'parent_validated_ns', 'verified',
-                   'parent_ack_published_ns', 'resources_after_validation',
-                   'resources_after_handler', 'private_storage_at_validation',
-                   'construction_storage_high_water',
-                   'construction_storage_high_water_unavailable'}
-    def native_stage(row):
-        return {key: value for key, value in row.items() if key not in parent_keys}
-    if stages and mode is None:
-        if len(stages) != 2:
-            raise ValueError('native startup stage count differs')
-        expected = [('canonical-demand', 'whole_slug'),
-                    (stages[1].get('startup_stage'), 'active_page')]
-        if expected[1][0] not in {'canonical-intake', 'canonical-prefix'}:
-            raise ValueError('native startup stage 1 differs')
-        for index, (stage, identity, command) in enumerate(zip(stages, expected, PREFIX_COMMANDS)):
-            if ((stage.get('startup_stage'), stage.get('probe')) != identity
-                    or stage.get('command') != command
-                    or stage.get('operator_prefix_sequence') != index + 1):
-                raise ValueError(f'native startup stage {index} differs')
-    from revalidation import MODE, validate_slice
+    from revalidation import native_stage
     from public_mode import MODE as PUBLIC_MODE
     if mode == PUBLIC_MODE:
         from public_mode import validate_slice as validate_public_slice
         responses = validate_public_slice(root,prefix,responses,stages,ready,history,manifest,audit,native_stage)
-    elif mode == MODE:
-        if audit is None:
-            audit = json.loads((root / 'final-audit.json').read_text())
-        responses = validate_slice(root, prefix, responses, stages, ready, history, manifest, audit, native_stage)
     elif mode == 'main-ordinary':
         from revalidation import validate_main_slice
         responses = validate_main_slice(root,prefix,responses,stages,ready,history,manifest,audit)
     else:
-        if mode is not None or 'canonical_revalidation' in prefix or prefix.get('mode') == MODE:
-            raise ValueError('canonical revalidation requires its explicit named mode')
-        for index, row in enumerate(prefix['rows']):
-            if row.get('command') != PREFIX_COMMANDS[index]:
-                raise ValueError(f'prefix row {index} command differs')
-            receipt = row['answer']
-            if 'startup_stage' in receipt:
-                if not stages or native_stage(receipt) != stages[index]:
-                    raise ValueError(f'prefix receipt {index} differs from actual native stage')
-                from capped_compare import validated_prefix_answer
-                if row.get('normalized_answer') != validated_prefix_answer(index, stages[index], manifest, private=True):
-                    raise ValueError('saved private prefix normalization differs from raw oracle')
-            else:
-                # A private Get is always required. Only a declined capped Find
-                # uses the exact post-Ready fallback receipt in this position.
-                if stages and (index != 1
-                               or stages[1].get('startup_stage') != 'canonical-prefix'
-                               or stages[1].get('early_published') is not False):
-                    raise ValueError(f'prefix receipt {index} expected a private native stage')
-                if not responses or responses[0] != receipt:
-                    raise ValueError(f'prefix receipt {index} differs from exact native response')
-                # Validate the canonical P before removing it from the suffix.
-                # Ordinary Get/Find and capped Find fallback obey the same rule
-                # as the named revalidation pair. Private epochs stay separate.
-                from revalidation import canonical_answer
-                epoch = provenance_epoch(audit.get('store_epoch'))
-                generation = nonnegative_generation(audit.get('write_generation'))
-                if generation < 120:
-                    raise ValueError('canonical prefix cannot precede 120 audited mutations')
-                normalized, _ = canonical_answer(index, receipt, manifest, expected=(epoch,generation-120),
-                    private_epochs=[stage.get('projection_epoch') for stage in stages])
-                if row.get('normalized_answer') != normalized:
-                    raise ValueError('saved canonical prefix normalization differs from full raw oracle')
-                responses.pop(0)
+        raise ValueError('public comparison requires its explicit named mode')
     if len(responses) != 481: raise ValueError('canonical response count differs after exact prefix slice')
     if stages:
         observed = json.loads((root/'loading-checkpoints.json').read_text())

@@ -1,6 +1,8 @@
 """Independent answer checks and summaries for the baseline workload."""
 
+import base64
 import copy
+import json
 import math
 import statistics
 
@@ -234,3 +236,28 @@ def validate_first_get_content(response, manifest, *, first_index=False):
     if actual_headings != expected_headings:
         raise ValueError('get headings differ from authored answer')
     return normalized
+
+
+def metadata_answer(stage):
+    """Normalize only verified projection identity; preserve query content and cursor keys."""
+    answer = copy.deepcopy(stage["answer"])
+    report = answer["report"]
+
+    def check(reading):
+        if (reading["epoch"] != stage["projection_epoch"]
+                or reading["generation"] != stage["projection_generation"]):
+            raise ValueError("metadata projection provenance disagrees with its answer")
+
+    if "counted_at" in report:
+        check(report["counted_at"])
+        report["counted_at"].pop("epoch")
+        report["counted_at"].pop("generation")
+    page = report.get("page", report)
+    if page.get("next") is not None:
+        encoded = page["next"]
+        cursor = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        check(cursor["snapshot"])
+        cursor["snapshot"].pop("epoch")
+        cursor["snapshot"].pop("generation")
+        page["next"] = cursor
+    return answer

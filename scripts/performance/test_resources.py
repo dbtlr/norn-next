@@ -55,7 +55,7 @@ class PrefixResourceLabelChecks(unittest.TestCase):
             with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 binary = root / 'worker'
-                row = {'startup_stage': 'canonical-demand'}
+                row = {'startup_stage': 'public-get'}
                 if prefix:
                     row['operator_prefix_sequence'] = 1
                 import json

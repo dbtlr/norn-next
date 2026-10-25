@@ -45,16 +45,14 @@ class LoadingProtocolTests(unittest.TestCase):
 
         class Worker:
             def __init__(self, stages):
-                self.stages = [{"startup_stage": stage, "probe": "boundary"} for stage in stages]
+                self.stages = [{"startup_stage": stage, "probe": probe} for stage, probe in stages]
             def call(self, _command):
                 raise Accepted()
             def close(self):
                 pass
 
         for mode, stages in [
-            ("canonical-demand-silent", ["catalogue", "canonical-demand", "canonical-health"]),
-            ("canonical-intake-silent", ["catalogue", "canonical-demand", "canonical-intake", "canonical-health"]),
-            ("layered-silent", ["catalogue", "get", "frontmatter", "lexical", "rich", "health"]),
+            ("operator-prefix-public", [("public-get", "whole_slug"), ("public-find", "active_page")]),
         ]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -65,7 +63,7 @@ class LoadingProtocolTests(unittest.TestCase):
                 with patch("baseline.Current", return_value=Worker(stages)):
                     with self.assertRaises(Accepted):
                         run_worker(args, "current", 0, 0, fixture, manifest, io.StringIO())
-                with patch("baseline.Current", return_value=Worker(["catalogue"])):
+                with patch("baseline.Current", return_value=Worker([("public-get", "whole_slug")])):
                     with self.assertRaisesRegex(ValueError, "requested loading mode"):
                         run_worker(args, "current", 0, 1, fixture, manifest, io.StringIO())
 

@@ -116,12 +116,13 @@ def run_worker(args, engine, size, repetition, fixture, manifest, samples):
     began = time.perf_counter_ns()
     loading = getattr(args, "loading", None)
     if loading and engine != "current":
-        raise ValueError("staged loading is only supported by the current worker")
+        raise ValueError("public first-open loading is only supported by the current worker")
     worker = cls(binary, root, loading=loading) if loading else cls(binary, root)
     try:
         if loading:
-            from loading import expected_checkpoints
-            if {(row["startup_stage"], row["probe"]) for row in worker.stages} != expected_checkpoints(loading):
+            if (loading != "operator-prefix-public" or len(worker.stages) != 2
+                    or {(row["startup_stage"], row["probe"]) for row in worker.stages}
+                    != {("public-get", "whole_slug"), ("public-find", "active_page")}):
                 raise ValueError("warm comparison did not execute the requested loading mode")
             write_json(root / "loading-checkpoints.json", worker.stages)
         # A control hello can precede lazy indexing. Readiness includes a real validated query.
