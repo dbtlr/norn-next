@@ -189,19 +189,31 @@ where
         }
         #[cfg(feature = "induced-failure")]
         hold.query_boundary(self, true);
-        // Storage/resource failures keep their actual type. Known data-derived
-        // refusals require the same final authority judgment as successful rows.
+        // Storage/resource failures keep their actual type. Other refusals require
+        // the same final authority judgment as successful rows.
         let depends_on_source = match &result {
             Ok(_) => true,
-            Err(refusal) => matches!(
-                refusal,
-                PageRefusal::UnknownTarget { .. }
-                    | PageRefusal::AmbiguousTarget(_)
-                    | PageRefusal::OrderChanged(_)
-                    | PageRefusal::CursorNotTaken { .. }
-                    | PageRefusal::DeclarationNotPinned { .. }
-                    | PageRefusal::UnknownRule { .. }
-            ),
+            Err(refusal) => match refusal {
+                PageRefusal::Store(_)
+                | PageRefusal::CountCursorExpired
+                | PageRefusal::CountResultBusy
+                | PageRefusal::CountResultStorageFull
+                | PageRefusal::CountResultCapacity { .. }
+                | PageRefusal::CountResultTooLarge { .. }
+                | PageRefusal::CountResultFailed { .. } => false,
+                PageRefusal::UnreadableBound { .. }
+                | PageRefusal::DeclarationNotPinned { .. }
+                | PageRefusal::OrderChanged(_)
+                | PageRefusal::CursorNotTaken { .. }
+                | PageRefusal::SummaryNotPaged
+                | PageRefusal::EmptyMembership { .. }
+                | PageRefusal::OutOfBound { .. }
+                | PageRefusal::UnknownPart { .. }
+                | PageRefusal::AmbiguousTarget(_)
+                | PageRefusal::UnknownTarget { .. }
+                | PageRefusal::UnknownRule { .. }
+                | PageRefusal::PartNotTaken { .. } => true,
+            },
         };
         if depends_on_source && !hold.current() {
             return Err(ReadRefusal::FirstIndex(hold.reading().published().clone()).answer(name));

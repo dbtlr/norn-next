@@ -948,6 +948,37 @@ fn final_authority_check_covers_success_and_data_derived_refusals() {
 }
 
 #[test]
+fn final_authority_check_covers_unreadable_find_bounds() {
+    let fixture = Fixture::new("public-stage-final-bound-check");
+    let construction = Probe::new([Point::MetadataComplete]);
+    let reads = Probe::new([Point::QueryBuilt]);
+    let host = fixture.host(Arc::new(SplitProbe {
+        construction: construction.clone(),
+        reads: reads.clone(),
+    }));
+    std::thread::scope(|scope| {
+        let _release_construction = Release(&construction);
+        let _release_reads = Release(&reads);
+        let _demand = host.demand(&name()).unwrap();
+        construction.wait(Point::MetadataComplete);
+        let params = find().with_predicates([Predicate::equal_to("rank", "not-a-number")]);
+        let host_ref = &host;
+        let result = scope.spawn(move || host_ref.find(&params));
+        reads.wait(Point::QueryBuilt);
+        std::fs::rename(&fixture.root, fixture.scratch.join("moved-root")).unwrap();
+        assert!(host.find(&find()).is_err());
+        reads.release();
+        let error = result.join().unwrap().unwrap_err();
+        assert_eq!(
+            error.code(),
+            &ReasonCode::HostEntryNotReady,
+            "a bound interpreted under a withdrawn declaration cannot escape"
+        );
+        construction.release();
+    });
+}
+
+#[test]
 fn late_cleanup_failure_reports_the_source_role_after_the_last_held_owner_releases() {
     let fixture = Fixture::new("public-stage-late-cleanup");
     let construction = Probe::new([Point::MetadataComplete]);
