@@ -33,6 +33,23 @@ def event(index=0, ready=False):
 
 
 class PublicReceipts(unittest.TestCase):
+    def test_ordered_get_targets_keep_sequence_and_get_validation(self):
+        commands = [COMMANDS[0], dict(op='get', target='bench/large.md', whole=True), COMMANDS[1]]
+        row, _ = event()
+        row.update(operator_prefix_sequence=2, command=commands[1])
+        self.assertEqual(validate_attempt(1, row, commands=commands), row['answer'])
+        wrong = copy.deepcopy(row)
+        wrong['command'] = commands[0]
+        with self.assertRaises(ValueError):
+            validate_attempt(1, wrong, commands=commands)
+        wrong = copy.deepcopy(row)
+        wrong['builder_work'] = {key: 0 for key in FIND_WORK}
+        with self.assertRaises(ValueError):
+            validate_attempt(1, wrong, commands=commands)
+        row, _ = event(1)
+        row['operator_prefix_sequence'] = 3
+        self.assertEqual(validate_attempt(2, row, commands=commands), row['answer'])
+
     def test_actual_warming_and_ready_answers_use_same_content_oracle(self):
         warming, manifest=event()
         ready,_=event(ready=True)

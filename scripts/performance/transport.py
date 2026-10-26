@@ -88,7 +88,8 @@ def resources(pid: int) -> dict:
 
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
-                 loading: str | None = None, stage_handler=None, loading_options: dict | None = None):
+                 loading: str | None = None, stage_handler=None, loading_options: dict | None = None,
+                 public_get_targets: list[str] | None = None):
         token = issue_root(root)
         env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
@@ -105,6 +106,12 @@ class Current:
                 raise ValueError("invalid four-step loading controls")
             env["NORN_PERFORMANCE_TRANSACTION_BOUND"] = str(loading_options["transaction_bound"])
             env["NORN_PERFORMANCE_REQUESTED_PATHS"] = json.dumps(loading_options["requested_paths"])
+        if public_get_targets is not None:
+            if (loading != "operator-prefix-public" or not isinstance(public_get_targets, list)
+                    or not public_get_targets
+                    or any(not isinstance(target, str) or not target for target in public_get_targets)):
+                raise ValueError("invalid public Get targets")
+            env["NORN_PERFORMANCE_PUBLIC_GET_TARGETS"] = json.dumps(public_get_targets)
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()

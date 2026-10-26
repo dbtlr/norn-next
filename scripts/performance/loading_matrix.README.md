@@ -20,8 +20,10 @@ python3 scripts/performance/loading_matrix.py --prepare-plan --sizes 2014 10014 
 python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --freeze-fixtures target/frozen --sizes 314 2014 10014
 ```
 
-One `--prepare-builds` invocation creates all three roles: main `2e213c09`, the
-committed prototype HEAD, and health-once `e944a338`. Every role has its own
+One `--prepare-builds` invocation creates all three roles: main worker
+`perf/norn-459-main-worker`, the committed prototype HEAD, and health-once
+`e944a338`. The main receipt records its commit and verifies that only the
+performance Rust worker differs from product baseline `2e213c09`. Every role has its own
 checkout, target directory, frozen binary, and build receipt. Compiler identities
 must match. Source and binary hashes, features, profile, Cargo configuration, and
 prototype Rust source equality are checked again before and after the matrix.
@@ -45,6 +47,13 @@ Re-freezing an already enriched base is refused. The base digest and the
 measurement digest are deliberately distinct. Timed
 runs require `--fixtures` and reject fixtures without this version. All selected
 fixtures are copied and verified before any timed cell, including the warmup.
+
+The main controller supplies `NORN_PERFORMANCE_PUBLIC_GET_TARGETS` as an ordered
+JSON list: `small`, then `bench/large.md`. The worker calls `Host::get` for each
+target with the existing clocks and caller ACK protocol, then calls `Host::find`.
+Without this control, the worker retains its original small Get and Find prefix.
+Main linked answers include link-health findings; lab linked answers carry
+health loading. Both early linked timings remain in the side-by-side group.
 
 ## Run a pilot or the full matrix
 

@@ -9,6 +9,42 @@ from loading_matrix import plan, gate_semantics, documents_layout, validate_lab_
 
 
 class MatrixTests(unittest.TestCase):
+    def test_linked_early_public_get_keeps_findings_while_warming(self):
+        import json
+        from loading_matrix import validate_link_get
+        response = {'answer': json.loads(Path(__file__).with_name('testdata').joinpath('linked_get.json').read_text())}
+        response['answer']['reading']['trust'] = dict(state='warming', phase='healing', healed=1, total_estimate=314)
+        manifest = {'large_body': response['answer']['report']['document']['body']['text']}
+        validate_link_get(response, manifest, first_index=True)
+        response['answer']['report']['document']['findings'] = dict(items=[], total=0)
+        with self.assertRaisesRegex(ValueError, 'broken-link finding'):
+            validate_link_get(response, manifest, first_index=True)
+
+    def test_main_worker_sources_allow_only_performance_worker_changes(self):
+        import subprocess
+        from loading_matrix import check_main_source
+        with tempfile.TemporaryDirectory() as folder:
+            repo = Path(folder)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            product = repo / 'crates/norn-host/src/lib.rs'
+            worker = repo / 'crates/norn-host/tests/performance/public.rs'
+            product.parent.mkdir(parents=True)
+            worker.parent.mkdir(parents=True)
+            product.write_text('product')
+            worker.write_text('worker')
+            subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+            subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                            'commit', '-qm', 'base'], cwd=repo, check=True)
+            worker.write_text('ordered worker')
+            check_main_source(repo, 'HEAD')
+            product.write_text('changed product')
+            with self.assertRaisesRegex(ValueError, 'main worker'):
+                check_main_source(repo, 'HEAD')
+            product.write_text('product')
+            (product.parent / 'extra.rs').write_text('untracked product')
+            with self.assertRaisesRegex(ValueError, 'main worker'):
+                check_main_source(repo, 'HEAD')
+
     def test_plan_balances_order_and_discards_one_warmup_per_size(self):
         cells = plan([2014, 10014])
         expected = ['main', 'four-step', 'health-once', 'four-step-no-body',
@@ -330,6 +366,31 @@ class MatrixTests(unittest.TestCase):
         self.assertIn('Search[lab FourStepRead::search]', summary)
         self.assertIn('answered before link health (health loading)', summary)
         self.assertIn('earliest availability plus builder query time', summary)
+
+    def test_explicit_public_targets_reach_worker_in_order_and_strip_inherited_list(self):
+        import json
+        import os
+        import sys
+        from unittest.mock import patch
+        from transport import Current
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            binary = root / 'worker'
+            binary.write_text(f'#!{sys.executable}\n' + """import os, json, sys
+assert json.loads(os.environ['NORN_PERFORMANCE_PUBLIC_GET_TARGETS']) == ['small', 'bench/large.md']
+assert os.environ['NORN_PERFORMANCE_LOADING'] == 'operator-prefix-public'
+print('NORN_PERFORMANCE ' + json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    if json.loads(line)['op'] == 'stop': break
+""")
+            binary.chmod(0o755)
+            with patch.dict(os.environ, NORN_PERFORMANCE_PUBLIC_GET_TARGETS='["foreign"]'):
+                worker = Current(binary, root, loading='operator-prefix-public',
+                                 public_get_targets=['small', 'bench/large.md'])
+                worker.close()
+            for targets in ([], 'small', ['small', '']):
+                with self.subTest(targets=targets), self.assertRaisesRegex(ValueError, 'public Get targets'):
+                    Current(binary, root, loading='operator-prefix-public', public_get_targets=targets)
 
     def test_explicit_lab_controls_reach_worker_without_inheriting_foreign_controls(self):
         import json

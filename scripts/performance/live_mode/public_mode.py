@@ -21,13 +21,15 @@ def trust(value, *, answer=False):
     raise ValueError('unsupported public trust')
 
 
-def validate_attempt(index,event):
+def validate_attempt(index,event,*,commands=COMMANDS):
     """Check the actual VaultAnswer before permitting identity normalization."""
     from native_validation import provenance_epoch, nonnegative_generation, validate_cursor_provenance
-    if (type(index) is not int or index not in (0,1)
-            or event.get('startup_stage')!=('public-get','public-find')[index]
-            or event.get('probe')!=('whole_slug','active_page')[index]
-            or event.get('operator_prefix_sequence')!=index+1 or event.get('command')!=COMMANDS[index]
+    if type(index) is not int or not 0 <= index < len(commands):
+        raise ValueError('invalid public attempt sequence')
+    kind = 0 if commands[index]['op'] == 'get' else 1
+    if (event.get('startup_stage')!=('public-get','public-find')[kind]
+            or event.get('probe')!=('whole_slug','active_page')[kind]
+            or event.get('operator_prefix_sequence')!=index+1 or event.get('command')!=commands[index]
             or event.get('mode')!='public' or event.get('availability_scope')!=SCOPE
             or any(k in event for k in ('global_ready','simulation','counters_before_builder','builder_invoked','construction_eligibility_gets'))):
         raise ValueError('invalid public attempt identity or invented private observation')
@@ -47,10 +49,10 @@ def validate_attempt(index,event):
         epoch=provenance_epoch(reading['epoch']);generation=nonnegative_generation(reading['generation'])
         validate_cursor_provenance(answer['report'],epoch,generation,index)
         counters(event.get('counters'),executed=True)
-        work=event.get('builder_work');keys=GET_WORK if index==0 else FIND_WORK
+        work=event.get('builder_work');keys=GET_WORK if kind==0 else FIND_WORK
         if not isinstance(work,dict) or set(work)!=keys:raise ValueError('missing public Answered builder work')
         for v in work.values():integer(v)
-        statements=work['get_statements' if index==0 else 'find_statements']
+        statements=work['get_statements' if kind==0 else 'find_statements']
         if not 0 < statements <= event['counters']['statements_executed']:
             raise ValueError('public builder work exceeds snapshot work')
         early=state=='warming' and after!='ready'

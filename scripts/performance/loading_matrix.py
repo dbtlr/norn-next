@@ -9,7 +9,10 @@ from pathlib import Path
 from loading_method import (ARMS, LINK_TARGET, BASE_2014, plan, gate_semantics, identity_map,
                             store_layout, await_idle, BUSY_THRESHOLDS, summarize)
 
-REVISIONS = {'main': '2e213c09', 'health-once': 'e944a338'}
+MAIN_BASE = '2e213c09'
+REVISIONS = {'main': 'perf/norn-459-main-worker', 'health-once': 'e944a338'}
+PUBLIC_GET_TARGETS = ['small', LINK_TARGET]
+PUBLIC_COMMANDS = [dict(op='get', target=target, whole=True) for target in PUBLIC_GET_TARGETS] + [dict(op='find')]
 
 
 def documents_layout(path):
@@ -72,10 +75,10 @@ def validate_lab_stage(stage, manifest):
             raise ValueError('lab Search differs from the lexical first page')
 
 
-def validate_link_get(response, manifest, health_loading=False):
+def validate_link_get(response, manifest, health_loading=False, *, first_index=False):
     """Validate the authored whole record, including each link and finding handle."""
     from results import whole_get_answer
-    whole_get_answer(response)
+    whole_get_answer(response, first_index=first_index)
     doc = response['answer']['report']['document']
     body = manifest['large_body']
     source = '---\nstatus: draft\nperf_bucket: probe\n---\n' + body
@@ -266,17 +269,25 @@ def measure_cell(binary, root, manifest, arm):
         if arm == 'main':
             from public_mode import validate_attempt
             index = stage['operator_prefix_sequence'] - 1
-            validate_attempt(index, stage)
+            validate_attempt(index, stage, commands=PUBLIC_COMMANDS)
             if stage['disposition'] == 'served':
-                if index == 0:
-                    validate_first_get_content(stage, manifest, first_index=True)
+                kind = PUBLIC_COMMANDS[index]['op']
+                if kind == 'get':
+                    if index == 0:
+                        validate_first_get_content(stage, manifest, first_index=True)
+                    else:
+                        validate_link_get(stage, manifest, first_index=True)
                 else:
                     validate_read('current', {'op': 'find'}, stage, manifest)
-                probes[('get', 'find')[index]] = dict(
+                probe = dict(
                     parent_received_ns=stage['parent_received_ns'], worker_ns=stage['query_finished_ns'],
-                    path=('public Host::get', 'public Host::find')[index], response=stage,
+                    path=f'public Host::{kind}', response=stage,
                     query_started_ns=stage['query_started_ns'], query_finished_ns=stage['query_finished_ns'],
                     query_host_ns=stage['query_host_ns'])
+                if kind == 'get':
+                    get_targets[('bench/small.md', LINK_TARGET)[index]] = probe
+                if index != 1:
+                    probes[kind] = probe
             ack = root / 'operator-prefix-acks' / f'{index + 1}.pending'
             write_json(ack, dict(sequence=index + 1, probe=stage['probe']))
             ack.replace(ack.with_suffix('.json'))
@@ -303,6 +314,8 @@ def measure_cell(binary, root, manifest, arm):
     # Explicit lab controls are supplied by the child process environment. Current
     # strips inherited NORN_* values, so the adapter's typed options own selection.
     options = dict(loading=loading, stage_handler=on_stage)
+    if arm == 'main':
+        options['public_get_targets'] = PUBLIC_GET_TARGETS
     if arm.startswith('four-step'):
         options['loading_options'] = {'transaction_bound': 128, 'requested_paths': ['bench/small.md', LINK_TARGET]}
     worker = Current(binary, root, **options)
@@ -317,8 +330,9 @@ def measure_cell(binary, root, manifest, arm):
             lab = lab_measurements(arm, events)
         elif arm == 'health-once':
             validate_receipts(arm, events, worker.ready, manifest)
-        elif len(events) != 2:
-            raise ValueError('main must execute its two public prefix attempts')
+        elif (len(events) != len(PUBLIC_COMMANDS)
+              or worker.ready['operator_prefix_receipt']['logical_requests'] != len(PUBLIC_COMMANDS)):
+            raise ValueError('main must execute all three public prefix attempts')
 
         # Untimed independent gate while the measured process is idle, before any
         # query or rename can conceal a step-4 health difference.
@@ -375,7 +389,7 @@ def measure_cell(binary, root, manifest, arm):
                 probe['requested_document_structure_ns'] = lab['requested_documents_structure'][target]['worker_ns']
         get_targets.setdefault('bench/small.md', probes['get'])
         get_targets.setdefault(LINK_TARGET, dict(parent_received_ns=linked['parent_received_ns'],
-            worker_ns=None, path='public Host::get after Ready (pinned worker has no second early probe)',
+            worker_ns=None, path='public Host::get after Ready (early attempt unavailable)',
             response=linked['response'], query_host_ns=linked['host_ns']))
         canonical = observations.copy()
         state = {name: dict(path=name, body=body, fields={'status': 'draft', 'perf_bucket': 'probe'})
@@ -477,6 +491,22 @@ def cell_workload():
     return commands
 
 
+def check_main_source(repo, base=MAIN_BASE):
+    """The main measurement differs only in its performance worker controls."""
+    import subprocess
+    allowed = lambda name: (name == 'crates/norn-host/tests/performance.rs'
+                            or name.startswith('crates/norn-host/tests/performance/') and name.endswith('.rs'))
+    changed = subprocess.check_output(['git', 'diff', '--name-only', base], cwd=repo, text=True).splitlines()
+    untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], cwd=repo, text=True).splitlines()
+    if any(not allowed(name) for name in changed + untracked):
+        raise ValueError('main worker must preserve pinned product sources and change only performance Rust tests')
+    command = ['git', 'diff', base, '--', 'crates/*/src']
+    output = subprocess.check_output(command, cwd=repo, text=True)
+    if output:
+        raise ValueError('main worker product sources differ from the pinned baseline')
+    return dict(base=base, product_sources_equal=True, command=command, output=output)
+
+
 def prepare_builds(root, repo):
     """Build exact detached sources with each revision's existing receipt producer."""
     import shutil
@@ -499,6 +529,7 @@ def prepare_builds(root, repo):
             subprocess.run(['git', 'checkout', '--detach', revisions[role]], cwd=source, check=True)
         else:
             subprocess.run(['git', 'worktree', 'add', '--detach', str(source), revisions[role]], cwd=repo, check=True)
+        main_check = check_main_source(source) if role == 'main' else None
         receipt_path = root / f'{role}.build.json'
         # Outside each source checkout, inside the enclosing harness checkout.
         subprocess.run([sys.executable, str(source / 'scripts/performance/provenance.py'),
@@ -507,6 +538,8 @@ def prepare_builds(root, repo):
         receipt = verify_build(receipt_path, source)
         frozen_binary = root / f'{role}.worker'
         shutil.copy2(receipt['executable'], frozen_binary)
+        if main_check is not None:
+            receipt['main_product_source_check'] = main_check
         receipt['executable'] = str(frozen_binary)
         receipt['sha256'] = sha256(frozen_binary)
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
@@ -542,8 +575,12 @@ def checked_build(config, arm):
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
     if receipt['repository_head'] != head:
         raise ValueError('source HEAD differs from the build receipt')
-    if role in REVISIONS and not head.startswith(REVISIONS[role]):
-        raise ValueError('arm source differs from its pinned revision')
+    if role in REVISIONS:
+        expected = subprocess.check_output(['git', 'rev-parse', REVISIONS[role]], cwd=source, text=True).strip()
+        if head != expected:
+            raise ValueError('arm source differs from its pinned revision')
+    if role == 'main' and receipt.get('main_product_source_check') != check_main_source(source):
+        raise ValueError('main worker receipt lacks product source equality evidence')
     if role == 'prototype':
         check_prototype_source(Path(__file__).resolve().parents[2], head)
     return receipt, source
@@ -558,7 +595,7 @@ def freeze_fixtures(config, destination, sizes, base=None):
     # Reuse only base fixtures bound to the unchanged generator and probe authoring.
     if base is not None:
         import subprocess
-        changed = subprocess.run(['git', 'diff', '--quiet', REVISIONS['main'], '--',
+        changed = subprocess.run(['git', 'diff', '--quiet', MAIN_BASE, '--',
                                   'crates/norn-fixtures', 'scripts/performance/fixture.py'], cwd=Path(__file__).resolve().parents[2])
         if changed.returncode:
             raise ValueError('base fixture generator differs')
