@@ -72,7 +72,7 @@ pub(super) struct Probe {
     mid_target: Option<String>,
     requests: Mutex<Option<FourStepRequests>>,
     fts_mode: &'static str,
-    buffer: Mutex<Buffer>,
+    buffer: Arc<Mutex<Buffer>>,
 }
 
 impl FourStepObserver for Probe {
@@ -92,20 +92,33 @@ impl FourStepObserver for Probe {
                 if step == "content" && total > 0 && completed * 4 >= total && !buffer.mid_requested
                 {
                     if let Some(path) = &self.mid_target {
-                        let request_ns = self.began.elapsed().as_nanos();
-                        self.requests
+                        let path = path.clone();
+                        let requests = self
+                            .requests
                             .lock()
                             .map_err(|error| error.to_string())?
                             .as_ref()
                             .ok_or("missing dynamic request handle")?
-                            .request(path.clone())?;
+                            .clone();
+                        let shared = Arc::clone(&self.buffer);
+                        let began = self.began;
                         buffer.mid_requested = true;
-                        buffer.requested.insert(path.clone());
-                        buffer.observations.push(Observation::Request(
-                            path.clone(),
-                            request_ns,
-                            Some((completed, total)),
-                        ));
+                        // Intake happens while the next host chunk is running.
+                        // Request-to-delivery includes its remaining chunk wait.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            let mut buffer = shared.lock().expect("request observation buffer");
+                            let request_ns = began.elapsed().as_nanos();
+                            requests
+                                .request(path.clone())
+                                .expect("mid-build request admitted");
+                            buffer.requested.insert(path.clone());
+                            buffer.observations.push(Observation::Request(
+                                path,
+                                request_ns,
+                                Some((completed, total)),
+                            ));
+                        });
                     }
                 }
                 return Ok(());
@@ -194,9 +207,9 @@ impl Probe {
                 Observation::Request(path, elapsed_ns, progress) => json!({
                     "startup_stage":"four-step-request", "path":path, "request_ns":elapsed_ns,
                     "request_kind":if progress.is_some() { "mid-content" } else { "start" },
-                    "request_alignment":if progress.is_some() { "boundary-aligned" } else { "startup" },
-                    "current_batch_wait_included":progress.map(|_| false),
-                    "latency_scope":progress.map(|_| "boundary-aligned; excludes current-batch wait; best-case relative to asynchronous arrival"),
+                    "request_alignment":if progress.is_some() { "asynchronous-after-batch" } else { "startup" },
+                    "current_batch_wait_included":progress.map(|_| true),
+                    "latency_scope":progress.map(|_| "asynchronous arrival; includes remaining host-chunk work, group commit and requested derivation"),
                     "content_progress":progress.map(|(completed,total)| json!({"completed":completed,"total":total})),
                 }),
                 Observation::Get(path, query, resolution_loading, health_loading) => {
@@ -281,7 +294,8 @@ impl Probe {
                     "delivery_ns":report.delivery_ns,
                     "refused_ns":report.refused_ns, "request_refusals":report.request_refusals,
                     "timing_commits":report.timing_commits, "timing_ns":report.timing_ns,
-                    "steps":report.steps, "reconciled":report.reconciled,
+                    "host_chunk_bound":report.host_chunk_bound, "transaction_bound":report.transaction_bound,
+                    "steps":report.steps, "profiles":report.profiles, "build_commits":report.build_commits, "reconciled":report.reconciled,
                     "requested_structure_ns":report.requested_structure_ns,
                     "content_complete_ns":report.content_complete_ns,
                     "boundary_ns":report.boundary_ns, "busy_ns":report.busy_ns,
@@ -318,7 +332,7 @@ pub(super) fn selection(mode: &str, began: Instant) -> (FourStepLoading, Arc<Pro
         mid_target: std::env::var("NORN_PERFORMANCE_MID_REQUEST_PATH").ok(),
         requests: Mutex::new(None),
         fts_mode: fts_mode.0,
-        buffer: Mutex::new(buffer),
+        buffer: Arc::new(Mutex::new(buffer)),
     });
     let loading =
         FourStepLoading::new(bound, mode == "four-step-no-body", requested, probe.clone())

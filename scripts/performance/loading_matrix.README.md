@@ -1,8 +1,18 @@
 # Run the loading lab comparison
 
-This is a lab prototype, not a production loading policy. Each cell starts one
+This is a lab prototype, not a production loading policy.
+Non-unique indexes wait for their first admitted reader: finding cleanup and
+per-document findings after names, field/path Find after content, resolution
+and anchor indexes before health, and remaining indexes by Ready. Production
+SQL is restored verbatim. Trigrams are buffered without indexes and bulk
+inserted in key order before health; their first reader is ordinary warm work.
+The build connection uses `wal_autocheckpoint=10000` and `cache_size=-65536`;
+`synchronous` stays at its production value.
+Requests flush the current transaction at the next host chunk boundary, then
+run content and structure in one transaction of their own. Each cell starts one
 fresh worker, serially, with release optimization, `induced-failure`, 128-document
-changesets, and 128-document four-step transactions. No cell restarts. The
+changesets, and 128-document host chunks grouped into SQLite transactions of
+at most 2,048 documents. No cell restarts. The
 controller, fixture generation, and audits are outside the worker's clocks.
 Filesystem caches remain uncontrolled. A discarded warmup is not a claim that every arm has identical cache state.
 
@@ -14,8 +24,8 @@ for the filesystem socket tests. All outputs stay inside this checkout.
 ```bash
 mkdir -p .t
 export TMPDIR="$PWD/.t" CARGO_TARGET_DIR="$PWD/.t/target"
-python3 scripts/performance/loading_matrix.py --prepare-builds "$PWD/.t/r8-builds"
-python3 scripts/performance/loading_matrix.py --config .t/r8-builds/config.json --freeze-fixtures .t/r8-frozen --sizes 314 10014
+python3 scripts/performance/loading_matrix.py --prepare-builds "$PWD/.t/r9-builds"
+python3 scripts/performance/loading_matrix.py --config .t/r9-builds/config.json --freeze-fixtures .t/r9-frozen --sizes 314 10014
 ```
 
 Commit the Rust implementation before `--prepare-builds`. Each build
@@ -70,10 +80,10 @@ cells: four-step/rebuild, main at that observed request offset, then
 four-step/batched. No extra seed or 10014 warmup runs.
 
 ```bash
-python3 scripts/performance/loading_matrix.py --config .t/r8-builds/config.json --fixtures .t/r8-frozen/fixtures --sizes 314 --repetitions 1 --row-start 1 --fts-mode rebuild --output .t/r8-pilot
-python3 scripts/performance/loading_matrix.py --config .t/r8-builds/config.json --fixtures .t/r8-frozen/fixtures --sizes 10014 --repetitions 1 --arms four-step --fts-mode rebuild --skip-warmup --output .t/r8-10014-rebuild
-python3 scripts/performance/loading_matrix.py --config .t/r8-builds/config.json --fixtures .t/r8-frozen/fixtures --sizes 10014 --repetitions 1 --arms main --fts-mode rebuild --mid-request-reference .t/r8-10014-rebuild --skip-warmup --output .t/r8-10014-main
-python3 scripts/performance/loading_matrix.py --config .t/r8-builds/config.json --fixtures .t/r8-frozen/fixtures --sizes 10014 --repetitions 1 --arms four-step --fts-mode batched --skip-warmup --output .t/r8-10014-batched
+python3 scripts/performance/loading_matrix.py --config .t/r9-builds/config.json --fixtures .t/r9-frozen/fixtures --sizes 314 --repetitions 1 --row-start 1 --fts-mode rebuild --warm-write-repetitions 10 --output .t/r9-pilot
+python3 scripts/performance/loading_matrix.py --config .t/r9-builds/config.json --fixtures .t/r9-frozen/fixtures --sizes 10014 --repetitions 1 --arms four-step --fts-mode rebuild --skip-warmup --warm-write-repetitions 10 --output .t/r9-10014-rebuild
+python3 scripts/performance/loading_matrix.py --config .t/r9-builds/config.json --fixtures .t/r9-frozen/fixtures --sizes 10014 --repetitions 1 --arms main --fts-mode rebuild --mid-request-reference .t/r9-10014-rebuild --skip-warmup --warm-write-repetitions 10 --output .t/r9-10014-main
+python3 scripts/performance/loading_matrix.py --config .t/r9-builds/config.json --fixtures .t/r9-frozen/fixtures --sizes 10014 --repetitions 1 --arms four-step --fts-mode batched --skip-warmup --warm-write-repetitions 10 --output .t/r9-10014-batched
 ```
 
 `--row-start 1` selects the zero-based second Williams row: four-step, no-body,
@@ -197,7 +207,10 @@ answer time. Queries delay subsequent steps, so their cost remains visible.
 
 Both `small.md` and linked `large.md` are requested at startup.
 `first_get_targets` reports each target's observed own-step-3 structure time and
-actual hook delivery. Get has no global-content prerequisite. Early records
+actual hook delivery. Get has no global-content prerequisite. Early lab Get accepts the exact rooted
+path of its completed callback document and omits outgoing resolution SQL
+until relations complete. Individual field projections wait for the complete
+field universe at content completion. Early records
 carry `link_resolution_loading=true` and `link_health_loading=true`. Their body,
 fields, headings, blocks, tags, and authored links are checked against frozen
 sources and final public answers. Incomplete link resolutions and health are
@@ -205,12 +218,12 @@ explicitly excluded from those completeness claims. Post-Ready linked Get also
 checks the broken-link finding.
 
 The mid target is at 90% of sorted document paths, outside the first 128-path
-batch and distinct from startup requests. The worker queues it at the first
+batch and distinct from startup requests. The worker schedules intake at the first
 content `Batch` with `completed * 4 >= total`. Content counts document read
-attempts. Transaction boundaries make the threshold approximately 25%.
-This is a **boundary-aligned** probe: its latency excludes waiting for the
-current batch and represents a best-case arrival relative to asynchronous main.
-Worker request JSON and `mid_request` label this scope explicitly.
+attempts. A separate thread waits 1 ms after that callback before queueing the request,
+while the next chunk runs. Request-to-delivery includes the remaining chunk
+work, the forced group commit, and requested-document derivation.
+Worker request JSON and `mid_request` label this asynchronous scope explicitly.
 `mid_request` records request, own structure, actual delivery, and latency on
 one worker clock. The host report's `build_request_ns`,
 `build_requested_structure_ns`, and `build_delivery_ns` maps use the separate
@@ -223,11 +236,16 @@ full-text completion. Boundary, busy, and step-counter maps contain `names`,
 `fts_rows_inserted`. Busy time excludes observer queries and requested-path
 pull-ahead. It measures elapsed time, not CPU. Boundary intervals include those
 pauses. Relations includes the authority check. Full-text includes FTS and
-finish teardown. Structure busy time and commits include timestamp bookkeeping.
-`timing_ns` and `timing_commits` record that subset of total time and commits;
-do not add them to totals. The `Structured` callback runs after the timestamp
-commit, so its observed completion is conservative. The build report's
-`requested_structure_ns` records completion before that commit.
+finish teardown, restoration of production connection settings, and a TRUNCATE
+WAL checkpoint. Structure timestamps share the build transaction, so
+`timing_commits` is zero. timing_ns remains a subset of busy time.
+`Structured` and GetReady run after the group commits. The build report's
+`requested_structure_ns` records derivation completion before that commit.
+`build_commits` counts nonempty grouped transactions. The step counters include setup,
+standalone index-boundary, and finish commits.
+`profiles` records inclusive calls and nanoseconds from norn_db::profiling
+for each pass: commits, index builds, row writes by fact table, FTS, checkpoint,
+read/hash, parse/derive, and SQL. Nested spans overlap; do not sum them.
 `refused_ns` and `request_refusals` retain explicit request refusals. A refusal
 stops the measurement worker because all selected targets must be readable.
 SQLite shadow-table work remains uncounted. Ordinary job evidence exposes
@@ -240,7 +258,10 @@ Lab and main mid results are **not comparable (side by side, no ratios)**.
 Health-once executes no early queries. Its first answers use public paths after
 Ready. No earlier endpoint is inferred.
 
-The fixed warm workload has eight reads and four writes. Write readbacks are
+The default warm workload has eight reads and four writes.
+`--warm-write-repetitions 10` repeats set_field and rename_hub ten times each,
+retaining one create and one subject rename. `warm_write_medians` reports host
+and round-trip medians separately for those two write kinds. Write readbacks are
 separate history entries outside each operation clock. No aggregate warm score
 can hide an individual regression. Archived health-once uses its own transport,
 audit adapter, and exactly-once validator in a separate Python process. The

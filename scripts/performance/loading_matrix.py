@@ -328,8 +328,8 @@ def lab_measurements(arm, events):
                   content_complete=stages['four-step-content'],
                   mid_request=dict(target=path, request_ns=request_ns, requested_document_structure_ns=structure_ns,
                       delivery_ns=delivery_ns, request_to_delivery_ns=delivery_ns-request_ns,
-                      request_alignment='boundary-aligned', current_batch_wait_included=False,
-                      latency_scope='boundary-aligned; excludes current-batch wait; best-case relative to asynchronous arrival',
+                      request_alignment=mid.get('request_alignment', 'boundary-aligned'), current_batch_wait_included=mid.get('current_batch_wait_included', False),
+                      latency_scope=mid.get('latency_scope', 'boundary-aligned; excludes current-batch wait; best-case relative to asynchronous arrival'),
                       content_progress=progress, clock_scope='worker origin; separate from build report clocks',
                       comparison='not comparable (side by side, no ratios)',
                       delivery_scope='typed answer returned by lab hook; stdout buffered until build ends'))
@@ -341,7 +341,7 @@ def lab_measurements(arm, events):
                              delivery_scope='buffered in worker; delivered after build',
                              resource_scope='sampled after build on buffered event receipt')
     result['requested_documents_structure'] = {path: dict(worker_ns=event['elapsed_ns'], parent_received_ns=event['parent_received_ns']) for path, event in structured.items()}
-    result.update({key: report[key] for key in ('refused_ns', 'request_refusals', 'timing_commits', 'timing_ns') if key in report})
+    result.update({key: report[key] for key in ('refused_ns', 'request_refusals', 'timing_commits', 'timing_ns', 'profiles', 'build_commits', 'host_chunk_bound', 'transaction_bound') if key in report})
     result['timing_bookkeeping_scope'] = 'timing_commits and timing_ns are a bookkeeping subset of total commits and elapsed work; structure totals include them'
     result['structure_observation_scope'] = 'Structured callback observed after timestamp commit (conservative); build requested_structure_ns captured before timestamp commit'
     result['ready']['counters'] = result['step_counters']
@@ -379,7 +379,7 @@ def cell_summary(documents, result):
     return '\n'.join(lines)
 
 
-def measure_cell(binary, root, manifest, arm, *, fts_mode='rebuild', mid_request_offset_ns=None, integrity_binary=None):
+def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_mode='rebuild', mid_request_offset_ns=None, integrity_binary=None):
     """One measured worker; validation and final audits use the existing harness code."""
     import os
     import time
@@ -579,8 +579,8 @@ def measure_cell(binary, root, manifest, arm, *, fts_mode='rebuild', mid_request
         state = {name: dict(path=name, body=body, fields={'status': 'draft', 'perf_bucket': 'probe'})
                  for name, body in manifest['probe_bodies'].items()}
         warm = []
-        for name, base in READS + [(name, None) for name in WRITES]:
-            command = base or mutation(name, 0)
+        for name, base, iteration in warm_workload(warm_write_repetitions):
+            command = base or mutation(name, iteration)
             before = 'bench/subject.md' if command['op'] == 'set' else command.get('from')
             before_bytes = (root / 'vault' / before).read_bytes() if before else None
             row = call(command, name=name)
@@ -594,8 +594,9 @@ def measure_cell(binary, root, manifest, arm, *, fts_mode='rebuild', mid_request
                         return read['response'], read['round_trip_ns']
                 verify_mutation(RecordingWorker(), 'current', command, root, row['response'], state, before_bytes)
             row['verified'] = True
+            row['sample'] = iteration
             warm.append(row)
-        end = endpoint(origin, path='after twelve warm operations and their readbacks',
+        end = endpoint(origin, path='after warm operations and their readbacks',
                        resources=resources(worker.process.pid))
     finally:
         worker.close()
@@ -617,7 +618,7 @@ def measure_cell(binary, root, manifest, arm, *, fts_mode='rebuild', mid_request
     write_json(root / 'request-history.json', history)
     write_json(root / 'observations.json', observations)
     responses = [row['response'] for row in observations]
-    replay = validate_provenance(root, history, responses, store, workload=cell_workload(mid_target))
+    replay = validate_provenance(root, history, responses, store, workload=cell_workload(mid_target, warm_write_repetitions))
     # Bind retained responses to raw native stdout before accepting the replay.
     from transport import PREFIX
     transcript = [json.loads(line.removeprefix(PREFIX)) for line in
@@ -631,7 +632,7 @@ def measure_cell(binary, root, manifest, arm, *, fts_mode='rebuild', mid_request
         first_get=describe_probe(probes['get'], arm, 'get'),
         first_find=describe_probe(probes['find'], arm, 'find'),
         first_search=describe_probe(probes['search'], arm, 'search'), public_search_after_ready=search,
-        stages=events, worker_ready=worker.ready, warm_operations=warm, canonical_operations=canonical, end=end, store=store,
+        stages=events, worker_ready=worker.ready, warm_operations=warm, warm_write_medians=warm_write_medians(warm), canonical_operations=canonical, end=end, store=store,
         post_ready_store=post_ready_store, post_ready_store_path_ids=post_ready_path_ids, store_path_ids=final_path_ids,
         first_get_targets={path: describe_probe(probe, arm, 'get') for path, probe in get_targets.items()},
         layout={'post_ready': post_ready_layout, 'post_workload': final_layout},
@@ -664,16 +665,35 @@ def health_once_final_gate(validator, events, ready, manifest, store):
     validator('health-once', events, ready, manifest, stored_links=store['counts']['links'])
 
 
-def cell_workload(mid_target=None):
-    """The existing twelve operations, one sample each, plus authored preparation/readbacks."""
+def warm_workload(repetitions=1):
+    """Repeat field and hub writes, preserving the original default workload."""
+    from baseline import READS, WRITES
+    if not 1 <= repetitions <= 100:
+        raise ValueError('warm-write repetitions must be in 1..100')
+    return [(name, base, 0) for name, base in READS] + [
+        (name, None, iteration) for name in WRITES
+        for iteration in range(repetitions if name in ('set_field', 'rename_hub') else 1)]
+
+
+def warm_write_medians(rows):
+    from statistics import median
+    return {name: dict(samples=len(selected),
+                       host_ns=median(row['host_ns'] for row in selected),
+                       round_trip_ns=median(row['round_trip_ns'] for row in selected))
+            for name in ('set_field', 'rename_hub')
+            if (selected := [row for row in rows if row['name'] == name])}
+
+
+def cell_workload(mid_target=None, warm_write_repetitions=1):
+    """Authored preparation, configurable warm writes and exact verification readbacks."""
     from baseline import READS, WRITES, mutation
     commands = [{'op': 'get', 'target': 'small', 'whole': True}, {'op': 'find'},
                 {'op': 'search', 'query': __import__('fixture').COMMON},
                 {'op': 'get', 'target': LINK_TARGET, 'whole': True}]
     if mid_target:
         commands.append({'op': 'get', 'target': mid_target, 'whole': True})
-    for name, base in READS + [(name, None) for name in WRITES]:
-        command = base or mutation(name, 0)
+    for name, base, iteration in warm_workload(warm_write_repetitions):
+        command = base or mutation(name, iteration)
         commands.append(command)
         if base is None:
             target = {'set': 'bench/subject.md', 'new': command.get('path'), 'move': command.get('to')}[command['op']]
@@ -824,8 +844,18 @@ def freeze_fixtures(config, destination, sizes, base=None):
     return destination / 'fixtures'
 
 
+def record_host_load(path):
+    import subprocess
+    from loading_method import host_sample
+    value = host_sample()
+    value['uptime'] = subprocess.check_output(['uptime'], text=True).strip()
+    value['pressure_raw'] = {kind: Path('/proc/pressure', kind).read_text()
+                             for kind in ('cpu', 'io', 'memory')}
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
 def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_reference=None, *,
-               fts_mode='rebuild', mid_request_reference=None, mid_request_offset_ns=None, skip_warmup=False, row_start=0):
+               fts_mode='rebuild', mid_request_reference=None, mid_request_offset_ns=None, skip_warmup=False, row_start=0, warm_write_repetitions=1):
     import shutil
     import subprocess
     import sys
@@ -887,11 +917,15 @@ def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_ref
             write_json(root / 'manifest.json', manifest)
             offset = (mid_request_offset_ns if mid_request_offset_ns is not None else seeds.get(documents, {}).get('offset_ns')) if arm == 'main' and not cell['discarded_warmup'] else None
             integrity_binary = builds['four-step'][0]['executable'] if arm != 'health-once' else None
-            spec = dict(fts_mode=fts_mode, mid_request_offset_ns=offset, integrity_binary=integrity_binary, arm=arm, binary=str(binary), source=str(source), manifest=manifest,
+            spec = dict(warm_write_repetitions=warm_write_repetitions, fts_mode=fts_mode, mid_request_offset_ns=offset, integrity_binary=integrity_binary, arm=arm, binary=str(binary), source=str(source), manifest=manifest,
                         root=str(root), build=receipt, harness_source_sha256=snapshot, cell=cell)
             write_json(root / 'cell.json', spec)
             await_idle(root / 'host-admission.json')
-            subprocess.run([sys.executable, str(Path(__file__).resolve()), '--cell', str(root / 'cell.json')], check=True)
+            record_host_load(root / 'host-load-before.json')
+            try:
+                subprocess.run([sys.executable, str(Path(__file__).resolve()), '--cell', str(root / 'cell.json')], check=True)
+            finally:
+                record_host_load(root / 'host-load-after.json')
             result = json.loads((root / 'result.json').read_text())
             metadata['results'].append(str(root / 'result.json'))
             gate_semantics(references, result)
@@ -923,6 +957,7 @@ def main():
     sys.path.insert(0, str(here / 'live_mode'))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare-plan', action='store_true')
+    parser.add_argument('--warm-write-repetitions', type=int, choices=range(1, 101), default=1)
     parser.add_argument('--prepare-builds', type=Path)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--freeze-fixtures', type=Path, help='prepare linked frozen fixtures outside timing')
@@ -944,7 +979,7 @@ def main():
         if spec['arm'] == 'health-once':
             sys.path.insert(0, str(Path(spec['source']) / 'scripts/performance'))
         result = measure_cell(Path(spec['binary']), Path(spec['root']), spec['manifest'], spec['arm'],
-                              fts_mode=spec.get('fts_mode', 'rebuild'), mid_request_offset_ns=spec.get('mid_request_offset_ns'),
+                              warm_write_repetitions=spec.get('warm_write_repetitions', 1), fts_mode=spec.get('fts_mode', 'rebuild'), mid_request_offset_ns=spec.get('mid_request_offset_ns'),
                               integrity_binary=Path(spec['integrity_binary']) if spec.get('integrity_binary') else None)
         result['build'] = spec['build']
         result['harness_source_sha256'] = spec['harness_source_sha256']
@@ -964,7 +999,7 @@ def main():
             parser.error('arms must be unique')
         run_matrix(json.loads(args.config.read_text()), args.fixtures, args.output.resolve(), args.sizes, args.arms, args.repetitions, args.gate_reference,
                    fts_mode=args.fts_mode, mid_request_reference=args.mid_request_reference,
-                   mid_request_offset_ns=args.mid_request_offset_ns, skip_warmup=args.skip_warmup, row_start=args.row_start)
+                   mid_request_offset_ns=args.mid_request_offset_ns, skip_warmup=args.skip_warmup, row_start=args.row_start, warm_write_repetitions=args.warm_write_repetitions)
 
 
 if __name__ == '__main__':

@@ -524,7 +524,7 @@ class MatrixTests(unittest.TestCase):
             with patch('loading_matrix.checked_build', return_value=({'rustc': 'one', 'executable': 'worker'}, root)), \
                     patch('baseline.prepare', return_value=(frozen, manifest)), \
                     patch('provenance.source_tree_digest', return_value='source'), \
-                    patch('loading_matrix.await_idle'), patch('loading_matrix.gate_semantics'), \
+                    patch('loading_matrix.await_idle'), patch('loading_matrix.record_host_load'), patch('loading_matrix.gate_semantics'), \
                     patch('loading_matrix.summarize', return_value={}), \
                     patch('loading_matrix.cell_summary', return_value='accepted'), \
                     patch('subprocess.run', side_effect=cell):
@@ -672,6 +672,21 @@ for line in sys.stdin:
         self.assertEqual(len(workload), 20)
         self.assertEqual([c['op'] for c in workload[4:12]], ['search'] * 4 + ['find'] + ['get'] * 3)
         self.assertEqual([c['op'] for c in workload[12:]], ['set', 'get', 'new', 'get', 'move', 'get', 'move', 'get'])
+
+    def test_repeated_warm_writes_have_exact_replay_and_independent_medians(self):
+        from loading_matrix import cell_workload, warm_workload, warm_write_medians
+        steps = warm_workload(10)
+        self.assertEqual(sum(name == 'set_field' for name, _, _ in steps), 10)
+        self.assertEqual(sum(name == 'rename_hub' for name, _, _ in steps), 10)
+        workload = cell_workload(warm_write_repetitions=10)
+        writes = [command for command in workload if command['op'] in ('set', 'new', 'move')]
+        self.assertEqual(len(writes), 22)
+        hubs = [command for command in writes if command.get('from', '').startswith('bench/hub')]
+        self.assertEqual(hubs[0]['from'], 'bench/hub.md')
+        self.assertEqual(hubs[-1]['to'], 'bench/hub.md')
+        medians = warm_write_medians([dict(name='set_field', host_ns=n, round_trip_ns=n+10)
+                                      for n in [1, 5, 2, 4]])
+        self.assertEqual(medians['set_field'], dict(samples=4, host_ns=3.0, round_trip_ns=13.0))
 
     def test_health_once_runs_archived_exactly_once_gate_with_audited_count(self):
         from loading_matrix import health_once_final_gate
