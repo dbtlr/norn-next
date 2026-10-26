@@ -45,6 +45,8 @@ def validate_lab_stage(stage, manifest):
         if stage.get('path') not in ('bench/small.md', LINK_TARGET):
             raise ValueError('lab hook answered the wrong target')
         if stage['path'] == LINK_TARGET:
+            wrapped.update(projection_epoch=stage['snapshot']['epoch'],
+                           projection_generation=stage['snapshot']['generation'])
             validate_link_get(wrapped, manifest, health_loading=True)
         else:
             validate_read('current', {'op': 'get', 'target': 'bench/small.md'}, wrapped, manifest)
@@ -71,24 +73,53 @@ def validate_lab_stage(stage, manifest):
 
 
 def validate_link_get(response, manifest, health_loading=False):
-    """Check both authored link families and the known broken target per whole Get."""
+    """Validate the authored whole record, including each link and finding handle."""
+    from results import whole_get_answer
+    whole_get_answer(response)
     doc = response['answer']['report']['document']
-    if (doc['path'] != LINK_TARGET or doc['body']['text'] != manifest['large_body']
-            or doc['fields'] != {key: {'kind': 'scalar', 'raw': value} for key, value in {'status': 'draft', 'perf_bucket': 'probe'}.items()}):
+    body = manifest['large_body']
+    source = '---\nstatus: draft\nperf_bucket: probe\n---\n' + body
+
+    def span(raw):
+        offset = source.index(raw)
+        return dict(byte_offset=len(source[:offset].encode()), line=source[:offset].count('\n') + 1,
+                    column=offset - source.rfind('\n', 0, offset))
+
+    expected_fields = {key: {'kind': 'scalar', 'raw': value}
+                       for key, value in {'status': 'draft', 'perf_bucket': 'probe'}.items()}
+    if (doc['path'] != LINK_TARGET or doc['body'] != {'text': body, 'byte_length': len(body.encode())}
+            or doc['fields'] != expected_fields):
         raise ValueError('linked Get content differs from fixture')
-    for key in ('headings', 'blocks', 'tags', 'links', 'findings'):
-        if doc[key]['total'] != len(doc[key]['items']):
-            raise ValueError('linked whole Get truncated a collection')
-    links = doc['links']['items']
-    if (len(links) != 3 or {link['family'] for link in links} != {'wikilink', 'markdown'}
-            or not any(link['anchor'] is not None for link in links)
-            or not any(link['target'] == 'matrix-missing-target' for link in links)):
-        raise ValueError('linked Get does not contain authored links/anchors/broken target')
+    headings = [dict(level=level, slug=slug, text=text, span=span(raw))
+                for level, slug, text, raw in [(1, 'large', 'Large', '# Large'),
+                    (2, 'details', 'Details', '## Details'), (2, 'tail', 'Tail', '## Tail')]]
+    if (doc['headings']['items'] != headings or doc['blocks']['items'] or doc['tags']['items']):
+        raise ValueError('linked Get structure differs from fixture')
+    expected_links = []
+    for family, target, title, anchor, raw in [
+            ('wikilink', 'small', None, {'kind': 'heading', 'text': 'Details'}, '[[small#Details]]'),
+            ('markdown', 'small.md', 'Small', {'kind': 'heading', 'text': 'Details'}, '[Small](small.md#Details)'),
+            ('wikilink', 'matrix-missing-target', None, None, '[[matrix-missing-target]]')]:
+        found = target != 'matrix-missing-target'
+        expected_links.append(dict(family=family, target=target, title=title, anchor=anchor, span=span(raw),
+                                   embed=False, protocol=None, health='healthy' if found else 'broken',
+                                   targets={'candidates': [{'path': 'bench/small.md', 'suffix': 'small'}] if found else [],
+                                            'total': int(found)}))
+    if doc['links']['items'] != expected_links:
+        raise ValueError('linked Get targets, anchors, spans, or resolutions differ from fixture')
+    findings = doc['findings']['items']
     if health_loading:
-        if doc['findings']['total'] != 0:
+        if findings:
             raise ValueError('lab Get unexpectedly includes step-4 findings')
-    elif not any(finding['kind'] == 'link/broken' for finding in doc['findings']['items']):
-        raise ValueError('public linked Get omitted broken-link finding')
+    else:
+        if len(findings) != 1:
+            raise ValueError('public linked Get omitted broken-link finding')
+        finding = findings[0]
+        expected = dict(path=LINK_TARGET, kind='link/broken', severity='warning',
+                        target='matrix-missing-target', span=span('[[matrix-missing-target]]'),
+                        head={'candidates': [], 'total': 0})
+        if any(finding[key] != value for key, value in expected.items()):
+            raise ValueError('public linked Get broken-link finding differs from fixture')
 
 
 def endpoint(origin, *, path, response=None, worker_ns=None, **fields):
@@ -336,7 +367,7 @@ def measure_cell(binary, root, manifest, arm):
         if arm.startswith('four-step'):
             early_doc = get_targets[LINK_TARGET]['response']['answer']['document']
             final_doc = linked['response']['answer']['report']['document']
-            for key in ('path', 'body', 'fields', 'headings', 'blocks', 'tags'):
+            for key in ('path', 'body', 'fields', 'headings', 'blocks', 'tags', 'links'):
                 if early_doc[key] != final_doc[key]:
                     raise ValueError('linked lab Get exact content/structure differs from public Get')
             for target, probe in get_targets.items():
@@ -451,7 +482,7 @@ def prepare_builds(root, repo):
     import subprocess
     import sys
     from provenance import verify_build, sha256
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     sources = root / 'sources'
     sources.mkdir()
     config = {'schema_version': 1, 'builds': {}}

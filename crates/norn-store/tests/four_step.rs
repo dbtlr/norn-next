@@ -1142,8 +1142,9 @@ fn four_step_finding_ids_follow_ordinary_first_build_order() {
             facts
         })
         .collect();
-    // Ordinary first construction with one document per changeset follows
-    // the walk's stored path order, with link positions ordered within it.
+    // The folded, one-document changeset below exercises caller-order restoration.
+    // The measured Linux matrix instead uses Sensitive ordering and batches up to
+    // 128 documents; pin its shared-batch ordinary comparison separately.
     for facts in &documents {
         ordinary
             .begin_request()
@@ -1203,6 +1204,59 @@ fn four_step_finding_ids_follow_ordinary_first_build_order() {
             "health document bound {bound}"
         );
     }
+    let mut documents = documents.clone();
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut ordinary_batch = Store::open(
+        scratch.join("ordinary-batch.sqlite3"),
+        StoredPathOrder::Sensitive,
+        DerivationVersion::new(1),
+    )
+    .unwrap();
+    for batch in documents.chunks(128) {
+        ordinary_batch
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                batch.iter().cloned().map(Change::Upsert),
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+    }
+    let mut lab_batch = Store::open(
+        scratch.join("lab-batch.sqlite3"),
+        StoredPathOrder::Sensitive,
+        DerivationVersion::new(1),
+    )
+    .unwrap();
+    four_step::begin(&mut lab_batch).unwrap();
+    four_step::names(
+        &mut lab_batch,
+        &documents
+            .iter()
+            .map(|facts| facts.path.clone())
+            .collect::<Vec<_>>(),
+        &[],
+        &ContentModel::none(),
+    )
+    .unwrap();
+    four_step::content(
+        &mut lab_batch,
+        &documents,
+        &[],
+        &ContentModel::none(),
+        false,
+        &[(0, 0), (0, 0)],
+    )
+    .unwrap();
+    complete_structure(&mut lab_batch, &documents, &ContentModel::none(), false).unwrap();
+    while four_step::health(&mut lab_batch, 128, &ContentModel::none())
+        .unwrap()
+        .commits
+        != 0
+    {}
+    four_step::finish(&mut lab_batch).unwrap();
+    assert_eq!(sequence(&mut lab_batch), sequence(&mut ordinary_batch));
 }
 
 #[test]

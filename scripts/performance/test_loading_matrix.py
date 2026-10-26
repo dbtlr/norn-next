@@ -88,6 +88,35 @@ class MatrixTests(unittest.TestCase):
             self.assertFalse(audit['accepted'])
             self.assertEqual(len(audit['samples'][0]['busy_reasons']), 4)
 
+    def test_linked_whole_get_rejects_wrong_content_links_findings_and_envelope(self):
+        import copy
+        import json
+        from loading_matrix import validate_link_get
+        response = {'answer': json.loads(Path(__file__).with_name('testdata').joinpath('linked_get.json').read_text())}
+        manifest = {'large_body': response['answer']['report']['document']['body']['text']}
+        validate_link_get(response, manifest)
+        mutations = [
+            lambda answer: answer.update(unsatisfied=['missing']),
+            lambda answer: answer['report']['document']['body'].update(byte_length=1),
+            lambda answer: answer['report']['document']['headings'].update(items=[], total=0),
+            lambda answer: answer['report']['document']['links']['items'][0].update(target='wrong'),
+            lambda answer: answer['report']['document']['links']['items'][0].update(anchor=None),
+            lambda answer: answer['report']['document']['links']['items'][0]['span'].update(line=1),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(path='wrong.md'),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(generation=999999),
+        ]
+        for number, mutate in enumerate(mutations):
+            wrong = copy.deepcopy(response)
+            mutate(wrong['answer'])
+            with self.subTest(mutation=number), self.assertRaises(ValueError):
+                validate_link_get(wrong, manifest)
+        response['answer']['report']['document']['findings'] = {'items': [], 'total': 0}
+        validate_link_get(response, manifest, health_loading=True)
+        wrong = copy.deepcopy(response)
+        wrong['answer']['report']['document']['links']['items'][0]['target'] = 'wrong'
+        with self.assertRaises(ValueError):
+            validate_link_get(wrong, manifest, health_loading=True)
+
     def test_freeze_preserves_small_and_adds_hash_bound_link_target(self):
         import json
         from unittest.mock import patch

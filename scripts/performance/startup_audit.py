@@ -2,7 +2,8 @@
 
 SQLite inspection and semantic normalization belong to norn-store. This
 controller checks the worker's ordered document triples against source bytes;
-it never opens the derived database. Run only after the measured worker closes.
+it never opens the derived database. Audit a quiescent committed store: either
+after the worker closes, or while it is idle at the loading matrix gate.
 """
 
 import hashlib
