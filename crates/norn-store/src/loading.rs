@@ -269,22 +269,33 @@ fn metadata_predicate(predicate: &norn_wire::Predicate) -> bool {
     )
 }
 
+fn metadata_column(column: &norn_wire::Column) -> bool {
+    matches!(
+        column,
+        norn_wire::Column::Path { .. }
+            | norn_wire::Column::Field { .. }
+            | norn_wire::Column::Fields { .. }
+    )
+}
+
 pub fn supports_find(params: &norn_wire::FindParams) -> bool {
     !(!params.predicates.iter().all(metadata_predicate)
-        || !params.columns.iter().all(|column| {
-            matches!(
-                column,
-                norn_wire::Column::Path { .. }
-                    | norn_wire::Column::Field { .. }
-                    | norn_wire::Column::Fields { .. }
-            )
-        })
+        || !params.columns.iter().all(metadata_column)
         || params.sort.as_ref().is_some_and(|sort| {
             !matches!(
                 sort.key,
                 norn_wire::SortKey::Path { .. } | norn_wire::SortKey::Field { .. }
             )
         }))
+}
+
+/// A complete body index can rank the first lexical page before structure is
+/// complete. Its filters and projections must use complete metadata alone;
+/// continuations wait for the stable post-construction snapshot.
+pub fn supports_search(query: &crate::LexicalQuery) -> bool {
+    query.after.is_none()
+        && query.predicates.iter().all(metadata_predicate)
+        && query.columns.iter().all(metadata_column)
 }
 
 #[cfg(test)]
@@ -307,6 +318,46 @@ mod tests {
             });
         }
     }
+    #[test]
+    fn loading_search_admits_metadata_only_first_pages_of_body_matches() {
+        use norn_wire::{Column, Predicate};
+        let query = crate::LexicalQuery::new("body term")
+            .with_predicates([
+                Predicate::path("notes/**"),
+                Predicate::equal_to("status", "open"),
+            ])
+            .with_columns([Column::path(), Column::field("status"), Column::fields()]);
+        assert!(supports_search(&query));
+        for column in [
+            Column::body(),
+            Column::links(),
+            Column::headings(),
+            Column::blocks(),
+            Column::tags(),
+            Column::findings(),
+        ] {
+            assert!(!supports_search(&query.clone().with_columns([column])));
+        }
+        for predicate in [
+            Predicate::tag("draft"),
+            Predicate::has_finding(norn_wire::FindingKind::Broken),
+            Predicate::matches("another term"),
+        ] {
+            assert!(!supports_search(
+                &query.clone().with_predicates([predicate])
+            ));
+        }
+        let after = norn_wire::Cursor::new(
+            norn_wire::Snapshot::new("epoch", 1, None, None),
+            norn_wire::CursorKey::hit(
+                norn_wire::RungSet::lexical(),
+                norn_wire::Score::new(1.0).unwrap(),
+                "a.md",
+            ),
+        );
+        assert!(!supports_search(&query.with_after(after)));
+    }
+
     fn oversized_work(size: usize) -> u64 {
         let scratch = norn_testkit::scratch::Scratch::new("catalogue-bounded-closure");
         let mut catalogue = Catalogue::open(&scratch.join("loading")).unwrap();

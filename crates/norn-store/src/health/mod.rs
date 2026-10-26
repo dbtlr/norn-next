@@ -1338,6 +1338,7 @@ pub(crate) fn four_step_document(
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
     path: &DocumentPath,
+    summaries: &mut KeySummaries,
 ) -> Result<(u64, u64), StoreError> {
     let writer = OnWriter {
         connection: transaction,
@@ -1346,7 +1347,6 @@ pub(crate) fn four_step_document(
     let mut after = -1_i64;
     let mut judged = 0;
     let mut findings = 0;
-    let mut summaries = KeySummaries::default();
     loop {
         let mut statement = transaction
             .prepare_cached(
@@ -1377,15 +1377,13 @@ pub(crate) fn four_step_document(
         )?;
         links.retain(|held| LinkHealth::of_address(held.link.address, 0) != LinkHealth::NotJudged);
         judged += links.len() as u64;
-        for finding in judge_links(transaction, work, ignore, &links, &mut summaries)? {
+        for finding in judge_links(transaction, work, ignore, &links, summaries)? {
             request::write_finding(transaction, &finding)?;
             findings += 1;
         }
-        // Bound all retained resolution data to this link page, including the
-        // filled-key totals ordinary incremental health retains for its act.
+        // Keep heads bounded to this page while exact totals outlive eviction,
+        // as in redecide. The caller shares this set for its whole transaction.
         summaries.keep_only_keys_of(&links);
-        let held: BTreeSet<&Key> = links.iter().flat_map(|link| &link.keys).collect();
-        summaries.totals.retain(|key, _| held.contains(key));
         if rows.len() < LINK_HEALTH_CHUNK {
             break;
         }
@@ -1398,6 +1396,110 @@ mod tests {
     use super::*;
 
     use crate::{Change, ContentModel, DocumentFacts, IncrementProvenance, Provenance, Store};
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn four_step_health_counts_a_hub_once_across_documents_and_nonconsecutive_pages_per_chunk() {
+        use norn_db::rusqlite::trace::{TraceEvent, TraceEventCodes};
+        use std::cell::Cell;
+
+        thread_local! {
+            static TOTAL_READS: Cell<u64> = const { Cell::new(0) };
+        }
+        fn record(event: TraceEvent<'_>) {
+            if let TraceEvent::Stmt(_, sql) = event
+                && sql == statement::totals_sql(SuffixKey::Comparison)
+            {
+                TOTAL_READS.with(|count| count.set(count.get() + 1));
+            }
+        }
+
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-health-hub",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let model = ContentModel::none();
+        let mut documents = ["a.md", "b.md", "c.md"]
+            .map(|path| DocumentFacts::new(DocumentPath::new(path).unwrap(), "hash", "", 0))
+            .to_vec();
+        let link = |target: &str| crate::LinkFact {
+            field: None,
+            family: crate::LinkFamily::Wikilink,
+            embed: false,
+            protocol: None,
+            target: target.into(),
+            title: None,
+            anchor: None,
+            span: None,
+        };
+        // The middle page evicts the hub's head. Its total must survive both
+        // that eviction and moving to the next document in the same chunk.
+        documents[0].links = std::iter::repeat_with(|| link("hub"))
+            .take(LINK_HEALTH_CHUNK)
+            .chain(std::iter::repeat_with(|| link("missing")).take(LINK_HEALTH_CHUNK))
+            .chain([link("hub")])
+            .collect();
+        documents[1].links.push(link("hub"));
+        documents[2].links.push(link("hub"));
+        for index in 0..CANDIDATE_HEAD + 2 {
+            documents.push(DocumentFacts::new(
+                DocumentPath::new(&format!("z/{index}/hub.md")).unwrap(),
+                "hub",
+                "",
+                0,
+            ));
+        }
+        crate::four_step::begin(&mut store).unwrap();
+        crate::four_step::names(
+            &mut store,
+            &documents
+                .iter()
+                .map(|facts| facts.path.clone())
+                .collect::<Vec<_>>(),
+            &[],
+            &model,
+        )
+        .unwrap();
+        crate::four_step::content(
+            &mut store,
+            &documents,
+            &[],
+            &model,
+            false,
+            &vec![(0, 0); documents.len()],
+        )
+        .unwrap();
+        let pending =
+            crate::four_step::pending(&store, crate::four_step::Step::Structure, documents.len())
+                .unwrap();
+        crate::four_step::structure(&mut store, &documents, &pending, &[], &model, false).unwrap();
+
+        TOTAL_READS.with(|count| count.set(0));
+        store
+            .connection()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
+        let first = crate::four_step::health(&mut store, 2, &model).unwrap();
+        assert_eq!(first.links_judged, (2 * LINK_HEALTH_CHUNK + 2) as u64);
+        assert_eq!(
+            TOTAL_READS.with(Cell::get),
+            1,
+            "one hub total for the whole health chunk"
+        );
+        crate::four_step::health(&mut store, 1, &model).unwrap();
+        assert_eq!(
+            TOTAL_READS.with(Cell::get),
+            2,
+            "the next transaction takes a fresh cache"
+        );
+        store.connection().trace_v2(TraceEventCodes::empty(), None);
+    }
 
     /// **A mass delete no link reaches runs a statement per chunk of its keys,
     /// never one per key.** Six hundred documents, none linked and none named

@@ -17,6 +17,7 @@ struct Probe {
     report: Mutex<Option<FourStepReport>>,
     early: Mutex<Option<serde_json::Value>>,
     find: Mutex<Option<serde_json::Value>>,
+    search: Mutex<Option<serde_json::Value>>,
 }
 
 impl FourStepObserver for Probe {
@@ -42,6 +43,7 @@ impl FourStepObserver for Probe {
                         ResolutionTarget::new("z-requested").unwrap(),
                     );
                     let got = read.get(&params)?;
+                    assert!(got.unsatisfied.is_empty());
                     *self.early.lock().unwrap() = Some(serde_json::to_value(got.report).unwrap());
                 }
             }
@@ -59,6 +61,35 @@ impl FourStepObserver for Probe {
             }
             FourStepEvent::Complete(report) => *self.report.lock().unwrap() = Some(report.clone()),
             _ => {}
+        }
+        let query =
+            norn_store::LexicalQuery::new("Requested").with_columns([norn_wire::Column::path()]);
+        if matches!(
+            event,
+            FourStepEvent::ContentComplete | FourStepEvent::StructureComplete
+        ) {
+            if read.search_complete() {
+                let (unsatisfied, advisories, report) = read.search(&query)?.into_report();
+                assert!(unsatisfied.is_empty());
+                assert!(advisories.is_empty());
+                self.search
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(|| serde_json::to_value(report).unwrap());
+                assert!(
+                    read.search(
+                        &norn_store::LexicalQuery::new("Requested")
+                            .with_columns([norn_wire::Column::tags()])
+                    )
+                    .is_err(),
+                    "the early search hook refuses incomplete structure projections"
+                );
+            } else {
+                assert!(
+                    read.search(&query).is_err(),
+                    "no-body search waits for stored bodies"
+                );
+            }
         }
         Ok(())
     }
@@ -87,12 +118,15 @@ fn fixture(label: &str, undecodable: bool) -> norn_testkit::scratch::Scratch {
         ),
         ("malformed.md", "---\nbad: [\n---\n# Body\n#beta\n"),
         ("hub.md", "# Present\nBlock. ^block\n"),
+        ("bare-bom.md", "\u{feff}[[hub]] #beta\n"),
+        ("cr-only.md", "---\rrating: 4\r---\r# CR\r[[hub]]\r"),
+        ("crlf.md", "# CRLF\r\n[[hub]]\r\n"),
         ("one/dupe.md", "[[hub]]\n"),
         ("two/dupe.md", "[[hub]]\n"),
         ("deep/nested/target.md", "[[hub]] [[../../hub]]\n"),
         (
             "z-requested.md",
-            "---\nrating: 7\nrelated: '[[hub]]'\n---\n# Requested\n[[hub#Present]] [[missing]] [[a]]\n#early\n",
+            "---\nrating: 7\ntags: [beta]\nrelated: '[[hub]]'\n---\n# Requested\n[[hub#Present]] [[missing]] [[a]]\n#early\n",
         ),
         ("media/picture.png", "name-only"),
     ] {
@@ -134,11 +168,22 @@ fn ids(path: &std::path::Path) -> BTreeMap<String, i64> {
         .unwrap()
 }
 
-fn without_findings(mut report: serde_json::Value) -> serde_json::Value {
-    report["document"]
-        .as_object_mut()
+fn without_link_findings(mut report: serde_json::Value) -> serde_json::Value {
+    let findings = &mut report["document"]["findings"];
+    let rows = findings["items"].as_array_mut().unwrap();
+    rows.retain(|finding| !finding["kind"].as_str().unwrap().starts_with("link/"));
+    findings["total"] = serde_json::json!(rows.len());
+    report
+}
+
+fn normalize_finding_provenance(mut report: serde_json::Value) -> serde_json::Value {
+    for finding in report["document"]["findings"]["items"]
+        .as_array_mut()
         .unwrap()
-        .remove("findings");
+    {
+        finding["id"] = serde_json::json!(0);
+        finding["generation"] = serde_json::json!(0);
+    }
     report
 }
 
@@ -155,7 +200,17 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
             VaultAddress::name(ordinary.name().clone()),
             ResolutionTarget::new("z-requested").unwrap(),
         );
-        let ordinary_get = serde_json::to_value(host.get(&params).unwrap().answer.report).unwrap();
+        let ordinary_answer = host.get(&params).unwrap().answer;
+        assert!(ordinary_answer.unsatisfied.is_empty());
+        let ordinary_get = serde_json::to_value(ordinary_answer.report).unwrap();
+        let search_params =
+            norn_wire::SearchParams::new(VaultAddress::name(ordinary.name().clone()), "Requested")
+                .with_rungs(norn_wire::RungSelection::exactly(
+                    norn_wire::RungSet::of([norn_wire::Rung::Lexical]).unwrap(),
+                ))
+                .with_columns([norn_wire::Column::path()]);
+        let ordinary_search =
+            serde_json::to_value(host.search(&search_params).unwrap().answer.report).unwrap();
         let find_params = norn_wire::FindParams::new(VaultAddress::name(ordinary.name().clone()))
             .with_columns([
                 norn_wire::Column::path(),
@@ -195,6 +250,9 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     ordinary_advisories
                 );
                 let work = host.evidence();
+                let final_answer = host.get(&params).unwrap().answer;
+                assert!(final_answer.unsatisfied.is_empty());
+                let final_get = serde_json::to_value(final_answer.report).unwrap();
                 drop(demand);
                 drop(host);
                 let actual =
@@ -222,7 +280,7 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     .unwrap()
                     .clone()
                     .expect("completion counters");
-                assert_eq!(report.steps["relations"]["links_judged"], 17);
+                assert_eq!(report.steps["relations"]["links_judged"], 20);
                 assert_eq!(
                     report.steps["content"]["rows_deleted"],
                     if undecodable { 2 } else { 0 }
@@ -235,7 +293,7 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                         .sum::<u64>(),
                     0
                 );
-                assert_eq!(work.links_redecided, 17);
+                assert_eq!(work.links_redecided, 20);
                 if pull_ahead {
                     assert!(
                         report.requested_structure_ns["z-requested.md"]
@@ -246,10 +304,47 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                         "z-requested.md"
                     );
                 }
+                let early = probe.early.lock().unwrap().clone().unwrap();
                 assert_eq!(
-                    without_findings(probe.early.lock().unwrap().clone().unwrap()),
-                    without_findings(ordinary_get.clone())
+                    early,
+                    without_link_findings(early.clone()),
+                    "early link-health findings are absent: health is still loading"
                 );
+                assert!(
+                    early["document"]["findings"]["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|finding| finding["kind"] == "document/undeclared-tag"),
+                    "the early answer includes its non-link findings"
+                );
+                assert_eq!(
+                    early,
+                    without_link_findings(final_get),
+                    "same-store non-link finding ids and generations must remain unchanged"
+                );
+                assert_eq!(
+                    normalize_finding_provenance(early),
+                    normalize_finding_provenance(without_link_findings(ordinary_get.clone()))
+                );
+                assert_eq!(
+                    probe.search.lock().unwrap().as_ref().unwrap(),
+                    &ordinary_search
+                );
+                assert_eq!(
+                    report.steps["structure"]["body_rows_rewritten"],
+                    if no_body {
+                        report.steps["content"]["rows_rewritten"]
+                    } else {
+                        0
+                    }
+                );
+                let boundaries = ["names", "content", "structure", "relations"]
+                    .map(|step| report.boundary_ns[step]);
+                assert!(boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
+                for step in ["names", "content", "structure", "relations"] {
+                    assert!(report.busy_ns[step] <= report.boundary_ns[step]);
+                }
                 assert_eq!(probe.find.lock().unwrap().as_ref().unwrap(), &ordinary_find);
                 println!("ordinary={ordinary_work:?}; lab={work:?}; steps={report:?}");
                 machine.store().verify_integrity().unwrap();

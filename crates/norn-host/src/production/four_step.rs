@@ -12,6 +12,11 @@ pub struct FourStepReport {
     /// Descriptive timings from the lab build's start; they grant no read admission.
     pub requested_structure_ns: BTreeMap<String, u128>,
     pub content_complete_ns: u128,
+    /// Monotonic time since the build began, captured before observer query work.
+    pub boundary_ns: BTreeMap<&'static str, u128>,
+    /// Main-pass work only; requested-document pull-ahead is recorded separately.
+    pub busy_ns: BTreeMap<&'static str, u128>,
+    pub pull_ahead_ns: u128,
 }
 
 /// All callbacks run after the named transaction committed, outside host gates.
@@ -80,9 +85,28 @@ pub struct FourStepRead<'a> {
     authority: Option<&'a FirstIndexObservation>,
     ready_path: Option<&'a str>,
     metadata_complete: bool,
+    search_complete: bool,
 }
 
 impl FourStepRead<'_> {
+    pub fn search_complete(&self) -> bool {
+        self.search_complete
+    }
+
+    pub fn search(&self, query: &norn_store::LexicalQuery) -> Result<norn_store::Searched, String> {
+        if !self.search_complete || !norn_store::loading::supports_search(query) {
+            return Err("only a first lexical page with complete field/path data is available at this lab boundary".into());
+        }
+        let result = self
+            .snapshot()?
+            .search(query, self.model)
+            .map_err(|error| error.to_string());
+        if !self.is_current() {
+            return Err("four-step source changed during search".into());
+        }
+        result
+    }
+
     pub fn metadata_complete(&self) -> bool {
         self.metadata_complete
     }
@@ -184,7 +208,11 @@ impl ProductionEntryOps {
             report: FourStepReport::default(),
             changed: false,
             metadata_complete: false,
+            search_complete: false,
+            refused: Vec::new(),
+            skipped_links: SkippedLinks::default(),
             began: Instant::now(),
+            observer_ns: std::cell::Cell::new(0),
         };
         let counters = four_step::begin(build.store).map_err(store_effect)?;
 
@@ -192,10 +220,19 @@ impl ProductionEntryOps {
             build.add(step, StepCounters::default());
         }
         build.add("names", counters);
+        let names_began = Instant::now();
+        let names_observer = build.observer_ns.get();
         build.names()?;
+        build.report.busy_ns.insert(
+            "names",
+            names_began.elapsed().as_nanos() - (build.observer_ns.get() - names_observer),
+        );
+        build.boundary("names");
         build.observe(FourStepEvent::NamesComplete, None)?;
         // Requested documents use exactly the same content and structure
         // routines as the main passes. Persisted per-path state skips them later.
+        let pull_ahead_began = Instant::now();
+        let pull_ahead_observer = build.observer_ns.get();
         for path in &loading.requested {
             if let Some(document) =
                 four_step::pending_at(build.store, Step::Content, path).map_err(store_effect)?
@@ -208,6 +245,10 @@ impl ProductionEntryOps {
                 build.structure(vec![document])?;
             }
         }
+        build.report.pull_ahead_ns =
+            pull_ahead_began.elapsed().as_nanos() - (build.observer_ns.get() - pull_ahead_observer);
+        let content_began = Instant::now();
+        let content_observer = build.observer_ns.get();
         loop {
             let documents = four_step::pending(build.store, Step::Content, loading.bound)
                 .map_err(store_effect)?;
@@ -216,8 +257,13 @@ impl ProductionEntryOps {
             }
             build.content(documents)?;
         }
-        attachment.skipped_links = build.refused_spellings()?;
+        build.report.busy_ns.insert(
+            "content",
+            content_began.elapsed().as_nanos() - (build.observer_ns.get() - content_observer),
+        );
         build.metadata_complete = true;
+        build.search_complete = !loading.no_body;
+        build.boundary("content");
         build.report.content_complete_ns = build.began.elapsed().as_nanos();
         build.observe(FourStepEvent::ContentComplete, None)?;
         // Step 3 completion alone never proves that provisional target names
@@ -237,15 +283,29 @@ impl ProductionEntryOps {
                 build.observe(FourStepEvent::GetReady(path.as_str()), Some(path.as_str()))?;
             }
         }
+        let structure_began = Instant::now();
+        let structure_observer = build.observer_ns.get();
         loop {
             let documents = four_step::pending(build.store, Step::Structure, loading.bound)
                 .map_err(store_effect)?;
             if documents.is_empty() {
+                // A fully pulled-ahead or empty vault can still owe refused spellings.
+                if !build.refused.is_empty() {
+                    build.structure(Vec::new())?;
+                }
                 break;
             }
             build.structure(documents)?;
         }
+        build.report.busy_ns.insert(
+            "structure",
+            structure_began.elapsed().as_nanos() - (build.observer_ns.get() - structure_observer),
+        );
+        build.search_complete = true;
+        build.boundary("structure");
         build.observe(FourStepEvent::StructureComplete, None)?;
+        let relations_began = Instant::now();
+        let relations_observer = build.observer_ns.get();
         loop {
             let counters = four_step::health(build.store, loading.bound, declared.content_model())
                 .map_err(store_effect)?;
@@ -254,6 +314,7 @@ impl ProductionEntryOps {
             }
             build.add("relations", counters);
         }
+        attachment.skipped_links = std::mem::take(&mut build.skipped_links);
         // Every surviving row has complete content/structure before ordinary
         // hash-based reconciliation can skip it. A changed no-body source was
         // forgotten instead of pairing new body bytes with old frontmatter.
@@ -268,6 +329,11 @@ impl ProductionEntryOps {
         }
         let counters = four_step::finish(build.store).map_err(store_effect)?;
         build.add("relations", counters);
+        build.report.busy_ns.insert(
+            "relations",
+            relations_began.elapsed().as_nanos() - (build.observer_ns.get() - relations_observer),
+        );
+        build.boundary("relations");
         build.observe(FourStepEvent::Complete(&build.report), None)?;
         Ok(())
     }
@@ -286,10 +352,20 @@ struct Build<'a> {
     report: FourStepReport,
     changed: bool,
     metadata_complete: bool,
+    search_complete: bool,
+    refused: Vec<PlannedFinding>,
+    skipped_links: SkippedLinks,
     began: Instant,
+    observer_ns: std::cell::Cell<u128>,
 }
 
 impl Build<'_> {
+    fn boundary(&mut self, step: &'static str) {
+        self.report
+            .boundary_ns
+            .insert(step, self.began.elapsed().as_nanos());
+    }
+
     fn add(&mut self, step: &'static str, counters: StepCounters) {
         let values = readings(&counters);
         let total = self.report.steps.entry(step).or_default();
@@ -304,7 +380,9 @@ impl Build<'_> {
         event: FourStepEvent<'_>,
         ready_path: Option<&str>,
     ) -> Result<(), JobFailure> {
-        self.loading
+        let began = Instant::now();
+        let result = self
+            .loading
             .observer
             .at(
                 event,
@@ -314,9 +392,13 @@ impl Build<'_> {
                     authority: self.authority,
                     ready_path,
                     metadata_complete: self.metadata_complete,
+                    search_complete: self.search_complete,
                 },
             )
-            .map_err(JobFailure::Environmental)
+            .map_err(JobFailure::Environmental);
+        self.observer_ns
+            .set(self.observer_ns.get() + began.elapsed().as_nanos());
+        result
     }
 
     fn changed(&mut self) {
@@ -331,16 +413,24 @@ impl Build<'_> {
         let mut files = Vec::new();
         for fact in walk(self.root, self.exclusions).map_err(effect)? {
             match fact.map_err(effect)? {
-                norn_fs::WalkFact::File(file) => {
-                    if let Ok(path) = document_path(file.path().as_path()) {
+                norn_fs::WalkFact::File(file) => match document_path(file.path().as_path()) {
+                    Ok(path) => {
                         if is_markdown(file.path().as_path()) {
                             documents.push(path);
                         } else if path.is_vault_file() {
                             files.push(path);
                         }
                     }
-                }
+                    Err(quarantine) if is_markdown(file.path().as_path()) => {
+                        self.refused
+                            .push(plan_quarantine(file.path().as_path(), quarantine));
+                    }
+                    Err(_) => {}
+                },
                 norn_fs::WalkFact::Skipped(skip) => {
+                    if matches!(skip.reason(), norn_fs::SkipReason::SymbolicLink(_)) {
+                        self.skipped_links.saw(skip.path().as_path());
+                    }
                     if !skip.reason().stands() {
                         self.changed();
                     }
@@ -374,71 +464,6 @@ impl Build<'_> {
         Ok(())
     }
 
-    fn refused_spellings(&mut self) -> Result<SkippedLinks, JobFailure> {
-        // Withholding must see decoded eligibility, not provisional names:
-        // a refused spelling can render onto a name that content quarantines.
-        // This second name walk never reads document bytes. Churn that later
-        // forgets a row forces an ordinary reconciliation of the final tree.
-        let mut account = Account::default();
-        let mut pending = Pending::new(
-            self.store,
-            self.loading.bound,
-            self.root,
-            self.exclusions,
-            &mut account,
-        )?;
-        let mut commits = 0;
-        let mut findings_written = 0;
-        for fact in walk(self.root, self.exclusions).map_err(effect)? {
-            match fact.map_err(effect)? {
-                norn_fs::WalkFact::File(file) if is_markdown(file.path().as_path()) => {
-                    if let Err(quarantine) = document_path(file.path().as_path()) {
-                        pending.quarantine(file.path().as_path(), quarantine);
-                        if pending.is_full() {
-                            pending.counters = norn_store::DerivationCounters::default();
-                            pending.flush()?;
-                            let count = pending.counters.findings_written();
-                            commits += u64::from(count > 0);
-                            findings_written += count;
-                        }
-                    }
-                }
-                norn_fs::WalkFact::Skipped(skip) => {
-                    pending.passed_over(skip.path().as_path(), skip.reason())
-                }
-                _ => {}
-            }
-        }
-        if !pending.queued.is_empty() {
-            pending.counters = norn_store::DerivationCounters::default();
-            pending.flush()?;
-            let count = pending.counters.findings_written();
-            commits += u64::from(count > 0);
-            findings_written += count;
-        }
-        drop(pending);
-        // Normal Pending already records its evidence; include only the phase
-        // receipt here to avoid charging those writes twice to JobEvidence.
-        let counters = StepCounters {
-            commits,
-            findings_written,
-            ..StepCounters::default()
-        };
-        for (name, count) in readings(&counters) {
-            *self
-                .report
-                .steps
-                .entry("content")
-                .or_default()
-                .entry(name)
-                .or_default() += count;
-        }
-        self.ops
-            .evidence
-            .count_four_step_receipt("content", &counters);
-        Ok(account.links)
-    }
-
     fn read(&mut self, path: &DocumentPath) -> Result<Option<norn_fs::ReadFile>, JobFailure> {
         match self.source.fact(Path::new(path.as_str())).map_err(effect)? {
             norn_fs::WalkFact::File(file) => file.read_optional().map_err(effect),
@@ -452,6 +477,7 @@ impl Build<'_> {
         let mut findings = Vec::new();
         let mut files_read = 0;
         for document in documents {
+            files_read += 1;
             let Some(read) = self.read(&document.path)? else {
                 self.changed();
                 let counters =
@@ -460,7 +486,6 @@ impl Build<'_> {
                 self.add("content", counters);
                 continue;
             };
-            files_read += 1;
             count_document_derived();
             let hash = read.content_hash().to_string();
             let (plan, origin) = crate::derivation::plan_four_step_content(
@@ -472,7 +497,8 @@ impl Build<'_> {
             );
             count_rule_work(plan.rule_work);
             if let Some(Change::Upsert(document)) = plan.change {
-                offsets.push(origin.expect("decoded content carries its origin").line as u64 - 1);
+                let origin = origin.expect("decoded content carries its origin");
+                offsets.push((origin.line as u64 - 1, origin.column as u64 - 1));
                 facts.push(document);
             }
             findings.extend(derived_findings(plan.findings, Some(&hash)));
@@ -503,10 +529,11 @@ impl Build<'_> {
         let mut facts = Vec::new();
         let mut findings = Vec::new();
         let mut files_read = 0;
+        let mut pending = Vec::new();
         for document in documents {
             let body = if self.loading.no_body {
+                files_read += 1;
                 let read = self.read(&document.path)?;
-                files_read += u64::from(read.is_some());
                 if read
                     .as_ref()
                     .is_none_or(|read| read.content_hash().to_string() != document.content_hash)
@@ -523,11 +550,11 @@ impl Build<'_> {
                     .expect("hash-verified decodable bytes");
                 text[document.body_offset as usize..].to_owned()
             } else {
-                document.body
+                document.body.clone()
             };
             let mut fact = DocumentFacts::new(
                 document.path.clone(),
-                document.content_hash,
+                document.content_hash.clone(),
                 body,
                 document.byte_length,
             );
@@ -537,17 +564,19 @@ impl Build<'_> {
                 norn_text::SourceSpan {
                     byte_offset: document.body_offset as usize,
                     line: document.body_line_offset as usize + 1,
-                    column: 1,
+                    column: document.body_column_offset as usize + 1,
                 },
             );
             if self.declared.schema().tags().reports_undeclared() {
-                let fm = self
-                    .store
-                    .begin_request()
-                    .stored_facts(&document.path)
-                    .map_err(store_effect)?
-                    .expect("content row");
-                let mut tags = fm.tags.into_iter().map(|tag| tag.fact).collect::<Vec<_>>();
+                let mut tags = document
+                    .frontmatter_tag_names
+                    .iter()
+                    .map(|name| norn_store::TagFact {
+                        name: name.clone(),
+                        source: norn_store::TagSource::Frontmatter,
+                        span: None,
+                    })
+                    .collect::<Vec<_>>();
                 tags.append(&mut fact.tags);
                 fact.tags = tags;
                 findings.extend(derived_findings(
@@ -558,11 +587,31 @@ impl Build<'_> {
                     .retain(|tag| tag.source == norn_store::TagSource::Body);
             }
             facts.push(fact);
+            pending.push(document);
         }
-        if !facts.is_empty() {
+        if self.metadata_complete {
+            // Refused names are recorded by the names walk. Withholding sees
+            // decoded eligibility only, after the global content pass.
+            let mut refused = Vec::new();
+            for finding in std::mem::take(&mut self.refused) {
+                if self
+                    .store
+                    .begin_request()
+                    .stored_document(&finding.subject)
+                    .map_err(store_effect)?
+                    .is_none()
+                {
+                    refused.push(finding);
+                }
+            }
+            findings.extend(derived_findings(refused, None));
+        }
+        if !facts.is_empty() || !findings.is_empty() {
             let counters = four_step::structure(
                 self.store,
                 &facts,
+                &pending,
+                &findings,
                 self.declared.content_model(),
                 self.loading.no_body,
             )
@@ -576,47 +625,12 @@ impl Build<'_> {
                 ..StepCounters::default()
             },
         );
-        if !findings.is_empty() {
-            let mut request = self.store.begin_request();
-            request
-                .apply_increment(
-                    IncrementProvenance::Derived,
-                    [],
-                    &findings,
-                    self.declared.content_model(),
-                )
-                .map_err(store_effect)?;
-            count_increment_work(request.counters(), request.read_steps());
-            let count = request.counters().findings_written();
-            *self
-                .report
-                .steps
-                .entry("structure")
-                .or_default()
-                .entry("commits")
-                .or_default() += 1;
-            *self
-                .report
-                .steps
-                .entry("structure")
-                .or_default()
-                .entry("findings_written")
-                .or_default() += count;
-            self.ops.evidence.count_four_step_receipt(
-                "structure",
-                &StepCounters {
-                    commits: 1,
-                    findings_written: count,
-                    ..StepCounters::default()
-                },
-            );
-        }
+        let structured_at = self.began.elapsed().as_nanos();
         for fact in &facts {
             if self.loading.requested.contains(&fact.path) {
-                self.report.requested_structure_ns.insert(
-                    fact.path.as_str().to_owned(),
-                    self.began.elapsed().as_nanos(),
-                );
+                self.report
+                    .requested_structure_ns
+                    .insert(fact.path.as_str().to_owned(), structured_at);
             }
             self.observe(
                 FourStepEvent::Structured(fact.path.as_str()),
@@ -656,6 +670,7 @@ pub(crate) fn readings(counters: &StepCounters) -> BTreeMap<&'static str, u64> {
     BTreeMap::from([
         ("rows_inserted", counters.rows_inserted),
         ("rows_rewritten", counters.rows_rewritten),
+        ("body_rows_rewritten", counters.body_rows_rewritten),
         ("rows_deleted", counters.rows_deleted),
         ("tombstones_discarded", counters.tombstones_discarded),
         ("fact_rows_written", counters.fact_rows_written),

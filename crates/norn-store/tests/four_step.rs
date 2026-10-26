@@ -15,6 +15,114 @@ fn open(path: &std::path::Path) -> Store {
     Store::open(path, StoredPathOrder::Sensitive, DerivationVersion::new(1)).unwrap()
 }
 
+fn complete_structure(
+    store: &mut Store,
+    documents: &[norn_store::DocumentFacts],
+    model: &ContentModel,
+    no_body: bool,
+) -> Result<four_step::StepCounters, norn_store::StoreError> {
+    let pending = documents
+        .iter()
+        .filter_map(|facts| {
+            four_step::pending_at(store, four_step::Step::Structure, &facts.path).unwrap()
+        })
+        .collect::<Vec<_>>();
+    four_step::structure(store, documents, &pending, &[], model, no_body)
+}
+
+#[test]
+fn content_retains_body_column_and_frontmatter_tag_names_for_structure() {
+    let scratch = scratch();
+    let mut store = open(&scratch.join("store.sqlite3"));
+    let mut facts = mixed_facts();
+    facts.tags[0].name = "front".into();
+    facts.tags[1].name = "body".into();
+    four_step::begin(&mut store).unwrap();
+    four_step::names(
+        &mut store,
+        std::slice::from_ref(&facts.path),
+        &[],
+        &ContentModel::none(),
+    )
+    .unwrap();
+    four_step::content(
+        &mut store,
+        std::slice::from_ref(&facts),
+        &[],
+        &ContentModel::none(),
+        false,
+        &[(0, 3)],
+    )
+    .unwrap();
+    let pending = four_step::pending_at(&store, four_step::Step::Structure, &facts.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.body_line_offset, 0);
+    assert_eq!(pending.body_column_offset, 3);
+    assert_eq!(pending.frontmatter_tag_names, vec!["front"]);
+}
+
+#[test]
+fn each_name_or_content_chunk_shares_one_write_generation() {
+    let scratch = scratch();
+    let mut store = open(&scratch.join("store.sqlite3"));
+    let documents = [
+        norn_store::DocumentFacts::new(DocumentPath::new("a.md").unwrap(), "a", "a", 1),
+        norn_store::DocumentFacts::new(DocumentPath::new("z.md").unwrap(), "z", "z", 1),
+    ];
+    four_step::begin(&mut store).unwrap();
+    let before = store.begin_request().write_generation().unwrap();
+    four_step::names(
+        &mut store,
+        &documents
+            .iter()
+            .map(|facts| facts.path.clone())
+            .collect::<Vec<_>>(),
+        &[DocumentPath::new("image.png").unwrap()],
+        &ContentModel::none(),
+    )
+    .unwrap();
+    assert_eq!(
+        store.begin_request().write_generation().unwrap(),
+        before + 1
+    );
+    for facts in &documents {
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&facts.path)
+                .unwrap()
+                .unwrap()
+                .generation,
+            before + 1
+        );
+    }
+    four_step::content(
+        &mut store,
+        &documents,
+        &[],
+        &ContentModel::none(),
+        false,
+        &[(0, 0), (0, 0)],
+    )
+    .unwrap();
+    assert_eq!(
+        store.begin_request().write_generation().unwrap(),
+        before + 2
+    );
+    for facts in &documents {
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&facts.path)
+                .unwrap()
+                .unwrap()
+                .generation,
+            before + 2
+        );
+    }
+}
+
 #[test]
 fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_structure() {
     let scratch = scratch();
@@ -30,7 +138,7 @@ fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_st
     )
     .unwrap();
     assert!(
-        four_step::structure(
+        complete_structure(
             &mut store,
             std::slice::from_ref(&z),
             &ContentModel::none(),
@@ -45,7 +153,7 @@ fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_st
             &[],
             &ContentModel::none(),
             false,
-            &[0],
+            &[(0, 0)],
         )
         .unwrap();
         assert!(
@@ -58,7 +166,7 @@ fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_st
             .is_err()
         );
         assert!(four_step::health(&mut store, 1, &ContentModel::none()).is_err());
-        four_step::structure(
+        complete_structure(
             &mut store,
             std::slice::from_ref(facts),
             &ContentModel::none(),
@@ -73,7 +181,7 @@ fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_st
         1
     );
     assert!(four_step::content(&mut store, &[], &[], &ContentModel::none(), false, &[]).is_err());
-    assert!(four_step::structure(&mut store, &[], &ContentModel::none(), false).is_err());
+    assert!(complete_structure(&mut store, &[], &ContentModel::none(), false).is_err());
     four_step::health(&mut store, 1, &ContentModel::none()).unwrap();
     four_step::finish(&mut store).unwrap();
 }
@@ -205,7 +313,7 @@ fn content_updates_once_and_carries_body_position_to_structure() {
         &[],
         &ContentModel::none(),
         false,
-        &[3],
+        &[(3, 0)],
     )
     .unwrap();
     assert_eq!(counters.rows_rewritten, 1);
@@ -229,7 +337,7 @@ fn content_updates_once_and_carries_body_position_to_structure() {
             &[],
             &ContentModel::none(),
             false,
-            &[3]
+            &[(3, 0)]
         )
         .is_err()
     );
@@ -312,7 +420,7 @@ fn a_single_content_document_can_have_more_schema_findings_than_the_document_chu
         &findings,
         &ContentModel::none(),
         false,
-        &[0],
+        &[(0, 0)],
     )
     .unwrap();
     assert_eq!(counters.findings_written, findings.len() as u64);
@@ -373,7 +481,7 @@ fn forgetting_a_vanished_name_or_changed_no_body_source_discards_only_its_own_fa
         ],
         &ContentModel::none(),
         true,
-        &[3, 0],
+        &[(3, 0), (0, 0)],
     )
     .unwrap();
     let row = four_step::pending_at(&store, four_step::Step::Structure, &source.path)
@@ -444,11 +552,133 @@ fn forgetting_a_vanished_name_or_changed_no_body_source_discards_only_its_own_fa
             .len(),
         1
     );
-    four_step::structure(&mut store, &[other], &ContentModel::none(), true).unwrap();
+    complete_structure(&mut store, &[other], &ContentModel::none(), true).unwrap();
     four_step::health(&mut store, 1, &ContentModel::none()).unwrap();
     assert!(four_step::forget(&mut store, &source.path).is_err());
     four_step::finish(&mut store).unwrap();
     store.verify_integrity().unwrap();
+}
+
+#[test]
+fn structure_commits_host_findings_atomically_and_flushes_without_touching_pending_rows() {
+    let scratch = scratch();
+    let mut store = open(&scratch.join("store.sqlite3"));
+    let source = mixed_facts();
+    let other = norn_store::DocumentFacts::new(DocumentPath::new("z.md").unwrap(), "z", "z", 1);
+    let documents = [source.clone(), other.clone()];
+    let model = ContentModel::none();
+    four_step::begin(&mut store).unwrap();
+    four_step::names(
+        &mut store,
+        &[source.path.clone(), other.path.clone()],
+        &[],
+        &model,
+    )
+    .unwrap();
+    four_step::content(&mut store, &documents, &[], &model, true, &[(0, 0), (0, 0)]).unwrap();
+    let pending = four_step::pending(&store, four_step::Step::Structure, 2).unwrap();
+    let finding = missing_field(&source.path, 0);
+    let mut changed = other.clone();
+    changed.content_hash = "changed".into();
+    assert!(
+        four_step::structure(
+            &mut store,
+            &[source.clone(), changed],
+            &pending,
+            std::slice::from_ref(&finding),
+            &model,
+            true
+        )
+        .is_err()
+    );
+    let unchanged = store
+        .begin_request()
+        .stored_facts(&source.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.body, "");
+    assert_eq!(unchanged.links.len(), 1);
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&source.path)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        four_step::pending(&store, four_step::Step::Structure, 2)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let counters = four_step::structure(
+        &mut store,
+        std::slice::from_ref(&source),
+        &pending[..1],
+        std::slice::from_ref(&finding),
+        &model,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            counters.commits,
+            counters.rows_rewritten,
+            counters.body_rows_rewritten,
+            counters.findings_written
+        ),
+        (1, 0, 1, 1)
+    );
+    let stored = store
+        .begin_request()
+        .stored_facts(&source.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.body, "# Body\n");
+    assert_eq!(stored.links.len(), 2);
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&source.path)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let refused = DocumentPath::new("refused.md").unwrap();
+    let mut deferred = missing_field(&refused, 0);
+    deferred.facts.kind = norn_wire::FindingKind::PathBytesNotUtf8;
+    let flushed = four_step::structure(&mut store, &[], &[], &[deferred], &model, true).unwrap();
+    assert_eq!(
+        (
+            flushed.commits,
+            flushed.rows_rewritten,
+            flushed.body_rows_rewritten,
+            flushed.rows_deleted,
+            flushed.findings_written
+        ),
+        (1, 0, 0, 0, 1)
+    );
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_findings(&refused)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        four_step::pending(&store, four_step::Step::Structure, 2).unwrap(),
+        pending[1..]
+    );
+    assert!(
+        store
+            .begin_request()
+            .stored_document(&other.path)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -470,7 +700,7 @@ fn structure_appends_body_facts_without_replacing_frontmatter_and_fills_omitted_
         &[],
         &ContentModel::none(),
         true,
-        &[0],
+        &[(0, 0)],
     )
     .unwrap();
     let content = store
@@ -481,14 +711,15 @@ fn structure_appends_body_facts_without_replacing_frontmatter_and_fills_omitted_
     assert_eq!(content.body, "");
     assert_eq!(content.links.len(), 1);
     assert_eq!(content.tags.len(), 1);
-    let counters = four_step::structure(
+    let counters = complete_structure(
         &mut store,
         std::slice::from_ref(&facts),
         &ContentModel::none(),
         true,
     )
     .unwrap();
-    assert_eq!(counters.rows_rewritten, 1);
+    assert_eq!(counters.rows_rewritten, 0);
+    assert_eq!(counters.body_rows_rewritten, 1);
     assert_eq!(counters.links_judged, 0);
     let structure = store
         .begin_request()
@@ -509,7 +740,7 @@ fn structure_appends_body_facts_without_replacing_frontmatter_and_fills_omitted_
             .unwrap()
             .is_empty()
     );
-    assert!(four_step::structure(&mut store, &[facts], &ContentModel::none(), true).is_err());
+    assert!(complete_structure(&mut store, &[facts], &ContentModel::none(), true).is_err());
 }
 
 #[test]
@@ -547,11 +778,11 @@ fn final_health_judges_eligible_links_once_across_link_pages_and_seals_for_reuse
         &[],
         &ContentModel::none(),
         false,
-        &[0],
+        &[(0, 0)],
     )
     .unwrap();
     assert!(four_step::finish(&mut store).is_err());
-    four_step::structure(
+    complete_structure(
         &mut store,
         std::slice::from_ref(&facts),
         &ContentModel::none(),
@@ -676,120 +907,136 @@ fn complete_four_steps_equal_ordinary_derivation_including_late_target_anchors()
         LinkAnchor, LinkFact, LinkFamily, Span,
     };
     use norn_testkit::equivalence::StoreProjection;
-    for no_body in [false, true] {
-        let scratch = scratch();
-        let mut lab = open(&scratch.join("lab.sqlite3"));
-        let mut ordinary = open(&scratch.join("ordinary.sqlite3"));
-        let mut source = mixed_facts();
-        for anchor in [
-            LinkAnchor::Heading {
-                written: "Present".into(),
-                readings: AnchorReadings {
-                    text: "Present".into(),
-                    marked: None,
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        for no_body in [false, true] {
+            let scratch = scratch();
+            let mut lab = Store::open(
+                scratch.join("lab.sqlite3"),
+                order,
+                DerivationVersion::new(1),
+            )
+            .unwrap();
+            let mut ordinary = Store::open(
+                scratch.join("ordinary.sqlite3"),
+                order,
+                DerivationVersion::new(1),
+            )
+            .unwrap();
+            let mut source = mixed_facts();
+            for anchor in [
+                LinkAnchor::Heading {
+                    written: "Present".into(),
+                    readings: AnchorReadings {
+                        text: "Present".into(),
+                        marked: None,
+                    },
                 },
-            },
-            LinkAnchor::Block { id: "id".into() },
-            LinkAnchor::Heading {
-                written: "Absent".into(),
-                readings: AnchorReadings {
-                    text: "Absent".into(),
-                    marked: None,
+                LinkAnchor::Block { id: "id".into() },
+                LinkAnchor::Heading {
+                    written: "Absent".into(),
+                    readings: AnchorReadings {
+                        text: "Absent".into(),
+                        marked: None,
+                    },
                 },
-            },
-        ] {
-            source.links.push(LinkFact {
-                field: None,
-                family: LinkFamily::Wikilink,
-                embed: false,
-                protocol: None,
-                target: "z".into(),
-                title: None,
-                anchor: Some(anchor),
-                span: None,
+            ] {
+                source.links.push(LinkFact {
+                    field: None,
+                    family: LinkFamily::Wikilink,
+                    embed: false,
+                    protocol: None,
+                    target: "z".into(),
+                    title: None,
+                    anchor: Some(anchor),
+                    span: None,
+                });
+            }
+            let body = "# Present\nblock ^id\n";
+            let mut target = DocumentFacts::new(
+                DocumentPath::new("z.md").unwrap(),
+                "z-hash",
+                body,
+                body.len() as u64,
+            );
+            target.headings.push(HeadingFact {
+                level: 1,
+                text: "Present".into(),
+                reading: "Present".into(),
+                slug: "present".into(),
+                span: Span {
+                    line: 1,
+                    column: 1,
+                    byte_offset: 0,
+                },
+                body_offset: 10,
+                inside_container: false,
             });
-        }
-        let body = "# Present\nblock ^id\n";
-        let mut target = DocumentFacts::new(
-            DocumentPath::new("z.md").unwrap(),
-            "z-hash",
-            body,
-            body.len() as u64,
-        );
-        target.headings.push(HeadingFact {
-            level: 1,
-            text: "Present".into(),
-            reading: "Present".into(),
-            slug: "present".into(),
-            span: Span {
-                line: 1,
-                column: 1,
-                byte_offset: 0,
-            },
-            body_offset: 10,
-            inside_container: false,
-        });
-        target.blocks.push(BlockFact {
-            block_id: "id".into(),
-            span: Some(Span {
-                line: 2,
-                column: 7,
-                byte_offset: 16,
-            }),
-        });
-        let docs = [source, target];
-        let file = DocumentPath::new("image.png").unwrap();
-        ordinary
-            .begin_request()
-            .apply_increment(
-                IncrementProvenance::Derived,
-                docs.iter()
-                    .cloned()
-                    .map(Change::Upsert)
-                    .chain([Change::FileBirth { path: file.clone() }]),
-                &[],
-                &ContentModel::none(),
-            )
-            .unwrap();
-        four_step::begin(&mut lab).unwrap();
-        four_step::names(
-            &mut lab,
-            &[docs[0].path.clone(), docs[1].path.clone()],
-            &[file],
-            &ContentModel::none(),
-        )
-        .unwrap();
-        for facts in &docs {
-            let counters = four_step::content(
+            target.blocks.push(BlockFact {
+                block_id: "id".into(),
+                span: Some(Span {
+                    line: 2,
+                    column: 7,
+                    byte_offset: 16,
+                }),
+            });
+            let docs = [source, target];
+            let file = DocumentPath::new("image.png").unwrap();
+            ordinary
+                .begin_request()
+                .apply_increment(
+                    IncrementProvenance::Derived,
+                    docs.iter()
+                        .cloned()
+                        .map(Change::Upsert)
+                        .chain([Change::FileBirth { path: file.clone() }]),
+                    &[],
+                    &ContentModel::none(),
+                )
+                .unwrap();
+            four_step::begin(&mut lab).unwrap();
+            four_step::names(
                 &mut lab,
-                std::slice::from_ref(facts),
-                &[],
+                &[docs[0].path.clone(), docs[1].path.clone()],
+                &[file],
                 &ContentModel::none(),
-                no_body,
-                &[0],
             )
             .unwrap();
-            assert_eq!(counters.rows_rewritten, 1);
+            for facts in &docs {
+                let counters = four_step::content(
+                    &mut lab,
+                    std::slice::from_ref(facts),
+                    &[],
+                    &ContentModel::none(),
+                    no_body,
+                    &[(0, 0)],
+                )
+                .unwrap();
+                assert_eq!(counters.rows_rewritten, 1);
+            }
+            for facts in &docs {
+                let counters = complete_structure(
+                    &mut lab,
+                    std::slice::from_ref(facts),
+                    &ContentModel::none(),
+                    no_body,
+                )
+                .unwrap();
+                assert_eq!(counters.rows_rewritten, 0);
+                assert_eq!(counters.body_rows_rewritten, u64::from(no_body));
+            }
+            let health = four_step::health(&mut lab, 1, &ContentModel::none()).unwrap();
+            assert_eq!(health.links_judged, 5);
+            assert_eq!(health.findings_written, 3);
+            four_step::health(&mut lab, 1, &ContentModel::none()).unwrap();
+            four_step::finish(&mut lab).unwrap();
+            StoreProjection::read(&mut lab).unwrap().assert_equivalent(
+                &StoreProjection::read(&mut ordinary).unwrap(),
+                "four-step ordinary equality",
+            );
         }
-        for facts in &docs {
-            let counters = four_step::structure(
-                &mut lab,
-                std::slice::from_ref(facts),
-                &ContentModel::none(),
-                no_body,
-            )
-            .unwrap();
-            assert_eq!(counters.rows_rewritten, u64::from(no_body));
-        }
-        let health = four_step::health(&mut lab, 1, &ContentModel::none()).unwrap();
-        assert_eq!(health.links_judged, 5);
-        assert_eq!(health.findings_written, 3);
-        four_step::health(&mut lab, 1, &ContentModel::none()).unwrap();
-        four_step::finish(&mut lab).unwrap();
-        StoreProjection::read(&mut lab).unwrap().assert_equivalent(
-            &StoreProjection::read(&mut ordinary).unwrap(),
-            "four-step ordinary equality",
-        );
     }
 }
 
@@ -818,10 +1065,10 @@ fn requested_document_can_complete_structure_before_other_content_and_be_forgott
         &[],
         &ContentModel::none(),
         false,
-        &[0],
+        &[(0, 0)],
     )
     .unwrap();
-    four_step::structure(
+    complete_structure(
         &mut store,
         std::slice::from_ref(&source),
         &ContentModel::none(),
@@ -840,7 +1087,7 @@ fn requested_document_can_complete_structure_before_other_content_and_be_forgott
         &[],
         &ContentModel::none(),
         false,
-        &[0],
+        &[(0, 0)],
     )
     .unwrap();
     let forgotten = four_step::forget(&mut store, &source.path).unwrap();

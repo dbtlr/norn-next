@@ -9,10 +9,14 @@ pub(crate) const MARKER: &str = "four_step_incomplete";
 /// Actual committed work. Row counts cover documents/files; fact counts include
 /// link keys and stem trigrams. Lab bookkeeping rows are excluded. The host
 /// supplies `files_read`; marker creation/removal each report their own commit.
+/// `rows_rewritten` counts the content/metadata transition; `body_rows_rewritten`
+/// counts the separate payload update when content omitted the body. SQLite's
+/// internal FTS trigger and shadow-table writes are not included in these counts.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StepCounters {
     pub rows_inserted: u64,
     pub rows_rewritten: u64,
+    pub body_rows_rewritten: u64,
     pub rows_deleted: u64,
     pub tombstones_discarded: u64,
     pub fact_rows_written: u64,
@@ -62,6 +66,8 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         structure_done INTEGER NOT NULL DEFAULT 0,
         health_done INTEGER NOT NULL DEFAULT 0,
         body_line_offset INTEGER NOT NULL DEFAULT 0,
+        body_column_offset INTEGER NOT NULL DEFAULT 0,
+        frontmatter_tag_names TEXT NOT NULL DEFAULT '[]',
         frontmatter_links INTEGER NOT NULL DEFAULT 0,
         frontmatter_tags INTEGER NOT NULL DEFAULT 0,
         frontmatter_fields INTEGER NOT NULL DEFAULT 0
@@ -92,15 +98,13 @@ pub fn names(
     guard(&tx, declared)?;
     phase(&tx, 1)?;
     let mut counters = StepCounters::default();
+    let generation = norn_db::meta::next_generation(&tx)?;
     for (table, paths) in [("documents", documents), ("vault_files", files)] {
         let mut last: Option<String> = tx
-            .query_row(
-                &format!(
-                    "SELECT path FROM {table} ORDER BY path{collation} DESC, path DESC LIMIT 1"
-                ),
-                [],
-                |r| r.get(0),
-            )
+            .prepare_cached(&format!(
+                "SELECT path FROM {table} ORDER BY path{collation} DESC, path DESC LIMIT 1"
+            ))
+            .and_then(|mut q| q.query_row([], |r| r.get(0)))
             .optional()
             .map_err(|e| error::sql("reading the last four-step name", e))?;
         for path in paths {
@@ -124,7 +128,6 @@ pub fn names(
             if table == "vault_files" && !path.is_vault_file() {
                 continue;
             }
-            let generation = norn_db::meta::next_generation(&tx)?;
             let admitting = declared
                 .ambiguity_ignore()
                 .admitting_segments(path.as_str());
@@ -153,11 +156,9 @@ pub fn names(
                         )
                     })
                     .map_err(|e| error::sql("inserting a provisional document", e))?;
-                tx.execute(
-                    "INSERT INTO four_step_state(path) VALUES (?1)",
-                    [path.as_str()],
-                )
-                .map_err(|e| error::sql("tracking a provisional document", e))?;
+                tx.prepare_cached("INSERT INTO four_step_state(path) VALUES (?1)")
+                    .and_then(|mut q| q.execute([path.as_str()]))
+                    .map_err(|e| error::sql("tracking a provisional document", e))?;
                 for trigram in crate::similarity::trigrams(path.stem()) {
                     counters.fact_rows_written += tx
                         .prepare_cached(WriteStatement::InsertStemTrigram.sql())
@@ -238,6 +239,8 @@ pub struct PendingDocument {
     pub body: String,
     pub body_offset: u64,
     pub body_line_offset: u64,
+    pub body_column_offset: u64,
+    pub frontmatter_tag_names: Vec<String>,
     pub frontmatter_links: u64,
     pub frontmatter_tags: u64,
     pub frontmatter_fields: u64,
@@ -290,7 +293,8 @@ fn pending_rows(
         .connection()
         .prepare_cached(&format!(
             "SELECT d.path, d.content_hash, d.byte_length, d.body, d.body_offset,
-                s.body_line_offset, s.frontmatter_links, s.frontmatter_tags, s.frontmatter_fields
+                s.body_line_offset, s.frontmatter_links, s.frontmatter_tags, s.frontmatter_fields,
+                s.body_column_offset, s.frontmatter_tag_names
          FROM four_step_state AS s CROSS JOIN documents AS d
          WHERE d.path = s.path AND {condition} AND {point}
          ORDER BY s.path{collation}, s.path LIMIT ?1"
@@ -308,6 +312,8 @@ fn pending_rows(
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
+                r.get::<_, String>(10)?,
             ))
         })
         .map_err(|e| error::sql("reading four-step progress", e))?;
@@ -322,6 +328,8 @@ fn pending_rows(
             frontmatter_links,
             frontmatter_tags,
             frontmatter_fields,
+            body_column_offset,
+            frontmatter_tag_names,
         ) = row.map_err(|e| error::sql("reading four-step source row", e))?;
         Ok(PendingDocument {
             path: DocumentPath::new(&path)?,
@@ -330,6 +338,9 @@ fn pending_rows(
             body,
             body_offset,
             body_line_offset,
+            body_column_offset,
+            frontmatter_tag_names: serde_json::from_str(&frontmatter_tag_names)
+                .map_err(|e| refused(&format!("invalid four-step tag names: {e}")))?,
             frontmatter_links,
             frontmatter_tags,
             frontmatter_fields,
@@ -338,8 +349,8 @@ fn pending_rows(
     .collect()
 }
 
-/// Fill content columns once and insert frontmatter facts only. `body_line_offsets`
-/// is parallel to `documents` and counts source lines before the body. With
+/// Fill content columns once and insert frontmatter facts only. `body_origins`
+/// is parallel to `documents`: zero-based (line, column) body origins. With
 /// `no_body`, structure later supplies the body omitted here.
 pub fn content(
     store: &mut Store,
@@ -347,11 +358,11 @@ pub fn content(
     findings: &[crate::DerivedFinding<'_>],
     declared: &ContentModel,
     no_body: bool,
-    body_line_offsets: &[u64],
+    body_origins: &[(u64, u64)],
 ) -> Result<StepCounters, StoreError> {
     bounded(documents.len())?;
-    if documents.len() != body_line_offsets.len() {
-        return Err(refused("body line offsets must match the content chunk"));
+    if documents.len() != body_origins.len() {
+        return Err(refused("body origins must match the content chunk"));
     }
     crate::increment::check_derived_findings(findings)?;
     let tx = store
@@ -362,9 +373,29 @@ pub fn content(
     let pinned: Option<String> =
         norn_db::meta::get_meta(&tx, crate::ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
     let mut counters = StepCounters::default();
+    let generation = norn_db::meta::next_generation(&tx)?;
     {
         let mut statements = crate::increment::Statements::prepare(&tx)?;
-        for (facts, line_offset) in documents.iter().zip(body_line_offsets) {
+        let body_columns = if no_body {
+            ""
+        } else {
+            "body = ?3, body_hash = ?4,"
+        };
+        let mut update = tx
+            .prepare_cached(&format!(
+                "UPDATE documents SET content_hash = ?1, byte_length = ?2, {body_columns}
+            body_offset = ?5, frontmatter = ?6, frontmatter_projection_hash = ?7,
+            frontmatter_diagnostic_count = ?8, generation = ?9, derived_at = ?10 WHERE id = ?11"
+            ))
+            .map_err(|e| error::sql("preparing four-step content", e))?;
+        let mut progress = tx
+            .prepare_cached(
+                "UPDATE four_step_state SET content_done = 1, body_line_offset = ?1,
+            frontmatter_links = ?2, frontmatter_tags = ?3, frontmatter_fields = ?4,
+            body_column_offset = ?6, frontmatter_tag_names = ?7 WHERE path = ?5",
+            )
+            .map_err(|e| error::sql("preparing four-step content progress", e))?;
+        for (facts, (line_offset, column_offset)) in documents.iter().zip(body_origins) {
             crate::increment::refuse_a_document_that_does_not_add_up(facts)?;
             crate::increment::refuse_typed_values_the_pin_does_not_derive(
                 pinned.as_deref(),
@@ -376,18 +407,20 @@ pub fn content(
                 .map(crate::json::canonical_json)
                 .transpose()?;
             let body = if no_body { "" } else { &facts.body };
-            let generation = norn_db::meta::next_generation(&tx)?;
-            let body_columns = if no_body {
-                ""
-            } else {
-                "body = ?3, body_hash = ?4,"
-            };
-            tx.execute(&format!("UPDATE documents SET content_hash = ?1, byte_length = ?2, {body_columns}
-                body_offset = ?5, frontmatter = ?6, frontmatter_projection_hash = ?7,
-                frontmatter_diagnostic_count = ?8, generation = ?9, derived_at = ?10 WHERE id = ?11"),
-                params![facts.content_hash, facts.byte_length, body, hash::sub_fingerprint(body), facts.body_offset,
-                    projection, projection.as_deref().map(hash::sub_fingerprint), facts.frontmatter_diagnostic_count,
-                    generation, request::unix_seconds(), document])
+            update
+                .execute(params![
+                    facts.content_hash,
+                    facts.byte_length,
+                    body,
+                    hash::sub_fingerprint(body),
+                    facts.body_offset,
+                    projection,
+                    projection.as_deref().map(hash::sub_fingerprint),
+                    facts.frontmatter_diagnostic_count,
+                    generation,
+                    request::unix_seconds(),
+                    document
+                ])
                 .map_err(|e| error::sql("updating four-step content", e))?;
             counters.rows_rewritten += 1;
             counters.fact_rows_written += crate::increment::insert_fact_rows(
@@ -398,11 +431,22 @@ pub fn content(
                 0,
                 0,
             )?;
-            tx.execute("UPDATE four_step_state SET content_done = 1, body_line_offset = ?1,
-                frontmatter_links = ?2, frontmatter_tags = ?3, frontmatter_fields = ?4 WHERE path = ?5",
-                params![line_offset, facts.links.iter().filter(|l| l.field.is_some()).count() as i64,
-                    facts.tags.iter().filter(|t| t.source == crate::TagSource::Frontmatter).count() as i64,
-                    facts.fields().rows().len() as i64, facts.path.as_str()])
+            let tag_names = facts
+                .tags
+                .iter()
+                .filter(|tag| tag.source == crate::TagSource::Frontmatter)
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>();
+            progress
+                .execute(params![
+                    line_offset,
+                    facts.links.iter().filter(|l| l.field.is_some()).count() as i64,
+                    tag_names.len() as i64,
+                    facts.fields().rows().len() as i64,
+                    facts.path.as_str(),
+                    column_offset,
+                    serde_json::to_string(&tag_names).expect("tag names encode as JSON")
+                ])
                 .map_err(|e| error::sql("completing four-step content row", e))?;
         }
     }
@@ -415,11 +459,8 @@ pub fn content(
     {
         let path = &finding.facts.path;
         let done: Option<i64> = tx
-            .query_row(
-                "SELECT content_done FROM four_step_state WHERE path = ?1",
-                [path.as_str()],
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT content_done FROM four_step_state WHERE path = ?1")
+            .and_then(|mut q| q.query_row([path.as_str()], |r| r.get(0)))
             .optional()
             .map_err(|e| error::sql("checking a provisional quarantine", e))?;
         if done == Some(1) {
@@ -427,7 +468,8 @@ pub fn content(
         }
         if done.is_some() {
             counters.rows_deleted += tx
-                .execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
+                .prepare_cached("DELETE FROM documents WHERE path = ?1")
+                .and_then(|mut q| q.execute([path.as_str()]))
                 .map_err(|e| error::sql("removing a provisional quarantine", e))?
                 as u64;
         }
@@ -452,25 +494,46 @@ fn incomplete_document(
     path: &DocumentPath,
     step: Step,
 ) -> Result<i64, StoreError> {
-    let condition = match step {
-        Step::Content => "s.content_done = 0",
-        Step::Structure => "s.content_done = 1 AND s.structure_done = 0",
-        Step::Health => "s.structure_done = 1 AND s.health_done = 0",
+    let sql = match step {
+        Step::Content => {
+            "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
+            WHERE d.path = ?1 AND s.content_done = 0"
+        }
+        Step::Structure => {
+            "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
+            WHERE d.path = ?1 AND s.content_done = 1 AND s.structure_done = 0"
+        }
+        Step::Health => {
+            "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
+            WHERE d.path = ?1 AND s.structure_done = 1 AND s.health_done = 0"
+        }
     };
-    tx.query_row(&format!("SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path WHERE d.path = ?1 AND {condition}"), [path.as_str()], |r| r.get(0))
-        .optional().map_err(|e| error::sql("checking an incomplete four-step document", e))?
+    tx.prepare_cached(sql)
+        .and_then(|mut q| q.query_row([path.as_str()], |r| r.get(0)))
+        .optional()
+        .map_err(|e| error::sql("checking an incomplete four-step document", e))?
         .ok_or_else(|| refused("a four-step document is absent or this step is already complete"))
 }
 
 /// Append only body facts, preserving the frontmatter rows and their ordinals.
 /// When content omitted the body, fill only its payload and sub-fingerprint.
+/// `pending` is parallel to `documents`, carrying the source identity and append
+/// offsets already read by the host. Host findings commit with the body facts;
+/// an empty document chunk can flush deferred spelling findings without touching
+/// provisional document rows.
 pub fn structure(
     store: &mut Store,
     documents: &[crate::DocumentFacts],
+    pending: &[PendingDocument],
+    findings: &[crate::DerivedFinding<'_>],
     declared: &ContentModel,
     no_body: bool,
 ) -> Result<StepCounters, StoreError> {
     bounded(documents.len())?;
+    if documents.len() != pending.len() {
+        return Err(refused("pending rows must match the structure chunk"));
+    }
+    crate::increment::check_derived_findings(findings)?;
     let tx = store
         .database
         .immediate_transaction("writing four-step structure")?;
@@ -481,17 +544,13 @@ pub fn structure(
     let mut counters = StepCounters::default();
     {
         let mut statements = crate::increment::Statements::prepare(&tx)?;
-        for facts in documents {
+        for (facts, source) in documents.iter().zip(pending) {
             crate::increment::refuse_a_document_that_does_not_add_up(facts)?;
             let document = incomplete_document(&tx, &facts.path, Step::Structure)?;
-            let (hash, byte_length, offset, links, tags): (String, u64, u64, usize, usize) = tx.query_row(
-                "SELECT d.content_hash, d.byte_length, d.body_offset, s.frontmatter_links, s.frontmatter_tags
-                 FROM documents d JOIN four_step_state s ON s.path = d.path WHERE d.id = ?1", [document],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            ).map_err(|e| error::sql("reading four-step append offsets", e))?;
-            if hash != facts.content_hash
-                || byte_length != facts.byte_length
-                || offset != facts.body_offset
+            if source.path != facts.path
+                || source.content_hash != facts.content_hash
+                || source.byte_length != facts.byte_length
+                || source.body_offset != facts.body_offset
             {
                 return Err(refused(
                     "structure must describe the bytes content recorded",
@@ -502,24 +561,28 @@ pub fn structure(
                 document,
                 facts,
                 crate::increment::FactPart::Body,
-                links,
-                tags,
+                source.frontmatter_links as usize,
+                source.frontmatter_tags as usize,
             )?;
             if no_body {
-                tx.execute(
-                    "UPDATE documents SET body = ?1, body_hash = ?2 WHERE id = ?3",
-                    params![facts.body, hash::sub_fingerprint(&facts.body), document],
-                )
-                .map_err(|e| error::sql("filling the four-step body", e))?;
-                counters.rows_rewritten += 1;
+                tx.prepare_cached("UPDATE documents SET body = ?1, body_hash = ?2 WHERE id = ?3")
+                    .and_then(|mut q| {
+                        q.execute(params![
+                            facts.body,
+                            hash::sub_fingerprint(&facts.body),
+                            document
+                        ])
+                    })
+                    .map_err(|e| error::sql("filling the four-step body", e))?;
+                counters.body_rows_rewritten += 1;
             }
-            tx.execute(
-                "UPDATE four_step_state SET structure_done = 1 WHERE path = ?1",
-                [facts.path.as_str()],
-            )
-            .map_err(|e| error::sql("completing four-step structure row", e))?;
+            tx.prepare_cached("UPDATE four_step_state SET structure_done = 1 WHERE path = ?1")
+                .and_then(|mut q| q.execute([facts.path.as_str()]))
+                .map_err(|e| error::sql("completing four-step structure row", e))?;
         }
     }
+    counters.findings_discarded = crate::increment::write_derived_findings(&tx, findings)?;
+    counters.findings_written = findings.len() as u64;
     committed(tx, counters)
 }
 
@@ -582,17 +645,21 @@ pub fn health(
     phase(&tx, 4)?;
     let work = request::ReadWork::default();
     let mut counters = StepCounters::default();
+    let mut summaries = crate::health::KeySummaries::default();
     for document in documents {
         incomplete_document(&tx, &document, Step::Health)?;
-        let (links, findings) =
-            crate::health::four_step_document(&tx, &work, declared.ambiguity_ignore(), &document)?;
+        let (links, findings) = crate::health::four_step_document(
+            &tx,
+            &work,
+            declared.ambiguity_ignore(),
+            &document,
+            &mut summaries,
+        )?;
         counters.links_judged += links;
         counters.findings_written += findings;
-        tx.execute(
-            "UPDATE four_step_state SET health_done = 1 WHERE path = ?1",
-            [document.as_str()],
-        )
-        .map_err(|e| error::sql("completing four-step link health row", e))?;
+        tx.prepare_cached("UPDATE four_step_state SET health_done = 1 WHERE path = ?1")
+            .and_then(|mut q| q.execute([document.as_str()]))
+            .map_err(|e| error::sql("completing four-step link health row", e))?;
     }
     committed(tx, counters)
 }
@@ -642,7 +709,8 @@ pub fn forget(store: &mut Store, path: &DocumentPath) -> Result<StepCounters, St
         return Err(refused("final health has already begun"));
     }
     let rows_deleted =
-        tx.execute("DELETE FROM documents WHERE path = ?1", [path.as_str()])
+        tx.prepare_cached("DELETE FROM documents WHERE path = ?1")
+            .and_then(|mut q| q.execute([path.as_str()]))
             .map_err(|e| error::sql("forgetting a provisional document", e))? as u64;
     let findings_discarded = request::discard_about_in(&tx, path, crate::DiscardScope::EveryKind)?;
     committed(
