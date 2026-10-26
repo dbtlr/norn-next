@@ -200,6 +200,9 @@ def cell_summary(documents, result):
                      f"query_host {probe.get('query_host_ns', probe.get('response', {}).get('host_ns', 0)) / 1e9:.6f}s; "
                      f"parent_delivery {probe['parent_received_ns'] / 1e9:.6f}s (not comparable); "
                      f"{probe['timing_scope']}{findings}")
+    for target, probe in result.get('first_get_targets', {}).items():
+        lines.append(f"  Get target {target}: own_step3 {probe.get('requested_document_structure_ns')}ns "
+                     f"admitted {probe.get('earliest_available_ns')}ns query_host {probe.get('query_host_ns')}ns; {probe['path']}")
     lines.append(f"  semantic {result['store']['semantic_sha256']}")
     return '\n'.join(lines)
 
@@ -563,7 +566,7 @@ def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_ref
     completed = []
     try:
         # Validate ALL receipts, toolchains and frozen fixtures before ANY timed cell.
-        builds = {arm: checked_build(config, arm) for arm in set(arms) | {'main'}}
+        builds = {arm: checked_build(config, arm) for arm in ARMS}
         if len({receipt['rustc'] for receipt, _ in builds.values()}) != 1:
             raise ValueError('all roles must use one toolchain')
         prepared = {}

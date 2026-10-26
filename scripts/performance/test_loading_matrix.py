@@ -88,6 +88,60 @@ class MatrixTests(unittest.TestCase):
             self.assertFalse(audit['accepted'])
             self.assertEqual(len(audit['samples'][0]['busy_reasons']), 4)
 
+    def test_freeze_preserves_small_and_adds_hash_bound_link_target(self):
+        import json
+        from unittest.mock import patch
+        from loading_matrix import freeze_fixtures
+        from fixture import tree_digest
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixture = root / 'fixtures/300'
+            vault = fixture / 'vault'
+            (vault / 'bench').mkdir(parents=True)
+            (vault / 'bench/small.md').write_text('unchanged small')
+            (vault / 'bench/large.md').write_text('original')
+            section = '## Details\nSection\n'
+            manifest = dict(tree_sha256=tree_digest(vault), large_body='Large\n' + section,
+                            section=section, probe_bodies={'bench/large.md': 'Large\n' + section},
+                            paths=['bench/large.md', 'bench/small.md'])
+            with patch('loading_matrix.checked_build', return_value=({'executable': '/mock/worker'}, root)), \
+                    patch('baseline.prepare', return_value=(fixture, manifest)):
+                freeze_fixtures({}, root, [314])
+            frozen = json.loads((fixture / 'manifest.json').read_text())
+            self.assertEqual((vault / 'bench/small.md').read_text(), 'unchanged small')
+            self.assertEqual(frozen['tree_sha256'], tree_digest(vault))
+            self.assertNotEqual(frozen['tree_sha256'], frozen['base_fixture_sha256'])
+            body = (vault / 'bench/large.md').read_text()
+            for raw in ('[[small#Details]]', '[Small](small.md#Details)', '[[matrix-missing-target]]'):
+                self.assertIn(raw, body)
+
+    def test_summary_excludes_warmup_and_retains_individual_warm_costs(self):
+        import copy
+        from loading_method import summarize
+        from baseline import READS, WRITES
+        counters = {key: 3 for key in ('document_opens', 'documents_derived', 'link_health_keys_resolved',
+                    'link_health_candidates_read', 'findings_written', 'links_redecided')}
+        probe = dict(worker_ns=10, query_host_ns=2, parent_received_ns=9000)
+        result = dict(public_ready=dict(probe, counters=counters), end={'resources': {'VmHWM_bytes': 42, 'cpu_seconds': 1}},
+                      warm_operations=[dict(name=name, host_ns=1, round_trip_ns=2) for name in
+                                       [row[0] for row in READS] + WRITES], canonical_operations=[],
+                      layout={}, ready=probe, first_get=probe, first_find=probe, first_search=probe,
+                      first_get_targets={'small': probe}, post_ready_store={}, store={})
+        warmup = copy.deepcopy(result)
+        warmup['public_ready']['worker_ns'] = 999999
+        later = copy.deepcopy(result)
+        later['public_ready']['worker_ns'] = 30
+        results = [({'documents': 314, 'arm': 'main', 'discarded_warmup': discard}, row)
+                   for discard, row in [(True, warmup), (False, result), (False, later)]]
+        report = summarize(results)['sizes']['314']['main']
+        self.assertEqual(report['comparable']['public_ready_worker_ns'],
+                         {'samples': 2, 'median': 20, 'min': 10, 'max': 30})
+        for name in [row[0] for row in READS] + WRITES:
+            self.assertIn('warm_operations.' + name + '.host_ns', report['comparable'])
+            self.assertIn('warm_operations.' + name + '.round_trip_ns', report['comparable'])
+        self.assertNotIn('parent_received_ns', report['comparable'])
+        self.assertIn('parent_clocks.public_ready', report['not comparable (side by side, no ratios)'])
+
     def test_dbstat_reports_documents_including_overflow_and_physical_order(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'store.sqlite3'

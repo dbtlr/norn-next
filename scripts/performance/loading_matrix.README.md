@@ -1,165 +1,176 @@
 # Run the loading lab comparison
 
-The controller runs one fresh measured worker per cell, serially. It uses release
-builds with `induced-failure`, the repository toolchain, 128-document changesets,
-and 128-document four-step transactions. It never restarts a measured cell.
-Fixture generation and the post-close audit run in separate, untimed processes.
-The operating system's filesystem caches are uncontrolled.
+This is a lab prototype, not a production loading policy. Each cell starts one
+fresh worker, serially, with release optimization, `induced-failure`, 128-document
+changesets, and 128-document four-step transactions. No cell restarts. The
+controller, fixture generation, and audits are outside the worker's clocks.
+Filesystem caches remain uncontrolled. The single discarded warmup per size is
+not a claim that every arm has identical cache state.
 
-Run these commands from the harness checkout after committing its worker changes.
-All generated files and detached source checkouts stay under its ignored `target`.
-The build step takes exact main and health-once revisions and the harness's
-current committed prototype revision. Each revision's `provenance.py` runs
-`rustup run` and retains compiler, Cargo, source, profile, feature, and binary
-identity. Each revision has its own Cargo target directory, immutable worker copy, and receipt.
-Separate targets prevent reuse of incompatible local-crate artifacts across revisions.
-At run time the prototype Rust sources must match this checkout; Python-only
-follow-up changes do not require recompilation.
+## Prepare builds and frozen fixtures
+
+Run from the harness checkout after committing Rust changes. Keep `TMPDIR` short
+for the filesystem socket tests. All outputs stay inside this checkout.
 
 ```bash
-mkdir -p target/scratch
-export TMPDIR="$PWD/target/scratch"
+mkdir -p t target
+export TMPDIR="$PWD/t" CARGO_TARGET_DIR="$PWD/target"
 python3 scripts/performance/loading_matrix.py --prepare-builds "$PWD/target/loading-builds"
 python3 scripts/performance/loading_matrix.py --prepare-plan --sizes 2014 10014 > target/loading-plan.json
+python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --freeze-fixtures target/frozen --sizes 314 2014 10014
 ```
 
-After preparation, run the 314-document pilot explicitly:
+One `--prepare-builds` invocation creates all three roles: main `2e213c09`, the
+committed prototype HEAD, and health-once `e944a338`. Every role has its own
+checkout, target directory, frozen binary, and build receipt. Compiler identities
+must match. Source and binary hashes, features, profile, Cargo configuration, and
+prototype Rust source equality are checked again before and after the matrix.
+Python-only follow-up commits can reuse receipts.
+
+`--freeze-fixtures` generates each background size exactly once before timing.
+To reuse a base fixture parent, add `--fixtures PATH`; its subdirectories use
+background counts (`300`, `2000`, `10000`). A reuse invocation requires every
+selected size to exist in that parent. Separate invocations with disjoint sizes
+can populate the same destination. The existing n2014 base digest must be
+`3c0fa350593b337a953d14c59dcb240ea5afca93d36d120d6c7b38fc5fd3635a`, and
+its generator and probe authoring must still match main. Every reused tree is
+rehashed against its manifest. Fixture manifests retain `base_fixture_sha256`.
+
+The version-2 matrix fixture extends `bench/large.md` with `[[small#Details]]`,
+`[Small](small.md#Details)`, and `[[matrix-missing-target]]`. It retains fourteen
+probe documents, keeps `small.md` unchanged, and records a new `tree_sha256`.
+The base digest and the measurement digest are deliberately distinct. Timed
+runs require `--fixtures` and reject fixtures without this version. All selected
+fixtures are copied and verified before any timed cell, including the warmup.
+
+## Run a pilot or the full matrix
 
 ```bash
-python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --sizes 314 --output target/loading-pilot
+python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --fixtures target/frozen/fixtures --sizes 314 --repetitions 1 --output target/loading-pilot
+python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --fixtures target/frozen/fixtures --sizes 2014 --repetitions 1 --arms health-once four-step --output target/loading-key-pilot
+python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --fixtures target/frozen/fixtures --sizes 2014 10014 --output target/loading-matrix
 ```
 
-The pilot needs `target/loading-builds/config.json` and the source checkouts,
-build receipts, and immutable worker binaries that configuration names.
-Preparation creates these files. A changed Rust worker requires a new committed
-prototype revision and a fresh build directory. Reuse no existing output directory.
+A repetition is one four-cell Williams row. The rows cycle in this order:
 
-The pilot runs each arm once. To select an arm, add exactly one of
-`--arms main`, `--arms four-step`, `--arms four-step-no-body`, or
-`--arms health-once` and use a new output directory. For an existing frozen fixture
-parent, add `--fixtures PATH`; its subdirectories use background counts `300`,
-`2000`, and `10000`. Otherwise `baseline.prepare` generates and freezes the fixture
-once per size using the existing seed and known-answer probes. Total document
-counts include fourteen probe documents. `small` resolves to `bench/small.md` in
-all arms; the lab receives that exact path as its requested document.
-
-The larger matrix is an explicit invocation, separate from preparation:
-
-```bash
-python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --sizes 2014 10014 --output target/loading-matrix
+```text
+main              four-step          health-once        four-step-no-body
+four-step         four-step-no-body  main               health-once
+four-step-no-body health-once        four-step          main
+health-once       main               four-step-no-body  four-step
 ```
 
-Each cell writes `result.json`, `cell.json`, its fixture manifest, raw worker and
-audit logs, and the complete request/response history. The run's `run.json` stays
-incomplete on any failed cell or semantic mismatch. It sets `semantic_equal`
-only when all four arms ran and passed the gate for each identical fixture.
+Defaults are eight repetitions at 2014 (two squares), four at 10014 (one square),
+and one at 314. Each size also has one main cell labelled `warmup-discarded`.
+`--repetitions N` overrides the row count for every selected size. Arm filtering
+retains relative Williams order and the warmup. The default full plan has 50
+cells. The 314 pilot has five. Warmups pass the gates but never enter summaries.
+Use a new output directory for every run.
 
-## Read the measurements
+Immediately before every cell the controller calls `sync`. It then records the
+raw load average and all fields of `/proc/pressure/{cpu,io,memory}`. Admission
+requires load1 per effective CPU at most 0.5, CPU `some avg10` at most 10%, IO
+`some avg10` at most 5%, and memory `some avg10` at most 1%. Effective CPU count
+is the minimum of process affinity and the current cgroup v2 quota, if present.
+The controller waits at most 300 seconds, sampling every five seconds, then
+refuses the cell. Each `host-admission.json` records thresholds, samples, reasons,
+acceptance, and elapsed wait. A refused cell leaves `run.json` incomplete.
 
-All `parent_received_ns` values share one origin per cell: immediately before
-constructing the existing `Current` adapter. They include process launch,
-serialization, transport, and earlier validation or sampling. Worker clocks have
-the worker's existing `Instant` origin and remain separate; they are never added
-to parent clocks. Report `step_boundary_ns` values have a third origin: the lab
-build's start, after host setup. Per-operation `host_ns` and `round_trip_ns` keep their existing
-worker and controller boundaries. These are descriptive observations from one
-sample, with no statistical or speedup claim.
+## Gates and layout
 
-Lab callbacks buffer typed answers and timing records. The worker serializes and
-emits them after construction and accounting finish, before its public Ready record.
-Their `parent_received_ns` values describe delivery after build, not early availability.
-Console output separates the estimated earliest answer, actual query finish,
-and parent delivery times.
+An independent, untimed store-owned audit runs immediately after public Ready,
+before canonical reads and all warm operations. Another runs after warm writes
+and worker shutdown, against the final source tree. This catches step-4 errors
+before `rename_hub` can re-judge links. Both audit phases check source hashes and
+semantic state. Native provenance replay checks every retained post-Ready
+response against the raw worker stream and final generation.
 
-- `ready`: four-step structure-complete callback; main's public Ready control
-  record; health-once's full-build health boundary. `public_ready` separately
-  retains the ordinary control record for every arm. Lab parent observations are
-  buffered delivery after build. The public control record includes the worker's
-  accounting tail after observing Ready. Console output names the selected
-  boundary and prints public Ready beside it.
-- `health_complete`: four-step relations-complete callback; public Ready for main;
-  full-build health boundary for health-once.
-- `first_get` and `first_find`: the first validated answer. Main sends one real
-  public `Host::get` and `Host::find` during ordinary first attachment, using its
-  existing caller-only ACK protocol; an ordinary loading refusal falls back
-  after Ready. Four-step uses `FourStepRead::get/find`, explicitly labelled as lab
-  hooks. Health-once uses public calls after its full build. All arms issue the
-  same logical whole Get and active metadata first page; the lab's Find projects
-  only paths, as the public query does. Lab answers are checked against final
-  public answers. The lab Get is labelled **answered before link health (health loading)**.
-  Main and health-once Get answers include link-health findings. The base fixture's
-  small document has no links, so equal answers do not make these findings guarantees equal.
-  Lab timing is labelled **estimated earliest availability plus builder query time**.
-  `earliest_available_ns` means prerequisite completion observed on the worker clock,
-  rather than the exact transaction completion instant. For Get, it is the later
-  of ContentComplete callback entry and that document's Structured callback entry.
-  Find uses ContentComplete entry. Search uses ContentComplete entry in standard
-  mode and StructureComplete entry in no-body mode.
-  `earliest_answer_ns` adds the measured `query_host_ns` to that prerequisite observation.
-  Lab endpoint `worker_ns` uses this derived estimate, which excludes dispatch
-  delays caused by preceding probes. It is not an actual answer-finish observation.
-  The estimate reuses the measured builder duration; no earlier-dispatch execution is measured.
-  Actual `query_started_ns` and `query_finished_ns` remain separate worker-clock observations.
-  Hook latency and public admission latency are different paths.
-- `requested_document_structure`: the lab's requested-document structure instant,
-  descriptive only. Whole Get still waits for content to finish vault-wide.
-- `first_search`: the first actual lexical answer for the existing common token,
-  independently checked against the fixture. Four-step calls `FourStepRead::search`
-  after content completes. No-body calls it after structure completes, when all
-  body text is present. Main and health-once use their first public `Host::search`
-  after Ready. Every result names the path used. `public_search_after_ready` retains
-  a public search in every arm, including the lab arms.
-- `step_counters`: the prototype report's per-step rows, facts, link judgments,
-  findings, commits, and file reads. `files_read` counts source-read attempts, including failed opens and paths refused before opening.
-  `rows_rewritten` counts content/metadata transitions. `body_rows_rewritten` counts
-  the separate body payload updates in no-body mode. SQLite's internal FTS trigger
-  and shadow-table writes are uncounted. Skipping findings discard on a fresh store
-  is also available to ordinary loading; that saving is not specific to four-step.
-  `step_boundary_ns` records names, content, structure, and relations end times
-  relative to the lab build's start. `step_boundary_intervals_ns` subtracts those
-  successive boundaries; intervening observer queries and pull-ahead work remain included.
-  `step_busy_ns` records each main pass's elapsed work, excluding observer callbacks
-  and requested-path pull-ahead. `pull_ahead_ns` records that requested-path work
-  separately, excluding callbacks. Busy time is elapsed work, not CPU time.
-  `worker_ready.job_evidence` retains ordinary counters, including links decided,
-  findings written/discarded, and changesets. Ordinary commit counts are
-  unavailable; changesets are not substituted for commits.
-- `warm_operations`: the existing eight reads and four writes, one sample each,
-  in their existing order. Each operation retains its command, response, host
-  time, round trip, counters, and validation. Write readbacks are separate history
-  entries outside the operation's clock. There is no aggregate warm score.
-- `store`: the existing store-owned schema-3 audit after all warm writes and
-  worker shutdown. Source paths, byte lengths, and hashes are checked against
-  the actual final tree. `semantic_sha256` must match across arms sharing the
-  original frozen fixture. Canonical identity, page map, and document construction
-  hashes remain descriptive; physical differences do not fail the semantic gate.
-- `documents_layout`: read-only SQLite `dbstat` after the four warm writes, worker
-  shutdown, and final audit. It describes the post-workload layout; it does not
-  isolate the layout produced by loading alone. It covers the documents B-tree only. Page count
-  includes interior, leaf, and overflow pages. Average fill is total payload bytes
-  divided by total page bytes. Fragmentation is the fraction of consecutive pages
-  in `dbstat.path` order whose physical page numbers are not adjacent. This is a
-  defined physical-order measure, not an estimate of query cost.
-- `ready.resources` and `end.resources`: Linux main-process RSS and related
-  readings when the controller receives the record. Lab boundary records arrive
-  after build, so their resources are not early-boundary samples. Samples exclude
-  the controller; they do not claim the exact publication instant.
-- `replay_verified`: the existing native provenance validator checks the complete
-  declared short workload against final epoch/generation and plan-root identity.
-  Retained responses must exactly equal the post-Ready raw worker stream.
+At each audit phase, a read-only SQLite connection reads exact `SELECT path,id`
+pairs from `documents` and `vault_files`. Semantic digests AND these path-to-id
+maps must equal the first accepted reference for the same frozen fixture at
+both phases. References persist in `FIXTURES/loading-gate-reference.json`, or
+`--gate-reference PATH`. Never delete that file to make a mismatch pass. These
+fixtures contain no undecodable names. Identity, construction, and page-map
+hashes remain descriptive; exact path-to-id equality is a separate mandatory
+gate. On any mismatch the controller fails loudly and records the failed run.
 
-Health-once cells start a separate Python adapter process with the archived
-checkout's `scripts/performance` first on its import path. Its own `transport` and
-`loading.validate_receipts` select and validate `health-once`; they are not ported.
-The controller uses the same current shared provenance replay validator and layout
-inspection for the four arms. The archived final audit uses its own audit adapter. Its exactly-once receipt gate
-uses the final audited link count: the fixed, validated warm workload changes no
-link cardinality, so this is also the initial stored link count.
+`layout.post_ready` and `layout.post_workload` capture every `dbstat` table and
+index, including SQLite and FTS internal objects: pages, payload bytes, unused
+bytes, overflow pages, and page bytes. They also capture `freelist_count`,
+`page_count`, `page_size`, database file size, and WAL file size. Post-Ready
+inspection runs while the idle worker remains open; SQLite reads the committed
+WAL view. File size alone does not describe the full live store. The retained
+`documents_layout` field additionally describes post-workload B-tree fill and
+physical fragmentation; its scope is only the documents table.
 
-Run the Python checks with the repository's standard runner:
+## Read the report
+
+`summary.json` separates the following categories. Each numeric metric reports
+its median and min–max across retained repetitions. These are descriptive
+statistics with no significance tests. No ratios are calculated.
+
+Comparable (main vs four-step vs four-step-no-body; health-once context only):
+
+- Public Ready on the worker clock, with link health complete.
+- Peak RSS (`VmHWM`) and end CPU for the worker process.
+- Document opens, documents derived, links judged, keys resolved, candidates
+  read, and findings written.
+- Each of twelve warm operations individually, with `host_ns` and round trip.
+- Canonical Get, Find, and Search after Ready, plus the linked whole Get.
+- Layout at both audit phases, and mandatory gates.
+
+Not comparable (side by side, no ratios):
+
+- Four-step `ready` (end of step 3) versus public Ready.
+- `first_get`, `first_find`, `first_search`: lab hooks and public paths have
+  different admission paths and findings guarantees.
+- Lab parent clocks and lab resources.
+- Step boundaries, busy times, pull-ahead, and commits.
+- Health-once timings as a judge-once effect; its archived pre-382 base is context.
+- Identity, page-map, and construction digests.
+
+Every result retains raw endpoints and responses. Parent clocks start before
+`Current` construction; worker clocks start at the worker's `Instant`; step
+report boundaries start at lab construction. Never add these clocks. Console
+public Ready uses only `public_ready.worker_ns`; parent delivery is explicitly
+not comparable.
+
+Lab callbacks buffer typed answers and emit them after construction. Their
+parent receipt times and resources describe post-build delivery. Each lab query
+reports `earliest_available_ns`, actual `query_started_ns`, `query_finished_ns`,
+and `query_host_ns`. The earliest-answer estimate is availability plus measured
+builder-query duration; it is not an actual earlier execution. Each query's
+builder time appears beside Ready because queries delay subsequent steps.
+
+Both `small.md` and the linked `large.md` are requested in four-step arms.
+`first_get_targets` reports each separately, with its own observed step-3 instant
+beside admitted Get. Admission waits for that structure AND vault-wide content,
+so the difference shows the vault-wide step-2 wait. Early Get is labelled
+"health loading". It returns exact content and structure, with no step-4
+findings. The whole linked Get checks both link families, an anchor, and a
+broken target. The post-Ready answer checks its broken-link finding.
+
+Pinned main and health-once workers expose only one early Get (`small`). Their
+second whole Get uses the public path after Ready and explicitly says so; no
+second early endpoint is inferred. Main's public Find retains
+`query_started_ns`: it starts after the controller acknowledges Get.
+
+Relations boundary and busy time include `four_step::finish` teardown and the
+authority check. Busy time excludes observer queries and requested-path
+pull-ahead; it is elapsed time, not CPU. Boundary intervals include those pauses.
+SQLite FTS trigger work is not counted as explicit rows or commits. Ordinary
+job evidence supplies changesets rather than committed transaction counts.
+
+The fixed warm workload has eight reads and four writes. Write readbacks are
+separate history entries outside each operation clock. No aggregate warm score
+can hide an individual regression. Archived health-once uses its own transport,
+audit adapter, and exactly-once validator in a separate Python process. The
+final audited link count equals the initial count because these writes preserve
+link cardinality.
+
+Python checks use the repository runner:
 
 ```bash
-TMPDIR="$PWD/target/scratch" python3 -m unittest discover -s scripts/performance -v
-TMPDIR="$PWD/target/scratch" python3 -m unittest discover -s scripts/performance/live_mode -v
-TMPDIR="$PWD/target/scratch" CARGO_TARGET_DIR="$PWD/target" cargo test -p norn-host --test performance_timing --features induced-failure
+TMPDIR="$PWD/t" python3 -m unittest discover -s scripts/performance -v
+TMPDIR="$PWD/t" python3 -m unittest discover -s scripts/performance/live_mode -v
 ```
