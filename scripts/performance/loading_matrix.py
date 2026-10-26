@@ -497,16 +497,16 @@ def cell_workload():
 def check_main_source(repo, base=MAIN_BASE):
     """The main measurement differs only in its performance worker controls."""
     import subprocess
+    command = ['git', 'diff', base, '--', ':(glob)crates/*/src/**']
+    output = subprocess.check_output(command, cwd=repo, text=True)
+    if output:
+        raise ValueError('main worker product sources differ from the pinned baseline')
     allowed = lambda name: (name == 'crates/norn-host/tests/performance.rs'
                             or name.startswith('crates/norn-host/tests/performance/') and name.endswith('.rs'))
     changed = subprocess.check_output(['git', 'diff', '--name-only', base], cwd=repo, text=True).splitlines()
     untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], cwd=repo, text=True).splitlines()
     if any(not allowed(name) for name in changed + untracked):
         raise ValueError('main worker must preserve pinned product sources and change only performance Rust tests')
-    command = ['git', 'diff', base, '--', 'crates/*/src']
-    output = subprocess.check_output(command, cwd=repo, text=True)
-    if output:
-        raise ValueError('main worker product sources differ from the pinned baseline')
     return dict(base=base, product_sources_equal=True, command=command, output=output)
 
 

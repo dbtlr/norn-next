@@ -85,7 +85,7 @@ class MatrixTests(unittest.TestCase):
             worker.write_text('ordered worker')
             check_main_source(repo, 'HEAD')
             product.write_text('changed product')
-            with self.assertRaisesRegex(ValueError, 'main worker'):
+            with self.assertRaisesRegex(ValueError, 'product sources differ'):
                 check_main_source(repo, 'HEAD')
             product.write_text('product')
             (product.parent / 'extra.rs').write_text('untracked product')
