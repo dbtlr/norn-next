@@ -149,11 +149,24 @@ pub fn begin_with_options(
     tx.execute_batch("CREATE TABLE four_step_indexes(name TEXT PRIMARY KEY, sql TEXT NOT NULL, boundary INTEGER NOT NULL) WITHOUT ROWID;
         CREATE TEMP TABLE four_step_trigrams(trigram TEXT NOT NULL, document INTEGER NOT NULL);")
         .map_err(|e| error::sql("creating deferred build state", e))?;
+    // Lab-only index-packing probe: name prefixes listed here stay maintained
+    // throughout the build instead of being bulk-created at their boundary.
+    let maintained: Vec<String> = std::env::var("NORN_PERFORMANCE_MAINTAINED_INDEXES")
+        .map(|v| {
+            v.split(',')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
     for sql in crate::ddl::statements()
         .into_iter()
         .filter(|sql| deferred_indexes && sql.starts_with("CREATE INDEX "))
     {
         let name = sql.split_whitespace().nth(2).expect("index name");
+        if maintained.iter().any(|prefix| name.starts_with(prefix.as_str())) {
+            continue;
+        }
         // Findings are admitted by the first per-document Get. Their indexes
         // also bound per-document finding replacement during content derivation.
         let boundary = if matches!(name, "findings_path" | "findings_rule_set")
