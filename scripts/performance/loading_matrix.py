@@ -6,22 +6,10 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-ARMS = ('main', 'four-step', 'four-step-no-body', 'health-once')
+from loading_method import (ARMS, LINK_TARGET, BASE_2014, plan, gate_semantics, identity_map,
+                            store_layout, await_idle, BUSY_THRESHOLDS, summarize)
+
 REVISIONS = {'main': '2e213c09', 'health-once': 'e944a338'}
-
-
-def plan(sizes):
-    if not sizes or len(set(sizes)) != len(sizes) or any(n not in (314, 2014, 10014) for n in sizes):
-        raise ValueError('choose unique total document counts from 314, 2014, 10014')
-    return [dict(documents=n, background_documents=n - 14, arm=arm,
-                 profile='release', changeset_size=128, transaction_bound=128)
-            for n in sizes for arm in ARMS]
-
-
-def gate_semantics(references, result):
-    digest = result['store']['semantic_sha256']
-    if references.setdefault(result['fixture_sha256'], digest) != digest:
-        raise ValueError('semantic_sha256 differs across arms for the same frozen fixture')
 
 
 def documents_layout(path):
@@ -54,9 +42,12 @@ def validate_lab_stage(stage, manifest):
     wrapped = {'answer': {'report': report, 'unsatisfied': stage['unsatisfied'],
                            'advisories': stage.get('advisories', [])}}
     if name == 'four-step-get':
-        if stage.get('path') != 'bench/small.md':
+        if stage.get('path') not in ('bench/small.md', LINK_TARGET):
             raise ValueError('lab hook answered the wrong target')
-        validate_read('current', {'op': 'get', 'target': 'bench/small.md'}, wrapped, manifest)
+        if stage['path'] == LINK_TARGET:
+            validate_link_get(wrapped, manifest, health_loading=True)
+        else:
+            validate_read('current', {'op': 'get', 'target': 'bench/small.md'}, wrapped, manifest)
         document = report['document']
         for key in ('headings', 'blocks', 'tags', 'links', 'findings'):
             collection = document[key]
@@ -77,6 +68,27 @@ def validate_lab_stage(stage, manifest):
         if (report['ladder'] != {'rungs': [{'rung': 'lexical'}], 'repeatable': True}
                 or page['moved'] or (page['next'] is not None) != (len(manifest['paths']) > 25)):
             raise ValueError('lab Search differs from the lexical first page')
+
+
+def validate_link_get(response, manifest, health_loading=False):
+    """Check both authored link families and the known broken target per whole Get."""
+    doc = response['answer']['report']['document']
+    if (doc['path'] != LINK_TARGET or doc['body']['text'] != manifest['large_body']
+            or doc['fields'] != {key: {'kind': 'scalar', 'raw': value} for key, value in {'status': 'draft', 'perf_bucket': 'probe'}.items()}):
+        raise ValueError('linked Get content differs from fixture')
+    for key in ('headings', 'blocks', 'tags', 'links', 'findings'):
+        if doc[key]['total'] != len(doc[key]['items']):
+            raise ValueError('linked whole Get truncated a collection')
+    links = doc['links']['items']
+    if (len(links) != 3 or {link['family'] for link in links} != {'wikilink', 'markdown'}
+            or not any(link['anchor'] is not None for link in links)
+            or not any(link['target'] == 'matrix-missing-target' for link in links)):
+        raise ValueError('linked Get does not contain authored links/anchors/broken target')
+    if health_loading:
+        if doc['findings']['total'] != 0:
+            raise ValueError('lab Get unexpectedly includes step-4 findings')
+    elif not any(finding['kind'] == 'link/broken' for finding in doc['findings']['items']):
+        raise ValueError('public linked Get omitted broken-link finding')
 
 
 def endpoint(origin, *, path, response=None, worker_ns=None, **fields):
@@ -108,15 +120,21 @@ def describe_probe(probe, arm, kind):
 
 
 def lab_measurements(arm, events):
-    expected = ['names', 'requested-structure', 'content', 'find']
+    names = [e['startup_stage'].removeprefix('four-step-') for e in events]
+    # Preserve exact pass/probe order while allowing one structure/Get pair per target.
+    expected = ['names', 'content', 'find']
     if arm == 'four-step':
         expected.append('search')
-    expected.extend(['get', 'structure'])
+    expected.append('structure')
     if arm == 'four-step-no-body':
         expected.append('search')
     expected.append('relations')
-    if [e['startup_stage'] for e in events] != ['four-step-' + name for name in expected]:
+    if [name for name in names if name not in ('requested-structure', 'get')] != expected:
         raise ValueError('four-step boundary/probe coverage differs')
+    requested = [e for e in events if e['startup_stage'] == 'four-step-requested-structure']
+    gets = [e for e in events if e['startup_stage'] == 'four-step-get']
+    if not requested or len(requested) != len(gets):
+        raise ValueError('four-step requested target coverage differs')
     stages = {e['startup_stage']: e for e in events}
     report = stages['four-step-relations']
     if report['reconciled'] is not False:
@@ -138,8 +156,8 @@ def lab_measurements(arm, events):
         raise ValueError('invalid four-step pull-ahead timing')
     result = dict(step_counters=report['steps'], step_boundary_ns=boundaries,
                   step_boundary_intervals_ns=intervals, step_busy_ns=busy, pull_ahead_ns=pull_ahead,
-                  step_boundary_scope='lab build origin; end of each main pass, before its observer queries',
-                  step_busy_scope='main-pass elapsed work excluding observer queries and requested-path pull-ahead',
+                  step_boundary_scope='lab build origin; end of each main pass, before its observer queries; relations includes four_step::finish teardown and authority check',
+                  step_busy_scope='main-pass elapsed work excluding observer queries and requested-path pull-ahead; relations includes four_step::finish teardown and authority check',
                   pull_ahead_scope='requested-path content and structure elapsed work; excludes observer queries',
                   step_duration_scope='boundary intervals include intervening observers and pull-ahead; busy_ns is elapsed work, not CPU time',
                   counter_scope={
@@ -155,6 +173,7 @@ def lab_measurements(arm, events):
                              resources=event.get('resources_when_observed'), source=event['startup_stage'],
                              delivery_scope='buffered in worker; delivered after build',
                              resource_scope='sampled after build on buffered event receipt')
+    result['requested_documents_structure'] = {e.get('path', 'bench/small.md'): dict(worker_ns=e['elapsed_ns'], parent_received_ns=e['parent_received_ns']) for e in requested}
     result['ready']['counters'] = {step: result['step_counters'][step] for step in steps[:3]}
     result['health_complete']['counters'] = result['step_counters']
     return result
@@ -167,8 +186,7 @@ def cell_summary(documents, result):
     clock = f"worker {worker_ready / 1e9:.6f}s " if worker_ready is not None else ''
     lines = [f"{documents} {result['arm']}: Ready[{boundary}] "
              f"{clock}"
-             f"parent_delivery {ready['parent_received_ns'] / 1e9:.6f}s "
-             f"public_Ready {result['public_ready']['parent_received_ns'] / 1e9:.6f}s"]
+             f"public_Ready_worker {result['public_ready'].get('worker_ns', 0) / 1e9:.6f}s (health complete)"]
     for kind in ('get', 'find', 'search'):
         probe = result['first_' + kind]
         worker = probe.get('worker_ns')
@@ -179,7 +197,8 @@ def cell_summary(documents, result):
             clock = f"worker {worker / 1e9:.6f}s " if worker is not None else ''
         findings = '; ' + probe['findings_scope'] if kind == 'get' else ''
         lines.append(f"  {kind.title()}[{probe['path']}] {clock}"
-                     f"parent_delivery {probe['parent_received_ns'] / 1e9:.6f}s; "
+                     f"query_host {probe.get('query_host_ns', probe.get('response', {}).get('host_ns', 0)) / 1e9:.6f}s; "
+                     f"parent_delivery {probe['parent_received_ns'] / 1e9:.6f}s (not comparable); "
                      f"{probe['timing_scope']}{findings}")
     lines.append(f"  semantic {result['store']['semantic_sha256']}")
     return '\n'.join(lines)
@@ -203,7 +222,7 @@ def measure_cell(binary, root, manifest, arm):
         from loading import validate_receipts
     from native_validation import validate_provenance
 
-    events, probes = [], {}
+    events, probes, get_targets = [], {}, {}
     origin = time.perf_counter_ns()
 
     def on_stage(stage):
@@ -220,7 +239,9 @@ def measure_cell(binary, root, manifest, arm):
                     validate_read('current', {'op': 'find'}, stage, manifest)
                 probes[('get', 'find')[index]] = dict(
                     parent_received_ns=stage['parent_received_ns'], worker_ns=stage['query_finished_ns'],
-                    path=('public Host::get', 'public Host::find')[index], response=stage)
+                    path=('public Host::get', 'public Host::find')[index], response=stage,
+                    query_started_ns=stage['query_started_ns'], query_finished_ns=stage['query_finished_ns'],
+                    query_host_ns=stage['query_host_ns'])
             ack = root / 'operator-prefix-acks' / f'{index + 1}.pending'
             write_json(ack, dict(sequence=index + 1, probe=stage['probe']))
             ack.replace(ack.with_suffix('.json'))
@@ -228,13 +249,17 @@ def measure_cell(binary, root, manifest, arm):
             validate_lab_stage(stage, manifest)
             if name in ('four-step-get', 'four-step-find', 'four-step-search'):
                 kind = name.removeprefix('four-step-')
-                if kind in probes:
+                key = stage['path'] if kind == 'get' else kind
+                target_probes = get_targets if kind == 'get' else probes
+                if key in target_probes:
                     raise ValueError('duplicate lab probe')
-                probes[kind] = dict(parent_received_ns=stage['parent_received_ns'],
+                target_probes[key] = dict(parent_received_ns=stage['parent_received_ns'],
                     worker_ns=stage['query_finished_ns'], path=f'lab FourStepRead::{kind}', response=stage,
                     earliest_available_ns=stage['earliest_available_ns'], query_host_ns=stage['query_host_ns'],
                     query_started_ns=stage['query_started_ns'], query_finished_ns=stage['query_finished_ns'],
                     earliest_answer_ns=stage['earliest_answer_ns'])
+                if kind == 'get' and stage['path'] == 'bench/small.md':
+                    probes['get'] = target_probes[key]
         events.append(stage)
 
     if arm == 'main':
@@ -244,7 +269,7 @@ def measure_cell(binary, root, manifest, arm):
     # strips inherited NORN_* values, so the adapter's typed options own selection.
     options = dict(loading=loading, stage_handler=on_stage)
     if arm.startswith('four-step'):
-        options['loading_options'] = {'transaction_bound': 128, 'requested_paths': ['bench/small.md']}
+        options['loading_options'] = {'transaction_bound': 128, 'requested_paths': ['bench/small.md', LINK_TARGET]}
     worker = Current(binary, root, **options)
     history, observations = [], []
     try:
@@ -259,6 +284,13 @@ def measure_cell(binary, root, manifest, arm):
             validate_receipts(arm, events, worker.ready, manifest)
         elif len(events) != 2:
             raise ValueError('main must execute its two public prefix attempts')
+
+        # Untimed independent gate while the measured process is idle, before any
+        # query or rename can conceal a step-4 health difference.
+        post_ready_store = audit_store(binary, root, manifest)
+        database = next((root / 'data').rglob('store.sqlite3'))
+        post_ready_path_ids = identity_map(database)
+        post_ready_layout = store_layout(database)
 
         def call(command, *, name):
             requested = time.perf_counter_ns() - origin
@@ -296,6 +328,21 @@ def measure_cell(binary, root, manifest, arm):
         validate_read('current', search['command'], search['response'], manifest)
         search['path'] = 'public Host::search after Ready'
         probes.setdefault('search', search)
+        linked = call({'op': 'get', 'target': LINK_TARGET, 'whole': True}, name='canonical_get_linked')
+        validate_link_get(linked['response'], manifest)
+        if arm.startswith('four-step'):
+            early_doc = get_targets[LINK_TARGET]['response']['answer']['document']
+            final_doc = linked['response']['answer']['report']['document']
+            for key in ('path', 'body', 'fields', 'headings', 'blocks', 'tags'):
+                if early_doc[key] != final_doc[key]:
+                    raise ValueError('linked lab Get exact content/structure differs from public Get')
+            for target, probe in get_targets.items():
+                probe['requested_document_structure_ns'] = lab['requested_documents_structure'][target]['worker_ns']
+        get_targets.setdefault('bench/small.md', probes['get'])
+        get_targets.setdefault(LINK_TARGET, dict(parent_received_ns=linked['parent_received_ns'],
+            worker_ns=None, path='public Host::get after Ready (pinned worker has no second early probe)',
+            response=linked['response'], query_host_ns=linked['host_ns']))
+        canonical = observations.copy()
         state = {name: dict(path=name, body=body, fields={'status': 'draft', 'perf_bucket': 'probe'})
                  for name, body in manifest['probe_bodies'].items()}
         warm = []
@@ -329,6 +376,8 @@ def measure_cell(binary, root, manifest, arm):
     store = audit_store(binary, root, final_manifest)
     if arm == 'health-once':
         health_once_final_gate(validate_receipts, events, worker.ready, manifest, store)
+    final_path_ids = identity_map(next((root / 'data').rglob('store.sqlite3')))
+    final_layout = store_layout(next((root / 'data').rglob('store.sqlite3')))
     layout = documents_layout(next((root / 'data').rglob('store.sqlite3')))
     write_json(root / 'request-history.json', history)
     write_json(root / 'observations.json', observations)
@@ -347,7 +396,10 @@ def measure_cell(binary, root, manifest, arm):
         first_get=describe_probe(probes['get'], arm, 'get'),
         first_find=describe_probe(probes['find'], arm, 'find'),
         first_search=describe_probe(probes['search'], arm, 'search'), public_search_after_ready=search,
-        stages=events, worker_ready=worker.ready, warm_operations=warm, end=end, store=store,
+        stages=events, worker_ready=worker.ready, warm_operations=warm, canonical_operations=canonical, end=end, store=store,
+        post_ready_store=post_ready_store, post_ready_store_path_ids=post_ready_path_ids, store_path_ids=final_path_ids,
+        first_get_targets={path: describe_probe(probe, arm, 'get') for path, probe in get_targets.items()},
+        layout={'post_ready': post_ready_layout, 'post_workload': final_layout},
         documents_layout=layout, replay_verified=replay,
         unavailable={'commits': 'ordinary job evidence exposes changesets, not committed transaction count'},
         resource_scope='Linux main-process RSS sampled on receipt; excludes controller, not exact publication instants')
@@ -379,7 +431,8 @@ def cell_workload():
     """The existing twelve operations, one sample each, plus authored preparation/readbacks."""
     from baseline import READS, WRITES, mutation
     commands = [{'op': 'get', 'target': 'small', 'whole': True}, {'op': 'find'},
-                {'op': 'search', 'query': __import__('fixture').COMMON}]
+                {'op': 'search', 'query': __import__('fixture').COMMON},
+                {'op': 'get', 'target': LINK_TARGET, 'whole': True}]
     for name, base in READS + [(name, None) for name in WRITES]:
         command = base or mutation(name, 0)
         commands.append(command)
@@ -416,6 +469,10 @@ def prepare_builds(root, repo):
         receipt['sha256'] = sha256(frozen_binary)
         receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
         config['builds'][role] = dict(source=str(source), receipt=str(receipt_path))
+    toolchains = {json.loads(Path(item['receipt']).read_text())['rustc'] for item in config['builds'].values()}
+    if len(toolchains) != 1:
+        raise ValueError('prepare-builds must compile all roles with one toolchain')
+    config['rustc'] = toolchains.pop()
     (root / 'config.json').write_text(json.dumps(config, indent=2) + '\n')
     return root / 'config.json'
 
@@ -450,53 +507,101 @@ def checked_build(config, arm):
     return receipt, source
 
 
-def run_matrix(config, fixtures, output, sizes, arms):
+def freeze_fixtures(config, destination, sizes, base=None):
+    """Freeze all source trees before the first measured process starts."""
+    from types import SimpleNamespace
+    from baseline import prepare, write_json
+    from fixture import tree_digest
+    receipt, source = checked_build(config, 'main')
+    # Reuse only base fixtures bound to the unchanged generator and probe authoring.
+    if base is not None:
+        import subprocess
+        changed = subprocess.run(['git', 'diff', '--quiet', REVISIONS['main'], '--',
+                                  'crates/norn-fixtures', 'scripts/performance/fixture.py'], cwd=Path(__file__).resolve().parents[2])
+        if changed.returncode:
+            raise ValueError('base fixture generator differs')
+    for size in sizes:
+        frozen, manifest = prepare(SimpleNamespace(output=destination, fixtures=base,
+                                  current=Path(receipt['executable'])), size - 14)
+        if base is not None and size == 2014 and manifest['tree_sha256'] != BASE_2014:
+            raise ValueError('existing n2014 base fixture does not match the known generator hash')
+        manifest['base_fixture_sha256'] = manifest['tree_sha256']
+        # Keep fourteen probes and the original small document. The second whole
+        # target adds both link families, a heading anchor, and a broken target.
+        links = "\n[[small#Details]]\n[Small](small.md#Details)\n[[matrix-missing-target]]\n"
+        body = manifest['large_body'].replace(manifest['section'], links + manifest['section'])
+        manifest['large_body'] = body
+        manifest['probe_bodies'][LINK_TARGET] = body
+        (frozen / 'vault' / LINK_TARGET).write_text('---\nstatus: draft\nperf_bucket: probe\n---\n' + body)
+        manifest.update(matrix_fixture_version=2, link_target=LINK_TARGET,
+                        tree_sha256=tree_digest(frozen / 'vault'),
+                        markdown_bytes=sum((frozen / 'vault' / name).stat().st_size for name in manifest['paths']))
+        write_json(frozen / 'manifest.json', manifest)
+    return destination / 'fixtures'
+
+
+def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_reference=None):
     import shutil
     import subprocess
     import sys
     from types import SimpleNamespace
     from baseline import prepare, write_json
     from provenance import source_tree_digest
-    cells = [c for c in plan(sizes) if c['arm'] in arms]
+    if fixtures is None:
+        raise ValueError('timed runs require --fixtures; freeze every size before timing')
+    cells = [c for c in plan(sizes, repetitions) if c['arm'] in arms or c['discarded_warmup']]
     output.mkdir(parents=True)
     snapshot = source_tree_digest(Path(__file__).resolve().parents[2])
-    metadata = dict(schema_version=1, completed=False, cells=cells, config=config,
+    metadata = dict(schema_version=2, completed=False, cells=cells, config=config,
                     harness_source_sha256=snapshot, results=[], semantic_equal=False,
-                    conditions='serial release workers; filesystem caches uncontrolled; one sample per warm operation')
+                    busy_thresholds=BUSY_THRESHOLDS,
+                    conditions='serial release workers; frozen sources; Williams rows; one discarded warmup per size')
+    write_json(output / 'plan.json', dict(serial=True, cells=cells))
     write_json(output / 'run.json', metadata)
-    references = {}
+    gate_reference = gate_reference or fixtures / 'loading-gate-reference.json'
+    references = json.loads(gate_reference.read_text()) if gate_reference.exists() else {}
+    completed = []
     try:
+        # Validate ALL receipts, toolchains and frozen fixtures before ANY timed cell.
+        builds = {arm: checked_build(config, arm) for arm in set(arms) | {'main'}}
+        if len({receipt['rustc'] for receipt, _ in builds.values()}) != 1:
+            raise ValueError('all roles must use one toolchain')
         prepared = {}
+        for documents in sizes:
+            prepared[documents] = prepare(SimpleNamespace(output=output, fixtures=fixtures,
+                current=Path(builds['main'][0]['executable'])), documents - 14)
+            manifest = prepared[documents][1]
+            if manifest['document_count'] != documents or manifest.get('matrix_fixture_version') != 2:
+                raise ValueError('fixture must have the requested count and linked-target version 2')
         for cell in cells:
             arm, documents = cell['arm'], cell['documents']
-            receipt, source = checked_build(config, arm)
+            receipt, source = builds[arm]
             binary = Path(receipt['executable'])
-            if documents not in prepared:
-                prepared[documents] = prepare(SimpleNamespace(output=output,
-                    fixtures=fixtures, current=binary), documents - 14)
             frozen, manifest = prepared[documents]
-            if manifest['document_count'] != documents:
-                raise ValueError('fixture has the wrong total document count')
-            root = (output / f'n{documents}-{arm}').resolve()
+            label = 'warmup-discarded' if cell['discarded_warmup'] else f"r{cell['repetition']:02}-p{cell['position']}"
+            root = (output / f'n{documents}-{label}-{arm}').resolve()
             root.mkdir()
             shutil.copytree(frozen / 'vault', root / 'vault')
             write_json(root / 'manifest.json', manifest)
             spec = dict(arm=arm, binary=str(binary), source=str(source), manifest=manifest,
-                        root=str(root), build=receipt, harness_source_sha256=snapshot)
+                        root=str(root), build=receipt, harness_source_sha256=snapshot, cell=cell)
             write_json(root / 'cell.json', spec)
-            # Each cell controller gets a clean module namespace. Health-once loads
-            # its revision's transport and loading receipt validator, never ports them.
+            await_idle(root / 'host-admission.json')
             subprocess.run([sys.executable, str(Path(__file__).resolve()), '--cell', str(root / 'cell.json')], check=True)
             result = json.loads((root / 'result.json').read_text())
             metadata['results'].append(str(root / 'result.json'))
             gate_semantics(references, result)
-            print(cell_summary(documents, result), flush=True)
-        for arm in arms:
+            write_json(gate_reference, references)
+            completed.append((cell, result))
+            write_json(output / 'summary.json', summarize(completed))
+            print(f"{label}: " + cell_summary(documents, result), flush=True)
+        for arm in builds:
             checked_build(config, arm)
         if snapshot != source_tree_digest(Path(__file__).resolve().parents[2]):
             raise ValueError('harness source changed during the run')
         metadata['completed'] = True
-        metadata['semantic_equal'] = len(arms) == len(ARMS)
+        metadata['semantic_equal'] = True
+        metadata['gate_reference'] = str(gate_reference.resolve())
     except BaseException as error:
         metadata['failure'] = repr(error)
         raise
@@ -513,6 +618,9 @@ def main():
     parser.add_argument('--prepare-plan', action='store_true')
     parser.add_argument('--prepare-builds', type=Path)
     parser.add_argument('--config', type=Path)
+    parser.add_argument('--freeze-fixtures', type=Path, help='prepare linked frozen fixtures outside timing')
+    parser.add_argument('--repetitions', type=int, help='Williams rows per size; defaults 2014=8, 10014=4, 314=1')
+    parser.add_argument('--gate-reference', type=Path, help='persistent cross-run semantic and path-id reference')
     parser.add_argument('--fixtures', type=Path, help='existing frozen fixture parent, keyed by background count')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--sizes', type=int, nargs='+', default=[2014, 10014], help='total documents, including fourteen probes')
@@ -528,7 +636,11 @@ def main():
         result['harness_source_sha256'] = spec['harness_source_sha256']
         (Path(spec['root']) / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     elif args.prepare_plan:
-        print(json.dumps(dict(serial=True, cells=[c for c in plan(args.sizes) if c['arm'] in args.arms]), indent=2))
+        print(json.dumps(dict(serial=True, cells=[c for c in plan(args.sizes, args.repetitions) if c['arm'] in args.arms or c['discarded_warmup']]), indent=2))
+    elif args.freeze_fixtures:
+        if args.config is None:
+            parser.error('--freeze-fixtures requires --config')
+        print(freeze_fixtures(json.loads(args.config.read_text()), args.freeze_fixtures.resolve(), args.sizes, args.fixtures))
     elif args.prepare_builds:
         print(prepare_builds(args.prepare_builds.resolve(), here.parents[1]))
     else:
@@ -536,7 +648,7 @@ def main():
             parser.error('provide --config and --output, or use --prepare-plan / --prepare-builds')
         if len(set(args.arms)) != len(args.arms):
             parser.error('arms must be unique')
-        run_matrix(json.loads(args.config.read_text()), args.fixtures, args.output.resolve(), args.sizes, args.arms)
+        run_matrix(json.loads(args.config.read_text()), args.fixtures, args.output.resolve(), args.sizes, args.arms, args.repetitions, args.gate_reference)
 
 
 if __name__ == '__main__':

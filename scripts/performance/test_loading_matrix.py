@@ -9,21 +9,84 @@ from loading_matrix import plan, gate_semantics, documents_layout, validate_lab_
 
 
 class MatrixTests(unittest.TestCase):
-    def test_plan_lists_exactly_one_serial_process_per_requested_cell(self):
+    def test_plan_balances_order_and_discards_one_warmup_per_size(self):
         cells = plan([2014, 10014])
-        self.assertEqual([(c['documents'], c['arm']) for c in cells], [
-            (n, arm) for n in (2014, 10014)
-            for arm in ('main', 'four-step', 'four-step-no-body', 'health-once')])
-        self.assertTrue(all(c['background_documents'] == c['documents'] - 14 for c in cells))
+        expected = ['main', 'four-step', 'health-once', 'four-step-no-body',
+                    'four-step', 'four-step-no-body', 'main', 'health-once',
+                    'four-step-no-body', 'health-once', 'four-step', 'main',
+                    'health-once', 'main', 'four-step-no-body', 'four-step']
+        for size, repetitions in [(2014, 8), (10014, 4)]:
+            rows = [c for c in cells if c['documents'] == size]
+            self.assertTrue(rows[0]['discarded_warmup'])
+            self.assertEqual(sum(c['discarded_warmup'] for c in rows), 1)
+            self.assertEqual([c['arm'] for c in rows[1:]], expected * (repetitions // 4))
+        self.assertEqual(len(plan([314], 1)), 5)
         with self.assertRaises(ValueError):
             plan([2014, 2014])
 
-    def test_semantic_gate_uses_fixture_identity_and_keeps_physical_differences(self):
+    def test_semantic_and_path_id_gates_survive_json_roundtrip(self):
+        import copy
+        import json
+        result = {'fixture_sha256': 'one', 'store': {'semantic_sha256': 'a'},
+                  'post_ready_store': {'semantic_sha256': 'initial'},
+                  'store_path_ids': {'documents': [('a.md', 1)], 'vault_files': [('a.png', -1)]},
+                  'post_ready_store_path_ids': {'documents': [('a.md', 1)], 'vault_files': [('a.png', -1)]}}
         references = {}
-        gate_semantics(references, {'fixture_sha256': 'one', 'store': {'semantic_sha256': 'a'}})
-        gate_semantics(references, {'fixture_sha256': 'two', 'store': {'semantic_sha256': 'b'}})
-        with self.assertRaisesRegex(ValueError, 'semantic'):
-            gate_semantics(references, {'fixture_sha256': 'one', 'store': {'semantic_sha256': 'b'}})
+        gate_semantics(references, result)
+        references = json.loads(json.dumps(references))
+        gate_semantics(references, result)
+        for phase in ('store', 'post_ready_store'):
+            for change in ('semantic', 'documents', 'vault_files'):
+                wrong = copy.deepcopy(result)
+                if change == 'semantic':
+                    wrong[phase]['semantic_sha256'] = 'different'
+                else:
+                    wrong[phase + '_path_ids'][change][0] = ('a.md', 2)
+                with self.subTest(phase=phase, change=change), self.assertRaisesRegex(ValueError, 'path→id'):
+                    gate_semantics(references, wrong)
+        gate_semantics(references, dict(result, fixture_sha256='two'))
+
+    def test_layout_and_identity_cover_tables_indexes_overflow_and_free_pages(self):
+        from loading_method import identity_map, store_layout
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'store.sqlite3'
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('pragma page_size=512')
+                db.execute('create table documents (id integer primary key, path text, body text)')
+                db.execute('create unique index doc_path on documents(path)')
+                db.execute('create table vault_files (id integer primary key, path text)')
+                db.execute("insert into documents values (7,'a.md',?)", ('x' * 3000,))
+                db.execute("insert into vault_files values (-3,'a.png')")
+                db.commit()
+            identity = identity_map(path)
+            self.assertEqual(identity, {'documents': [('a.md', 7)], 'vault_files': [('a.png', -3)]})
+            layout = store_layout(path)
+            self.assertIn('doc_path', layout['objects'])
+            self.assertIn('vault_files', layout['objects'])
+            self.assertGreater(layout['objects']['documents']['overflow_pages'], 0)
+            self.assertEqual(layout['page_count'] * 512, layout['file_size_bytes'])
+            self.assertEqual(layout['freelist_count'], 0)
+
+    def test_host_admission_rejects_each_busy_signal_and_records_bounded_refusal(self):
+        from loading_method import busy_reasons, await_idle, BUSY_THRESHOLDS
+        from unittest.mock import patch
+        sample = dict(loadavg='0 0 0 1/1 1', effective_cpus=2,
+                      pressure={kind: {'some': {'avg10': 0}} for kind in ('cpu', 'io', 'memory')})
+        self.assertEqual(busy_reasons(sample), [])
+        sample['loadavg'] = '2 0 0 1/1 1'
+        self.assertEqual(busy_reasons(sample), ['load1_per_cpu'])
+        for kind in ('cpu', 'io', 'memory'):
+            sample['pressure'][kind]['some']['avg10'] = 100
+        with tempfile.TemporaryDirectory() as folder, patch('loading_method.os.sync') as sync, \
+                patch('loading_method.host_sample', return_value=sample):
+            record = Path(folder) / 'admission.json'
+            with self.assertRaisesRegex(RuntimeError, 'host busy'):
+                await_idle(record, dict(BUSY_THRESHOLDS, max_wait_seconds=0))
+            sync.assert_called_once()
+            import json
+            audit = json.loads(record.read_text())
+            self.assertFalse(audit['accepted'])
+            self.assertEqual(len(audit['samples'][0]['busy_reasons']), 4)
 
     def test_dbstat_reports_documents_including_overflow_and_physical_order(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -134,7 +197,7 @@ class MatrixTests(unittest.TestCase):
         from loading_matrix import describe_probe, cell_summary
         result = {'arm': 'four-step', 'ready': {'source': 'four-step-structure',
                   'worker_ns': 3_000_000_000, 'parent_received_ns': 9_000_000_000},
-                  'public_ready': {'parent_received_ns': 10_000_000_000},
+                  'public_ready': {'worker_ns': 4_000_000_000, 'parent_received_ns': 10_000_000_000},
                   'store': {'semantic_sha256': 'equal'}}
         for kind in ('get', 'find', 'search'):
             result['first_' + kind] = describe_probe({'worker_ns': 7_000_000_000,
@@ -145,7 +208,9 @@ class MatrixTests(unittest.TestCase):
         summary = cell_summary(314, result)
         self.assertIn('Get[lab FourStepRead::get] estimated_earliest_answer 2.000000s', summary)
         self.assertIn('actual_query_finished 7.000000s', summary)
-        self.assertIn('parent_delivery 8.000000s', summary)
+        self.assertIn('parent_delivery 8.000000s (not comparable)', summary)
+        self.assertIn('public_Ready_worker 4.000000s', summary)
+        self.assertNotIn('10.000000', summary)
         self.assertIn('Search[lab FourStepRead::search]', summary)
         self.assertIn('answered before link health (health loading)', summary)
         self.assertIn('earliest availability plus builder query time', summary)
@@ -201,9 +266,9 @@ for line in sys.stdin:
     def test_workload_contains_all_twelve_operations_and_exactly_four_readbacks(self):
         from loading_matrix import cell_workload
         workload = cell_workload()
-        self.assertEqual(len(workload), 19)
-        self.assertEqual([c['op'] for c in workload[3:11]], ['search'] * 4 + ['find'] + ['get'] * 3)
-        self.assertEqual([c['op'] for c in workload[11:]], ['set', 'get', 'new', 'get', 'move', 'get', 'move', 'get'])
+        self.assertEqual(len(workload), 20)
+        self.assertEqual([c['op'] for c in workload[4:12]], ['search'] * 4 + ['find'] + ['get'] * 3)
+        self.assertEqual([c['op'] for c in workload[12:]], ['set', 'get', 'new', 'get', 'move', 'get', 'move', 'get'])
 
     def test_health_once_runs_archived_exactly_once_gate_with_audited_count(self):
         from loading_matrix import health_once_final_gate

@@ -1084,6 +1084,128 @@ fn provisional_quarantine_has_the_same_semantics_as_an_ordinary_build_from_zero(
 }
 
 #[test]
+fn four_step_finding_ids_follow_ordinary_first_build_order() {
+    use norn_store::{
+        Change, DocumentFacts, IncrementProvenance, LinkAnchor, LinkFact, LinkFamily, Span,
+    };
+
+    fn sequence(store: &mut Store) -> Vec<(DocumentPath, Option<Span>, String)> {
+        // This public reader follows finding IDs, rather than sorting findings
+        // by their subjects and hiding a different insertion order.
+        store
+            .begin_request()
+            .stored_findings_after(None, 8)
+            .unwrap()
+            .into_iter()
+            .map(|(_, finding)| (finding.path, finding.span, finding.kind))
+            .collect()
+    }
+
+    let scratch = scratch();
+    let mut ordinary = Store::open(
+        scratch.join("ordinary.sqlite3"),
+        StoredPathOrder::AsciiCaseInsensitive,
+        DerivationVersion::new(1),
+    )
+    .unwrap();
+    // Folded path order differs from byte order, and both documents' links
+    // fit in one health page, so the reader's byte order must be restored.
+    let documents: Vec<_> = ["a.md", "B.md"]
+        .into_iter()
+        .map(|path| {
+            let mut facts = DocumentFacts::new(DocumentPath::new(path).unwrap(), path, "", 0);
+            for (target, anchor, line) in [
+                ("missing", None, 1),
+                (
+                    path,
+                    Some(LinkAnchor::Block {
+                        id: "absent".into(),
+                    }),
+                    2,
+                ),
+            ] {
+                facts.links.push(LinkFact {
+                    field: None,
+                    family: LinkFamily::Wikilink,
+                    embed: false,
+                    protocol: None,
+                    target: target.into(),
+                    title: None,
+                    anchor,
+                    span: Some(Span {
+                        line,
+                        column: 1,
+                        byte_offset: line - 1,
+                    }),
+                });
+            }
+            facts
+        })
+        .collect();
+    // Ordinary first construction with one document per changeset follows
+    // the walk's stored path order, with link positions ordered within it.
+    for facts in &documents {
+        ordinary
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(facts.clone())],
+                &[],
+                &ContentModel::none(),
+            )
+            .unwrap();
+    }
+    let expected = sequence(&mut ordinary);
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(path, span, kind)| (path.as_str(), span.unwrap().line, kind.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a.md", 1, "link/broken"),
+            ("a.md", 2, "link/missing-anchor"),
+            ("B.md", 1, "link/broken"),
+            ("B.md", 2, "link/missing-anchor"),
+        ]
+    );
+    for bound in [1, 2] {
+        let mut lab = Store::open(
+            scratch.join(format!("lab-{bound}.sqlite3")),
+            StoredPathOrder::AsciiCaseInsensitive,
+            DerivationVersion::new(1),
+        )
+        .unwrap();
+        four_step::begin(&mut lab).unwrap();
+        let paths = documents
+            .iter()
+            .map(|facts| facts.path.clone())
+            .collect::<Vec<_>>();
+        four_step::names(&mut lab, &paths, &[], &ContentModel::none()).unwrap();
+        four_step::content(
+            &mut lab,
+            &documents,
+            &[],
+            &ContentModel::none(),
+            false,
+            &[(0, 0), (0, 0)],
+        )
+        .unwrap();
+        complete_structure(&mut lab, &documents, &ContentModel::none(), false).unwrap();
+        while four_step::health(&mut lab, bound, &ContentModel::none())
+            .unwrap()
+            .commits
+            != 0
+        {}
+        four_step::finish(&mut lab).unwrap();
+        assert_eq!(
+            sequence(&mut lab),
+            expected,
+            "health document bound {bound}"
+        );
+    }
+}
+
+#[test]
 fn complete_four_steps_equal_ordinary_derivation_including_late_target_anchors() {
     use norn_store::{
         AnchorReadings, BlockFact, Change, DocumentFacts, HeadingFact, IncrementProvenance,
