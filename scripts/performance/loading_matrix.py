@@ -117,8 +117,9 @@ def validate_link_get(response, manifest, health_loading=False):
         finding = findings[0]
         expected = dict(path=LINK_TARGET, kind='link/broken', severity='warning',
                         target='matrix-missing-target', span=span('[[matrix-missing-target]]'),
-                        head={'candidates': [], 'total': 0})
-        if any(finding[key] != value for key, value in expected.items()):
+                        head={'candidates': [], 'total': 0}, message='the link names no document',
+                        hint=None, rule_set=None, value=None)
+        if {key: value for key, value in finding.items() if key not in ('id', 'generation')} != expected:
             raise ValueError('public linked Get broken-link finding differs from fixture')
 
 

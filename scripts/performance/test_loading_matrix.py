@@ -119,6 +119,10 @@ class MatrixTests(unittest.TestCase):
             lambda answer: answer['report']['document']['links']['items'][0]['span'].update(line=1),
             lambda answer: answer['report']['document']['findings']['items'][0].update(path='wrong.md'),
             lambda answer: answer['report']['document']['findings']['items'][0].update(generation=999999),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(message='wrong'),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(hint='wrong'),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(rule_set='wrong'),
+            lambda answer: answer['report']['document']['findings']['items'][0].update(value='wrong'),
         ]
         for number, mutate in enumerate(mutations):
             wrong = copy.deepcopy(response)
