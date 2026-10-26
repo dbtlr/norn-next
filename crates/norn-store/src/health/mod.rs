@@ -1330,65 +1330,97 @@ fn written(link: &LinkFact) -> String {
     format!("{protocol}{}{anchor}", link.target)
 }
 
-/// Lab final pass: one document at a time, with bounded link and finding pages.
-/// The ordinary reader and judge retain the single mapping and resolution rule.
+/// Lab final pass over one chunk's documents, in the order given. Their
+/// links are judged a page of [`LINK_HEALTH_CHUNK`] at a time, each page
+/// filling across documents, so a key several of the chunk's documents hold
+/// is resolved, and its candidates named, once per run of pages holding it,
+/// as in [`redecide`], never once per document. The ordinary reader and judge
+/// retain the single mapping and resolution rule.
 #[cfg(feature = "induced-failure")]
-pub(crate) fn four_step_document(
+pub(crate) fn four_step_documents(
     transaction: &Transaction<'_>,
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
-    path: &DocumentPath,
+    documents: &[DocumentPath],
+    summaries: &mut KeySummaries,
+) -> Result<(u64, u64), StoreError> {
+    let mut page: Vec<i64> = Vec::with_capacity(LINK_HEALTH_CHUNK);
+    let (mut judged, mut findings) = (0, 0);
+    for path in documents {
+        let mut after = -1_i64;
+        loop {
+            let room = LINK_HEALTH_CHUNK - page.len();
+            let mut statement = transaction
+                .prepare_cached(
+                    "SELECT l.id, l.ordinal FROM documents d CROSS JOIN links l
+                 WHERE d.path = ?1 AND l.document = d.id AND l.ordinal > ?2
+                 ORDER BY l.ordinal LIMIT ?3",
+                )
+                .map_err(|e| crate::error::sql("preparing a four-step health page", e))?;
+            let rows = statement
+                .query_map(
+                    norn_db::rusqlite::params![path.as_str(), after, room as i64],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(|e| crate::error::sql("reading a four-step health page", e))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| crate::error::sql("reading four-step link identities", e))?;
+            let Some((_, ordinal)) = rows.last() else {
+                break;
+            };
+            after = *ordinal;
+            page.extend(rows.iter().map(|(id, _)| *id));
+            if page.len() == LINK_HEALTH_CHUNK {
+                let (links, written) = four_step_page(transaction, work, ignore, &page, summaries)?;
+                (judged, findings) = (judged + links, findings + written);
+                page.clear();
+            }
+            if rows.len() < room {
+                break;
+            }
+        }
+    }
+    if !page.is_empty() {
+        let (links, written) = four_step_page(transaction, work, ignore, &page, summaries)?;
+        (judged, findings) = (judged + links, findings + written);
+    }
+    Ok((judged, findings))
+}
+
+/// Judge and file one lab page of link `ids`, in their order, then forget
+/// every key the page's links do not hold. Heads stay bounded to the page
+/// while exact totals outlive eviction, as in [`redecide`]; the caller shares
+/// `summaries` for its whole transaction.
+#[cfg(feature = "induced-failure")]
+fn four_step_page(
+    transaction: &Transaction<'_>,
+    work: &ReadWork,
+    ignore: &AmbiguityIgnore,
+    ids: &[i64],
     summaries: &mut KeySummaries,
 ) -> Result<(u64, u64), StoreError> {
     let writer = OnWriter {
         connection: transaction,
         work,
     };
-    let mut after = -1_i64;
-    let mut judged = 0;
+    let encoded = serde_json::to_string(ids).expect("integer link IDs encode as JSON");
+    let (mut links, _) = read_links(
+        &writer,
+        SuffixKey::Comparison,
+        Selected::Links,
+        vec![Value::Text(encoded)],
+    )?;
+    // The reader orders by holder bytes; file in the caller's document order.
+    let order: HashMap<i64, usize> = ids.iter().enumerate().map(|(at, id)| (*id, at)).collect();
+    links.sort_by_key(|held| order.get(&held.id).copied());
+    links.retain(|held| LinkHealth::of_address(held.link.address, 0) != LinkHealth::NotJudged);
     let mut findings = 0;
-    loop {
-        let mut statement = transaction
-            .prepare_cached(
-                "SELECT l.id, l.ordinal FROM documents d CROSS JOIN links l
-             WHERE d.path = ?1 AND l.document = d.id AND l.ordinal > ?2
-             ORDER BY l.ordinal LIMIT ?3",
-            )
-            .map_err(|e| crate::error::sql("preparing a four-step health page", e))?;
-        let rows = statement
-            .query_map(
-                norn_db::rusqlite::params![path.as_str(), after, LINK_HEALTH_CHUNK as i64],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .map_err(|e| crate::error::sql("reading a four-step health page", e))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| crate::error::sql("reading four-step link identities", e))?;
-        let Some((_, ordinal)) = rows.last() else {
-            break;
-        };
-        after = *ordinal;
-        let ids = serde_json::to_string(&rows.iter().map(|(id, _)| *id).collect::<Vec<_>>())
-            .expect("integer link IDs encode as JSON");
-        let (mut links, _) = read_links(
-            &writer,
-            SuffixKey::Comparison,
-            Selected::Links,
-            vec![Value::Text(ids)],
-        )?;
-        links.retain(|held| LinkHealth::of_address(held.link.address, 0) != LinkHealth::NotJudged);
-        judged += links.len() as u64;
-        for finding in judge_links(transaction, work, ignore, &links, summaries)? {
-            request::write_finding(transaction, &finding)?;
-            findings += 1;
-        }
-        // Keep heads bounded to this page while exact totals outlive eviction,
-        // as in redecide. The caller shares this set for its whole transaction.
-        summaries.keep_only_keys_of(&links);
-        if rows.len() < LINK_HEALTH_CHUNK {
-            break;
-        }
+    for finding in judge_links(transaction, work, ignore, &links, summaries)? {
+        request::write_finding(transaction, &finding)?;
+        findings += 1;
     }
-    Ok((judged, findings))
+    summaries.keep_only_keys_of(&links);
+    Ok((links.len() as u64, findings))
 }
 
 #[cfg(test)]
@@ -1396,6 +1428,132 @@ mod tests {
     use super::*;
 
     use crate::{Change, ContentModel, DocumentFacts, IncrementProvenance, Provenance, Store};
+
+    /// **Final health's work follows its links and their distinct keys, not
+    /// its documents.** Thirty documents in one chunk each hold one link, and
+    /// consecutive documents name different ambiguous targets. Each of the
+    /// three keys is resolved once, its two candidates read and named once,
+    /// and the judge runs one page for the whole chunk: one link read, one
+    /// head read and one naming statement, however many documents hold them.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn four_step_health_resolves_and_names_each_key_once_per_chunk_across_documents() {
+        use norn_db::rusqlite::trace::{TraceEvent, TraceEventCodes};
+        use std::cell::RefCell;
+
+        const HOLDERS: usize = 30;
+        const TARGETS: usize = 3;
+        thread_local! {
+            static RAN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        }
+        fn record(event: TraceEvent<'_>) {
+            if let TraceEvent::Stmt(_, sql) = event {
+                RAN.with(|ran| ran.borrow_mut().push(sql.to_owned()));
+            }
+        }
+
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-health-per-chunk",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let model = ContentModel::none();
+        let mut documents: Vec<DocumentFacts> = (0..HOLDERS)
+            .map(|index| {
+                let mut facts = DocumentFacts::new(
+                    DocumentPath::new(&format!("d/{index:02}.md")).unwrap(),
+                    "holder",
+                    "",
+                    0,
+                );
+                facts.links.push(crate::LinkFact {
+                    field: None,
+                    family: crate::LinkFamily::Wikilink,
+                    embed: false,
+                    protocol: None,
+                    target: format!("t{}", index % TARGETS),
+                    title: None,
+                    anchor: None,
+                    span: None,
+                });
+                facts
+            })
+            .collect();
+        for target in 0..TARGETS {
+            for folder in ["x", "y"] {
+                documents.push(DocumentFacts::new(
+                    DocumentPath::new(&format!("{folder}/t{target}.md")).unwrap(),
+                    "target",
+                    "",
+                    0,
+                ));
+            }
+        }
+        documents.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
+        crate::four_step::begin(&mut store).unwrap();
+        let paths: Vec<DocumentPath> = documents.iter().map(|facts| facts.path.clone()).collect();
+        crate::four_step::names(&mut store, &paths, &[], &model).unwrap();
+        crate::four_step::content(
+            &mut store,
+            &documents,
+            &[],
+            &model,
+            false,
+            &vec![(0, 0); documents.len()],
+        )
+        .unwrap();
+        let pending =
+            crate::four_step::pending(&store, crate::four_step::Step::Structure, documents.len())
+                .unwrap();
+        crate::four_step::structure(&mut store, &documents, &pending, &[], &model, false).unwrap();
+
+        RAN.with(|ran| ran.borrow_mut().clear());
+        store
+            .connection()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
+        let counters = crate::four_step::health(&mut store, documents.len(), &model).unwrap();
+        store.connection().trace_v2(TraceEventCodes::empty(), None);
+
+        assert_eq!(counters.links_judged, HOLDERS as u64);
+        assert_eq!(
+            counters.findings_written, HOLDERS as u64,
+            "each link is ambiguous"
+        );
+        assert_eq!(
+            counters.keys_resolved, TARGETS as u64,
+            "each key resolved once"
+        );
+        assert_eq!(
+            counters.candidates_read,
+            2 * TARGETS as u64,
+            "each key's two candidates read once"
+        );
+        let (naming, _) = SuffixSpellings::new(&BTreeMap::new(), &AmbiguityIgnore::none())
+            .unwrap()
+            .statement()
+            .unwrap();
+        let ran = |sql: &str| RAN.with(|ran| ran.borrow().iter().filter(|ran| *ran == sql).count());
+        assert_eq!(
+            ran(&statement::links_sql(
+                SuffixKey::Comparison,
+                Selected::Links
+            )),
+            1,
+            "one link read for the chunk's single page"
+        );
+        assert_eq!(
+            ran(&statement::heads_sql(SuffixKey::Comparison)),
+            1,
+            "one head read for the chunk's single page"
+        );
+        assert_eq!(ran(&naming), 1, "one naming statement for the chunk");
+    }
 
     #[cfg(feature = "induced-failure")]
     #[test]

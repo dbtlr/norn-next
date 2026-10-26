@@ -305,6 +305,18 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     0
                 );
                 assert_eq!(work.links_redecided, 20);
+                // Final health reports its resolutions in the step and the job.
+                let relations = &report.steps["relations"];
+                assert!(relations["link_health_keys_resolved"] > 0);
+                assert!(relations["link_health_candidates_read"] > 0);
+                assert_eq!(
+                    work.link_health_keys_resolved,
+                    relations["link_health_keys_resolved"]
+                );
+                assert_eq!(
+                    work.link_health_candidates_read,
+                    relations["link_health_candidates_read"]
+                );
                 if pull_ahead {
                     assert!(
                         report.requested_structure_ns["z-requested.md"]

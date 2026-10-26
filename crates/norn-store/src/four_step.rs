@@ -12,6 +12,8 @@ pub(crate) const MARKER: &str = "four_step_incomplete";
 /// `rows_rewritten` counts the content/metadata transition; `body_rows_rewritten`
 /// counts the separate payload update when content omitted the body. SQLite's
 /// internal FTS trigger and shadow-table writes are not included in these counts.
+/// `keys_resolved` and `candidates_read` are final health's key resolutions and
+/// the candidates they read, as the ordinary judge counts them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StepCounters {
     pub rows_inserted: u64,
@@ -21,6 +23,8 @@ pub struct StepCounters {
     pub tombstones_discarded: u64,
     pub fact_rows_written: u64,
     pub links_judged: u64,
+    pub keys_resolved: u64,
+    pub candidates_read: u64,
     pub findings_written: u64,
     pub findings_discarded: u64,
     pub commits: u64,
@@ -813,7 +817,8 @@ fn require_complete(tx: &Connection, column: &str) -> Result<(), StoreError> {
 }
 
 /// Judge the next bounded chunk of completed documents, once per eligible link.
-/// A document's links and findings are themselves paged in the ordinary judge.
+/// The chunk's links and findings are paged across its documents in the
+/// ordinary judge, which shares one key-summary set for the transaction.
 /// An exhausted pass opens no write transaction and reports zero commits.
 pub fn health(
     store: &mut Store,
@@ -861,21 +866,23 @@ pub fn health(
     let work = request::ReadWork::default();
     let mut counters = StepCounters::default();
     let mut summaries = crate::health::KeySummaries::default();
-    for document in documents {
-        incomplete_document(&tx, &document, Step::Health)?;
-        let (links, findings) = crate::health::four_step_document(
-            &tx,
-            &work,
-            declared.ambiguity_ignore(),
-            &document,
-            &mut summaries,
-        )?;
-        counters.links_judged += links;
-        counters.findings_written += findings;
+    for document in &documents {
+        incomplete_document(&tx, document, Step::Health)?;
+    }
+    (counters.links_judged, counters.findings_written) = crate::health::four_step_documents(
+        &tx,
+        &work,
+        declared.ambiguity_ignore(),
+        &documents,
+        &mut summaries,
+    )?;
+    for document in &documents {
         tx.prepare_cached("UPDATE four_step_state SET health_done = 1 WHERE path = ?1")
             .and_then(|mut q| q.execute([document.as_str()]))
             .map_err(|e| error::sql("completing four-step link health row", e))?;
     }
+    counters.keys_resolved = summaries.keys_resolved();
+    counters.candidates_read = summaries.candidates_read();
     committed(tx, counters)
 }
 

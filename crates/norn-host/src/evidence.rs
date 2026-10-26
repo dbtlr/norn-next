@@ -499,6 +499,10 @@ impl JobEvidence {
             .fetch_add(counters.findings_discarded, Ordering::Relaxed);
         self.links_redecided
             .fetch_add(counters.links_judged, Ordering::Relaxed);
+        self.link_health_keys_resolved
+            .fetch_add(counters.keys_resolved, Ordering::Relaxed);
+        self.link_health_candidates_read
+            .fetch_add(counters.candidates_read, Ordering::Relaxed);
     }
 
     pub(crate) fn count_recovery(&self) {
