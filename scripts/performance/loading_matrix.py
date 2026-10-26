@@ -343,7 +343,7 @@ def lab_measurements(arm, events):
     result['requested_documents_structure'] = {path: dict(worker_ns=event['elapsed_ns'], parent_received_ns=event['parent_received_ns']) for path, event in structured.items()}
     result.update({key: report[key] for key in ('refused_ns', 'request_refusals', 'timing_commits', 'timing_ns', 'profiles', 'build_commits', 'host_chunk_bound', 'transaction_bound') if key in report})
     result['timing_bookkeeping_scope'] = 'timing_commits and timing_ns are a bookkeeping subset of total commits and elapsed work; structure totals include them'
-    result['structure_observation_scope'] = 'Structured callback observed after timestamp commit (conservative); build requested_structure_ns captured before timestamp commit'
+    result['structure_observation_scope'] = 'Structured callback observed after group commit; build requested_structure_ns captured after derivation before that commit'
     result['ready']['counters'] = result['step_counters']
     result['health_complete']['counters'] = {step: result['step_counters'][step] for step in steps[:4]}
     return result

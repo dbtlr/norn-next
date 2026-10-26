@@ -426,7 +426,18 @@ class MatrixTests(unittest.TestCase):
         for key, value in bookkeeping.items():
             self.assertEqual(result[key], value)
         self.assertIn('subset', result['timing_bookkeeping_scope'])
-        self.assertIn('after timestamp commit', result['structure_observation_scope'])
+        self.assertIn('after group commit', result['structure_observation_scope'])
+
+    def test_async_mid_request_retains_remaining_chunk_wait_in_its_latency(self):
+        from loading_matrix import lab_measurements
+        events = self.lab_events()
+        mid = next(event for event in events if event.get('request_kind') == 'mid-content')
+        mid.update(request_alignment='asynchronous-after-batch', current_batch_wait_included=True,
+                   latency_scope='includes remaining host-chunk work and requested derivation')
+        result = lab_measurements('four-step', events)
+        self.assertTrue(result['mid_request']['current_batch_wait_included'])
+        self.assertEqual(result['mid_request']['request_alignment'], 'asynchronous-after-batch')
+        self.assertEqual(result['mid_request']['request_to_delivery_ns'], 50)
 
     def test_lab_mid_request_rejects_early_threshold_and_mixed_build_clocks(self):
         from copy import deepcopy
