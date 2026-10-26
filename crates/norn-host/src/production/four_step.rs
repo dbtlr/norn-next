@@ -259,7 +259,25 @@ impl FourStepRead<'_> {
                 self.metadata_complete,
             )
         }
-        .map_err(|error| error.to_string());
+        .map_err(|error| {
+            if !self.relations_complete {
+                match &error {
+                    norn_store::PageRefusal::PartNotTaken { part: norn_wire::RequestPart::Column, answer: norn_wire::AnswerShape::Record } if !self.metadata_complete => {
+                        return "vault still indexing for the first time: an absent undeclared projection waits for the complete field universe".into();
+                    }
+                    norn_store::PageRefusal::UnknownTarget { .. } => {
+                        return "vault still indexing for the first time: the target has no completed document at this structure callback".into();
+                    }
+                    norn_store::PageRefusal::AmbiguousTarget(_) if !self.metadata_complete => {
+                        // Pending content may quarantine a provisional name. The
+                        // final ambiguity class is not established by names alone.
+                        return "vault still indexing for the first time: the target's provisional ambiguity waits for complete content".into();
+                    }
+                    _ => {}
+                }
+            }
+            error.to_string()
+        });
         if !self.is_current() {
             return Err(
                 "vault still indexing for the first time: four-step source changed during Get"

@@ -258,7 +258,7 @@ def describe_probe(probe, arm, kind):
 def lab_measurements(arm, events):
     names = [event['startup_stage'].removeprefix('four-step-') for event in events]
     expected = ['names', 'content', 'find', 'structure', 'relations', 'full-text', 'search', 'complete']
-    if [name for name in names if name not in ('request', 'requested-structure', 'get')] != expected:
+    if [name for name in names if name not in ('request', 'requested-structure', 'get', 'field-projection')] != expected:
         raise ValueError('four-step boundary/probe coverage differs')
     requested = {event['path']: event for event in events if event['startup_stage'] == 'four-step-request'}
     structured = {event['path']: event for event in events if event['startup_stage'] == 'four-step-requested-structure'}
@@ -635,7 +635,7 @@ def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_m
     if len(ready_at) != 1 or transcript[ready_at[0] + 1:] != responses:
         raise ValueError('retained responses differ from raw native worker stream')
     result = dict(arm=arm, build_cache_size=build_cache_size if arm.startswith('four-step') else None,
-        deferred_indexes=deferred_indexes if arm.startswith('four-step') else None, lab_get_targets=lab_get_targets, fixture_sha256=manifest['tree_sha256'], document_count=manifest['document_count'],
+        deferred_indexes=deferred_indexes if arm.startswith('four-step') else None, lab_get_targets=lab_get_targets if arm.startswith('four-step') else None, fixture_sha256=manifest['tree_sha256'], document_count=manifest['document_count'],
         origin_monotonic_ns=origin, clock_scope='parent origin before Current construction in every arm; worker clocks separate, never added',
         public_ready=public_ready, ready=public_ready, health_complete=public_ready,
         first_get=describe_probe(probes['get'], arm, 'get'),

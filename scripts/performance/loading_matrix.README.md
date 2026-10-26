@@ -215,7 +215,9 @@ Both `small.md` and linked `large.md` are requested at startup.
 actual hook delivery. Get has no global-content prerequisite. Early lab Get uses
 public target resolution and admits only its completed callback document.
 `--lab-get-targets small bench/large.md` runs the same targets as the main worker;
-the default targets remain rooted paths. Outgoing resolution SQL waits until
+the default targets remain rooted paths. Before global content completion, a
+provisional ambiguity reports loading: pending content may quarantine a name.
+A target outside its completed callback also reports loading. Outgoing resolution SQL waits until
 relations complete. Individual field projections use the document's primary key
 before global content completion. Declared keys and keys carried by the document
 can answer then. An absent undeclared key still waits for the final field

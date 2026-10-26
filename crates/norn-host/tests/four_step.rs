@@ -50,7 +50,8 @@ impl FourStepObserver for Probe {
                                     .clone()
                                     .with_columns([norn_wire::Column::field("missing")])
                             )
-                            .is_err()
+                            .unwrap_err()
+                            .contains("complete field universe")
                         );
                     }
                     if self.project_fields {
@@ -1038,4 +1039,67 @@ fn absent_requests_group_host_chunks_into_at_most_2048_document_commits_in_every
         drop(demand);
         drop(host);
     }
+}
+
+#[derive(Default)]
+struct ProvisionalAmbiguity(Mutex<Option<serde_json::Value>>);
+impl FourStepObserver for ProvisionalAmbiguity {
+    fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
+        if matches!(event, FourStepEvent::GetReady("one/topic.md")) {
+            assert!(!read.metadata_complete());
+            let params = GetParams::new(
+                VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
+                ResolutionTarget::new("topic").unwrap(),
+            );
+            assert!(
+                read.get(&params)
+                    .unwrap_err()
+                    .contains("vault still indexing")
+            );
+            let other = GetParams::new(
+                params.vault.clone(),
+                ResolutionTarget::new("two/topic").unwrap(),
+            );
+            assert!(
+                read.get(&other)
+                    .unwrap_err()
+                    .contains("vault still indexing")
+            );
+            let complete =
+                GetParams::new(params.vault, ResolutionTarget::new("one/topic").unwrap());
+            *self.0.lock().unwrap() =
+                Some(serde_json::to_value(read.get(&complete)?.report).unwrap());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_provisional_undecodable_name_withholds_ambiguity_until_content_is_complete() {
+    let scratch = norn_testkit::scratch::Scratch::under(
+        &std::env::current_dir().unwrap().join(".scratch"),
+        "four-step-provisional-name",
+    )
+    .unwrap();
+    let root = scratch.join("vault");
+    for directory in [".norn", "one", "two"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join("one/topic.md"), "# Topic\n").unwrap();
+    std::fs::write(root.join("two/topic.md"), [0xff, 0xfe]).unwrap();
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(ProvisionalAmbiguity::default());
+    let host = vault.host_with_four_step(
+        FourStepLoading::new(2, false, vec!["one/topic.md".into()], probe.clone()).unwrap(),
+    );
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, &vault);
+    let params = GetParams::new(
+        VaultAddress::name(vault.name().clone()),
+        ResolutionTarget::new("topic").unwrap(),
+    );
+    let final_answer = serde_json::to_value(host.get(&params).unwrap().answer.report).unwrap();
+    assert_eq!(probe.0.lock().unwrap().as_ref().unwrap(), &final_answer);
+    drop(demand);
 }

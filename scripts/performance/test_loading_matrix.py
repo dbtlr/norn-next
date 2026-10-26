@@ -393,6 +393,15 @@ class MatrixTests(unittest.TestCase):
                           delivery_ns={'late.md': 70})
         return events
 
+    def test_projection_observation_does_not_replace_a_required_boundary(self):
+        from loading_matrix import lab_measurements
+        events = self.lab_events()
+        events.insert(4, dict(startup_stage='four-step-field-projection', path='bench/small.md',
+                              delivery_ns=180, query_started_ns=171, query_finished_ns=180))
+        self.assertEqual(lab_measurements('four-step', events)['step_boundary_ns']['full-text'], 590)
+        with self.assertRaisesRegex(ValueError, 'coverage'):
+            lab_measurements('four-step', [event for event in events if event['startup_stage'] != 'four-step-content'])
+
     def test_lab_measurements_ready_is_step5_and_mid_request_delivery_is_actual(self):
         from loading_matrix import lab_measurements
         events = self.lab_events()

@@ -12,6 +12,7 @@ const FTS_MODE: &str = "four_step_fts_mode";
 pub const PROFILE_LABELS: &[&str] = &[
     "lab.commit",
     "lab.index_build",
+    "lab.resolution_index_build",
     "lab.trigrams",
     "lab.checkpoint",
     "lab.fts",
@@ -234,6 +235,18 @@ fn build_indexes(store: &mut Store, boundary: i64) -> Result<StepCounters, Store
     let tx = Chunk::new(store.connection(), "building capability indexes")?;
     for (name, sql) in indexes {
         let _span = norn_db::profiling::span("lab.index_build");
+        let _resolution_span = matches!(
+            name.as_str(),
+            "documents_suffix_key"
+                | "documents_admitted_suffix_key"
+                | "documents_path_key"
+                | "documents_path_nocase"
+                | "vault_files_suffix_key"
+                | "vault_files_admitted_suffix_key"
+                | "vault_files_path_key"
+                | "vault_files_path_nocase"
+        )
+        .then(|| norn_db::profiling::span("lab.resolution_index_build"));
         tx.execute_batch(&sql)
             .map_err(|e| error::sql("building production index", e))?;
         tx.execute("DELETE FROM four_step_indexes WHERE name = ?1", [name])
@@ -253,7 +266,7 @@ pub fn content_complete(store: &mut Store) -> Result<StepCounters, StoreError> {
     build_indexes(store, 2)
 }
 
-/// Build resolution indexes and sorted trigrams before the first health judgment.
+/// Build outgoing-link and anchor indexes and sorted trigrams before health.
 pub fn structure_complete(store: &mut Store) -> Result<StepCounters, StoreError> {
     require_complete(store.connection(), "structure_done")?;
     let mut counters = build_indexes(store, 3)?;
