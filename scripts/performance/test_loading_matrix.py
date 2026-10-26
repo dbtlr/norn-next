@@ -105,14 +105,30 @@ class MatrixTests(unittest.TestCase):
 
     def test_first_answer_labels_distinguish_builder_time_delivery_and_findings(self):
         from loading_matrix import describe_probe
-        lab = describe_probe({'worker_ns': 200, 'path': 'lab FourStepRead::get'}, 'four-step', 'get')
-        self.assertEqual(lab['timing_scope'], 'earliest availability plus builder query time')
+        probe = {'worker_ns': 940, 'path': 'lab FourStepRead::get', 'earliest_available_ns': 200,
+                 'earliest_answer_ns': 240, 'query_host_ns': 40,
+                 'query_started_ns': 900, 'query_finished_ns': 940}
+        lab = describe_probe(probe, 'four-step', 'get')
+        self.assertEqual(lab['worker_ns'], 240)
+        self.assertEqual(lab['query_finished_ns'], 940)
+        self.assertEqual(lab['timing_scope'], 'estimated earliest availability plus builder query time')
+        self.assertIn('not actual finish', lab['worker_clock_scope'])
+        self.assertEqual(lab['availability_clock_scope'], 'prerequisite completion observed on worker clock')
         self.assertEqual(lab['findings_scope'], 'answered before link health (health loading)')
         self.assertIn('after build', lab['delivery_scope'])
         for arm in ('main', 'health-once'):
             public = describe_probe({'worker_ns': None, 'path': 'public Host::get after Ready'}, arm, 'get')
             self.assertEqual(public['findings_scope'], 'includes link-health findings')
             self.assertIn('public', public['timing_scope'])
+
+    def test_lab_answer_estimate_rejects_mixed_or_impossible_query_clocks(self):
+        from loading_matrix import describe_probe
+        probe = {'worker_ns': 940, 'earliest_available_ns': 200, 'earliest_answer_ns': 240,
+                 'query_host_ns': 40, 'query_started_ns': 900, 'query_finished_ns': 940}
+        for wrong in ({'earliest_answer_ns': 940}, {'earliest_available_ns': 901},
+                      {'query_host_ns': 50}, {'query_finished_ns': 899}):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'lab query timing'):
+                describe_probe({**probe, **wrong}, 'four-step', 'get')
 
     def test_console_names_search_path_and_does_not_present_buffer_delivery_as_answer_time(self):
         from loading_matrix import describe_probe, cell_summary
@@ -121,10 +137,14 @@ class MatrixTests(unittest.TestCase):
                   'public_ready': {'parent_received_ns': 10_000_000_000},
                   'store': {'semantic_sha256': 'equal'}}
         for kind in ('get', 'find', 'search'):
-            result['first_' + kind] = describe_probe({'worker_ns': 2_000_000_000,
+            result['first_' + kind] = describe_probe({'worker_ns': 7_000_000_000,
+                'earliest_available_ns': 1_000_000_000, 'earliest_answer_ns': 2_000_000_000,
+                'query_started_ns': 6_000_000_000, 'query_finished_ns': 7_000_000_000,
+                'query_host_ns': 1_000_000_000,
                 'parent_received_ns': 8_000_000_000, 'path': f'lab FourStepRead::{kind}'}, 'four-step', kind)
         summary = cell_summary(314, result)
-        self.assertIn('Get[lab FourStepRead::get] worker 2.000000s', summary)
+        self.assertIn('Get[lab FourStepRead::get] estimated_earliest_answer 2.000000s', summary)
+        self.assertIn('actual_query_finished 7.000000s', summary)
         self.assertIn('parent_delivery 8.000000s', summary)
         self.assertIn('Search[lab FourStepRead::search]', summary)
         self.assertIn('answered before link health (health loading)', summary)

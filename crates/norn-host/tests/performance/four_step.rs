@@ -7,6 +7,10 @@ use norn_store::{Found, Gotten, LexicalQuery, Searched};
 use norn_wire::{FindParams, GetParams, Predicate, ResolutionTarget, VaultAddress, VaultName};
 use serde_json::{Value, json};
 
+#[path = "timing.rs"]
+mod timing;
+use timing::GetPrerequisites;
+
 const QUERY: &str = "profilecommonword";
 
 struct Query<T> {
@@ -31,9 +35,11 @@ impl<T> Query<T> {
 
     fn record(&self, stage: &str) -> Value {
         json!({"startup_stage":stage, "availability_scope":"lab canonical read hook",
-            "timing_scope":"earliest availability plus builder query time",
+            "timing_scope":"estimated earliest availability plus builder query time",
+            "availability_clock_scope":"prerequisite completion observed on worker clock",
             "delivery_scope":"buffered in worker; serialized and delivered after build",
             "earliest_available_ns":self.available_ns,
+            "earliest_answer_ns":self.available_ns+self.finished_ns-self.started_ns,
             "query_started_ns":self.started_ns, "query_finished_ns":self.finished_ns,
             "query_host_ns":self.finished_ns-self.started_ns})
     }
@@ -48,26 +54,33 @@ enum Observation {
     Complete(FourStepReport, u128),
 }
 
+#[derive(Default)]
+struct Buffer {
+    observations: Vec<Observation>,
+    prerequisites: GetPrerequisites,
+}
+
 pub(super) struct Probe {
     began: Instant,
     requested: Vec<String>,
     no_body: bool,
-    observations: Mutex<Vec<Observation>>,
+    buffer: Mutex<Buffer>,
 }
 
 impl FourStepObserver for Probe {
     fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
         let observed_ns = self.began.elapsed().as_nanos();
-        let mut observations = self
-            .observations
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let mut buffer = self.buffer.lock().map_err(|error| error.to_string())?;
         let stage = match event {
             FourStepEvent::NamesComplete => "names",
-            FourStepEvent::ContentComplete => "content",
+            FourStepEvent::ContentComplete => {
+                buffer.prerequisites.content_complete(observed_ns);
+                "content"
+            }
             FourStepEvent::Structured(path) => {
                 if self.requested.iter().any(|requested| requested == path) {
-                    observations.push(Observation::RequestedStructure(
+                    buffer.prerequisites.structured(path, observed_ns);
+                    buffer.observations.push(Observation::RequestedStructure(
                         path.to_owned(),
                         observed_ns,
                     ));
@@ -76,29 +89,36 @@ impl FourStepObserver for Probe {
             }
             FourStepEvent::GetReady(path) => {
                 if self.requested.iter().any(|requested| requested == path) {
+                    let available_ns = buffer.prerequisites.available_ns(path).ok_or(
+                        "GetReady arrived without observed content and structure prerequisites",
+                    )?;
                     let params = GetParams::new(
                         VaultAddress::name(VaultName::new("notes").unwrap()),
                         ResolutionTarget::new(format!("/{path}")).unwrap(),
                     );
-                    observations.push(Observation::Get(
+                    buffer.observations.push(Observation::Get(
                         path.to_owned(),
-                        Query::run(self.began, observed_ns, || read.get(&params)),
+                        Query::run(self.began, available_ns, || read.get(&params)),
                     ));
                 }
                 return Ok(());
             }
             FourStepEvent::StructureComplete => "structure",
             FourStepEvent::Complete(report) => {
-                observations.push(Observation::Complete(report.clone(), observed_ns));
+                buffer
+                    .observations
+                    .push(Observation::Complete(report.clone(), observed_ns));
                 return Ok(());
             }
         };
-        observations.push(Observation::Boundary(stage, observed_ns));
+        buffer
+            .observations
+            .push(Observation::Boundary(stage, observed_ns));
         if matches!(event, FourStepEvent::ContentComplete) {
             let params = FindParams::new(VaultAddress::name(VaultName::new("notes").unwrap()))
                 .with_predicates([Predicate::equal_to("perf_bucket", "active")])
                 .with_limit(25);
-            observations.push(Observation::Find(Query::run(
+            buffer.observations.push(Observation::Find(Query::run(
                 self.began,
                 observed_ns,
                 || read.find(&params),
@@ -111,7 +131,7 @@ impl FourStepObserver for Probe {
                 return Err("lexical search is incomplete at its expected lab boundary".into());
             }
             let query = LexicalQuery::new(QUERY).with_limit(25);
-            observations.push(Observation::Search(Query::run(
+            buffer.observations.push(Observation::Search(Query::run(
                 self.began,
                 observed_ns,
                 || read.search(&query),
@@ -123,8 +143,13 @@ impl FourStepObserver for Probe {
 
 impl Probe {
     pub(super) fn emit(&self) {
-        let observations =
-            std::mem::take(&mut *self.observations.lock().expect("buffered lab answers"));
+        let observations = std::mem::take(
+            &mut self
+                .buffer
+                .lock()
+                .expect("buffered lab answers")
+                .observations,
+        );
         for observation in observations {
             let record = match observation {
                 Observation::Boundary(stage, elapsed_ns) => json!({
@@ -231,7 +256,7 @@ pub(super) fn selection(mode: &str, began: Instant) -> (FourStepLoading, Arc<Pro
         began,
         requested: requested.clone(),
         no_body: mode == "four-step-no-body",
-        observations: Mutex::new(Vec::new()),
+        buffer: Mutex::new(Buffer::default()),
     });
     let loading =
         FourStepLoading::new(bound, mode == "four-step-no-body", requested, probe.clone())

@@ -87,10 +87,20 @@ def endpoint(origin, *, path, response=None, worker_ns=None, **fields):
 
 def describe_probe(probe, arm, kind):
     lab = arm.startswith('four-step')
-    result = dict(probe, timing_scope=('earliest availability plus builder query time' if lab else
+    result = dict(probe, timing_scope=('estimated earliest availability plus builder query time' if lab else
                                      'first validated public answer; includes admission and builder query time'),
                   delivery_scope=('buffered in worker; serialized and delivered after build' if lab else
                                   'public response delivered when answered'))
+    if lab:
+        available, started, finished, duration, estimate = (probe[key] for key in (
+            'earliest_available_ns', 'query_started_ns', 'query_finished_ns', 'query_host_ns', 'earliest_answer_ns'))
+        if (any(type(value) is not int for value in (available, started, finished, duration, estimate))
+                or not 0 <= available <= started <= finished or duration != finished - started
+                or estimate != available + duration):
+            raise ValueError('invalid lab query timing')
+        result.update(worker_ns=estimate,
+                      worker_clock_scope='derived earliest-answer estimate; not actual finish',
+                      availability_clock_scope='prerequisite completion observed on worker clock')
     if kind == 'get':
         result['findings_scope'] = ('answered before link health (health loading)' if lab else
                                     'includes link-health findings')
@@ -133,7 +143,7 @@ def lab_measurements(arm, events):
                   pull_ahead_scope='requested-path content and structure elapsed work; excludes observer queries',
                   step_duration_scope='boundary intervals include intervening observers and pull-ahead; busy_ns is elapsed work, not CPU time',
                   counter_scope={
-                      'files_read': 'attempted source-file opens, including failed opens',
+                      'files_read': 'source-read attempts, including failed opens and paths refused before opening',
                       'rows_rewritten': 'content/metadata transitions; separate no-body payload updates are body_rows_rewritten',
                       'fts': 'SQLite internal FTS trigger and shadow-table work is uncounted',
                       'findings_discard': 'skipping findings discard on a fresh store is available to ordinary loading too; not a four-step-specific saving'},
@@ -162,7 +172,11 @@ def cell_summary(documents, result):
     for kind in ('get', 'find', 'search'):
         probe = result['first_' + kind]
         worker = probe.get('worker_ns')
-        clock = f"worker {worker / 1e9:.6f}s " if worker is not None else ''
+        if 'earliest_answer_ns' in probe:
+            clock = (f"estimated_earliest_answer {worker / 1e9:.6f}s "
+                     f"actual_query_finished {probe['query_finished_ns'] / 1e9:.6f}s ")
+        else:
+            clock = f"worker {worker / 1e9:.6f}s " if worker is not None else ''
         findings = '; ' + probe['findings_scope'] if kind == 'get' else ''
         lines.append(f"  {kind.title()}[{probe['path']}] {clock}"
                      f"parent_delivery {probe['parent_received_ns'] / 1e9:.6f}s; "
@@ -218,7 +232,9 @@ def measure_cell(binary, root, manifest, arm):
                     raise ValueError('duplicate lab probe')
                 probes[kind] = dict(parent_received_ns=stage['parent_received_ns'],
                     worker_ns=stage['query_finished_ns'], path=f'lab FourStepRead::{kind}', response=stage,
-                    earliest_available_ns=stage['earliest_available_ns'], query_host_ns=stage['query_host_ns'])
+                    earliest_available_ns=stage['earliest_available_ns'], query_host_ns=stage['query_host_ns'],
+                    query_started_ns=stage['query_started_ns'], query_finished_ns=stage['query_finished_ns'],
+                    earliest_answer_ns=stage['earliest_answer_ns'])
         events.append(stage)
 
     if arm == 'main':

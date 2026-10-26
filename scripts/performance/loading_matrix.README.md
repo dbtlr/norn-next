@@ -68,7 +68,8 @@ sample, with no statistical or speedup claim.
 Lab callbacks buffer typed answers and timing records. The worker serializes and
 emits them after construction and accounting finish, before its public Ready record.
 Their `parent_received_ns` values describe delivery after build, not early availability.
-Console output prints worker times and parent delivery times separately.
+Console output separates the estimated earliest answer, actual query finish,
+and parent delivery times.
 
 - `ready`: four-step structure-complete callback; main's public Ready control
   record; health-once's full-build health boundary. `public_ready` separately
@@ -88,9 +89,17 @@ Console output prints worker times and parent delivery times separately.
   public answers. The lab Get is labelled **answered before link health (health loading)**.
   Main and health-once Get answers include link-health findings. The base fixture's
   small document has no links, so equal answers do not make these findings guarantees equal.
-  Lab timing is labelled **earliest availability plus builder query time**.
-  Each hook retains `earliest_available_ns`, actual dispatch and completion times,
-  and `query_host_ns`. Callback scheduling can delay dispatch beyond first availability.
+  Lab timing is labelled **estimated earliest availability plus builder query time**.
+  `earliest_available_ns` means prerequisite completion observed on the worker clock,
+  rather than the exact transaction completion instant. For Get, it is the later
+  of ContentComplete callback entry and that document's Structured callback entry.
+  Find uses ContentComplete entry. Search uses ContentComplete entry in standard
+  mode and StructureComplete entry in no-body mode.
+  `earliest_answer_ns` adds the measured `query_host_ns` to that prerequisite observation.
+  Lab endpoint `worker_ns` uses this derived estimate, which excludes dispatch
+  delays caused by preceding probes. It is not an actual answer-finish observation.
+  The estimate reuses the measured builder duration; no earlier-dispatch execution is measured.
+  Actual `query_started_ns` and `query_finished_ns` remain separate worker-clock observations.
   Hook latency and public admission latency are different paths.
 - `requested_document_structure`: the lab's requested-document structure instant,
   descriptive only. Whole Get still waits for content to finish vault-wide.
@@ -101,7 +110,7 @@ Console output prints worker times and parent delivery times separately.
   after Ready. Every result names the path used. `public_search_after_ready` retains
   a public search in every arm, including the lab arms.
 - `step_counters`: the prototype report's per-step rows, facts, link judgments,
-  findings, commits, and file reads. `files_read` includes failed source-file opens.
+  findings, commits, and file reads. `files_read` counts source-read attempts, including failed opens and paths refused before opening.
   `rows_rewritten` counts content/metadata transitions. `body_rows_rewritten` counts
   the separate body payload updates in no-body mode. SQLite's internal FTS trigger
   and shadow-table writes are uncounted. Skipping findings discard on a fresh store
@@ -152,4 +161,5 @@ Run the Python checks with the repository's standard runner:
 ```bash
 TMPDIR="$PWD/target/scratch" python3 -m unittest discover -s scripts/performance -v
 TMPDIR="$PWD/target/scratch" python3 -m unittest discover -s scripts/performance/live_mode -v
+TMPDIR="$PWD/target/scratch" CARGO_TARGET_DIR="$PWD/target" cargo test -p norn-host --test performance_timing --features induced-failure
 ```
