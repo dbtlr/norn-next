@@ -89,7 +89,7 @@ def resources(pid: int) -> dict:
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
                  loading: str | None = None, stage_handler=None, loading_options: dict | None = None,
-                 public_get_targets: list[str] | None = None):
+                 public_get_targets: list[str] | None = None, public_mid_request: dict | None = None):
         token = issue_root(root)
         env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
@@ -98,7 +98,11 @@ class Current:
             env["NORN_PERFORMANCE_LOADING"] = loading
         if loading_options is not None:
             if (loading not in ("four-step", "four-step-no-body")
-                    or set(loading_options) != {"transaction_bound", "requested_paths"}
+                    or not {"transaction_bound", "requested_paths"} <= set(loading_options)
+                    or set(loading_options) - {"transaction_bound", "requested_paths", "fts_mode", "mid_request_path"}
+                    or loading_options.get("fts_mode", "rebuild") not in ("rebuild", "batched")
+                    or ("mid_request_path" in loading_options and
+                        (not isinstance(loading_options["mid_request_path"], str) or not loading_options["mid_request_path"]))
                     or type(loading_options["transaction_bound"]) is not int
                     or not 1 <= loading_options["transaction_bound"] <= 128
                     or not isinstance(loading_options["requested_paths"], list)
@@ -106,6 +110,16 @@ class Current:
                 raise ValueError("invalid four-step loading controls")
             env["NORN_PERFORMANCE_TRANSACTION_BOUND"] = str(loading_options["transaction_bound"])
             env["NORN_PERFORMANCE_REQUESTED_PATHS"] = json.dumps(loading_options["requested_paths"])
+            env["NORN_PERFORMANCE_FTS_MODE"] = loading_options.get("fts_mode", "rebuild")
+            if "mid_request_path" in loading_options:
+                env["NORN_PERFORMANCE_MID_REQUEST_PATH"] = loading_options["mid_request_path"]
+        if public_mid_request is not None:
+            if (loading != "operator-prefix-public" or set(public_mid_request) != {"path", "offset_ns"}
+                    or not isinstance(public_mid_request["path"], str) or not public_mid_request["path"]
+                    or type(public_mid_request["offset_ns"]) is not int or public_mid_request["offset_ns"] < 0):
+                raise ValueError("invalid public mid-request controls")
+            env["NORN_PERFORMANCE_MID_REQUEST_PATH"] = public_mid_request["path"]
+            env["NORN_PERFORMANCE_MID_REQUEST_OFFSET_NS"] = str(public_mid_request["offset_ns"])
         if public_get_targets is not None:
             if (loading != "operator-prefix-public" or not isinstance(public_get_targets, list)
                     or not public_get_targets

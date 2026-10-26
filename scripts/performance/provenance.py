@@ -34,7 +34,7 @@ def sha256(path: Path) -> str:
 
 
 def source_tree_digest(repo: Path) -> str:
-    names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=repo, timeout=30)
+    names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".", ":(top,exclude).t"], cwd=repo, timeout=30)
     digest = hashlib.sha256()
     for name in sorted(set(names.split(b"\0")) - {b""}):
         path = repo / os.fsdecode(name)

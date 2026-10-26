@@ -18,15 +18,17 @@ LINK_TARGET = 'bench/large.md'
 BASE_2014 = '3c0fa350593b337a953d14c59dcb240ea5afca93d36d120d6c7b38fc5fd3635a'
 
 
-def plan(sizes, repetitions=None):
+def plan(sizes, repetitions=None, row_start=0):
     if not sizes or len(set(sizes)) != len(sizes) or any(n not in (314, 2014, 10014) for n in sizes):
         raise ValueError('choose unique total document counts from 314, 2014, 10014')
     if repetitions is not None and repetitions < 1:
         raise ValueError('repetitions must be positive')
+    if type(row_start) is not int or not 0 <= row_start < len(WILLIAMS):
+        raise ValueError('row_start must name a Williams row from 0 through 3')
     cells = []
     for size in sizes:
         count = repetitions if repetitions is not None else {314: 1, 2014: 8, 10014: 4}[size]
-        orders = [(0, ['main'])] + [(r + 1, WILLIAMS[r % 4]) for r in range(count)]
+        orders = [(0, ['main'])] + [(r + 1, WILLIAMS[(r + row_start) % 4]) for r in range(count)]
         for repetition, order in orders:
             for position, arm in enumerate(order):
                 cells.append(dict(documents=size, background_documents=size - 14, arm=arm,
@@ -64,6 +66,8 @@ def store_layout(path):
         return dict(objects={name: dict(pages=pages, payload_bytes=payload, unused_bytes=unused,
                                         overflow_pages=overflow, page_bytes=page_bytes)
                              for name, pages, payload, unused, overflow, page_bytes in rows},
+                    schema=[dict(type=kind, name=name, table=table, sql=sql) for kind, name, table, sql in
+                            db.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')],
                     freelist_count=db.execute('PRAGMA freelist_count').fetchone()[0],
                     page_count=db.execute('PRAGMA page_count').fetchone()[0],
                     page_size=db.execute('PRAGMA page_size').fetchone()[0],
@@ -169,7 +173,9 @@ def summarize(results):
                           layout=result['layout'], gates={'passed': 1})
         descriptive = {key: result[key] for key in ('ready', 'first_get', 'first_find', 'first_search', 'first_get_targets')}
         descriptive.update({key: result[key] for key in ('step_boundary_ns', 'step_busy_ns', 'pull_ahead_ns',
-                            'step_counters', 'requested_documents_structure') if key in result})
+                            'step_counters', 'requested_documents_structure', 'mid_request', 'build_request_ns',
+                            'build_requested_structure_ns', 'build_delivery_ns', 'build_request_to_delivery_ns',
+                            'refused_ns', 'request_refusals', 'timing_commits', 'timing_ns') if key in result})
         descriptive['parent_clocks'] = {'public_ready': result['public_ready']['parent_received_ns']}
         descriptive['lab_resources'] = (result.get('ready', {}).get('resources') or {}) if cell['arm'].startswith('four-step') else {}
         digests = {phase: {key: value for key, value in result[phase].items()
@@ -184,6 +190,8 @@ def summarize(results):
             descriptive[key] = timings(result[key])
         descriptive['first_get_targets'] = {key: timings(value) for key, value in result['first_get_targets'].items()}
         descriptive['ready'] = timings(result['ready'])
+        if 'mid_request' in result:
+            descriptive['mid_request'] = timings(result['mid_request'])
         bucket = groups.setdefault(str(cell['documents']), {}).setdefault(cell['arm'], {'comparable': {}, 'not comparable (side by side, no ratios)': {}})
         if cell['arm'] == 'health-once':
             descriptive['health-once context only'] = comparable
@@ -198,7 +206,7 @@ def summarize(results):
                 if not isinstance(metrics, dict):
                     continue
                 categories[category] = {key: distribution(values) for key, values in metrics.items()}
-    return dict(statistics='median and min–max; descriptive; no significance tests; discarded warmups excluded',
+    return dict(fts_modes=sorted({result['fts_mode'] for _, result in results if 'fts_mode' in result}), statistics='median and min–max; descriptive; no significance tests; discarded warmups excluded',
                 comparable='main vs four-step vs four-step-no-body; health-once context only',
-                **{'not comparable (side by side, no ratios)': 'lab/public first answers, end-step-3 Ready, parent clocks, lab resources, steps, digests, health-once timings'},
+                **{'not comparable (side by side, no ratios)': 'lab/public first answers, end-step-5 Ready, parent clocks, lab resources, steps, digests, health-once timings'},
                 sizes=groups)

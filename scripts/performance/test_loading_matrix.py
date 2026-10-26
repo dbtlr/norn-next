@@ -9,6 +9,25 @@ from loading_matrix import plan, gate_semantics, documents_layout, validate_lab_
 
 
 class MatrixTests(unittest.TestCase):
+    def test_mid_target_is_late_in_path_order_outside_initial_batch(self):
+        from loading_matrix import mid_request_target
+        paths = [f'notes/{number:04}.md' for number in range(300)]
+        manifest = {'paths': ['bench/small.md', 'bench/large.md'] + paths}
+        target = mid_request_target(manifest)
+        self.assertEqual(target, 'notes/0269.md')
+        self.assertGreater(sorted(manifest['paths']).index(target), 128)
+        with self.assertRaisesRegex(ValueError, 'outside the first'):
+            mid_request_target({'paths': paths[:100]})
+
+    def test_early_get_requires_both_explicit_loading_flags(self):
+        from loading_matrix import validate_loading_flags
+        valid = {'link_resolution_loading': True, 'link_health_loading': True}
+        validate_loading_flags(valid)
+        for wrong in ({}, {'link_health_loading': True},
+                      dict(valid, link_resolution_loading=False)):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'loading flags'):
+                validate_loading_flags(wrong)
+
     def test_linked_ready_get_retains_archived_health_once_oracle_signature(self):
         import json
         from unittest.mock import patch
@@ -144,6 +163,9 @@ class MatrixTests(unittest.TestCase):
             identity = identity_map(path)
             self.assertEqual(identity, {'documents': [('a.md', 7)], 'vault_files': [('a.png', -3)]})
             layout = store_layout(path)
+            self.assertEqual(next(row for row in layout['schema'] if row['name'] == 'doc_path'),
+                             dict(type='index', name='doc_path', table='documents',
+                                  sql='CREATE UNIQUE INDEX doc_path on documents(path)'))
             self.assertIn('doc_path', layout['objects'])
             self.assertIn('vault_files', layout['objects'])
             self.assertGreater(layout['objects']['documents']['overflow_pages'], 0)
@@ -337,82 +359,228 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'lexical'):
             validate_lab_stage(wrong, manifest)
 
-    def test_lab_measurements_use_report_boundaries_and_separate_pass_and_pull_ahead_work(self):
+    def lab_events(self):
+        events = [dict(startup_stage='four-step-' + name, elapsed_ns=ns,
+                       parent_received_ns=9000 + ns)
+                  for name, ns in [('names', 100), ('request', 120),
+                                   ('requested-structure', 160), ('get', 170),
+                                   ('content', 300), ('find', 310), ('structure', 400),
+                                   ('relations', 500), ('full-text', 600), ('search', 610),
+                                   ('complete', 620)]]
+        events[1].update(path='late.md', request_ns=120, request_kind='mid-content',
+                         content_progress={'completed': 128, 'total': 400})
+        events[2].update(path='late.md')
+        events[3].update(path='late.md', delivery_ns=170, earliest_available_ns=160,
+                         query_started_ns=161, query_finished_ns=170, query_host_ns=9,
+                         link_resolution_loading=True, link_health_loading=True)
+        steps = ('names', 'content', 'structure', 'relations', 'full-text')
+        events[-1].update(reconciled=False, fts_mode='rebuild',
+                          steps={key: {'fts_rows_inserted': 400} if key == 'full-text' else {} for key in steps},
+                          boundary_ns=dict(zip(steps, (90, 290, 390, 490, 590))),
+                          busy_ns=dict(zip(steps, (80, 100, 80, 80, 80))), pull_ahead_ns=40,
+                          request_ns={'late.md': 20}, requested_structure_ns={'late.md': 60},
+                          delivery_ns={'late.md': 70})
+        return events
+
+    def test_lab_measurements_ready_is_step5_and_mid_request_delivery_is_actual(self):
         from loading_matrix import lab_measurements
-        events = [dict(startup_stage='four-step-' + name, elapsed_ns=worker_ns,
-                       parent_received_ns=9000 + worker_ns)
-                  for name, worker_ns in [('names', 1000), ('requested-structure', 1100),
-                                          ('content', 2000), ('find', 2200), ('search', 2400),
-                                          ('get', 2600), ('structure', 3000), ('relations', 4000)]]
-        events[-1].update(reconciled=False, steps={'names': {'commits': 2}, 'content': {},
-                          'structure': {}, 'relations': {}},
-                          boundary_ns={'names': 100, 'content': 900, 'structure': 1500, 'relations': 2100},
-                          busy_ns={'names': 80, 'content': 500, 'structure': 300, 'relations': 400},
-                          pull_ahead_ns=100)
+        events = self.lab_events()
         result = lab_measurements('four-step', events)
-        self.assertEqual(result['step_boundary_ns'], {'names': 100, 'content': 900,
-                                                      'structure': 1500, 'relations': 2100})
-        self.assertEqual(result['step_boundary_intervals_ns'], {'names': 100, 'content': 800,
-                                                               'structure': 600, 'relations': 600})
-        self.assertEqual(result['step_busy_ns']['content'], 500)
-        self.assertEqual(result['pull_ahead_ns'], 100)
-        self.assertIn('observer', result['step_busy_scope'])
-        self.assertEqual(result['ready']['source'], 'four-step-structure')
-        with self.assertRaisesRegex(ValueError, 'coverage'):
-            lab_measurements('four-step', [e for e in events if e['startup_stage'] != 'four-step-search'])
-        no_body = events[:4] + events[5:7] + [events[4], events[-1]]
-        lab_measurements('four-step-no-body', no_body)
-        with self.assertRaisesRegex(ValueError, 'coverage'):
-            lab_measurements('four-step-no-body', events)
+        self.assertEqual(result['ready']['source'], 'four-step-full-text')
+        self.assertEqual(result['step_boundary_ns']['full-text'], 590)
+        self.assertEqual(result['step_busy_ns']['full-text'], 80)
+        self.assertEqual(result['step_counters']['full-text']['fts_rows_inserted'], 400)
+        mid = result['mid_request']
+        self.assertEqual((mid['request_ns'], mid['requested_document_structure_ns'], mid['delivery_ns']),
+                         (120, 160, 170))
+        self.assertEqual(mid['request_to_delivery_ns'], 50)
+        self.assertEqual(result['build_request_to_delivery_ns']['late.md'], 50)
+        self.assertEqual(mid['comparison'], 'not comparable (side by side, no ratios)')
+        for name in ('four-step-relations', 'four-step-full-text', 'four-step-search'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'coverage'):
+                lab_measurements('four-step', [event for event in events if event['startup_stage'] != name])
 
-    def test_first_answer_labels_distinguish_builder_time_delivery_and_findings(self):
+    def test_lab_mid_probe_labels_boundary_alignment_and_keeps_bookkeeping_subsets(self):
+        from loading_matrix import lab_measurements
+        events = self.lab_events()
+        bookkeeping = dict(refused_ns={}, request_refusals={},
+                           timing_commits={'structure': 3}, timing_ns={'structure': 20})
+        events[-1].update(bookkeeping)
+        result = lab_measurements('four-step', events)
+        self.assertEqual(result['mid_request']['request_alignment'], 'boundary-aligned')
+        self.assertIs(result['mid_request']['current_batch_wait_included'], False)
+        self.assertIn('best-case', result['mid_request']['latency_scope'])
+        self.assertIn('relations includes authority check', result['step_boundary_scope'])
+        self.assertIn('full-text includes FTS and finish', result['step_boundary_scope'])
+        for key, value in bookkeeping.items():
+            self.assertEqual(result[key], value)
+        self.assertIn('subset', result['timing_bookkeeping_scope'])
+        self.assertIn('after timestamp commit', result['structure_observation_scope'])
+
+    def test_lab_mid_request_rejects_early_threshold_and_mixed_build_clocks(self):
+        from copy import deepcopy
+        from loading_matrix import lab_measurements
+        for mutate in (lambda events: events[1]['content_progress'].update(completed=10),
+                       lambda events: events[-1]['delivery_ns'].update({'late.md': 10}),
+                       lambda events: events[3].update(delivery_ns=119)):
+            events = deepcopy(self.lab_events())
+            mutate(events)
+            with self.assertRaises(ValueError):
+                lab_measurements('four-step', events)
+
+    def test_first_answer_labels_use_actual_typed_delivery_and_explicit_loading(self):
         from loading_matrix import describe_probe
-        probe = {'worker_ns': 940, 'path': 'lab FourStepRead::get', 'earliest_available_ns': 200,
-                 'earliest_answer_ns': 240, 'query_host_ns': 40,
-                 'query_started_ns': 900, 'query_finished_ns': 940}
+        probe = dict(worker_ns=940, path='lab FourStepRead::get', earliest_available_ns=200,
+                     delivery_ns=940, query_host_ns=40, query_started_ns=900, query_finished_ns=940,
+                     link_resolution_loading=True, link_health_loading=True)
         lab = describe_probe(probe, 'four-step', 'get')
-        self.assertEqual(lab['worker_ns'], 240)
-        self.assertEqual(lab['query_finished_ns'], 940)
-        self.assertEqual(lab['timing_scope'], 'estimated earliest availability plus builder query time')
-        self.assertIn('not actual finish', lab['worker_clock_scope'])
-        self.assertEqual(lab['availability_clock_scope'], 'prerequisite completion observed on worker clock')
-        self.assertEqual(lab['findings_scope'], 'answered before link health (health loading)')
+        self.assertEqual(lab['worker_ns'], 940)
+        self.assertEqual(lab['delivery_ns'], 940)
+        self.assertIn('actual', lab['timing_scope'])
+        self.assertIn('link resolution loading', lab['findings_scope'])
         self.assertIn('after build', lab['delivery_scope'])
-        for arm in ('main', 'health-once'):
-            public = describe_probe({'worker_ns': None, 'path': 'public Host::get after Ready'}, arm, 'get')
-            self.assertEqual(public['findings_scope'], 'includes link-health findings')
-            self.assertIn('public', public['timing_scope'])
-
-    def test_lab_answer_estimate_rejects_mixed_or_impossible_query_clocks(self):
-        from loading_matrix import describe_probe
-        probe = {'worker_ns': 940, 'earliest_available_ns': 200, 'earliest_answer_ns': 240,
-                 'query_host_ns': 40, 'query_started_ns': 900, 'query_finished_ns': 940}
-        for wrong in ({'earliest_answer_ns': 940}, {'earliest_available_ns': 901},
-                      {'query_host_ns': 50}, {'query_finished_ns': 899}):
+        for wrong in ({'delivery_ns': 240}, {'earliest_available_ns': 901}, {'query_host_ns': 50}):
             with self.subTest(wrong=wrong), self.assertRaisesRegex(ValueError, 'lab query timing'):
-                describe_probe({**probe, **wrong}, 'four-step', 'get')
+                describe_probe(dict(probe, **wrong), 'four-step', 'get')
 
-    def test_console_names_search_path_and_does_not_present_buffer_delivery_as_answer_time(self):
+    def test_console_names_actual_delivery_and_step5(self):
         from loading_matrix import describe_probe, cell_summary
-        result = {'arm': 'four-step', 'ready': {'source': 'four-step-structure',
-                  'worker_ns': 3_000_000_000, 'parent_received_ns': 9_000_000_000},
-                  'public_ready': {'worker_ns': 4_000_000_000, 'parent_received_ns': 10_000_000_000},
-                  'store': {'semantic_sha256': 'equal'}}
+        result = {'arm': 'four-step', 'ready': {'source': 'four-step-full-text', 'worker_ns': 3_000_000_000},
+                  'public_ready': {'worker_ns': 4_000_000_000}, 'store': {'semantic_sha256': 'equal'}}
         for kind in ('get', 'find', 'search'):
-            result['first_' + kind] = describe_probe({'worker_ns': 7_000_000_000,
-                'earliest_available_ns': 1_000_000_000, 'earliest_answer_ns': 2_000_000_000,
-                'query_started_ns': 6_000_000_000, 'query_finished_ns': 7_000_000_000,
-                'query_host_ns': 1_000_000_000,
-                'parent_received_ns': 8_000_000_000, 'path': f'lab FourStepRead::{kind}'}, 'four-step', kind)
+            result['first_' + kind] = describe_probe(dict(worker_ns=2_000_000_000,
+                earliest_available_ns=1_000_000_000, delivery_ns=2_000_000_000,
+                query_started_ns=1_900_000_000, query_finished_ns=2_000_000_000, query_host_ns=100_000_000,
+                parent_received_ns=8_000_000_000, path=f'lab FourStepRead::{kind}',
+                link_resolution_loading=True, link_health_loading=True), 'four-step', kind)
         summary = cell_summary(314, result)
-        self.assertIn('Get[lab FourStepRead::get] estimated_earliest_answer 2.000000s', summary)
-        self.assertIn('actual_query_finished 7.000000s', summary)
+        self.assertIn('Get[lab FourStepRead::get] actual_delivery 2.000000s', summary)
+        self.assertIn('Ready[four-step-full-text]', summary)
         self.assertIn('parent_delivery 8.000000s (not comparable)', summary)
-        self.assertIn('public_Ready_worker 4.000000s', summary)
-        self.assertNotIn('10.000000', summary)
-        self.assertIn('Search[lab FourStepRead::search]', summary)
-        self.assertIn('answered before link health (health loading)', summary)
-        self.assertIn('earliest availability plus builder query time', summary)
+        self.assertNotIn('estimated', summary)
+
+    def test_integrity_gate_requires_one_positive_native_receipt_and_retains_logs(self):
+        import json
+        import sys
+        from loading_matrix import verify_store
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'performance-token').write_text('test-token')
+            binary = root / 'worker'
+            for rows in ([{'integrity_verified': True}], [{'integrity_verified': False}],
+                         [{'integrity_verified': True}, {'integrity_verified': True}]):
+                binary.write_text(f'#!{sys.executable}\nimport sys\nassert sys.argv[1] == "verify"\n'
+                    + '\n'.join('print(' + repr('NORN_PERFORMANCE ' + json.dumps(row)) + ', flush=True)' for row in rows) + '\n')
+                binary.chmod(0o700)
+                if rows == [{'integrity_verified': True}]:
+                    receipt = verify_store(binary, root, 'post_ready')
+                    self.assertTrue(receipt['integrity_verified'])
+                    self.assertTrue((root / 'integrity-post_ready.stdout.log').is_file())
+                else:
+                    with self.assertRaisesRegex(ValueError, 'integrity'):
+                        verify_store(binary, root, 'post_ready')
+
+    def test_second_williams_row_can_seed_main_without_an_extra_pilot_cell(self):
+        from loading_matrix import selected_cells
+        cells = selected_cells([314], ('main', 'four-step', 'four-step-no-body', 'health-once'),
+                               repetitions=1, row_start=1)
+        self.assertEqual([cell['arm'] for cell in cells],
+                         ['main', 'four-step', 'four-step-no-body', 'main', 'health-once'])
+        self.assertTrue(cells[0]['discarded_warmup'])
+        self.assertTrue(all(not cell['discarded_warmup'] for cell in cells[1:]))
+        cells = selected_cells([10014], ('four-step',), 1, skip_warmup=True)
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0]['arm'], 'four-step')
+
+    def test_main_cell_uses_preceding_accepted_lab_offset_in_the_same_run(self):
+        import json
+        from unittest.mock import patch
+        from loading_matrix import run_matrix, mid_request_target
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            frozen = root / 'frozen'
+            (frozen / 'vault').mkdir(parents=True)
+            manifest = dict(document_count=314, matrix_fixture_version=2, tree_sha256='frozen',
+                            paths=[f'notes/{number:04}.md' for number in range(314)],
+                            large_body='[[small#Details]] [Small](small.md#Details) [[matrix-missing-target]]')
+            offsets = []
+            def cell(command, **kwargs):
+                spec = json.loads(Path(command[-1]).read_text())
+                offsets.append((spec['arm'], spec['mid_request_offset_ns']))
+                result = dict(arm=spec['arm'], document_count=314, fts_mode='rebuild', fixture_sha256='frozen',
+                              mid_request=dict(target=mid_request_target(manifest), request_ns=123))
+                (Path(spec['root']) / 'result.json').write_text(json.dumps(result))
+            with patch('loading_matrix.checked_build', return_value=({'rustc': 'one', 'executable': 'worker'}, root)), \
+                    patch('baseline.prepare', return_value=(frozen, manifest)), \
+                    patch('provenance.source_tree_digest', return_value='source'), \
+                    patch('loading_matrix.await_idle'), patch('loading_matrix.gate_semantics'), \
+                    patch('loading_matrix.summarize', return_value={}), \
+                    patch('loading_matrix.cell_summary', return_value='accepted'), \
+                    patch('subprocess.run', side_effect=cell):
+                run_matrix({}, root, root / 'output', [314], ('four-step', 'main'), 1, row_start=1)
+            self.assertEqual(offsets, [('main', None), ('four-step', None), ('main', 123)])
+
+    def test_main_offset_seed_comes_from_completed_same_mode_lab_run(self):
+        import json
+        from loading_matrix import mid_request_seeds
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            result = dict(arm='four-step', fts_mode='batched', document_count=314,
+                          fixture_sha256='frozen', mid_request=dict(target='late.md', request_ns=123))
+            (root / 'result.json').write_text(json.dumps(result))
+            run = dict(completed=True, semantic_equal=True, results=[str(root / 'result.json')])
+            (root / 'run.json').write_text(json.dumps(run))
+            self.assertEqual(mid_request_seeds(root, 'batched')[314],
+                             dict(path='late.md', offset_ns=123, fixture_sha256='frozen'))
+            with self.assertRaisesRegex(ValueError, 'FTS mode'):
+                mid_request_seeds(root, 'rebuild')
+            run['completed'] = False
+            (root / 'run.json').write_text(json.dumps(run))
+            with self.assertRaisesRegex(ValueError, 'completed'):
+                mid_request_seeds(root, 'batched')
+
+    def test_build_digest_excludes_checkout_local_measurement_scratch(self):
+        import subprocess
+        from provenance import source_tree_digest
+        with tempfile.TemporaryDirectory() as folder:
+            repo = Path(folder)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            (repo / 'worker.rs').write_text('source')
+            before = source_tree_digest(repo)
+            (repo / '.t').mkdir()
+            (repo / '.t/measurement.json').write_text('first')
+            self.assertEqual(source_tree_digest(repo), before)
+            (repo / '.t/measurement.json').write_text('second')
+            self.assertEqual(source_tree_digest(repo), before)
+            (repo / 'worker.rs').write_text('changed')
+            self.assertNotEqual(source_tree_digest(repo), before)
+
+    def test_mid_controls_reach_workers_and_ignore_inherited_values(self):
+        import json
+        import os
+        import sys
+        from unittest.mock import patch
+        from transport import Current
+        for mode in ('rebuild', 'batched'):
+            for loading in ('four-step', 'operator-prefix-public'):
+                with self.subTest(mode=mode, loading=loading), tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    binary = root / 'worker'
+                    binary.write_text(f'#!{sys.executable}\n' + 'import os, sys, json\n'
+                        + "assert os.environ['NORN_PERFORMANCE_MID_REQUEST_PATH'] == 'late.md'\n"
+                        + (f"assert os.environ['NORN_PERFORMANCE_FTS_MODE'] == '{mode}'\n" if loading == 'four-step' else
+                           "assert os.environ['NORN_PERFORMANCE_MID_REQUEST_OFFSET_NS'] == '123'\n")
+                        + "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                        + 'sys.stdin.readline()\n')
+                    binary.chmod(0o700)
+                    options = ({'loading_options': dict(transaction_bound=128, requested_paths=[],
+                                                       fts_mode=mode, mid_request_path='late.md')}
+                               if loading == 'four-step' else
+                               {'public_mid_request': dict(path='late.md', offset_ns=123)})
+                    with patch.dict(os.environ, NORN_PERFORMANCE_FTS_MODE='foreign',
+                                    NORN_PERFORMANCE_MID_REQUEST_PATH='foreign'):
+                        worker = Current(binary, root, loading=loading, **options)
+                        worker.close()
 
     def test_explicit_public_targets_reach_worker_in_order_and_strip_inherited_list(self):
         import json
