@@ -3,19 +3,23 @@ status: proposed
 date: 2026-10-26
 ---
 
-# 0044 — derived indexes split into two lanes, link health rides the changeset, a first build judges it once, and inference never re-enters correctness
+# 0044 — derived indexes split into two lanes, link health rides the changeset, a from-zero build judges it once, and inference never re-enters correctness
 
 Supersedes [ADR 0027](0027-link-health-rides-the-changeset.md), whose lanes, change feed,
 link-health admission, inference firewall and invalidation keys this decision restates
 whole. ADR 0027 had every changeset re-decide the links it reaches, a from-zero build's
 included, and priced the repetition that follows: a build commits in chunks, names arrive a
-chunk at a time, and a class touched by many chunks is re-judged by each of them. **A first
-build of a fresh store judges link health once, after every fact has landed, rather than per
-changeset.** No reader can observe that store as complete until its construction ends, and
-no query's answer or write's safety reads a stored link-health finding, so nothing needs the
-findings before every fact they are judged over exists. Every later write keeps ADR 0027's
-per-changeset re-decision unchanged, and the store a first build finishes holds exactly the
-findings an ordinary build files.
+chunk at a time, and a class touched by many chunks is re-judged by each of them. **A
+from-zero build judges link health once, after every fact has landed, rather than per
+changeset.** A **from-zero build** constructs a canonical store from empty — a vault's first
+build and every rebuild from zero — and is the same construction
+[ADR 0045](0045-first-index-writes-once-in-steps.md) builds in steps, under the same term.
+No reader can adopt that store as complete until its construction ends, no reader reads a
+link-health finding before the judgment has run, and no query's answer or write's safety
+reads one, so nothing needs the findings before every fact they are judged over exists.
+Every changeset after the judgment — the reconcile that precedes `Ready` included — keeps
+ADR 0027's per-changeset re-decision unchanged, and the store a from-zero build finishes
+holds exactly the findings per-changeset re-decision files over the same tree.
 
 ## The two lanes
 
@@ -116,9 +120,9 @@ readings stored per heading, per block and per link, so the whole judgment is on
 predicate. The findings are judged against the facts the transaction holds once every entry
 of the changeset is written. The exception admits exactly the link-health family: broken,
 ambiguous and missing anchor, each a finding about exactly one link, filed to the findings
-pillar. It is never an aggregate over the set, and never a write to another pillar. A first
-build is the one write that judges the same family by the same predicate at another time,
-as the next section rules.
+pillar. It is never an aggregate over the set, and never a write to another pillar. A
+from-zero build is the one write that judges the same family by the same predicate at
+another time, as the next section rules.
 
 **The re-decided set** is the union of:
 
@@ -177,47 +181,61 @@ exactness is kept. This obligation is not yet built.
 findings the host handed it with a changeset, and decided none. Link-health findings are the
 first it judges and files itself; every other finding stays the host's to decide.
 
-## A first build judges link health once
+## A from-zero build judges link health once
 
-**The scope is a first build: a newly created, empty canonical store under its first
-construction.** No ordinary reader can observe that store as complete. It cannot be adopted
-until its construction finishes, and a crash during construction restarts the construction
-from zero rather than resuming over what it left. A store reused at attach, a rebuild of an
-existing store, a recovery, a schema pin and every write after the first build ends are not
-first builds; each keeps the per-changeset re-decision above unchanged.
+**The scope is every from-zero build.** A from-zero build constructs a canonical store from
+empty: a vault's first build, and every rebuild of an existing store from zero — over a DDL
+fingerprint, derivation version or path order the store does not match, over damage, or by
+any other rung that discards the database and derives the vault again. No reader can adopt
+the store as complete until its construction ends: the store carries an under-construction
+mark until then, and an open that finds the mark rebuilds from zero rather than resuming
+over what a crash left, as ADR 0045 rules. A full tree heal of an existing store, a recovery
+that does not rebuild from zero, a schema pin and every write after the build ends maintain
+an existing store; each keeps the per-changeset re-decision above unchanged.
 
-**During a first build no changeset re-decides link health.** Once the structure facts of
-every document — its headings, blocks and links — have landed, the store judges every
+**During a from-zero build no changeset re-decides link health.** Once the structure facts
+of every document — its headings, blocks and links — have landed, the store judges every
 eligible link exactly once, in path order, in bounded chunks. The judgment is the one above:
 the same SQL predicate, over the same summaries of the keys each link is read through,
-filing the same kinds with the same invalidation keys, in the same deterministic order. Its
-working memory is a bounded chunk of links and the candidates they resolve against, never
-the vault. The finished store's findings equal an ordinary build's, finding order included,
-so incremental equals rebuild holds for every store a reader can adopt.
+filing the same kinds with the same invalidation keys, in the same deterministic order. A
+path a filesystem fact requeues while the judgment runs is derived again first, and the
+judgment then judges again the links that path reaches — the set a changeset writing or
+killing that path re-decides — before it ends, so every finding it files is judged over the
+facts the store holds when it ends. Facts accepted after the judgment ends are reconciled
+before `Ready` as ordinary changesets, under the per-changeset rule. The judgment's working
+memory is a bounded chunk of links and the candidates they resolve against, never the vault.
+The finished store's findings equal the findings per-changeset re-decision files over the
+same tree, finding order included, so incremental equals rebuild holds for every store a
+reader can adopt.
 
-**The four obligations hold for the pass as a first build has them.** Atomicity protects a
-reader from a tear between a row and the findings judged over it; a first-build store has no
-reader that can adopt it until the pass has finished, and a crash discards the construction
-whole. Working memory is bounded by the chunk. The work bar measures a write against its
-blast radius, and a first build's blast radius is the whole vault: judging each link once is
-the least work that blast radius admits, where per-changeset re-decision exceeds it.
+**The four obligations hold for the pass as a from-zero build has them.** Atomicity protects
+a reader from a tear between a row and the findings judged over it. A from-zero build admits
+readers of the rows it has completed, but it withholds the findings surface, not the store,
+until the judgment has run: no reader reads a link-health finding before then, and an open
+after a crash discards the construction whole. Working memory is bounded by the chunk. The
+work bar measures a write against its blast radius, and a from-zero build's blast radius is
+the whole vault: judging each link once is the least work that blast radius admits, where
+per-changeset re-decision exceeds it.
 
-**A first build may defer judgment because nothing during the build reads the findings.**
-A link's broken or ambiguous verdict reads only names — which documents its keys name — and
-the vault schema's `paths.ambiguity_ignore` globs; its missing-anchor verdict reads only the
-headings and blocks of the one document it names. The store is first a faithful copy of the
-files, and link-health findings serve validate and repair. Stored link-health findings are
-read only by the surfaces that report them — validate, a find's `HasFinding` part and a
-findings column — and by repair, which plans from them; no other query's answer reads them,
-and no write's safety does. A write other than a repair judges the health of the links it
-changes itself while it plans, and resolution reads names and stored link rows, never a
-finding. A reader that meets a first build before its judgment has run sees link health as
-still loading, never as absent ([ADR 0045](0045-first-index-writes-once-in-steps.md)).
+**A from-zero build may defer judgment because nothing during the build reads the
+findings.** A link's broken or ambiguous verdict reads only names — which documents its keys
+name — and the vault schema's `paths.ambiguity_ignore` globs; its missing-anchor verdict
+reads only the headings and blocks of the one document it names. The store is first a
+faithful copy of the files, and link-health findings serve validate and repair. Stored
+link-health findings are read only by the surfaces that report them — validate, a find's
+`HasFinding` part and a findings column — and by repair, which plans from them; no other
+query's answer reads them, and no write's safety does. A write other than a repair judges
+the health of the links it changes itself while it plans, and resolution reads names and
+stored link rows, never a finding. A reader that meets a from-zero build before its judgment
+has run sees link health as still loading, never as absent, and a `HasFinding` part is
+refused as not ready, as ADR 0045 rules.
 
 **What it buys.** Measured on a lab prototype in release builds, on a 10,014-document
-fixture, an ordinary first build made 89,186 link judgments for 59,969 links and wrote
-32,874 link-health findings, most of which later changesets discarded; link health was about
-9.3 s of a build of about 23.6 s in its phase profile. Judging once made exactly 59,969
+fixture, per-changeset re-decision during a from-zero build made 89,186 link judgments for
+59,969 links and wrote 32,874 link-health findings, most of which later changesets
+discarded. In a phase profile of that build alone, link health was about 9.3 s of about
+23.6 s; that profile measures construction, not the end-to-end time to `Ready` ADR 0045
+reports for a build that also served early reads. Judging once made exactly 59,969
 judgments and wrote 4,001 findings, the findings the finished store holds.
 
 ## Lane 2 reads change through a feed
@@ -246,7 +264,7 @@ withdrawing inferred rows from the table the applier trusts would be nearly impo
 
 A projection over named lane-1 pillars is not a projection over another index's output: the
 tag facet's findings read stored tag rows and link-health findings read stored links,
-headings and blocks, and the firewall stands whole over both. A first build's single
+headings and blocks, and the firewall stands whole over both. A from-zero build's single
 judgment reads the same pillars and nothing else.
 
 ## Invalidation keys
@@ -255,9 +273,9 @@ Every projection names one invalidation key, and the key lives with the state it
 invalidates: the vault schema fingerprint for lane-1 schema-keyed tables, an engine's own
 configuration and model versions for its sidecar. Link health's findings carry that
 fingerprint, which any pin moves, and beside it the class and path keys the changeset's
-discard ranges over for the re-decided set. A finding a first build files carries the same
-keys, so the first write after the build discards it exactly as it would discard a finding
-an ordinary changeset filed. How invalidated state converges is the owning side's judgment.
+discard ranges over for the re-decided set. A finding a from-zero build files carries the
+same keys, so the first write after the judgment discards it exactly as it would discard a
+finding an ordinary changeset filed. How invalidated state converges is the owning side's judgment.
 Wholesale rebuild is the current implementation and the permanent always-correct floor;
 finer responses — adding one index without a rebuild, a pillar carrying its own version
 key — are carved evolutions taken when something like measured cost forces them, not
@@ -281,11 +299,10 @@ an in-memory post-pass over more rows than the read returns, which fails
 `no-in-memory-query-layer`. And maintaining every input while deriving the findings on each
 read is the exact defect `derived-findings-are-materialized-and-maintained` names.
 
-**Re-deciding per changeset during a first build, as ADR 0027 ruled.** Each chunk re-judges
-every class its names touch, against names later chunks have not yet written, and files
-findings later chunks discard: 89,186 judgments and 32,874 findings written for the 59,969
-judgments and 4,001 findings the finished store holds, at 10,014 documents. The repetition
-buys nothing, because no reader adopts the store before the last chunk lands.
+**Re-deciding per changeset during a from-zero build, as ADR 0027 ruled.** Each chunk
+re-judges every class its names touch, against names later chunks have not yet written, and
+files findings later chunks discard, at the cost measured above. The repetition buys
+nothing, because no reader reads a finding before the last chunk lands.
 
 ## Consequences
 
@@ -299,18 +316,20 @@ duration. That stall is an accepted cost.
 **Memory must stay bounded while the transaction is long.** The bounded-working-memory
 obligation requires the re-decided set to be judged in the statement and streamed out of it,
 never materialized beyond a bounded chunk of rows, so that a hub costs time inside the
-transaction and not memory; a memory bar is what tests it. A first build's single judgment
-is held to the same bar.
+transaction and not memory; a memory bar is what tests it. A from-zero build's single
+judgment is held to the same bar.
 
-**A first build judges each eligible link once; every other from-zero heal still re-decides
-common-stem classes once per chunk.** A rebuild of an existing store, and any heal that is
-not a first build, commits in chunks under the per-changeset rule, and a class touched by
-many chunks is re-decided by each of them. Such a heal still converges to the rebuild's
-findings; the price is repeated work on common stems.
+**A full tree heal of an existing store still re-decides common-stem classes once per
+chunk.** A heal that maintains an existing store — an attach over a store it adopts, or a
+recovery that does not rebuild from zero — commits in chunks under the per-changeset rule,
+and a class touched by many chunks is re-decided by each of them. Such a heal still
+converges to the rebuild's findings; the price is repeated work on common stems, largest
+when the heal reaches most of the vault.
 
-**Link health reads as still loading for the length of a first build.** Its findings exist
-only once the single judgment has run, so every surface that reports them answers "still
-loading" until then, as ADR 0045 rules.
+**Link health reads as still loading until a from-zero build's judgment has run.** Its
+findings exist only once the single judgment has run, so every surface that reports them
+answers "still loading" until then, for a rebuild of an existing store as for a vault's
+first build, as ADR 0045 rules.
 
 **Warm writes still re-decide by ADR 0027's set.** A write that changes no name, heading or
 block still re-decides every link the set names for the paths it writes. Narrowing that set

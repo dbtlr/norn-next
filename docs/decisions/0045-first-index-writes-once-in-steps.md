@@ -3,17 +3,20 @@ status: proposed
 date: 2026-10-26
 ---
 
-# 0045 — First indexing writes each document once into the canonical store, in steps, and serves each capability when its data is complete
+# 0045 — A from-zero build writes each document once into the canonical store, in steps, and serves each capability when its data is complete
 
 Supersedes [ADR 0043](0043-first-index-complete-reads.md).
 The elastic reader budget, canonical read acquisition, demand lease, recovery
 restraint, settling bound, teardown, retained-count rules and whole-vault and semantic
-readiness are restated below. The change replaces how first indexing serves early
-requests. ADR 0043 derived request-specific disposable sources beside the canonical
-store and answered from them; this decision builds the canonical store itself in
-steps, writing each document's row once and filling it progressively, and switches
-each capability on when the data it reads is complete. Whole-vault readiness retains
-its existing meaning.
+readiness are restated below. The change replaces how a store built from empty serves
+early requests, and which builds do. ADR 0043 derived request-specific disposable
+sources beside the canonical store and answered from them, during a fresh store's first
+attach only; this decision builds the canonical store itself in steps — on every
+**from-zero build**, a vault's first build and every rebuild from zero alike — writing
+each document's row once and filling it progressively, and switches each capability on
+when the data it reads is complete. A from-zero build is the construction
+[ADR 0044](0044-a-first-build-judges-link-health-once.md) judges link health once over,
+under the same term. Whole-vault readiness retains its existing meaning.
 
 ## Context
 
@@ -49,16 +52,17 @@ The store's one writer connection sits behind `&mut`, inside the attachment that
 lifecycle job holds for its whole duration — so a wire read borrowing it would serialize
 behind every warm job that holds the store while trust stays `Ready` (polls, maintenance,
 plan application), and the timing-barred query shapes would measure orchestration where the
-acceptance contract bars SQL. Canonical acquisition is unavailable until first construction
-and its drain publish `Ready`; a canonical read meeting a never-served entry refuses at once.
-A first-index capability may answer earlier, from the store under construction, under the
-rules below.
+acceptance contract bars SQL. Canonical acquisition is unavailable until a from-zero build
+publishes `Ready`; a canonical read meeting an entry under a from-zero build refuses at
+once, and a capability that build has published may answer earlier, from the store under
+construction, under the rules below.
 Every later heal takes trust out of `Ready`. A read waits out the heals that take in a
 change — a watcher batch's reconcile and a vault schema reload's — and refuses at once
-during the heals that follow withdrawn trust — a recovery's and a rebuild's. A shared
+during a recovery that follows withdrawn trust without rebuilding from zero; a rebuild from
+zero is a from-zero build and serves reads as one. A shared
 borrow of the live store cannot serve reads either — a `&self` cannot exist while a job
 holds the attachment mutably. Wire reads therefore run on pooled read-only handles
-`norn-store` mints from a live `Store`, a store under first construction included.
+`norn-store` mints from a live `Store`, a store under a from-zero build included.
 Minting a pool opens no database and runs no SQL. Connections open lazily outside
 the entry gate, read-only with `query_only` set, carrying the read builders and their `EXPLAIN` seam
 so the gates exercise the connection reads actually use, and keeping the
@@ -209,18 +213,20 @@ reload, reads it again and heals it.
 
 **Whether a canonical read waits is its stance, and the stance is read under the entry
 gate, in the same critical section that reads the published demand.** There are two
-canonical stances. First-index capabilities additionally use the admission below; they do
-not turn a never-served entry into a canonical settling entry.
+canonical stances. Capabilities a from-zero build has published additionally use the
+admission below; they do not turn an entry under a from-zero build into a canonical
+settling entry.
 
 - **Settle.** An entry that entered warming from `Ready`, with no withdrawal of trust in
   between, settles, and a read that meets it waits. That is an entry taking in a change: a
   polled watcher batch, a reconcile turn, or a vault schema reload.
-- **Refuse.** Everything else refuses at once, with its reason: an entry that has never
-  served unless this request's first-index capability is admitted below, an entry that lost trust —
+- **Refuse.** Everything else refuses at once, with its reason: an entry under a from-zero
+  build unless this request's capability is admitted below, an entry that lost trust —
   a watcher overflow or loss, an environmental refusal,
   damaged derived state — a release, a detach or a drop, and every park. Warming entered
-  from untrusted, which is a recovery's or a rebuild's, refuses at once, although it too runs
-  over coverage that was once `Ready`.
+  from untrusted by a recovery that does not rebuild from zero refuses at once, although it
+  too runs over coverage that was once `Ready`. Warming entered from untrusted by a rebuild
+  from zero admits what that build has published, as a vault's first build does.
 
 Warming published by a reconcile and warming published by a recovery or a rebuild carry the
 same trust label, so the label does not say how warming was entered. The entry's own state
@@ -291,222 +297,300 @@ backlog must not become one such interval. The bound is work-based, not a promis
 wall-clock duration for an individual filesystem or model operation.
 
 
-## First indexing writes once, in steps
+## A from-zero build writes once, in steps
 
 ### Scope
 
-First construction is the build of a newly created, initially empty canonical store
-under the current initial-attach claim and its synchronized watcher coverage. Reuse of
-an existing store and rebuilding an existing store inside the attach leg are not first
-construction. A recovery, rebuild, schema reload, park or release that otherwise
-refuses gains nothing from this section. A later inline rebuild closes first-index
-admission; it cannot remint the earlier authority. An existing canonical index keeps
-its ordinary attachment and read path. No reader can adopt a store under first
-construction as complete, and a crash during it restarts construction from zero.
+A **from-zero build** constructs a canonical store from empty, and every one is built as
+this section rules: a vault's first build, and every rebuild of an existing store from
+zero — over a DDL fingerprint, derivation version or path order the store does not match,
+over damage, or by any other rung that discards the database and derives the vault again.
+It is the construction [ADR 0044](0044-a-first-build-judges-link-health-once.md) judges link
+health once over, under the same term. There is one construction path from empty to
+complete; the ordinary per-changeset heal only maintains a store that already exists. A
+full tree heal of an existing store, a recovery that does not rebuild from zero, a schema
+reload, a park and a release gain nothing from this section and keep their existing read
+rules.
+
+A vault's first build and a rebuild serve reads alike: the same admission, under the same
+warming trust label. Admission belongs to the claim of the leg that runs the build — the
+attach leg, or the rung-3 leg — and to the watcher coverage that claim holds. A rebuild that
+starts while a from-zero build runs abandons that construction and starts its own: the
+capabilities the abandoned construction published are withdrawn, and the new construction
+publishes its own under its own claim; it never remints the earlier authority.
+
+**No reader can adopt a store under construction as complete.** The store records an
+under-construction mark in `meta` when it is created, in the transaction that records its
+DDL fingerprint, path order and derivation version, and clears the mark in the transaction
+that ends step 5. The mark is a rebuild input beside those three
+([ADR 0026](0026-a-derived-store-records-the-derivation-that-wrote-it.md)): an open that finds
+it rebuilds from zero through the same ceremony a fingerprint mismatch uses, and reports why.
+A crash during construction therefore restarts construction from zero and never resumes
+over what the crash left. A store whose recorded inputs match and which carries no mark is a
+finished store, and its open is the ordinary one.
 
 ### The canonical store is written once, in five steps
 
-First construction writes each document's row once and fills it progressively.
-Nothing is written to a store it does not stay in. The steps run in order over the
-vault, each in path order:
+A from-zero build writes each document's row once and fills it progressively. Nothing is
+written to a store it does not stay in. The steps run in order over the vault, each in path
+order:
 
 1. **Names.** Every document row is written with its names only, in path order, so
-   document ids equal an ordinary build's; every vault-file row is written final. A
-   `.md` path whose bytes prove not to be a document is removed later through the
-   ordinary removal path and leaves a gap in the ids, which is accepted. The
-   name-resolution indexes are built at the end of this step.
-2. **Content.** Each file is read once: its content hash, frontmatter projection,
-   fields, and frontmatter link and tag facts are written, and its body is stored but
-   not full-text indexed. The field indexes are built at the end of this step.
-3. **Structure.** Each stored body is parsed. No file is read again: every fact comes
-   from the bytes step 2 hashed. Headings, blocks, body links and inline tags are
-   written.
-4. **Relations.** Link health is judged once, over every eligible link, as
-   [ADR 0044](0044-a-first-build-judges-link-health-once.md) rules.
-5. **Full-text.** The full-text index is built from the stored bodies in bounded
-   batches, and its triggers are installed.
+   document ids equal those of a store built document by document; every vault-file row is
+   written final. A `.md` path whose bytes prove not to be a document is removed later
+   through the ordinary removal path and leaves a gap in the ids, which is accepted. The
+   name-resolution indexes are created at the end of this step.
+2. **Content.** Each file is read once: its content hash, frontmatter projection, fields,
+   and frontmatter link and tag facts are written, and its body is stored but not full-text
+   indexed. The field indexes are created at the end of this step.
+3. **Structure.** Each stored body is parsed. No file is read again: every fact comes from
+   the bytes step 2 hashed. Headings, blocks, body links and inline tags are written. The
+   indexes their readers seek are created at the end of this step.
+4. **Relations.** Link health is judged once, over every eligible link, as ADR 0044 rules.
+5. **Full-text.** The full-text index is built from the stored bodies in bounded batches.
+   The transaction that ends the step installs the full-text triggers and clears the
+   under-construction mark.
 
-Each step has one routine. The normal passes run it over the vault in batches; a
-requested document runs the same routine on its own. There is no second derivation
-path.
+**Construction ends at step 5, and `Ready` follows in one order.** Step 5 installs the
+triggers; the facts accepted since step 5 began are then reconciled as ordinary
+changesets, under ADR 0044's per-changeset rule; a checkpoint runs; and `Ready` is
+published.
+
+Each step has one routine. The normal passes run it over the vault in batches; a requested
+document, and a path a filesystem fact requeues, run the same routine on their own. There
+is no second derivation path.
 
 ### Every document can be fetched and parsed on its own
 
 Once step 1 has finished, a requested document runs steps 2 and 3 through their own
-routines ahead of the queue and is answered as soon as its own step 3 is done. A
-request that arrives mid-build jumps the queue at the next chunk boundary. Nothing
-waits for every document to finish a step before answering one that is ready. Pending
-requests are bounded independently of vault size; a request past the bound keeps the
-ordinary loading behavior.
+routines ahead of the queue and is answered as soon as its own step 3 is done. A Get by name
+first runs every candidate the name resolves among, under the vault schema's
+`paths.ambiguity_ignore` globs, through the step-2 routine, so its added work is bounded by
+the candidate count, never by the vault. A request that arrives mid-build jumps the queue at
+the next chunk boundary. Nothing waits for every document to finish a step before answering
+one that is ready. Pending requests are bounded independently of vault size; a request past
+the bound keeps the ordinary loading behavior.
 
-Targets come from actual requests, including requests arriving during construction.
-No target is configured before attachment merely to qualify for early service. Demand
-is owned by the request's existing lease. Expired interest releases its place in the
-queue. Distinct incoming requests cannot indefinitely delay construction. There is no
-vault-sized in-memory target map.
+Targets come from actual requests, including requests arriving during construction. No
+target is configured before attachment merely to qualify for early service. Demand is owned
+by the request's existing lease. Expired interest releases its place in the queue. Distinct
+incoming requests cannot indefinitely delay construction. There is no vault-sized in-memory
+target map.
 
 ### Capabilities switch on by data completeness
 
 Each capability is admitted when every row it reads is complete, and not before:
 
-- **Whole Get**, and every per-document projection, when the requested document has
-  finished its own step 3. Its body, fields, headings and links are exact. Which
-  document each of its links resolves to, and each link's health, read as still
-  loading until step 4: a `.md` candidate not yet read may prove not to be a document.
-  The resolution of the requested name itself is exact: every candidate it resolves
-  among has been read before the answer, through the same step-2 routine, so an
-  unknown or ambiguous answer is never given over a candidate that may yet drop out.
-- **Field and path Find** when every document has finished step 2. Only the
-  predicates, projections and ordering its existing guarded builders support are
-  eligible.
-- **Link health, validate and `HasFinding`** at the end of step 4. Before then a
-  `HasFinding` part is refused with a typed not-ready cause, and a findings column or
-  page reads "still loading", never empty.
-- **Full-text search** at the end of step 5.
-- **Ready** at the end of step 5: every lane-1 capability. Writes and repair are
-  admitted only then. A write that changed a body before the full-text index exists
-  would make the external-content index drop text it never held.
+- **Whole Get** when step 1 has finished and the requested document has finished its own
+  step 3. Its body, fields, headings, blocks and links are exact. The resolution of the
+  requested name itself is exact: every candidate it resolves among has been through step
+  2, so an unknown or ambiguous answer is never given over a candidate that may yet prove
+  not to be a document. Which document each of its links resolves to, and each link's
+  health, read as still loading until step 4 ends: resolution and health switch on
+  together, and a missing-anchor verdict needs the headings and blocks of every document,
+  which only the end of step 3 completes. Whether a path is a document is settled for
+  every path when step 2 ends. A projection of the document that reads other documents —
+  its backlinks among them — is admitted when step 3 ends, and until then reads as still
+  loading.
+- **Field and path Find** when every document has finished step 2: predicates, projections
+  and ordering over frontmatter fields and paths only, and only those its existing guarded
+  builders support.
+- **Tag predicates, and every Find shape that reads structure facts or other documents** —
+  inline tags, links-to and backlinks, headings — when every document has finished step 3.
+- **Link health, validate and `HasFinding`** when step 4 ends. Before then a `HasFinding`
+  part is refused as not ready, and a findings column or page reads "still loading", never
+  empty.
+- **Full-text search** when step 5 ends.
+- **`Ready`** after step 5, in the order above: every lane-1 capability. Writes and repair
+  are admitted only then.
 
-An early answer is exact or not given. No early row records a provisional link target
-or a provisional absence. A request whose capability is not yet admitted, or whose
-shape no early capability supports, keeps the ordinary loading behavior. A missing
-or unfinished step is never a successful missing-document result.
+"Every document" counts the paths a filesystem fact has requeued: a vault-wide capability
+is admitted only once each of them has run again through the step it needs.
 
-Get and Find use one request-aware acquisition algorithm with canonical acquisition.
-The ordinary public unrestricted read hold remains canonical. An early hold exposes
-only the operation whose data is complete; it lends no unrestricted snapshot, reader,
-count, rich-query, plan or mutation capability. Actual execution checks the request
-shape again and invokes the ordinary builder. There is no second query language,
-filter, parser, resolver, or client API.
+An early answer is exact or not given. No early row records a provisional link target or a
+provisional absence. A request whose capability is not yet admitted, or whose shape no early
+capability supports, keeps the ordinary loading behavior. A missing or unfinished step is
+never a successful missing-document result.
 
-A supported first-open request may wait for its capability within the original read
-acquisition deadline. The first gate take, construction-availability wait, capacity/open
-wait and gate retakes share that deadline. No phase renews it. Publication, withdrawal
-and closure of a capability wake affected waiters; progress counters alone are not an
-availability signal. No wait runs under the entry gate. Expiry while waiting for a
-capability returns `host/entry-not-ready` with the current warming phase and counters
-and the message "this vault is still indexing for the first time"; a refusal of a
-capability not yet admitted says the same. Resource and gate-acquisition failures keep
-their existing refusal rules. This adds a price: an eligible first-open caller can be
-held up to the ordinary bound, whereas a canonical first-open request still refuses at
-once.
+Get and Find use one request-aware acquisition algorithm with canonical acquisition. The
+ordinary public unrestricted read hold remains canonical. An early hold exposes only the
+operation whose data is complete; it lends no unrestricted snapshot, reader, count,
+rich-query, plan or mutation capability. Actual execution checks the request shape again
+and invokes the ordinary builder. There is no second query language, filter, parser,
+resolver, or client API.
 
-### Full-text triggers are absent during first construction
+A supported request that meets a from-zero build may wait for its capability within the
+original read acquisition deadline. The first gate take, construction-availability wait,
+capacity/open wait and gate retakes share that deadline. No phase renews it. Publication,
+withdrawal and closure of a capability wake affected waiters; progress counters alone are
+not an availability signal. No wait runs under the entry gate. Expiry while waiting for a
+capability, the refusal of a capability not yet admitted and the refusal of a `HasFinding`
+part before step 4 ends all name one code, `host/entry-not-ready`, with the current warming
+phase and counters and the message "this vault is still indexing for the first time".
+Resource and gate-acquisition failures keep their existing refusal rules. This adds a
+price: an eligible caller can be held up to the ordinary bound, whereas a canonical request
+that meets a from-zero build still refuses at once.
 
-The full-text index is maintained by triggers on `documents`, and they are otherwise
-the only writer of `documents_fts`. First construction is a deliberate exception: the
-triggers do not exist while it runs, step 5 builds the index from the stored bodies,
-and the same step installs the triggers. From then on they are again the only
-maintainer. Because no write is admitted before Ready, no body changes while the
-triggers are absent. The finished store's schema equals an ordinary store's.
+### A filesystem fact withdraws only what it touches
 
-### Construction keeps its cost following the work
+A from-zero build is covered by one watcher authority captured before enumeration. A
+relevant filesystem fact the authority accepts while the build runs withdraws only what it
+touches, until its path is derived again:
 
-- A non-unique secondary index is created when its first reader is admitted, never
-  maintained row by row during construction. Unique indexes and primary keys stay.
-- An admitted early statement never scans a vault-sized table.
-- Host chunks stay bounded at 128 documents. A SQLite transaction spans up to 2,048
-  documents, and commits at the next chunk boundary whenever a request is pending, so
-  the request's snapshot sees its document.
-- The WAL autocheckpoint is raised during construction, and a checkpoint runs before
-  Ready. `synchronous` and the cache size keep their production values.
+- **Its path is derived again.** During steps 1–4 the path is requeued at the front of the
+  queue and runs again through the same step routines, up to the step the build has
+  reached; a path requeued while step 4 runs has the links it reaches judged again before
+  step 4 ends, as ADR 0044 rules. From step 5 on nothing is requeued: the fact waits for
+  the reconcile that precedes `Ready`.
+- **A Get of that document waits** until its path is derived again. Other Gets are
+  unaffected.
+- **Every vault-wide capability waits for it** — field Find, the step-3 shapes, link health
+  and search — until every requeued path has run again, and from step 5 on until the
+  reconcile.
+- **A create, a delete or a rename changes name rows at once** during steps 1–4, through
+  the ordinary add and remove path, and a Get whose name could resolve to an affected name
+  checks its resolution again before it answers. From step 5 on, such a fact waits for the
+  reconcile, and a Get whose name could resolve to an affected name waits with it.
+- **Lost coverage withdraws every early capability.** An overflow, a lost root, a backend
+  the watcher cannot cover, or any other loss of watcher fidelity withdraws every early
+  capability, and neither draining a batch, finishing a heal window nor seeing a missing
+  root return restores them. Construction continues, the store is reconciled with the
+  vault before `Ready`, and requests meanwhile keep the ordinary loading behavior.
 
-### Initializing a vault runs its first index in the foreground
-
-Initializing a vault runs the first index before it returns, so normal use has no cold
-start. First-index admission is for a vault used before its initialization finishes.
-Surfaces implement this behavior.
-
-### Source authority and publication
-
-First construction is covered by one watcher authority captured before enumeration.
-The first implementation uses conservative withdrawal: any accepted relevant filesystem
-fact or observed source contradiction withdraws every early capability. Withdrawal
-cannot be restored by draining a batch, finishing a heal window or seeing a missing
-root return. Lost or overflowed coverage prevents early success. Construction itself
-continues; the accumulated facts are reconciled before Ready, and requests meanwhile
-keep the ordinary loading behavior.
-
-The authority includes every relevant fact the subscription accepts after capture,
-wherever it is held: the coalescer's pending or unplaced batch, an open heal window,
-collected heal observations and the delivery slot are examples. The entry's merged
-`pending.taken_in` counter alone is not this boundary. A request fixes its requirement
-when it meets the entry; known facts cannot be omitted merely because the attach leg
-has not returned them yet. A withdrawn capability yields to ordinary reconciliation
-rather than repeatedly moving the request's requirement until the filesystem falls
-quiet.
+The authority includes every relevant fact the subscription accepts after capture, wherever
+it is held: the coalescer's pending or unplaced batch, an open heal window, collected heal
+observations and the delivery slot are examples. The entry's merged `pending.taken_in`
+counter alone is not this boundary. A request fixes its requirement when it meets the
+entry; known facts cannot be omitted merely because the build has not taken them in yet. A
+waiting request waits for the facts it met, never for the ones that arrive after it, rather
+than moving its requirement until the filesystem falls quiet.
 
 Publication of a capability binds the canonical store's identity, the capability, the
-pinned content model, the watcher authority and the attach claim atomically under the
+pinned content model, the watcher authority and the build's claim atomically under the
 entry gate. A changed claim, registration, root, schema, known damage, park or release
-prevents stale publication. Publishing a capability never sets
-`trust_unbroken_since_ready` or global `Ready`.
+prevents stale publication. Publishing a capability never sets `trust_unbroken_since_ready`
+or global `Ready`.
 
 A bounded root-identity check is permitted on this early acquisition path, outside the
 entry gate and watcher locks. It reads no document and runs no derivation. The canonical
 warm request path keeps its existing filesystem-check-free behavior. This is a scoped
-exception to the architecture's request-path filesystem-check prohibition and the
-"never per request" alternative below; it does not permit other filesystem query work.
+exception to the architecture's request-path filesystem-check prohibition and the "never
+per request" alternative below; it does not permit other filesystem query work.
 Bookkeeping-only claim, authority, capability and deadline checks run under the
-establishing gate hold; filesystem work, opening and waiting do not. Watcher callbacks
-never take the entry gate, including when they withdraw authority or wake a waiter.
-The lock order is entry gate before watcher bookkeeping, never the reverse.
+establishing gate hold; filesystem work, opening and waiting do not. Watcher callbacks never
+take the entry gate, including when they withdraw a capability or wake a waiter. The lock
+order is entry gate before watcher bookkeeping, never the reverse.
 
 After a cold open or capacity wait, acquisition rechecks the current claim, capability,
-authority, request shape and pinned model under the original deadline. Before exposing
-an early result, the read checks that no known source or coverage contradiction
-withdrew its authority. Store, resource and environmental failures keep their types
-even when eligibility also moves. Every source-dependent refusal is an early result for
-this authority check: unknown or ambiguous target, cursor position/order refusals and
-other judgments derived from indexed data cannot bypass it by being represented as an
-error. Source-independent input errors retain their ordinary validation. This is a
-watcher-fidelity guarantee, not filesystem atomicity or proof that an unseen
+authority, request shape and pinned model under the original deadline. Before exposing an
+early result, the read checks that no accepted fact and no coverage loss known at that
+instant withdrew the capability it answers under. Store, resource and environmental
+failures keep their types even when eligibility also moves. Every source-dependent refusal
+is an early result for this check: unknown or ambiguous target, cursor position/order
+refusals and other judgments derived from indexed data cannot bypass it by being
+represented as an error. Source-independent input errors retain their ordinary validation.
+This is a watcher-fidelity guarantee, not filesystem atomicity or proof that an unseen
 operating-system event did not occur.
+
+### Full-text triggers are absent during construction
+
+The full-text index is maintained by triggers on `documents`, and they are otherwise the
+only writer of `documents_fts`. A from-zero build is a deliberate exception: the triggers do
+not exist while it runs, step 5 builds the index from the stored bodies, and the
+transaction that ends step 5 installs the triggers. From then on they are again the only
+maintainer. No body changes while they are absent: a requeued path rewrites its body only
+during steps 1–4, before step 5 has indexed any body, and every later body change — the
+reconcile that precedes `Ready`, and the writes and repair admitted only at `Ready` — is a
+changeset that runs after the triggers exist. A body changed after the index took it,
+without the triggers, would leave the external-content index holding text the body no
+longer holds and dropping text it never held. The finished store's schema equals an
+ordinary store's.
+
+### Construction keeps its cost following the work
+
+- Each non-unique secondary index is created and committed at the end of the step after
+  which its first reader is admitted, before that capability publishes, so an admitted
+  statement's `EXPLAIN` gate sees the index; none is maintained row by row during
+  construction. Unique indexes and primary keys stay.
+- An admitted early statement never scans a vault-sized table.
+- Host chunks stay bounded at 128 documents. A SQLite transaction spans up to 2,048
+  documents, and commits at the next chunk boundary whenever a request is pending, so the
+  request's snapshot sees its document.
+- The WAL autocheckpoint is raised during construction, and the checkpoint before `Ready`
+  runs in the order construction states. `synchronous` and the cache size keep their
+  production values.
+
+### Initializing a vault runs its first build in the foreground
+
+Initializing a vault runs its from-zero build before it returns, so normal use has no cold
+start; it returns once the vault is `Ready`. Early admission serves a vault used before its
+initialization finishes. An environment error or an interruption that ends the build leaves
+the vault registered: initialization reports the failure, and that indexing restarts from
+zero on the vault's next use. A file the build cannot read is quarantined as one document,
+under a finding naming it, and is not an initialization failure.
 
 ### Promotion, budget and answers
 
-Early reads run on read-only handles over the canonical store under construction,
-under the same host-wide reader budget and fairness group as every canonical read.
-Ready closes early admission and opens unrestricted canonical acquisition in the same
-gate hold that publishes it. Healthy promotion and administrative retirement do not
-invalidate an already established immutable read; its held proof and resources
-survive independently of new admission. Explicit detach, unregister and host
-destruction count as administrative retirement, including the unsubscription they
-cause. Established authority must distinguish that administrative end from backend
-failure, overflow or root/source loss. Dropping the subscription alone does not erase
-the proof a held read already earned or permit new acquisition. Known source or
-coverage contradiction is different and withdraws the early result, including a
-source-dependent refusal. Teardown never waits for a read or a cold open.
+Early reads run on read-only handles over the canonical store under construction, under the
+same host-wide reader budget and fairness group as every canonical read. Get and Find
+acquire source capacity, not retained-count scratch capacity. `Ready` closes early
+admission and opens unrestricted canonical acquisition in the same gate hold that publishes
+it. Healthy promotion and administrative retirement do not invalidate an already
+established immutable read; its held proof and resources survive independently of new
+admission. Explicit detach, unregister and host destruction count as administrative
+retirement, including the unsubscription they cause. Established authority must
+distinguish that administrative end from backend failure, overflow or root/source loss.
+Dropping the subscription alone does not erase the proof a held read already earned or
+permit new acquisition. An accepted fact or a coverage loss is different and withdraws the
+early result it touches, including a source-dependent refusal. Teardown never waits for a
+read or a cold open.
 
-Damage met by an early read is canonical damage and takes the existing claim-bound
-path; environmental failures do not become damage.
+Damage met by an early read is canonical damage and takes the existing claim-bound path,
+which discards the store and starts a new from-zero build; environmental failures do not
+become damage.
 
-An early answer carries the actual warming trust, store epoch and committed generation
-of its establishing hold. Find continuations use ordinary cursor judgment: compatible
-epoch movement continues with movement reported; incompatible order/schema retains the
-ordinary refusal. No cursor is rewritten, silently restarted or implicitly promoted
-into a retained-count result.
+An early answer carries the actual warming trust, store epoch and committed generation of
+its establishing hold. Find continuations use ordinary cursor judgment: compatible epoch
+movement continues with movement reported; incompatible order/schema retains the ordinary
+refusal. No cursor is rewritten, silently restarted or implicitly promoted into a
+retained-count result.
 
-### What this withdraws
+### What this changes and withdraws
 
-ADR 0043's disposable sources have no subject here and are retired with every rule
-that existed only for them: the disk-backed names catalogue, the sealed metadata intake
-store, the closure Get sources and their name and link closure bounds, the per-attach
-budget of target preparations, the loading directory beside the canonical store and its
-sweeps, the rule that a source's writers close before its readers open, the separate
-identity, epoch and damage judgment of a disposable source, the rule that physical
-temporary-file names buy no extra fair turns, cleanup receipts for temporary storage,
-and the promotion that retired published sources at Ready. A Get answered early no
-longer needs a rich projection derived apart from the store: the store's own rows are
-the projection.
+**An early Get carries less than ADR 0043's did.** ADR 0043's early Get carried complete
+findings and resolved links, because its closure source derived the candidates and linked
+documents they need. An early Get here reads link resolution and link health as still
+loading until step 4 ends, and a projection that reads other documents as still loading
+until step 3 ends. Its body, fields, headings, blocks and links are exact, as before.
+
+**A rebuild serves early reads, and a crash restarts it.** ADR 0043 admitted early reads
+only during a fresh store's first attach, and a rebuild refused reads until `Ready`. Every
+from-zero build now admits them. A crash during any from-zero build restarts it from zero,
+where a rebuild of an existing store resumed by heal over the chunks it had committed.
+
+**One fact no longer withdraws everything.** ADR 0043 withdrew every early capability on
+any accepted fact. A fact now withdraws the document it touches and holds the vault-wide
+capabilities until that document is derived again; only a loss of coverage withdraws every
+early capability.
+
+ADR 0043's disposable sources have no subject here and are retired with every rule that
+existed only for them: the disk-backed names catalogue, the sealed metadata intake store,
+the closure Get sources and their name and link closure bounds, the per-attach budget of
+target preparations, the loading directory beside the canonical store and its sweeps, the
+rule that a source's writers close before its readers open, the separate identity, epoch
+and damage judgment of a disposable source, the rule that physical temporary-file names buy
+no extra fair turns, cleanup receipts for temporary storage, and the promotion that retired
+published sources at `Ready`. A Get answered early no longer needs a rich projection derived
+apart from the store: the store's own rows are the projection.
 
 ## Whole-vault and semantic readiness
 
-Global lane-1 `Ready` still requires first construction through step 5, watcher
-synchronization and reconciliation of the accumulated facts. Request-specific early
-permission does not weaken that boundary. Canonical lexical/rich queries become useful
-at that boundary even while optional semantic initialization or feed consumption
-remains outstanding.
+Global lane-1 `Ready` still requires a from-zero build through step 5, watcher
+synchronization and reconciliation of the accumulated facts, in the order construction
+states. Request-specific early permission does not weaken that boundary. Canonical
+lexical/rich queries become useful at that boundary even while optional semantic
+initialization or feed consumption remains outstanding. Semantic engines start after
+`Ready`: no sidecar opens and no model initializes while a from-zero build runs.
 
 Configuration interpretation and delivery still precede publication of the canonical
 declaration. Delivery validates the section and records its desired configuration identity
@@ -551,13 +635,15 @@ An attachment that recreates its semantic engine can publish canonical `Ready` b
 the vector rung becomes usable, including a warm reattachment after idle detach.
 Status reports preparation during that interval; its duration is not promised here.
 
-## First-index prices
+## From-zero build prices
 
 Measured on a lab prototype in release builds, as medians of a serial matrix run in
-Williams order, on a 10,014-document fixture unless stated, against an ordinary build
-serving early reads from ADR 0043's disposable sources:
+Williams order, on a vault's first build over a 10,014-document fixture unless stated,
+against a build serving early reads from ADR 0043's disposable sources. Each figure is end
+to end, early reads served; ADR 0044's link-health figures come from a phase profile of
+construction alone and are not comparable with these.
 
-| Measure | Ordinary build | Built in steps |
+| Measure | Disposable sources | Built in steps |
 |---|---|---|
 | Ready | 30.6 s | 9.0 s |
 | CPU time | 27.9 s | 10.0 s |
@@ -576,22 +662,27 @@ in document ids, in schema text and in full-text integrity.
 ### Known limit
 
 `CREATE INDEX` packs index pages about 99% full, where row-by-row maintenance leaves
-them about 88% full, so the first writes after a cold build split pages. Each costs
+them about 88% full, so the first writes after a from-zero build split pages. Each costs
 about 1–2 ms more, and about 4 ms for a rename of a hub, for roughly the first 200
 writes scattered over the vault or about 5 writes to one document: about 0.3 s in total
 at 10,014 documents. The packing survives restart. Per-write cost then matches or beats
-an ordinary build's. SQLite has no fill factor, and VACUUM packs pages full;
+a store whose indexes were maintained row by row. SQLite has no fill factor, and VACUUM packs pages full;
 maintaining indexes during construction removes the cost at 0.7 to 2.2 s more before
 Ready. The cost is judged imperceptible and accepted.
 
-### First-index alternatives
+### From-zero build alternatives
 
 - **Keeping disposable sources.** Every document an early source serves is derived
   twice, and Ready moves later.
-- **An ordinary build followed by one whole-vault link-health pass, without writing
-  names first.** Early reads would still need rows written twice, and it does not let
+- **Building in steps for a vault's first build only.** A rebuild of an existing store
+  would keep a second construction path from empty, refuse reads until `Ready`, and pay
+  per-changeset link-health re-decision across every chunk.
+- **Withdrawing every early capability on any accepted fact.** One edit anywhere in the
+  vault would hold every early read until `Ready`, though it touches one document.
+- **A document-by-document build followed by one whole-vault link-health pass,
+  without writing names first.** Early reads would still need rows written twice, and it does not let
   a requested document be fetched and parsed on its own.
-- **A separate first-build name table standing in for documents during resolution.**
+- **A separate build-time name table standing in for documents during resolution.**
   It writes every name twice.
 - **Reusing the vault-file table for pending documents.** Its key and eligibility rules
   differ from a document's.
