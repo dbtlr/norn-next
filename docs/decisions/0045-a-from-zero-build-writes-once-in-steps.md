@@ -15,7 +15,7 @@ attach only; this decision builds the canonical store itself in steps — on eve
 **from-zero build**, a vault's first build and every rebuild from zero alike — writing
 each document's row once and filling it progressively, and switches each capability on
 when the data it reads is complete. A from-zero build is the construction
-[ADR 0044](0044-a-first-build-judges-link-health-once.md) judges link health once over,
+[ADR 0044](0044-a-from-zero-build-judges-link-health-once.md) judges link health once over,
 under the same term. Whole-vault readiness retains its existing meaning.
 
 ## Context
@@ -305,7 +305,7 @@ A **from-zero build** constructs a canonical store from empty, and every one is 
 this section rules: a vault's first build, and every rebuild of an existing store from
 zero — over a DDL fingerprint, derivation version or path order the store does not match,
 over damage, or by any other rung that discards the database and derives the vault again.
-It is the construction [ADR 0044](0044-a-first-build-judges-link-health-once.md) judges link
+It is the construction [ADR 0044](0044-a-from-zero-build-judges-link-health-once.md) judges link
 health once over, under the same term. There is one construction path from empty to
 complete; the ordinary per-changeset heal only maintains a store that already exists. A
 full tree heal of an existing store, a recovery that does not rebuild from zero, a schema
@@ -426,7 +426,7 @@ withdrawal and closure of a capability wake affected waiters; progress counters 
 not an availability signal. No wait runs under the entry gate. Expiry while waiting for a
 capability, the refusal of a capability not yet admitted and the refusal of a `HasFinding`
 part before step 4 ends all name one code, `host/entry-not-ready`, with the current warming
-phase and counters and the message "this vault is still indexing for the first time".
+phase and counters and the message "this vault is still being indexed".
 Resource and gate-acquisition failures keep their existing refusal rules. This adds a
 price: an eligible caller can be held up to the ordinary bound, whereas a canonical request
 that meets a from-zero build still refuses at once.
@@ -450,7 +450,9 @@ touches, until its path is derived again:
 - **A create, a delete or a rename changes name rows at once** during steps 1–4, through
   the ordinary add and remove path, and a Get whose name could resolve to an affected name
   checks its resolution again before it answers. From step 5 on, such a fact waits for the
-  reconcile, and a Get whose name could resolve to an affected name waits with it.
+  reconcile, and a Get whose name could resolve to an affected name waits with it. A create,
+  delete or rename accepted during or after step 5 therefore waits for the pre-`Ready`
+  reconcile, because name rows are not changed while the full-text triggers are absent.
 - **Lost coverage withdraws every early capability.** An overflow, a lost root, a backend
   the watcher cannot cover, or any other loss of watcher fidelity withdraws every early
   capability, and neither draining a batch, finishing a heal window nor seeing a missing
@@ -526,8 +528,13 @@ Initializing a vault runs its from-zero build before it returns, so normal use h
 start; it returns once the vault is `Ready`. Early admission serves a vault used before its
 initialization finishes. An environment error or an interruption that ends the build leaves
 the vault registered: initialization reports the failure, and that indexing restarts from
-zero on the vault's next use. A file the build cannot read is quarantined as one document,
-under a finding naming it, and is not an initialization failure.
+zero on the vault's next use. A file whose bytes do not decode as a document is quarantined as one document,
+under a finding naming it, and is not an initialization failure. A document the build
+cannot open, such as one whose permission was denied, is refused as the architecture's
+permission-loss row rules: nothing was read, so nothing is known about what it holds, and
+the entry stays untrusted. For a foreground initialization that refusal is a failed first
+index, so the vault stays registered, initialization reports it, and indexing restarts from
+zero on the vault's next use.
 
 ### Promotion, budget and answers
 
@@ -565,8 +572,8 @@ until step 3 ends. Its body, fields, headings, blocks and links are exact, as be
 
 **A rebuild serves early reads, and a crash restarts it.** ADR 0043 admitted early reads
 only during a fresh store's first attach, and a rebuild refused reads until `Ready`. Every
-from-zero build now admits them. A crash during any from-zero build restarts it from zero,
-where a rebuild of an existing store resumed by heal over the chunks it had committed.
+from-zero build now admits them. A crash during any from-zero build leaves the under-construction mark,
+and the next open rebuilds from zero.
 
 **One fact no longer withdraws everything.** ADR 0043 withdrew every early capability on
 any accepted fact. A fact now withdraws the document it touches and holds the vault-wide

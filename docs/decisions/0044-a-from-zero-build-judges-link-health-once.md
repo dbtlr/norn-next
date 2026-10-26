@@ -13,7 +13,7 @@ chunk at a time, and a class touched by many chunks is re-judged by each of them
 from-zero build judges link health once, after every fact has landed, rather than per
 changeset.** A **from-zero build** constructs a canonical store from empty — a vault's first
 build and every rebuild from zero — and is the same construction
-[ADR 0045](0045-first-index-writes-once-in-steps.md) builds in steps, under the same term.
+[ADR 0045](0045-a-from-zero-build-writes-once-in-steps.md) builds in steps, under the same term.
 No reader can adopt that store as complete until its construction ends, no reader reads a
 link-health finding before the judgment has run, and no query's answer or write's safety
 reads one, so nothing needs the findings before every fact they are judged over exists.
