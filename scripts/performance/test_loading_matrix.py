@@ -26,7 +26,7 @@ class MatrixTests(unittest.TestCase):
             gate_semantics(references, {'fixture_sha256': 'one', 'store': {'semantic_sha256': 'b'}})
 
     def test_dbstat_reports_documents_including_overflow_and_physical_order(self):
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[2] / 'target') as folder:
+        with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'store.sqlite3'
             with closing(sqlite3.connect(path)) as db:
                 db.execute('pragma page_size=512')
