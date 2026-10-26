@@ -149,11 +149,13 @@ fn performance_worker() {
         "public prefix excludes profiling"
     );
     #[cfg(feature = "induced-failure")]
-    let host = match operator_mode {
-        Some(mode @ ("four-step" | "four-step-no-body")) => {
-            vault.host_with_four_step_policy(policy, four_step::selection(mode, began))
-        }
-        _ => vault.host_with_policy(policy),
+    let lab = operator_mode
+        .filter(|mode| matches!(*mode, "four-step" | "four-step-no-body"))
+        .map(|mode| four_step::selection(mode, began));
+    #[cfg(feature = "induced-failure")]
+    let host = match &lab {
+        Some((loading, _)) => vault.host_with_four_step_policy(policy, loading.clone()),
+        None => vault.host_with_policy(policy),
     };
     #[cfg(not(feature = "induced-failure"))]
     let host = vault.host_with_policy(policy);
@@ -209,6 +211,10 @@ fn performance_worker() {
     #[cfg(not(feature = "induced-failure"))]
     let (timings, evidence): (Option<Value>, Value) = (None, Value::Null);
     #[cfg(feature = "induced-failure")]
+    if let Some((_, probe)) = &lab {
+        probe.emit();
+    }
+    #[cfg(feature = "induced-failure")]
     let evidence = if operator_mode == Some("public") {
         let mut evidence = evidence;
         evidence["tombstones_recorded"] = json!(host.evidence().tombstones_recorded);
@@ -235,8 +241,9 @@ fn performance_worker() {
     let ready = if let Some(mode @ ("four-step" | "four-step-no-body")) = operator_mode {
         let mut ready = ready;
         ready["loading_mode"] = json!(mode);
-        ready["loading_read_scope"] =
-            json!("lab canonical pooled hook; whole Get waits for global content eligibility");
+        ready["loading_read_scope"] = json!(
+            "lab canonical pooled hooks; answers buffered until build ends; whole Get precedes link health; Search waits for complete lexical content"
+        );
         ready
     } else {
         ready

@@ -46,7 +46,7 @@ def validate_lab_stage(stage, manifest):
     """Validate the real hook answer against the existing frozen fixture oracle."""
     from results import validate_read
     name = stage['startup_stage']
-    if name not in ('four-step-get', 'four-step-find'):
+    if name not in ('four-step-get', 'four-step-find', 'four-step-search'):
         return
     if stage.get('current') is not True:
         raise ValueError('lab hook lost its current source')
@@ -62,18 +62,113 @@ def validate_lab_stage(stage, manifest):
             collection = document[key]
             if collection['total'] != len(collection['items']):
                 raise ValueError('lab whole Get truncated a collection')
-    else:
+    elif name == 'four-step-find':
         validate_read('current', {'op': 'find'}, wrapped, manifest)
         page = report['page']
         if (page['moved'] or (page['next'] is not None) != (len(manifest['active_paths']) > 25)
                 or any(set(row) != {'path'} for row in page['rows'])):
             raise ValueError('lab metadata page differs from the public path-only page')
+    else:
+        from fixture import COMMON
+        if stage.get('query') != COMMON:
+            raise ValueError('lab Search used the wrong query')
+        validate_read('current', {'op': 'search', 'query': COMMON}, wrapped, manifest)
+        page = report['page']
+        if (report['ladder'] != {'rungs': [{'rung': 'lexical'}], 'repeatable': True}
+                or page['moved'] or (page['next'] is not None) != (len(manifest['paths']) > 25)):
+            raise ValueError('lab Search differs from the lexical first page')
 
 
 def endpoint(origin, *, path, response=None, worker_ns=None, **fields):
     import time
     return dict(parent_received_ns=time.perf_counter_ns() - origin, worker_ns=worker_ns,
                 path=path, response=response, **fields)
+
+
+def describe_probe(probe, arm, kind):
+    lab = arm.startswith('four-step')
+    result = dict(probe, timing_scope=('earliest availability plus builder query time' if lab else
+                                     'first validated public answer; includes admission and builder query time'),
+                  delivery_scope=('buffered in worker; serialized and delivered after build' if lab else
+                                  'public response delivered when answered'))
+    if kind == 'get':
+        result['findings_scope'] = ('answered before link health (health loading)' if lab else
+                                    'includes link-health findings')
+    return result
+
+
+def lab_measurements(arm, events):
+    expected = ['names', 'requested-structure', 'content', 'find']
+    if arm == 'four-step':
+        expected.append('search')
+    expected.extend(['get', 'structure'])
+    if arm == 'four-step-no-body':
+        expected.append('search')
+    expected.append('relations')
+    if [e['startup_stage'] for e in events] != ['four-step-' + name for name in expected]:
+        raise ValueError('four-step boundary/probe coverage differs')
+    stages = {e['startup_stage']: e for e in events}
+    report = stages['four-step-relations']
+    if report['reconciled'] is not False:
+        raise ValueError('source churn required an ordinary heal during the lab build')
+    steps = ('names', 'content', 'structure', 'relations')
+    boundaries = report['boundary_ns']
+    busy = report['busy_ns']
+    if set(boundaries) != set(steps) or set(busy) != set(steps):
+        raise ValueError('four-step timing coverage differs')
+    intervals, previous = {}, 0
+    for name in steps:
+        boundary = boundaries[name]
+        if type(boundary) is not int or boundary < previous or type(busy[name]) is not int or busy[name] < 0:
+            raise ValueError('invalid four-step timing')
+        intervals[name] = boundary - previous
+        previous = boundary
+    pull_ahead = report['pull_ahead_ns']
+    if type(pull_ahead) is not int or pull_ahead < 0:
+        raise ValueError('invalid four-step pull-ahead timing')
+    result = dict(step_counters=report['steps'], step_boundary_ns=boundaries,
+                  step_boundary_intervals_ns=intervals, step_busy_ns=busy, pull_ahead_ns=pull_ahead,
+                  step_boundary_scope='lab build origin; end of each main pass, before its observer queries',
+                  step_busy_scope='main-pass elapsed work excluding observer queries and requested-path pull-ahead',
+                  pull_ahead_scope='requested-path content and structure elapsed work; excludes observer queries',
+                  step_duration_scope='boundary intervals include intervening observers and pull-ahead; busy_ns is elapsed work, not CPU time',
+                  counter_scope={
+                      'files_read': 'attempted source-file opens, including failed opens',
+                      'rows_rewritten': 'content/metadata transitions; separate no-body payload updates are body_rows_rewritten',
+                      'fts': 'SQLite internal FTS trigger and shadow-table work is uncounted',
+                      'findings_discard': 'skipping findings discard on a fresh store is available to ordinary loading too; not a four-step-specific saving'},
+                  content_complete=stages['four-step-content'])
+    for field, name in [('ready', 'structure'), ('health_complete', 'relations'),
+                        ('requested_document_structure', 'requested-structure')]:
+        event = stages['four-step-' + name]
+        result[field] = dict(parent_received_ns=event['parent_received_ns'], worker_ns=event['elapsed_ns'],
+                             resources=event.get('resources_when_observed'), source=event['startup_stage'],
+                             delivery_scope='buffered in worker; delivered after build',
+                             resource_scope='sampled after build on buffered event receipt')
+    result['ready']['counters'] = {step: result['step_counters'][step] for step in steps[:3]}
+    result['health_complete']['counters'] = result['step_counters']
+    return result
+
+
+def cell_summary(documents, result):
+    ready = result['ready']
+    boundary = ready.get('source', 'public Ready control record')
+    worker_ready = ready.get('worker_ns')
+    clock = f"worker {worker_ready / 1e9:.6f}s " if worker_ready is not None else ''
+    lines = [f"{documents} {result['arm']}: Ready[{boundary}] "
+             f"{clock}"
+             f"parent_delivery {ready['parent_received_ns'] / 1e9:.6f}s "
+             f"public_Ready {result['public_ready']['parent_received_ns'] / 1e9:.6f}s"]
+    for kind in ('get', 'find', 'search'):
+        probe = result['first_' + kind]
+        worker = probe.get('worker_ns')
+        clock = f"worker {worker / 1e9:.6f}s " if worker is not None else ''
+        findings = '; ' + probe['findings_scope'] if kind == 'get' else ''
+        lines.append(f"  {kind.title()}[{probe['path']}] {clock}"
+                     f"parent_delivery {probe['parent_received_ns'] / 1e9:.6f}s; "
+                     f"{probe['timing_scope']}{findings}")
+    lines.append(f"  semantic {result['store']['semantic_sha256']}")
+    return '\n'.join(lines)
 
 
 def measure_cell(binary, root, manifest, arm):
@@ -117,12 +212,13 @@ def measure_cell(binary, root, manifest, arm):
             ack.replace(ack.with_suffix('.json'))
         elif arm.startswith('four-step'):
             validate_lab_stage(stage, manifest)
-            if name in ('four-step-get', 'four-step-find'):
+            if name in ('four-step-get', 'four-step-find', 'four-step-search'):
                 kind = name.removeprefix('four-step-')
                 if kind in probes:
                     raise ValueError('duplicate lab probe')
                 probes[kind] = dict(parent_received_ns=stage['parent_received_ns'],
-                    worker_ns=stage['query_finished_ns'], path=f'lab FourStepRead::{kind}', response=stage)
+                    worker_ns=stage['query_finished_ns'], path=f'lab FourStepRead::{kind}', response=stage,
+                    earliest_available_ns=stage['earliest_available_ns'], query_host_ns=stage['query_host_ns'])
         events.append(stage)
 
     if arm == 'main':
@@ -142,10 +238,7 @@ def measure_cell(binary, root, manifest, arm):
         if arm.startswith('four-step'):
             if worker.ready.get('loading_mode') != arm:
                 raise ValueError('worker did not execute requested four-step mode')
-            expected = ['four-step-names', 'four-step-requested-structure', 'four-step-content',
-                        'four-step-find', 'four-step-get', 'four-step-structure', 'four-step-relations']
-            if [e['startup_stage'] for e in events] != expected:
-                raise ValueError('four-step boundary/probe coverage differs')
+            lab = lab_measurements(arm, events)
         elif arm == 'health-once':
             validate_receipts(arm, events, worker.ready, manifest)
         elif len(events) != 2:
@@ -183,9 +276,10 @@ def measure_cell(binary, root, manifest, arm):
             probes.setdefault(kind, dict(parent_received_ns=row['parent_received_ns'], worker_ns=None,
                 path=f'public Host::{kind} after Ready', response=row['response'],
                 parent_requested_ns=row['parent_requested_ns']))
-        search = call({'op': 'search', 'query': COMMON}, name='first_search')
+        search = call({'op': 'search', 'query': COMMON}, name='canonical_search')
         validate_read('current', search['command'], search['response'], manifest)
         search['path'] = 'public Host::search after Ready'
+        probes.setdefault('search', search)
         state = {name: dict(path=name, body=body, fields={'status': 'draft', 'perf_bucket': 'probe'})
                  for name, body in manifest['probe_bodies'].items()}
         warm = []
@@ -234,37 +328,16 @@ def measure_cell(binary, root, manifest, arm):
     result = dict(arm=arm, fixture_sha256=manifest['tree_sha256'], document_count=manifest['document_count'],
         origin_monotonic_ns=origin, clock_scope='parent origin before Current construction in every arm; worker clocks separate, never added',
         public_ready=public_ready, ready=public_ready, health_complete=public_ready,
-        first_get=probes['get'], first_find=probes['find'], first_search=search,
+        first_get=describe_probe(probes['get'], arm, 'get'),
+        first_find=describe_probe(probes['find'], arm, 'find'),
+        first_search=describe_probe(probes['search'], arm, 'search'), public_search_after_ready=search,
         stages=events, worker_ready=worker.ready, warm_operations=warm, end=end, store=store,
         documents_layout=layout, replay_verified=replay,
         unavailable={'commits': 'ordinary job evidence exposes changesets, not committed transaction count'},
         resource_scope='Linux main-process RSS sampled on receipt; excludes controller, not exact publication instants')
     if arm.startswith('four-step'):
-        stages = {e['startup_stage']: e for e in events}
-        for field, name in [('ready', 'structure'), ('health_complete', 'relations'),
-                            ('requested_document_structure', 'requested-structure')]:
-            event = stages['four-step-' + name]
-            result[field] = dict(parent_received_ns=event['parent_received_ns'], worker_ns=event['elapsed_ns'],
-                resources=event.get('resources_when_observed'), source=event['startup_stage'])
-        if stages['four-step-relations']['reconciled'] is not False:
-            raise ValueError('source churn required an ordinary heal during the lab build')
-        result['step_counters'] = stages['four-step-relations']['steps']
-        result['ready']['counters'] = {step: result['step_counters'][step] for step in ('names', 'content', 'structure')}
-        result['health_complete']['counters'] = result['step_counters']
-        result['step_boundary_intervals_ns'] = {}
-        result['step_durations_ns'] = None
-        previous = 0
-        for name in ('names', 'content', 'structure', 'relations'):
-            boundary = stages['four-step-' + name]['elapsed_ns']
-            result['step_boundary_intervals_ns'][name] = boundary - previous
-            previous = boundary
-        result['step_duration_scope'] = 'worker boundary intervals; names includes host setup; later intervals include observer probes and serialization'
-        result['content_complete'] = stages['four-step-content']
-        result['unavailable']['pure_step_durations'] = ('Existing observer clocks only completed boundaries; '
-            'requested-document content/structure run before the global content pass. Intervals include probes and cannot isolate step CPU or elapsed work.')
+        result.update(lab)
         result['unavailable'].pop('commits')
-        result['unavailable']['step_2_search_answer'] = ('FourStepRead exposes get/find only; text Find is rejected; '
-            'no allowed worker-only route to lexical search at this boundary. Actual public search recorded after health-complete.')
     elif arm == 'health-once':
         event = events[-1]
         result['ready'] = result['health_complete'] = dict(parent_received_ns=event['parent_received_ns'],
@@ -401,12 +474,7 @@ def run_matrix(config, fixtures, output, sizes, arms):
             result = json.loads((root / 'result.json').read_text())
             metadata['results'].append(str(root / 'result.json'))
             gate_semantics(references, result)
-            boundary = result['ready'].get('source', 'public Ready control record')
-            print(f"{documents} {arm}: Ready[{boundary}] {result['ready']['parent_received_ns'] / 1e9:.6f}s "
-                  f"public_Ready {result['public_ready']['parent_received_ns'] / 1e9:.6f}s "
-                  f"Get {result['first_get']['parent_received_ns'] / 1e9:.6f}s "
-                  f"Find {result['first_find']['parent_received_ns'] / 1e9:.6f}s "
-                  f"semantic {result['store']['semantic_sha256']}", flush=True)
+            print(cell_summary(documents, result), flush=True)
         for arm in arms:
             checked_build(config, arm)
         if snapshot != source_tree_digest(Path(__file__).resolve().parents[2]):

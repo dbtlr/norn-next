@@ -53,6 +53,83 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'current'):
             validate_lab_stage({**stage, 'current': False}, manifest)
 
+    def test_lab_search_checks_the_common_token_answer_and_lexical_ladder(self):
+        from copy import deepcopy
+        from fixture import COMMON
+        manifest = {'paths': ['a.md', 'b.md']}
+        stage = {'startup_stage': 'four-step-search', 'query': COMMON, 'current': True,
+                 'unsatisfied': [], 'advisories': [], 'answer': {
+                     'page': {'rows': [{'path': 'a.md'}, {'path': 'b.md'}], 'next': None, 'moved': []},
+                     'ladder': {'rungs': [{'rung': 'lexical'}], 'repeatable': True}, 'rule_sets': []}}
+        validate_lab_stage(stage, manifest)
+        wrong = deepcopy(stage)
+        wrong['answer']['page']['rows'][0]['path'] = 'foreign.md'
+        with self.assertRaisesRegex(ValueError, 'authored workload'):
+            validate_lab_stage(wrong, manifest)
+        with self.assertRaisesRegex(ValueError, 'current'):
+            validate_lab_stage({**stage, 'current': False}, manifest)
+        with self.assertRaisesRegex(ValueError, 'query'):
+            validate_lab_stage({**stage, 'query': 'different'}, manifest)
+        wrong = deepcopy(stage)
+        wrong['answer']['ladder']['rungs'] = []
+        with self.assertRaisesRegex(ValueError, 'lexical'):
+            validate_lab_stage(wrong, manifest)
+
+    def test_lab_measurements_use_report_boundaries_and_separate_pass_and_pull_ahead_work(self):
+        from loading_matrix import lab_measurements
+        events = [dict(startup_stage='four-step-' + name, elapsed_ns=worker_ns,
+                       parent_received_ns=9000 + worker_ns)
+                  for name, worker_ns in [('names', 1000), ('requested-structure', 1100),
+                                          ('content', 2000), ('find', 2200), ('search', 2400),
+                                          ('get', 2600), ('structure', 3000), ('relations', 4000)]]
+        events[-1].update(reconciled=False, steps={'names': {'commits': 2}, 'content': {},
+                          'structure': {}, 'relations': {}},
+                          boundary_ns={'names': 100, 'content': 900, 'structure': 1500, 'relations': 2100},
+                          busy_ns={'names': 80, 'content': 500, 'structure': 300, 'relations': 400},
+                          pull_ahead_ns=100)
+        result = lab_measurements('four-step', events)
+        self.assertEqual(result['step_boundary_ns'], {'names': 100, 'content': 900,
+                                                      'structure': 1500, 'relations': 2100})
+        self.assertEqual(result['step_boundary_intervals_ns'], {'names': 100, 'content': 800,
+                                                               'structure': 600, 'relations': 600})
+        self.assertEqual(result['step_busy_ns']['content'], 500)
+        self.assertEqual(result['pull_ahead_ns'], 100)
+        self.assertIn('observer', result['step_busy_scope'])
+        self.assertEqual(result['ready']['source'], 'four-step-structure')
+        with self.assertRaisesRegex(ValueError, 'coverage'):
+            lab_measurements('four-step', [e for e in events if e['startup_stage'] != 'four-step-search'])
+        no_body = events[:4] + events[5:7] + [events[4], events[-1]]
+        lab_measurements('four-step-no-body', no_body)
+        with self.assertRaisesRegex(ValueError, 'coverage'):
+            lab_measurements('four-step-no-body', events)
+
+    def test_first_answer_labels_distinguish_builder_time_delivery_and_findings(self):
+        from loading_matrix import describe_probe
+        lab = describe_probe({'worker_ns': 200, 'path': 'lab FourStepRead::get'}, 'four-step', 'get')
+        self.assertEqual(lab['timing_scope'], 'earliest availability plus builder query time')
+        self.assertEqual(lab['findings_scope'], 'answered before link health (health loading)')
+        self.assertIn('after build', lab['delivery_scope'])
+        for arm in ('main', 'health-once'):
+            public = describe_probe({'worker_ns': None, 'path': 'public Host::get after Ready'}, arm, 'get')
+            self.assertEqual(public['findings_scope'], 'includes link-health findings')
+            self.assertIn('public', public['timing_scope'])
+
+    def test_console_names_search_path_and_does_not_present_buffer_delivery_as_answer_time(self):
+        from loading_matrix import describe_probe, cell_summary
+        result = {'arm': 'four-step', 'ready': {'source': 'four-step-structure',
+                  'worker_ns': 3_000_000_000, 'parent_received_ns': 9_000_000_000},
+                  'public_ready': {'parent_received_ns': 10_000_000_000},
+                  'store': {'semantic_sha256': 'equal'}}
+        for kind in ('get', 'find', 'search'):
+            result['first_' + kind] = describe_probe({'worker_ns': 2_000_000_000,
+                'parent_received_ns': 8_000_000_000, 'path': f'lab FourStepRead::{kind}'}, 'four-step', kind)
+        summary = cell_summary(314, result)
+        self.assertIn('Get[lab FourStepRead::get] worker 2.000000s', summary)
+        self.assertIn('parent_delivery 8.000000s', summary)
+        self.assertIn('Search[lab FourStepRead::search]', summary)
+        self.assertIn('answered before link health (health loading)', summary)
+        self.assertIn('earliest availability plus builder query time', summary)
+
     def test_explicit_lab_controls_reach_worker_without_inheriting_foreign_controls(self):
         import json
         import os

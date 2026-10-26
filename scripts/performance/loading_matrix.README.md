@@ -21,8 +21,18 @@ mkdir -p target/scratch
 export TMPDIR="$PWD/target/scratch"
 python3 scripts/performance/loading_matrix.py --prepare-builds "$PWD/target/loading-builds"
 python3 scripts/performance/loading_matrix.py --prepare-plan --sizes 2014 10014 > target/loading-plan.json
+```
+
+After preparation, run the 314-document pilot explicitly:
+
+```bash
 python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --sizes 314 --output target/loading-pilot
 ```
+
+The pilot needs `target/loading-builds/config.json` and the source checkouts,
+build receipts, and immutable worker binaries that configuration names.
+Preparation creates these files. A changed Rust worker requires a new committed
+prototype revision and a fresh build directory. Reuse no existing output directory.
 
 The pilot runs each arm once. To select an arm, add exactly one of
 `--arms main`, `--arms four-step`, `--arms four-step-no-body`, or
@@ -50,14 +60,20 @@ All `parent_received_ns` values share one origin per cell: immediately before
 constructing the existing `Current` adapter. They include process launch,
 serialization, transport, and earlier validation or sampling. Worker clocks have
 the worker's existing `Instant` origin and remain separate; they are never added
-to parent clocks. Per-operation `host_ns` and `round_trip_ns` keep their existing
+to parent clocks. Report `step_boundary_ns` values have a third origin: the lab
+build's start, after host setup. Per-operation `host_ns` and `round_trip_ns` keep their existing
 worker and controller boundaries. These are descriptive observations from one
 sample, with no statistical or speedup claim.
 
+Lab callbacks buffer typed answers and timing records. The worker serializes and
+emits them after construction and accounting finish, before its public Ready record.
+Their `parent_received_ns` values describe delivery after build, not early availability.
+Console output prints worker times and parent delivery times separately.
+
 - `ready`: four-step structure-complete callback; main's public Ready control
   record; health-once's full-build health boundary. `public_ready` separately
-  retains the ordinary control record for every arm. These parent observations
-  include delivery delay and, for the public control record, the worker's
+  retains the ordinary control record for every arm. Lab parent observations are
+  buffered delivery after build. The public control record includes the worker's
   accounting tail after observing Ready. Console output names the selected
   boundary and prints public Ready beside it.
 - `health_complete`: four-step relations-complete callback; public Ready for main;
@@ -69,19 +85,33 @@ sample, with no statistical or speedup claim.
   hooks. Health-once uses public calls after its full build. All arms issue the
   same logical whole Get and active metadata first page; the lab's Find projects
   only paths, as the public query does. Lab answers are checked against final
-  public answers. Hook latency and public admission latency are different paths.
+  public answers. The lab Get is labelled **answered before link health (health loading)**.
+  Main and health-once Get answers include link-health findings. The base fixture's
+  small document has no links, so equal answers do not make these findings guarantees equal.
+  Lab timing is labelled **earliest availability plus builder query time**.
+  Each hook retains `earliest_available_ns`, actual dispatch and completion times,
+  and `query_host_ns`. Callback scheduling can delay dispatch beyond first availability.
+  Hook latency and public admission latency are different paths.
 - `requested_document_structure`: the lab's requested-document structure instant,
   descriptive only. Whole Get still waits for content to finish vault-wide.
-- `first_search`: an actual lexical `Host::search` for the existing common token,
-  independently checked against the fixture. It runs after public Ready in every
-  arm. **The step-2 search answer time is unavailable:** the lab read hook has no
-  search method and rejects text Find. `content_complete` is a boundary, not a
-  claimed search response.
+- `first_search`: the first actual lexical answer for the existing common token,
+  independently checked against the fixture. Four-step calls `FourStepRead::search`
+  after content completes. No-body calls it after structure completes, when all
+  body text is present. Main and health-once use their first public `Host::search`
+  after Ready. Every result names the path used. `public_search_after_ready` retains
+  a public search in every arm, including the lab arms.
 - `step_counters`: the prototype report's per-step rows, facts, link judgments,
-  findings, commits, and file reads. `step_boundary_intervals_ns` subtracts the
-  worker's successive callback clocks. These intervals include observer work;
-  the names interval includes setup, and the content interval includes the
-  requested document's pull-ahead structure. Pure step durations are unavailable.
+  findings, commits, and file reads. `files_read` includes failed source-file opens.
+  `rows_rewritten` counts content/metadata transitions. `body_rows_rewritten` counts
+  the separate body payload updates in no-body mode. SQLite's internal FTS trigger
+  and shadow-table writes are uncounted. Skipping findings discard on a fresh store
+  is also available to ordinary loading; that saving is not specific to four-step.
+  `step_boundary_ns` records names, content, structure, and relations end times
+  relative to the lab build's start. `step_boundary_intervals_ns` subtracts those
+  successive boundaries; intervening observer queries and pull-ahead work remain included.
+  `step_busy_ns` records each main pass's elapsed work, excluding observer callbacks
+  and requested-path pull-ahead. `pull_ahead_ns` records that requested-path work
+  separately, excluding callbacks. Busy time is elapsed work, not CPU time.
   `worker_ready.job_evidence` retains ordinary counters, including links decided,
   findings written/discarded, and changesets. Ordinary commit counts are
   unavailable; changesets are not substituted for commits.
@@ -102,8 +132,9 @@ sample, with no statistical or speedup claim.
   in `dbstat.path` order whose physical page numbers are not adjacent. This is a
   defined physical-order measure, not an estimate of query cost.
 - `ready.resources` and `end.resources`: Linux main-process RSS and related
-  readings when the controller observes the boundary. Samples exclude the
-  controller; they do not claim the exact publication instant.
+  readings when the controller receives the record. Lab boundary records arrive
+  after build, so their resources are not early-boundary samples. Samples exclude
+  the controller; they do not claim the exact publication instant.
 - `replay_verified`: the existing native provenance validator checks the complete
   declared short workload against final epoch/generation and plan-root identity.
   Retained responses must exactly equal the post-Ready raw worker stream.
