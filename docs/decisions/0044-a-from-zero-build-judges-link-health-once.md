@@ -69,9 +69,16 @@ link's health by:
   enumerate the rest;
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
   **missing anchor**; a link that resolves to one document the store has never read — a
-  broken document ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) that holds
-  only the row its path derives — is not judged for its anchor, because that document's
-  headings and blocks are unknown rather than absent.
+  broken document ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) whose row
+  holds no content or structure fact, only the names its path derives — is not judged for its
+  anchor, because that document's headings and blocks are unknown rather than absent. A
+  broken document read before it broke keeps its headings and blocks, and a link to it is
+  judged against them;
+- a path-addressed link whose spelled path lies beneath a directory marked unreadable
+  ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) is not judged, because its
+  target is unknown rather than absent, and the directory's finding states why. A
+  suffix-addressed link cannot be tied to one directory, so it is judged over the names the
+  store holds, and the directory's finding marks the gap those names may have.
 
 An embed is a link and carries the same kinds. Every link-health finding has warning
 severity.
@@ -80,9 +87,10 @@ Each finding's truth depends on documents the link is not written in: which docu
 target names, and what headings and blocks the one it names holds. Creating, deleting,
 renaming or moving a document, and editing the headings or blocks of a document a link
 names, can each change a finding about a link in a document nobody touched. Its inputs are
-lane-1 pillars — stored links, headings, blocks and document keys — in the same way the tag
-facet's findings read stored tag rows, so it is not a projection over another index's output
-and the inference firewall below applies to it unchanged.
+lane-1 pillars — stored links, headings, blocks, document keys, and the unreadable-directory
+findings the host files — in the same way the tag facet's findings read stored tag rows, so
+it is not a projection over another index's output and the inference firewall below applies
+to it unchanged.
 
 Five requirements bind these findings. A validate is a pure read over the lane-1 findings
 pillar: it runs no rule and derives nothing. Findings are one of the four protected surfaces
@@ -133,7 +141,10 @@ another time, as the next section rules.
 - every suffix-addressed link whose keys fall in the class of a path the changeset writes or
   kills, whether or not that class's membership moved;
 - every path-addressed link whose key equals a path the changeset writes or kills, including
-  the old path of a rename.
+  the old path of a rename;
+- every path-addressed link whose key lies beneath a directory whose unreadable-directory
+  finding the act files or ends, re-decided in the transaction that files or ends that
+  finding, so a link left unjudged under a marked directory is judged once it lists again.
 
 Every link-health finding carries invalidation keys in the key space its link is addressed
 in, so the changeset's discard reaches it through the same keys the re-decided set is found
@@ -141,8 +152,12 @@ by. The path half of that discard, and the path keys it ranges over, are part of
 decision rules and does not yet exist. Within that family, the exception admits only re-decision that is:
 
 1. **indexed** — every link in the re-decided set is reached by an index seek: a written
-   document's links by that document, and every other link by its stored keys in its own key
-   space;
+   document's links by that document, every other link by its stored keys in its own key
+   space, and the links beneath a marked directory by a range seek over path keys under the
+   directory's own key. A path-addressed link reaches a marked directory the same way: each
+   directory its spelled path passes through is a prefix of that path, and the place key of
+   each is sought among the unreadable-directory findings, one seek per directory the spelling
+   names, so the work follows the spelling, never the vault;
 2. **keyed like its discard** — every finding it files is keyed by exactly the class and path
    keys the discard ranges over, so the next change to any of them discards it;
 3. **deterministic, in facts and in order** — the same facts yield the same findings, and the
@@ -151,7 +166,8 @@ decision rules and does not yet exist. Within that family, the exception admits 
 4. **over facts the changeset's own transaction reads** — per-document facts lane 1 derives,
    and no lane-2 or engine output;
 5. **bounded by the re-decided set** — its work is the links in that set plus the candidates
-   they resolve against, with each distinct target key resolved once.
+   they resolve against and the directories their spelled paths name, with each distinct
+   target key resolved once.
 
 The five conditions are necessary, not sufficient. Backlink counts keyed by class, a rule
 that a linked document carries a tag, and tags inherited along links would each meet them;
@@ -226,8 +242,9 @@ per-changeset re-decision exceeds it.
 
 **A from-zero build may defer judgment because nothing during the build reads the
 findings.** A link's broken or ambiguous verdict reads only names — which documents its keys
-name — and the vault schema's `paths.ambiguity_ignore` globs; its missing-anchor verdict
-reads only the headings and blocks of the one document it names. The store is first a
+name, and which directories along a spelled path are marked unreadable — and the vault
+schema's `paths.ambiguity_ignore` globs; its missing-anchor verdict reads only the headings
+and blocks of the one document it names. The store is first a
 faithful copy of the files, and link-health findings serve validate and repair. Stored
 link-health findings are read only by the surfaces that report them — validate, a find's
 `HasFinding` part and a findings column — and by repair, which plans from them; no other
@@ -272,7 +289,8 @@ withdrawing inferred rows from the table the applier trusts would be nearly impo
 
 A projection over named lane-1 pillars is not a projection over another index's output: the
 tag facet's findings read stored tag rows and link-health findings read stored links,
-headings and blocks, and the firewall stands whole over both. A from-zero build's single
+headings, blocks and the unreadable-directory findings the host files, and the firewall
+stands whole over both. A from-zero build's single
 judgment reads the same pillars and nothing else.
 
 ## Invalidation keys

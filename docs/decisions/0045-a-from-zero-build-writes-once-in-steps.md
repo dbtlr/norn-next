@@ -403,7 +403,9 @@ Each capability is admitted when every row it reads is complete, and not before:
   loading verdict. Whether a path is a document is settled for every path when step 2
   ends; a document step 2 could not open stays a document. A Get of such a document
   answers with the unreadable-document finding its own step 2 filed, never with an empty
-  body read as the document's. A projection of the document that reads other documents —
+  body read as the document's. A document that breaks on a requeue after its own step 2
+  keeps the body that step committed, as ADR 0046 rules, and a Get of it answers that body
+  with the finding beside it. A projection of the document that reads other documents —
   its backlinks among them — is admitted when step 3 ends, and until then reads as still
   loading.
 - **Field and path Find** when every document has finished step 2: predicates, projections
@@ -472,8 +474,11 @@ touches, until its path is derived again:
   capability, and neither draining a batch, finishing a heal window nor seeing a missing
   root return restores them. Construction continues, the store is reconciled with the
   vault before `Ready`, and requests meanwhile keep the ordinary loading behavior. A
-  directory below the root that coverage cannot be installed over because its own access is
-  denied is not such a loss: it is withheld and marked as ADR 0046 rules.
+  directory below the root whose watch cannot be installed because its own access is denied
+  is not such a loss: the install withholds coverage at that directory alone and files no
+  finding, and the walk that meets the same denial withholds and marks it, as ADR 0046
+  rules. Its parent's watch reports a change to the directory's attributes, and that fact
+  requeues the directory into construction as any fact requeues its path.
 
 The authority includes every relevant fact the subscription accepts after capture, wherever
 it is held: the coalescer's pending or unplaced batch, an open heal window, collected heal
