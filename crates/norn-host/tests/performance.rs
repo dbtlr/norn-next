@@ -147,9 +147,10 @@ fn performance_worker() {
     let host_setup = began.elapsed();
     let _demand = host.demand(vault.name()).expect("request attachment");
     #[cfg(feature = "induced-failure")]
-    let public_ready = (operator_mode == Some("public"))
-        .then(|| public::prefix(&host, vault.name(), &root, began))
-        .flatten();
+    let public_prefix = (operator_mode == Some("public"))
+        .then(|| public::prefix(&host, vault.name(), &root, began));
+    #[cfg(feature = "induced-failure")]
+    let public_ready = public_prefix.as_ref().and_then(|(ready, _)| *ready);
     let until = Instant::now() + std::time::Duration::from_secs(240);
     while host.state(vault.name()).expect("registered vault state") != norn_wire::TrustState::Ready
     {
@@ -210,7 +211,7 @@ fn performance_worker() {
     let ready = if let Some(mode) = operator_mode {
         let mut ready = ready;
         ready["operator_prefix_mode"] = json!(mode);
-        ready["operator_prefix_receipt"] = json!({"mode":"public-host-prefix","logical_requests":2,
+        ready["operator_prefix_receipt"] = json!({"mode":"public-host-prefix","logical_requests":public_prefix.expect("public prefix completed").1,
             "dispatch":"caller thread through Host::get then Host::find",
             "availability_scope":"public Host first-open requests"});
         ready

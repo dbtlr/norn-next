@@ -1,4 +1,4 @@
-//! Two real caller-thread requests while ordinary attachment continues independently.
+//! Ordered real caller-thread requests while ordinary attachment continues independently.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,6 +10,20 @@ use norn_wire::{
 };
 use serde_json::{Value, json};
 
+fn prefix_commands(targets: Option<&str>) -> Vec<Value> {
+    let targets: Vec<String> = targets.map_or_else(
+        || vec!["small".into()],
+        |value| serde_json::from_str(value).expect("an ordered JSON list of Get targets"),
+    );
+    assert!(!targets.is_empty(), "at least one early Get target");
+    let mut commands: Vec<_> = targets
+        .into_iter()
+        .map(|target| json!({"op":"get","target":target,"whole":true}))
+        .collect();
+    commands.push(json!({"op":"find"}));
+    commands
+}
+
 /// ACKs rendezvous with this caller only; attachment owns no observer or pause.
 /// Ready here means a caller observation, never the instant of publication.
 pub fn prefix(
@@ -17,20 +31,21 @@ pub fn prefix(
     name: &VaultName,
     root: &Path,
     began: Instant,
-) -> Option<u128> {
+) -> (Option<u128>, usize) {
     let address = VaultAddress::name(name.clone());
     let mut observed_ready = None;
-    for (index, command) in [
-        json!({"op":"get","target":"small","whole":true}),
-        json!({"op":"find"}),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let targets = std::env::var("NORN_PERFORMANCE_PUBLIC_GET_TARGETS").ok();
+    let commands = prefix_commands(targets.as_deref());
+    let request_count = commands.len();
+    for (index, command) in commands.into_iter().enumerate() {
+        let is_get = command["op"] == "get";
         let started = began.elapsed().as_nanos();
         let finished;
-        let (answer, error, counters, work) = if index == 0 {
-            let params = GetParams::new(address.clone(), ResolutionTarget::new("small").unwrap());
+        let (answer, error, counters, work) = if is_get {
+            let params = GetParams::new(
+                address.clone(),
+                ResolutionTarget::new(super::text(&command, "target")).expect("a Get target"),
+            );
             let result = host.get(&params);
             finished = began.elapsed().as_nanos();
             match result {
@@ -75,9 +90,9 @@ pub fn prefix(
         let early = !answer.is_null()
             && answer["reading"]["trust"]["state"] == "warming"
             && state != TrustState::Ready;
-        let probe = ["whole_slug", "active_page"][index];
+        let probe = if is_get { "whole_slug" } else { "active_page" };
         super::emit(
-            json!({"startup_stage":(["public-get","public-find"][index]),
+            json!({"startup_stage":(if is_get { "public-get" } else { "public-find" }),
             "probe":probe,"operator_prefix_sequence":index+1,"command":command,
             "mode":"public","availability_scope":"public Host first-open requests",
             "disposition":disposition,"answer":answer,"error":error,
@@ -97,7 +112,7 @@ pub fn prefix(
         )
         .expect("bounded caller-only parent acknowledgement");
     }
-    observed_ready
+    (observed_ready, request_count)
 }
 
 fn operator_ack(
