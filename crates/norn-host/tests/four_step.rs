@@ -132,6 +132,17 @@ fn fixture(label: &str, undecodable: bool) -> norn_testkit::scratch::Scratch {
     ] {
         std::fs::write(root.join(path), text).unwrap();
     }
+    // More refused names than one lab chunk exercises the persisted queue;
+    // a decodable row at a rendered spelling still withholds its refusal.
+    for index in 0..5 {
+        std::fs::write(
+            root.join(format!("refused\\{index}.md")),
+            "Refused spelling\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(root.join("rendered\\.md"), "Refused spelling\n").unwrap();
+    std::fs::write(root.join("rendered�.md"), "Decoded spelling\n").unwrap();
     std::os::unix::fs::symlink("hub.md", root.join("link.md")).unwrap();
     if undecodable {
         std::fs::write(root.join("a.md"), [0xff, 0xfe]).unwrap();
@@ -546,5 +557,40 @@ fn a_document_removed_after_content_matches_an_ordinary_build_of_the_final_tree(
             "removed document, no_body={no_body}: tombstones lab={} ordinary={}",
             actual["tables"]["tombstones"]["rows"], expected["tables"]["tombstones"]["rows"]
         );
+    }
+}
+
+#[test]
+fn refused_only_tail_drains_after_the_only_document_was_pulled_ahead() {
+    for no_body in [false, true] {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::env::current_dir().unwrap().join(".scratch"),
+            "four-step-refused-tail",
+        )
+        .unwrap();
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        std::fs::write(root.join("z-requested.md"), "# Requested\n").unwrap();
+        for index in 0..5 {
+            std::fs::write(root.join(format!("refused\\{index}.md")), "Refused\n").unwrap();
+        }
+        let vault = attach::Vault::adopt(scratch.root());
+        let probe = Arc::new(Probe::default());
+        let host = vault.host_with_four_step(
+            FourStepLoading::new(2, no_body, vec!["z-requested.md".into()], probe.clone()).unwrap(),
+        );
+        let demand = host.demand(vault.name()).unwrap();
+        wait_ready(&host, &vault);
+        let report = probe.report.lock().unwrap().clone().unwrap();
+        assert_eq!(report.steps["structure"]["findings_written"], 5);
+        assert_eq!(
+            report.steps["structure"]["commits"], 4,
+            "one pull-ahead commit and three bounded refused-only pages"
+        );
+        assert_eq!(report.steps["content"]["rows_rewritten"], 1);
+        drop(demand);
+        drop(host);
+        vault.store().verify_integrity().unwrap();
     }
 }

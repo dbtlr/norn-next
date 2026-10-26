@@ -72,6 +72,13 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         frontmatter_tags INTEGER NOT NULL DEFAULT 0,
         frontmatter_fields INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE four_step_refused (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('document/path-bytes-not-utf8', 'document/path-names-no-document')),
+        message TEXT NOT NULL,
+        detail TEXT
+    );
     CREATE INDEX four_step_content ON four_step_state(content_done, {path_order});
     CREATE INDEX four_step_structure ON four_step_state(structure_done, {path_order});
     CREATE INDEX four_step_health ON four_step_state(health_done, {path_order});"
@@ -88,6 +95,22 @@ pub fn names(
     files: &[DocumentPath],
     declared: &ContentModel,
 ) -> Result<StepCounters, StoreError> {
+    names_with_refused(store, documents, files, &[], declared)
+}
+
+/// Queue spelling findings in the names commit. The private queue retains only
+/// path, kind, message and detail until content establishes document eligibility.
+pub fn names_with_refused(
+    store: &mut Store,
+    documents: &[DocumentPath],
+    files: &[DocumentPath],
+    refused_findings: &[crate::FindingFacts],
+    declared: &ContentModel,
+) -> Result<StepCounters, StoreError> {
+    bounded(refused_findings.len())?;
+    for finding in refused_findings {
+        check_refused_spelling(finding)?;
+    }
     bounded(documents.len())?;
     bounded(files.len())?;
     let order = store.path_order();
@@ -182,7 +205,128 @@ pub fn names(
             counters.rows_inserted += 1;
         }
     }
+    for finding in refused_findings {
+        tx.prepare_cached(
+            "INSERT INTO four_step_refused(path, kind, message, detail) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .and_then(|mut q| {
+            q.execute(params![
+                finding.path.as_str(),
+                finding.kind.as_str(),
+                finding.message,
+                finding.detail
+            ])
+        })
+        .map_err(|e| error::sql("queueing a four-step refused spelling", e))?;
+    }
     committed(tx, counters)
+}
+
+fn check_refused_spelling(finding: &crate::FindingFacts) -> Result<(), StoreError> {
+    use norn_wire::FindingKind;
+    if !matches!(
+        finding.kind,
+        FindingKind::PathBytesNotUtf8 | FindingKind::PathNamesNoDocument
+    ) || finding.severity != finding.kind.default_severity()
+        || !finding.class_keys.is_empty()
+        || !finding.path_keys.is_empty()
+        || finding.target.is_some()
+        || finding.span.is_some()
+        || finding.ordinal.is_some()
+        || !finding.candidates.is_empty()
+        || finding.candidates_total != 0
+        || !finding.rules.is_empty()
+        || finding.value.is_some()
+    {
+        return Err(refused(
+            "a queued spelling finding may carry only its path, canonical kind/severity, message and detail",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether bounded structure work still owes any deferred spelling findings.
+pub fn has_refused(store: &Store) -> Result<bool, StoreError> {
+    if norn_db::meta::get_meta::<i64>(store.connection(), MARKER)?.is_none() {
+        return Err(refused("four-step construction has not begun"));
+    }
+    refused_pending(store.connection())
+}
+
+fn refused_pending(connection: &Connection) -> Result<bool, StoreError> {
+    connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM four_step_refused)")
+        .and_then(|mut q| q.query_row([], |row| row.get(0)))
+        .map_err(|e| error::sql("checking queued four-step refused spellings", e))
+}
+
+fn drain_refused(
+    tx: &Transaction<'_>,
+    limit: usize,
+    counters: &mut StepCounters,
+) -> Result<(), StoreError> {
+    let mut query = tx
+        .prepare_cached(
+            "SELECT r.id, r.path, r.kind, r.message, r.detail,
+        NOT EXISTS(SELECT 1 FROM documents d WHERE d.path = r.path)
+        FROM four_step_refused r ORDER BY r.id LIMIT ?1",
+        )
+        .map_err(|e| error::sql("preparing queued four-step refused spellings", e))?;
+    let rows = query
+        .query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })
+        .map_err(|e| error::sql("reading queued four-step refused spellings", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| error::sql("reading a queued four-step refused spelling", e))?;
+    let Some(last) = rows.last().map(|row| row.0) else {
+        return Ok(());
+    };
+    let mut findings = Vec::new();
+    for (_, path, kind, message, detail, recordable) in rows {
+        if !recordable {
+            continue;
+        }
+        let kind = match kind.as_str() {
+            "document/path-bytes-not-utf8" => norn_wire::FindingKind::PathBytesNotUtf8,
+            "document/path-names-no-document" => norn_wire::FindingKind::PathNamesNoDocument,
+            _ => return Err(refused("invalid queued four-step refused spelling kind")),
+        };
+        findings.push(crate::DerivedFinding {
+            facts: crate::FindingFacts {
+                path: DocumentPath::new(&path)?,
+                kind,
+                severity: kind.default_severity(),
+                message,
+                detail,
+                class_keys: Default::default(),
+                path_keys: Default::default(),
+                target: None,
+                span: None,
+                ordinal: None,
+                candidates: vec![],
+                candidates_total: 0,
+                rules: Default::default(),
+                value: None,
+            },
+            replaces: None,
+            bytes_hash: None,
+        });
+    }
+    crate::increment::check_derived_findings(&findings)?;
+    counters.findings_discarded += crate::increment::write_derived_findings(tx, &findings)?;
+    counters.findings_written += findings.len() as u64;
+    tx.prepare_cached("DELETE FROM four_step_refused WHERE id <= ?1")
+        .and_then(|mut q| q.execute([last]))
+        .map_err(|e| error::sql("consuming queued four-step refused spellings", e))?;
+    Ok(())
 }
 
 fn bounded(size: usize) -> Result<(), StoreError> {
@@ -244,6 +388,35 @@ pub struct PendingDocument {
     pub frontmatter_links: u64,
     pub frontmatter_tags: u64,
     pub frontmatter_fields: u64,
+    receipt: SourceReceipt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SourceReceipt {
+    epoch: String,
+    origin: std::path::PathBuf,
+    metadata_hash: String,
+}
+
+impl PendingDocument {
+    // The receipt protects mutable public source metadata without fetching it
+    // again. Epoch and origin distinguish stores, including copied databases.
+    fn metadata_hash(&self) -> String {
+        let metadata = serde_json::to_string(&(
+            self.path.as_str(),
+            &self.content_hash,
+            self.byte_length,
+            self.body_offset,
+            self.body_line_offset,
+            self.body_column_offset,
+            self.frontmatter_links,
+            self.frontmatter_tags,
+            self.frontmatter_fields,
+            &self.frontmatter_tag_names,
+        ))
+        .expect("pending source metadata encodes as JSON");
+        hash::sub_fingerprint(&metadata)
+    }
 }
 
 /// Read the first incomplete rows in store path order. Completing a chunk
@@ -331,7 +504,7 @@ fn pending_rows(
             body_column_offset,
             frontmatter_tag_names,
         ) = row.map_err(|e| error::sql("reading four-step source row", e))?;
-        Ok(PendingDocument {
+        let mut document = PendingDocument {
             path: DocumentPath::new(&path)?,
             content_hash,
             byte_length,
@@ -344,7 +517,14 @@ fn pending_rows(
             frontmatter_links,
             frontmatter_tags,
             frontmatter_fields,
-        })
+            receipt: SourceReceipt {
+                epoch: store.database.epoch().into(),
+                origin: store.path().to_owned(),
+                metadata_hash: String::new(),
+            },
+        };
+        document.receipt.metadata_hash = document.metadata_hash();
+        Ok(document)
     })
     .collect()
 }
@@ -529,15 +709,44 @@ pub fn structure(
     declared: &ContentModel,
     no_body: bool,
 ) -> Result<StepCounters, StoreError> {
+    structure_with_refused(store, documents, pending, findings, declared, no_body, 0)
+}
+
+/// Complete structure and consume at most `refused_limit` queued spellings in
+/// the same commit. Withheld findings consume their queue slots too, so each
+/// call holds at most one bounded queue page. Draining requires complete content.
+pub fn structure_with_refused(
+    store: &mut Store,
+    documents: &[crate::DocumentFacts],
+    pending: &[PendingDocument],
+    findings: &[crate::DerivedFinding<'_>],
+    declared: &ContentModel,
+    no_body: bool,
+    refused_limit: usize,
+) -> Result<StepCounters, StoreError> {
+    bounded(refused_limit)?;
     bounded(documents.len())?;
     if documents.len() != pending.len() {
         return Err(refused("pending rows must match the structure chunk"));
     }
     crate::increment::check_derived_findings(findings)?;
+    for source in pending {
+        if source.receipt.epoch != store.database.epoch()
+            || source.receipt.origin != store.path()
+            || source.receipt.metadata_hash != source.metadata_hash()
+        {
+            return Err(refused(
+                "structure requires unchanged pending metadata from this store",
+            ));
+        }
+    }
     let tx = store
         .database
         .immediate_transaction("writing four-step structure")?;
     guard(&tx, declared)?;
+    if refused_limit > 0 {
+        require_complete(&tx, "content_done")?;
+    }
     // A requested row may finish structure while other rows still owe
     // content. Names are sealed globally; progress after that is per path.
     phase(&tx, 2)?;
@@ -583,6 +792,9 @@ pub fn structure(
     }
     counters.findings_discarded = crate::increment::write_derived_findings(&tx, findings)?;
     counters.findings_written = findings.len() as u64;
+    if refused_limit > 0 {
+        drain_refused(&tx, refused_limit, &mut counters)?;
+    }
     committed(tx, counters)
 }
 
@@ -614,6 +826,9 @@ pub fn health(
     }
     guard(store.connection(), declared)?;
     require_complete(store.connection(), "structure_done")?;
+    if refused_pending(store.connection())? {
+        return Err(refused("four-step refused spellings remain queued"));
+    }
     let collation = store.path_order().collation();
     // Health needs identities alone; reading the pending source projection
     // would materialize bodies that this pass never uses.
@@ -676,6 +891,9 @@ pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
     require_complete(&tx, "content_done")?;
     require_complete(&tx, "structure_done")?;
     require_complete(&tx, "health_done")?;
+    if refused_pending(&tx)? {
+        return Err(refused("four-step refused spellings remain queued"));
+    }
     // No construction state has been adoptable. Deaths the ordinary churn
     // reconciliation observed are transient first-build history; a build from
     // zero over the final tree has none. begin() refuses pre-existing deaths,
@@ -683,7 +901,7 @@ pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
     let tombstones_discarded =
         tx.execute("DELETE FROM tombstones", [])
             .map_err(|e| error::sql("discarding construction-only tombstones", e))? as u64;
-    tx.execute_batch("DROP TABLE four_step_state")
+    tx.execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
         .map_err(|e| error::sql("dropping four-step progress", e))?;
     tx.execute("DELETE FROM meta WHERE key = ?1", [MARKER])
         .map_err(|e| error::sql("clearing four-step construction marker", e))?;
@@ -784,7 +1002,7 @@ mod tests {
         // progress table restores the production schema but not complete data.
         store
             .connection()
-            .execute_batch("DROP TABLE four_step_state")
+            .execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
             .unwrap();
         drop(store);
         let mut reopened = Store::open(

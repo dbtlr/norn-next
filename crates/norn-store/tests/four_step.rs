@@ -559,6 +559,189 @@ fn forgetting_a_vanished_name_or_changed_no_body_source_discards_only_its_own_fa
     store.verify_integrity().unwrap();
 }
 
+fn refused_spelling(path: &DocumentPath) -> norn_store::FindingFacts {
+    let mut facts = missing_field(path, 0).facts;
+    facts.kind = norn_wire::FindingKind::PathNamesNoDocument;
+    facts.severity = facts.kind.default_severity();
+    facts.target = None;
+    facts.message = "path names no document".into();
+    facts.detail = Some("refused spelling".into());
+    facts
+}
+
+#[test]
+fn refused_spellings_are_withheld_after_content_and_consumed_in_bounded_structure_chunks() {
+    let scratch = scratch();
+    let mut store = open(&scratch.join("store.sqlite3"));
+    let model = ContentModel::none();
+    let valid = norn_store::DocumentFacts::new(DocumentPath::new("a.md").unwrap(), "a", "a", 1);
+    let bad = DocumentPath::new("b.md").unwrap();
+    let refused = [
+        valid.path.clone(),
+        bad.clone(),
+        DocumentPath::new("c.md").unwrap(),
+        DocumentPath::new("d.md").unwrap(),
+    ]
+    .iter()
+    .map(refused_spelling)
+    .collect::<Vec<_>>();
+    four_step::begin(&mut store).unwrap();
+    let names = four_step::names_with_refused(
+        &mut store,
+        &[valid.path.clone(), bad.clone()],
+        &[],
+        &refused,
+        &model,
+    )
+    .unwrap();
+    assert_eq!(
+        (names.commits, names.rows_inserted, names.findings_written),
+        (1, 2, 0)
+    );
+    assert!(four_step::has_refused(&store).unwrap());
+    assert!(
+        four_step::structure_with_refused(&mut store, &[], &[], &[], &model, false, 1).is_err()
+    );
+    let mut quarantine = norn_store::DerivedFinding {
+        facts: refused_spelling(&bad),
+        replaces: None,
+        bytes_hash: Some("bad".into()),
+    };
+    quarantine.facts.kind = norn_wire::FindingKind::BodyBytesNotUtf8;
+    four_step::content(
+        &mut store,
+        std::slice::from_ref(&valid),
+        &[quarantine],
+        &model,
+        false,
+        &[(0, 0)],
+    )
+    .unwrap();
+    let pending = four_step::pending(&store, four_step::Step::Structure, 1).unwrap();
+    let first =
+        four_step::structure_with_refused(&mut store, &[valid], &pending, &[], &model, false, 1)
+            .unwrap();
+    assert_eq!(
+        (first.commits, first.findings_written),
+        (1, 0),
+        "a decoded row withholds its queued spelling finding"
+    );
+    assert!(four_step::has_refused(&store).unwrap());
+    assert!(
+        four_step::health(&mut store, 1, &model).is_err(),
+        "final health cannot seal an undrained queue"
+    );
+    let second =
+        four_step::structure_with_refused(&mut store, &[], &[], &[], &model, false, 2).unwrap();
+    assert_eq!(
+        (second.commits, second.findings_written, second.rows_deleted),
+        (1, 2, 0)
+    );
+    assert!(four_step::has_refused(&store).unwrap());
+    let third =
+        four_step::structure_with_refused(&mut store, &[], &[], &[], &model, false, 2).unwrap();
+    assert_eq!((third.commits, third.findings_written), (1, 1));
+    assert!(!four_step::has_refused(&store).unwrap());
+    assert!(
+        store
+            .begin_request()
+            .stored_findings(&refused[0].path)
+            .unwrap()
+            .is_empty()
+    );
+    for finding in &refused[1..] {
+        let stored = store
+            .begin_request()
+            .stored_findings(&finding.path)
+            .unwrap();
+        let actual = stored
+            .iter()
+            .find(|stored| stored.kind == finding.kind.as_str())
+            .unwrap();
+        assert_eq!(actual.message, finding.message);
+        assert_eq!(actual.detail, finding.detail);
+        assert_eq!(actual.severity, finding.severity.as_str());
+    }
+    four_step::health(&mut store, 1, &model).unwrap();
+    four_step::finish(&mut store).unwrap();
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn structure_refuses_another_stores_pending_source_and_edited_public_metadata() {
+    let scratch = scratch();
+    let mut a = open(&scratch.join("a.sqlite3"));
+    let mut b = open(&scratch.join("b.sqlite3"));
+    let path = DocumentPath::new("a.md").unwrap();
+    let model = ContentModel::none();
+    let facts_a = norn_store::DocumentFacts::new(path.clone(), "hash-a", "aaa", 3);
+    let facts_b = norn_store::DocumentFacts::new(path.clone(), "hash-b", "bbb", 3);
+    for (store, facts) in [(&mut a, &facts_a), (&mut b, &facts_b)] {
+        four_step::begin(store).unwrap();
+        four_step::names(store, std::slice::from_ref(&path), &[], &model).unwrap();
+        four_step::content(
+            store,
+            std::slice::from_ref(facts),
+            &[],
+            &model,
+            true,
+            &[(0, 0)],
+        )
+        .unwrap();
+    }
+    let pending_a = four_step::pending_at(&a, four_step::Step::Structure, &path)
+        .unwrap()
+        .unwrap();
+    let pending_b = four_step::pending_at(&b, four_step::Step::Structure, &path)
+        .unwrap()
+        .unwrap();
+    assert!(
+        four_step::structure(
+            &mut a,
+            std::slice::from_ref(&facts_b),
+            &[pending_b],
+            &[],
+            &model,
+            true
+        )
+        .is_err()
+    );
+    let mut forged = pending_a.clone();
+    forged.content_hash = "hash-b".into();
+    assert!(
+        four_step::structure(
+            &mut a,
+            std::slice::from_ref(&facts_b),
+            &[forged],
+            &[],
+            &model,
+            true
+        )
+        .is_err()
+    );
+    let mut forged = pending_a.clone();
+    forged.frontmatter_links = 99;
+    assert!(
+        four_step::structure(
+            &mut a,
+            std::slice::from_ref(&facts_a),
+            &[forged],
+            &[],
+            &model,
+            true
+        )
+        .is_err()
+    );
+    let unchanged = a.begin_request().stored_facts(&path).unwrap().unwrap();
+    assert_eq!(unchanged.document.content_hash, "hash-a");
+    assert_eq!(unchanged.body, "");
+    four_step::structure(&mut a, &[facts_a], &[pending_a], &[], &model, true).unwrap();
+    assert_eq!(
+        a.begin_request().stored_facts(&path).unwrap().unwrap().body,
+        "aaa"
+    );
+}
+
 #[test]
 fn structure_commits_host_findings_atomically_and_flushes_without_touching_pending_rows() {
     let scratch = scratch();

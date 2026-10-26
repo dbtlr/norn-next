@@ -209,7 +209,6 @@ impl ProductionEntryOps {
             changed: false,
             metadata_complete: false,
             search_complete: false,
-            refused: Vec::new(),
             skipped_links: SkippedLinks::default(),
             began: Instant::now(),
             observer_ns: std::cell::Cell::new(0),
@@ -290,8 +289,9 @@ impl ProductionEntryOps {
                 .map_err(store_effect)?;
             if documents.is_empty() {
                 // A fully pulled-ahead or empty vault can still owe refused spellings.
-                if !build.refused.is_empty() {
+                if four_step::has_refused(build.store).map_err(store_effect)? {
                     build.structure(Vec::new())?;
+                    continue;
                 }
                 break;
             }
@@ -353,7 +353,6 @@ struct Build<'a> {
     changed: bool,
     metadata_complete: bool,
     search_complete: bool,
-    refused: Vec<PlannedFinding>,
     skipped_links: SkippedLinks,
     began: Instant,
     observer_ns: std::cell::Cell<u128>,
@@ -411,6 +410,7 @@ impl Build<'_> {
     fn names(&mut self) -> Result<(), JobFailure> {
         let mut documents = Vec::new();
         let mut files = Vec::new();
+        let mut refused = Vec::new();
         for fact in walk(self.root, self.exclusions).map_err(effect)? {
             match fact.map_err(effect)? {
                 norn_fs::WalkFact::File(file) => match document_path(file.path().as_path()) {
@@ -422,8 +422,9 @@ impl Build<'_> {
                         }
                     }
                     Err(quarantine) if is_markdown(file.path().as_path()) => {
-                        self.refused
-                            .push(plan_quarantine(file.path().as_path(), quarantine));
+                        let finding =
+                            Queued::new(plan_quarantine(file.path().as_path(), quarantine), None);
+                        refused.push(finding.finding);
                     }
                     Err(_) => {}
                 },
@@ -436,11 +437,12 @@ impl Build<'_> {
                     }
                 }
             }
-            if documents.len() + files.len() >= self.loading.bound {
-                let counters = four_step::names(
+            if documents.len() + files.len() + refused.len() >= self.loading.bound {
+                let counters = four_step::names_with_refused(
                     self.store,
                     &documents,
                     &files,
+                    &refused,
                     self.declared.content_model(),
                 )
                 .map_err(store_effect)?;
@@ -448,13 +450,15 @@ impl Build<'_> {
                 self.add("names", counters);
                 documents.clear();
                 files.clear();
+                refused.clear();
             }
         }
-        if !documents.is_empty() || !files.is_empty() {
-            let counters = four_step::names(
+        if !documents.is_empty() || !files.is_empty() || !refused.is_empty() {
+            let counters = four_step::names_with_refused(
                 self.store,
                 &documents,
                 &files,
+                &refused,
                 self.declared.content_model(),
             )
             .map_err(store_effect)?;
@@ -589,31 +593,24 @@ impl Build<'_> {
             facts.push(fact);
             pending.push(document);
         }
-        if self.metadata_complete {
-            // Refused names are recorded by the names walk. Withholding sees
-            // decoded eligibility only, after the global content pass.
-            let mut refused = Vec::new();
-            for finding in std::mem::take(&mut self.refused) {
-                if self
-                    .store
-                    .begin_request()
-                    .stored_document(&finding.subject)
-                    .map_err(store_effect)?
-                    .is_none()
-                {
-                    refused.push(finding);
-                }
-            }
-            findings.extend(derived_findings(refused, None));
-        }
-        if !facts.is_empty() || !findings.is_empty() {
-            let counters = four_step::structure(
+        // Deferred names are held in SQLite and consumed in bounded pages,
+        // inside the same structure transaction as the body and tag findings.
+        if !facts.is_empty()
+            || (self.metadata_complete
+                && four_step::has_refused(self.store).map_err(store_effect)?)
+        {
+            let counters = four_step::structure_with_refused(
                 self.store,
                 &facts,
                 &pending,
                 &findings,
                 self.declared.content_model(),
                 self.loading.no_body,
+                if self.metadata_complete {
+                    self.loading.bound
+                } else {
+                    0
+                },
             )
             .map_err(store_effect)?;
             self.add("structure", counters);
