@@ -268,7 +268,7 @@ def measure_cell(binary, root, manifest, arm):
         name = stage['startup_stage']
         if arm == 'main':
             from public_mode import validate_attempt
-            index = stage['operator_prefix_sequence'] - 1
+            index = len(events)
             validate_attempt(index, stage, commands=PUBLIC_COMMANDS)
             if stage['disposition'] == 'served':
                 kind = PUBLIC_COMMANDS[index]['op']

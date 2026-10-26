@@ -20,6 +20,42 @@ class MatrixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'broken-link finding'):
             validate_link_get(response, manifest, first_index=True)
 
+    def test_main_controller_rejects_reordered_or_repeated_attempts_before_audit(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from loading_matrix import measure_cell, PUBLIC_COMMANDS
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / 'live_mode'))
+        for sequence in ([2, 1, 3], [1, 1, 1], [1, 2, 3]):
+            with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as folder:
+                def current(binary, root, **options):
+                    for number in sequence:
+                        is_get = PUBLIC_COMMANDS[number - 1]['op'] == 'get'
+                        state = dict(state='warming', phase='healing', healed=0, total_estimate=314)
+                        options['stage_handler'](dict(
+                            startup_stage='public-get' if is_get else 'public-find',
+                            probe='whole_slug' if is_get else 'active_page',
+                            operator_prefix_sequence=number, command=PUBLIC_COMMANDS[number - 1],
+                            mode='public', availability_scope='public Host first-open requests',
+                            disposition='unavailable', answer=None, counters=None, builder_work=None,
+                            error=dict(code='host/entry-not-ready', message='loading',
+                                       detail=dict(code='host/entry-not-ready', state=state)),
+                            state_after_call=state, early_answer=False, query_started_ns=1,
+                            query_finished_ns=2, query_host_ns=1, state_observed_ns=3))
+                    return SimpleNamespace(ready=dict(observed_ready_ns=4, job_evidence={},
+                        operator_prefix_receipt=dict(logical_requests=3)),
+                        process=SimpleNamespace(pid=0), close=lambda: None)
+                with patch('transport.Current', side_effect=current), patch('transport.resources', return_value={}), \
+                        patch('startup_audit.audit_store', side_effect=RuntimeError('reached audit')) as audit:
+                    if sequence == [1, 2, 3]:
+                        with self.assertRaisesRegex(RuntimeError, 'reached audit'):
+                            measure_cell(Path('worker'), Path(folder), {}, 'main')
+                        audit.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'public attempt identity'):
+                            measure_cell(Path('worker'), Path(folder), {}, 'main')
+                        audit.assert_not_called()
+
     def test_main_worker_sources_allow_only_performance_worker_changes(self):
         import subprocess
         from loading_matrix import check_main_source
