@@ -2,12 +2,17 @@
 
 This is a lab prototype, not a production loading policy.
 Non-unique indexes wait for their first admitted reader: finding cleanup and
-per-document findings after names, field/path Find after content, resolution
-and anchor indexes before health, and remaining indexes by Ready. Production
+per-document findings and target resolution after names, field/path Find after
+content, anchor and outgoing-link indexes before health, and remaining indexes
+by Ready. Production
 SQL is restored verbatim. Trigrams are buffered without indexes and bulk
 inserted in key order before health; their first reader is ordinary warm work.
 The build connection uses `wal_autocheckpoint=10000` and `cache_size=-65536`;
-`synchronous` stays at its production value.
+`synchronous` stays at its production value. `--build-cache-size production`
+retains the ordinary cache. An integer selects SQLite pages (positive) or KiB
+(negative). `--no-deferred-indexes` keeps secondary indexes throughout the lab
+build. Both controls apply only to four-step arms and are retained in each cell.
+Ready restores the original cache and WAL settings.
 Requests flush the current transaction at the next host chunk boundary, then
 run content and structure in one transaction of their own. Each cell starts one
 fresh worker, serially, with release optimization, `induced-failure`, 128-document
@@ -207,10 +212,15 @@ answer time. Queries delay subsequent steps, so their cost remains visible.
 
 Both `small.md` and linked `large.md` are requested at startup.
 `first_get_targets` reports each target's observed own-step-3 structure time and
-actual hook delivery. Get has no global-content prerequisite. Early lab Get accepts the exact rooted
-path of its completed callback document and omits outgoing resolution SQL
-until relations complete. Individual field projections wait for the complete
-field universe at content completion. Early records
+actual hook delivery. Get has no global-content prerequisite. Early lab Get uses
+public target resolution and admits only its completed callback document.
+`--lab-get-targets small bench/large.md` runs the same targets as the main worker;
+the default targets remain rooted paths. Outgoing resolution SQL waits until
+relations complete. Individual field projections use the document's primary key
+before global content completion. Declared keys and keys carried by the document
+can answer then. An absent undeclared key still waits for the final field
+universe, including unknown-key suggestions. The small-document callback also
+records and validates a `status` projection at its own step 3. Early records
 carry `link_resolution_loading=true` and `link_health_loading=true`. Their body,
 fields, headings, blocks, tags, and authored links are checked against frozen
 sources and final public answers. Incomplete link resolutions and health are

@@ -54,6 +54,7 @@ enum Observation {
     RequestedStructure(String, u128),
     Request(String, u128, Option<(u64, u64)>),
     Get(String, Query<Gotten>, bool, bool),
+    Projection(String, Query<Gotten>, bool, bool),
     Find(Query<Found>),
     Search(Query<Searched>),
     Complete(FourStepReport, u128),
@@ -70,6 +71,7 @@ struct Buffer {
 pub(super) struct Probe {
     began: Instant,
     mid_target: Option<String>,
+    get_targets: std::collections::BTreeMap<String, String>,
     requests: Mutex<Option<FourStepRequests>>,
     fts_mode: &'static str,
     buffer: Arc<Mutex<Buffer>>,
@@ -141,7 +143,13 @@ impl FourStepObserver for Probe {
                     )?;
                     let params = GetParams::new(
                         VaultAddress::name(VaultName::new("notes").unwrap()),
-                        ResolutionTarget::new(format!("/{path}")).unwrap(),
+                        ResolutionTarget::new(
+                            self.get_targets
+                                .get(path)
+                                .cloned()
+                                .unwrap_or_else(|| format!("/{path}")),
+                        )
+                        .unwrap(),
                     );
                     buffer.observations.push(Observation::Get(
                         path.to_owned(),
@@ -149,6 +157,18 @@ impl FourStepObserver for Probe {
                         read.link_resolution_loading(),
                         read.link_health_loading(),
                     ));
+                    if path == "bench/small.md" {
+                        let projected = params.with_columns([
+                            norn_wire::Column::path(),
+                            norn_wire::Column::field("status"),
+                        ]);
+                        buffer.observations.push(Observation::Projection(
+                            path.to_owned(),
+                            Query::run(self.began, available_ns, || read.get(&projected)),
+                            read.link_resolution_loading(),
+                            read.link_health_loading(),
+                        ));
+                    }
                 }
                 return Ok(());
             }
@@ -214,6 +234,12 @@ impl Probe {
                 }),
                 Observation::Get(path, query, resolution_loading, health_loading) => {
                     let mut record = query.record("four-step-get");
+                    record["target"] = json!(
+                        self.get_targets
+                            .get(&path)
+                            .cloned()
+                            .unwrap_or_else(|| format!("/{path}"))
+                    );
                     record["path"] = json!(path);
                     record["link_resolution_loading"] = json!(resolution_loading);
                     record["link_health_loading"] = json!(health_loading);
@@ -231,6 +257,30 @@ impl Probe {
                                     .collect::<std::collections::BTreeMap<_, _>>()
                             );
                             record["current"] = json!(true);
+                        }
+                        Err(error) => {
+                            record["current"] = json!(false);
+                            record["error"] = json!(error);
+                        }
+                    }
+                    record
+                }
+                Observation::Projection(path, query, resolution_loading, health_loading) => {
+                    let mut record = query.record("four-step-field-projection");
+                    record["path"] = json!(path);
+                    record["link_resolution_loading"] = json!(resolution_loading);
+                    record["link_health_loading"] = json!(health_loading);
+                    match query.answer {
+                        Ok(answer) => {
+                            record["answer"] = json!(answer.report);
+                            record["unsatisfied"] = json!(answer.unsatisfied);
+                            record["current"] = json!(true);
+                            record["builder_work"] = json!(
+                                answer
+                                    .work
+                                    .readings()
+                                    .collect::<std::collections::BTreeMap<_, _>>()
+                            );
                         }
                         Err(error) => {
                             record["current"] = json!(false);
@@ -314,6 +364,21 @@ pub(super) fn selection(mode: &str, began: Instant) -> (FourStepLoading, Arc<Pro
         |_| Vec::new(),
         |value| serde_json::from_str(&value).expect("a JSON list of requested document paths"),
     );
+    let get_targets: Vec<String> = std::env::var("NORN_PERFORMANCE_GET_TARGETS").map_or_else(
+        |_| requested.iter().map(|path| format!("/{path}")).collect(),
+        |value| serde_json::from_str(&value).expect("a JSON list of Get targets"),
+    );
+    assert_eq!(get_targets.len(), requested.len());
+    let build_cache_size = match std::env::var("NORN_PERFORMANCE_BUILD_CACHE_SIZE").as_deref() {
+        Ok("production") => None,
+        Ok(value) => Some(value.parse().expect("SQLite cache size")),
+        Err(_) => Some(-65536),
+    };
+    let deferred_indexes = match std::env::var("NORN_PERFORMANCE_DEFERRED_INDEXES").as_deref() {
+        Ok("false") => false,
+        Ok("true") | Err(_) => true,
+        other => panic!("invalid deferred-index selection: {other:?}"),
+    };
     let fts_mode = match std::env::var("NORN_PERFORMANCE_FTS_MODE").as_deref() {
         Ok("rebuild") => ("rebuild", norn_store::four_step::FtsBuildMode::Rebuild),
         Ok("batched") => ("batched", norn_store::four_step::FtsBuildMode::Batched),
@@ -330,6 +395,7 @@ pub(super) fn selection(mode: &str, began: Instant) -> (FourStepLoading, Arc<Pro
     let probe = Arc::new(Probe {
         began,
         mid_target: std::env::var("NORN_PERFORMANCE_MID_REQUEST_PATH").ok(),
+        get_targets: requested.iter().cloned().zip(get_targets).collect(),
         requests: Mutex::new(None),
         fts_mode: fts_mode.0,
         buffer: Arc::new(Mutex::new(buffer)),
@@ -337,7 +403,9 @@ pub(super) fn selection(mode: &str, began: Instant) -> (FourStepLoading, Arc<Pro
     let loading =
         FourStepLoading::new(bound, mode == "four-step-no-body", requested, probe.clone())
             .expect("valid four-step loading options")
-            .with_fts_mode(fts_mode.1);
+            .with_fts_mode(fts_mode.1)
+            .with_build_cache_size(build_cache_size)
+            .with_deferred_indexes(deferred_indexes);
     *probe.requests.lock().expect("dynamic request handle") = Some(loading.requests());
     (loading, probe)
 }

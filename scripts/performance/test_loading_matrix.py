@@ -629,6 +629,23 @@ for line in sys.stdin:
                 with self.subTest(targets=targets), self.assertRaisesRegex(ValueError, 'public Get targets'):
                     Current(binary, root, loading='operator-prefix-public', public_get_targets=targets)
 
+    def test_lab_memory_controls_reach_worker(self):
+        import sys
+        from transport import Current
+        for cache in (None, -8192, 100):
+            with self.subTest(cache=cache), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                binary = root / 'worker'
+                binary.write_text(f'#!{sys.executable}\nimport os, sys\n'
+                    + f"assert os.environ['NORN_PERFORMANCE_BUILD_CACHE_SIZE'] == {str(cache) if cache is not None else 'production'!r}\n"
+                    + "assert os.environ['NORN_PERFORMANCE_DEFERRED_INDEXES'] == 'false'\n"
+                    + "print('NORN_PERFORMANCE {\"ready\":true}', flush=True)\n"
+                    + 'sys.stdin.readline()\n')
+                binary.chmod(0o700)
+                worker = Current(binary, root, loading='four-step', loading_options=dict(
+                    transaction_bound=128, requested_paths=[], build_cache_size=cache, deferred_indexes=False))
+                worker.close()
+
     def test_explicit_lab_controls_reach_worker_without_inheriting_foreign_controls(self):
         import json
         import os

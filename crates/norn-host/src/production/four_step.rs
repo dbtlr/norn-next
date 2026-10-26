@@ -66,6 +66,8 @@ pub struct FourStepLoading {
     no_body: bool,
     requests: FourStepRequests,
     fts_mode: four_step::FtsBuildMode,
+    build_cache_size: Option<i32>,
+    deferred_indexes: bool,
     observer: Arc<dyn FourStepObserver>,
 }
 
@@ -132,9 +134,23 @@ impl FourStepLoading {
             no_body,
             requests,
             fts_mode: four_step::FtsBuildMode::Rebuild,
+            build_cache_size: Some(-65536),
+            deferred_indexes: true,
             observer,
         })
     }
+    /// Select SQLite pages (positive), KiB (negative), or the ordinary cache.
+    pub fn with_build_cache_size(mut self, cache_size: Option<i32>) -> Self {
+        self.build_cache_size = cache_size;
+        self
+    }
+
+    /// Keep ordinary secondary indexes throughout construction when false.
+    pub fn with_deferred_indexes(mut self, deferred: bool) -> Self {
+        self.deferred_indexes = deferred;
+        self
+    }
+
     pub fn requests(&self) -> FourStepRequests {
         self.requests.clone()
     }
@@ -231,14 +247,6 @@ impl FourStepRead<'_> {
         let Some(ready_path) = self.ready_path else {
             return Err("vault still indexing for the first time: no document finished structure at this boundary".into());
         };
-        if !self.metadata_complete
-            && params
-                .columns
-                .iter()
-                .any(|column| matches!(column, norn_wire::Column::Field { .. }))
-        {
-            return Err("vault still indexing for the first time: individual field projections wait for the complete field universe".into());
-        }
         let snapshot = self.snapshot()?;
         let result = if self.relations_complete {
             snapshot.get(params, self.model, &crate::text::TextLayer)
@@ -341,7 +349,12 @@ impl ProductionEntryOps {
             deliveries: Vec::new(),
         };
         let mut profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
-        let counters = four_step::begin(build.store).map_err(store_effect)?;
+        let counters = four_step::begin_with_options(
+            build.store,
+            loading.build_cache_size,
+            loading.deferred_indexes,
+        )
+        .map_err(store_effect)?;
 
         for step in ["names", "content", "structure", "relations", "full-text"] {
             build.add(step, StepCounters::default());

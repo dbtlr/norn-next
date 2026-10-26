@@ -13,6 +13,7 @@ use norn_wire::{GetParams, ResolutionTarget, TrustState, VaultAddress};
 
 #[derive(Default)]
 struct Probe {
+    project_fields: bool,
     structured: Mutex<Vec<String>>,
     report: Mutex<Option<FourStepReport>>,
     early: Mutex<Option<serde_json::Value>>,
@@ -28,7 +29,7 @@ impl FourStepObserver for Probe {
                 if path == "z-requested.md" && !read.metadata_complete() {
                     let params = GetParams::new(
                         VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
-                        ResolutionTarget::new("/z-requested.md").unwrap(),
+                        ResolutionTarget::new("z-requested").unwrap(),
                     );
                     assert!(
                         read.get(&params).is_ok(),
@@ -40,7 +41,7 @@ impl FourStepObserver for Probe {
                 if path == "z-requested.md" {
                     let params = GetParams::new(
                         VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
-                        ResolutionTarget::new("/z-requested.md").unwrap(),
+                        ResolutionTarget::new("z-requested").unwrap(),
                     );
                     if !read.metadata_complete() {
                         assert!(
@@ -49,8 +50,19 @@ impl FourStepObserver for Probe {
                                     .clone()
                                     .with_columns([norn_wire::Column::field("missing")])
                             )
-                            .unwrap_err()
-                            .contains("complete field universe")
+                            .is_err()
+                        );
+                    }
+                    if self.project_fields {
+                        let projected = read.get(&params.clone().with_columns([
+                            norn_wire::Column::field("rating"),
+                            norn_wire::Column::field("related"),
+                        ]))?;
+                        assert!(projected.unsatisfied.is_empty());
+                        let value = serde_json::to_value(projected.report).unwrap();
+                        assert_eq!(
+                            value["document"]["fields"]["rating"],
+                            serde_json::json!({"kind":"scalar", "raw":"7"})
                         );
                     }
                     assert!(read.link_resolution_loading());
@@ -270,7 +282,10 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
             for pull_ahead in [false, true] {
                 let machine =
                     vault.beside(&scratch.join(format!("lab-{no_body}-{pull_ahead}-{fts_mode:?}")));
-                let probe = Arc::new(Probe::default());
+                let probe = Arc::new(Probe {
+                    project_fields: true,
+                    ..Probe::default()
+                });
                 let loading = FourStepLoading::new(
                     2,
                     no_body,

@@ -88,6 +88,16 @@ pub struct StepCounters {
 /// Persist the nonadoption guard, remove FTS triggers, and create private progress
 /// in one commit. Bodies remain at rest while full-text indexing is deferred.
 pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
+    begin_with_options(store, Some(-65536), true)
+}
+
+/// Select the lab build cache (SQLite pages, or negative KiB) and index deferral.
+/// `None` retains the ordinary connection's cache setting; finish restores it.
+pub fn begin_with_options(
+    store: &mut Store,
+    cache_size: Option<i32>,
+    deferred_indexes: bool,
+) -> Result<StepCounters, StoreError> {
     if !matches!(store.open_outcome(), OpenOutcome::Created) {
         return Err(refused(
             "four-step construction requires a newly created store",
@@ -122,8 +132,12 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
     }
     norn_db::meta::put_meta(&tx, "four_step_cache", cache)?;
     norn_db::meta::put_meta(&tx, "four_step_wal", wal)?;
-    tx.execute_batch("PRAGMA wal_autocheckpoint=10000; PRAGMA cache_size=-65536")
-        .map_err(|e| error::sql("tuning build connection", e))?;
+    tx.pragma_update(None, "wal_autocheckpoint", 10000)
+        .map_err(|e| error::sql("tuning build WAL", e))?;
+    if let Some(cache_size) = cache_size {
+        tx.pragma_update(None, "cache_size", cache_size)
+            .map_err(|e| error::sql("tuning build cache", e))?;
+    }
     norn_db::meta::put_meta(&tx, MARKER, 1_i64)?;
     tx.execute_batch(
         "DROP TRIGGER documents_fts_insert;
@@ -136,14 +150,22 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         .map_err(|e| error::sql("creating deferred build state", e))?;
     for sql in crate::ddl::statements()
         .into_iter()
-        .filter(|sql| sql.starts_with("CREATE INDEX "))
+        .filter(|sql| deferred_indexes && sql.starts_with("CREATE INDEX "))
     {
         let name = sql.split_whitespace().nth(2).expect("index name");
         // Findings are admitted by the first per-document Get. Their indexes
         // also bound per-document finding replacement during content derivation.
-        let boundary = if matches!(name, "findings_path" | "findings_rule_set") {
+        let boundary = if matches!(name, "findings_path" | "findings_rule_set")
+            || name.starts_with("vault_files_")
+            || matches!(
+                name,
+                "documents_suffix_key"
+                    | "documents_admitted_suffix_key"
+                    | "documents_path_key"
+                    | "documents_path_nocase"
+            ) {
             1
-        } else if name.starts_with("document_fields_") || name == "documents_path_nocase" {
+        } else if name.starts_with("document_fields_") {
             2
         } else if name.starts_with("documents_")
             && name != "documents_change_feed"
@@ -1568,6 +1590,46 @@ mod tests {
     }
 
     #[test]
+    fn build_controls_preserve_production_cache_and_can_keep_secondary_indexes() {
+        for cache in [None, Some(-8192), Some(100)] {
+            let scratch = norn_testkit::scratch::Scratch::under(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+                "four-step-controls",
+            )
+            .unwrap();
+            let mut store = Store::open(
+                scratch.join("store.sqlite3"),
+                crate::StoredPathOrder::Sensitive,
+                crate::DerivationVersion::new(1),
+            )
+            .unwrap();
+            let saved: i32 = store
+                .connection()
+                .pragma_query_value(None, "cache_size", |r| r.get(0))
+                .unwrap();
+            begin_with_options(&mut store, cache, false).unwrap();
+            let configured: i32 = store
+                .connection()
+                .pragma_query_value(None, "cache_size", |r| r.get(0))
+                .unwrap();
+            assert_eq!(configured, cache.unwrap_or(saved));
+            let indexes: u64 = store
+                .connection()
+                .query_row("SELECT count(*) FROM four_step_indexes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(indexes, 0);
+            assert!(store.connection().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='document_fields_raw')", [], |r| r.get::<_, bool>(0)).unwrap());
+            full_text(&mut store, FtsBuildMode::Rebuild, 128).unwrap();
+            finish(&mut store).unwrap();
+            let restored: i32 = store
+                .connection()
+                .pragma_query_value(None, "cache_size", |r| r.get(0))
+                .unwrap();
+            assert_eq!(restored, saved);
+        }
+    }
+
+    #[test]
     fn secondary_indexes_wait_for_their_first_capability() {
         let scratch = norn_testkit::scratch::Scratch::under(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
@@ -1597,11 +1659,21 @@ mod tests {
         assert!(!exists(&store, "documents_suffix_key"));
         names_complete(&mut store).unwrap();
         assert!(exists(&store, "findings_path"));
+        for table in ["documents", "vault_files"] {
+            for suffix in [
+                "suffix_key",
+                "admitted_suffix_key",
+                "path_key",
+                "path_nocase",
+            ] {
+                assert!(exists(&store, &format!("{table}_{suffix}")));
+            }
+        }
         assert!(!exists(&store, "document_fields_raw"));
         content_complete(&mut store).unwrap();
         assert!(exists(&store, "documents_path_nocase"));
         assert!(exists(&store, "document_fields_raw"));
-        assert!(!exists(&store, "documents_suffix_key"));
+        assert!(exists(&store, "documents_suffix_key"));
         structure_complete(&mut store).unwrap();
         assert!(exists(&store, "documents_suffix_key"));
         assert!(exists(&store, "vault_files_path_key"));

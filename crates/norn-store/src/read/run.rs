@@ -117,6 +117,8 @@ pub(crate) struct Lookups {
     #[cfg(feature = "induced-failure")]
     pub(crate) completed_path: Option<String>,
     #[cfg(feature = "induced-failure")]
+    pub(crate) local_fields: bool,
+    #[cfg(feature = "induced-failure")]
     pub(crate) count_source_only: bool,
 }
 

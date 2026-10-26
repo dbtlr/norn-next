@@ -450,9 +450,8 @@ impl Snapshot {
         self.run_get(params, declared, text, &mut Lookups::default())
     }
 
-    /// Lab Get over the exact completed path. Targets must be rooted paths;
-    /// outgoing targets/health are placeholders while the caller reports loading.
-    /// This reads no resolution class or outgoing-link candidate SQL.
+    /// Lab Get through public target resolution, restricted to a completed document.
+    /// Outgoing targets/health are placeholders while the caller reports loading.
     #[cfg(feature = "induced-failure")]
     pub fn four_step_get(
         &self,
@@ -462,25 +461,10 @@ impl Snapshot {
         text: &dyn DocumentText,
         metadata_complete: bool,
     ) -> Result<Gotten, PageRefusal> {
-        if !metadata_complete
-            && params
-                .columns
-                .iter()
-                .any(|column| matches!(column, norn_wire::Column::Field { .. }))
-        {
-            return Err(PageRefusal::PartNotTaken {
-                part: RequestPart::Column,
-                answer: AnswerShape::Record,
-            });
-        }
-        if params.target.address() != format!("/{}", path.as_str()) {
-            return Err(PageRefusal::UnknownTarget {
-                target: params.target.clone(),
-            });
-        }
         let mut lookups = Lookups::default();
         lookups.completed_path = Some(path.as_str().to_owned());
         lookups.unresolved_links = true;
+        lookups.local_fields = !metadata_complete;
         self.run_get(params, declared, text, &mut lookups)
     }
 
@@ -541,29 +525,52 @@ impl Snapshot {
             _ => 0,
         };
         self.declaration_pinned(declared, lookups)?;
-        #[cfg(feature = "induced-failure")]
-        let named = if let Some(path) = lookups.completed_path.clone() {
-            let path = crate::DocumentPath::new(&path)?;
-            let (document, _) = self.read_holder(&path, &mut lookups.ran)?.ok_or_else(|| {
-                PageRefusal::UnknownTarget {
-                    target: params.target.clone(),
-                }
-            })?;
-            Named {
-                document,
-                wire: wire_path(path.as_str())?,
-                path: path.as_str().to_owned(),
-            }
-        } else {
-            self.named(&params.target, declared, lookups)?
-        };
-        #[cfg(not(feature = "induced-failure"))]
         let named = self.named(&params.target, declared, lookups)?;
+        #[cfg(feature = "induced-failure")]
+        if lookups
+            .completed_path
+            .as_ref()
+            .is_some_and(|path| path != &named.path)
+        {
+            return Err(PageRefusal::UnknownTarget {
+                target: params.target.clone(),
+            });
+        }
         let snapshot = self.reading_facts(None, lookups)?;
         let mut work = GetWork::default();
         let (report, unsatisfied) = match shape {
             Shape::Record(projection) => {
                 let mut unknown = Vec::new();
+                #[cfg(feature = "induced-failure")]
+                if lookups.local_fields {
+                    for key in &projection.keys {
+                        if !declared.is_declared(key) {
+                            let present = self.ask(
+                                &mut lookups.ran,
+                                crate::read::Ran::new(FindStatement::KnownKey, (
+                                    "SELECT EXISTS(SELECT 1 FROM document_fields WHERE document = ?1 AND key = ?2 AND ordinal = 0)".into(),
+                                    vec![norn_db::rusqlite::types::Value::Integer(named.document), norn_db::rusqlite::types::Value::Text((*key).into())],
+                                )),
+                                "checking the requested document's projected key",
+                            )?;
+                            if !present {
+                                // Absence cannot establish the final vault-wide key
+                                // universe until every document has completed content.
+                                return Err(PageRefusal::PartNotTaken {
+                                    part: RequestPart::Column,
+                                    answer: AnswerShape::Record,
+                                });
+                            }
+                        }
+                    }
+                }
+                #[cfg(feature = "induced-failure")]
+                let fields = if lookups.local_fields {
+                    projection.keys.clone()
+                } else {
+                    self.projected_keys(&projection, declared, lookups, &mut unknown)?
+                };
+                #[cfg(not(feature = "induced-failure"))]
                 let fields = self.projected_keys(&projection, declared, lookups, &mut unknown)?;
                 let mut hydration = FindWork::default();
                 let mut rows = self.hydrate_rows(
@@ -1024,7 +1031,7 @@ mod loading_plan_tests {
     }
 
     #[test]
-    fn completed_get_uses_only_point_or_document_bounded_plans_before_resolution_indexes() {
+    fn completed_get_resolves_names_with_bounded_plans_at_own_structure() {
         for order in [
             StoredPathOrder::Sensitive,
             StoredPathOrder::AsciiCaseInsensitive,
@@ -1048,8 +1055,16 @@ mod loading_plan_tests {
                     .collect::<Vec<_>>();
                 four_step::names(&mut store, &names, &[], &model).unwrap();
             }
+            four_step::names_complete(&mut store).unwrap();
             let mut facts =
-                DocumentFacts::new(DocumentPath::new("d0000.md").unwrap(), "hash", "body", 4);
+                DocumentFacts::new(DocumentPath::new("d0000.md").unwrap(), "hash", "body", 4)
+                    .with_frontmatter(
+                        Some(crate::FrontmatterValue::Map(vec![(
+                            "status".into(),
+                            crate::FrontmatterValue::String("open".into()),
+                        )])),
+                        &model,
+                    );
             facts.links.push(crate::LinkFact {
                 family: crate::LinkFamily::Wikilink,
                 embed: false,
@@ -1073,7 +1088,7 @@ mod loading_plan_tests {
                 .unwrap()
                 .unwrap();
             four_step::structure(&mut store, &[facts], &[pending], &[], &model, false).unwrap();
-            assert!(!store.connection().query_row(
+            assert!(store.connection().query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='documents_suffix_key')", [], |r| r.get::<_, bool>(0)).unwrap());
             let reader = std::sync::Arc::new(store.open_reader().reader.unwrap());
             let snapshot = reader.try_take().unwrap().establish().unwrap();
@@ -1083,6 +1098,9 @@ mod loading_plan_tests {
             );
             for params in [
                 base.clone(),
+                GetParams::new(base.vault.clone(), ResolutionTarget::new("d0000").unwrap()),
+                base.clone()
+                    .with_columns([norn_wire::Column::field("status")]),
                 base.clone().with_collection(CollectionSelector::Links),
                 GetParams::new(
                     base.vault.clone(),
@@ -1096,6 +1114,7 @@ mod loading_plan_tests {
                 let mut lookups = Lookups::default();
                 lookups.completed_path = Some("d0000.md".into());
                 lookups.unresolved_links = true;
+                lookups.local_fields = true;
                 snapshot
                     .run_get(&params, &model, &Text, &mut lookups)
                     .unwrap();
@@ -1103,14 +1122,13 @@ mod loading_plan_tests {
                     assert_eq!(ran.stepped.full_scan_steps, 0, "{}", ran.sql());
                     assert!(!matches!(
                         ran.statement,
-                        ReadStatement::Find(
-                            FindStatement::ClassHead
-                                | FindStatement::LinkTargets
-                                | FindStatement::CandidateSuffixes
-                        )
+                        ReadStatement::Find(FindStatement::LinkTargets)
                     ));
                 }
                 let plans = snapshot.explained(lookups.ran, |_, _, plan| plan).unwrap();
+                if !params.columns.is_empty() {
+                    assert!(plans.iter().flat_map(|plan| &plan.steps).any(|step| step.detail.contains("document_fields USING PRIMARY KEY (document=? AND key=? AND ordinal=?)")), "{plans:?}");
+                }
                 for plan in plans {
                     for step in plan.steps {
                         let detail = step.detail.to_ascii_lowercase();

@@ -99,8 +99,16 @@ class Current:
         if loading_options is not None:
             if (loading not in ("four-step", "four-step-no-body")
                     or not {"transaction_bound", "requested_paths"} <= set(loading_options)
-                    or set(loading_options) - {"transaction_bound", "requested_paths", "fts_mode", "mid_request_path"}
+                    or set(loading_options) - {"transaction_bound", "requested_paths", "fts_mode", "mid_request_path", "build_cache_size", "deferred_indexes", "get_targets"}
                     or loading_options.get("fts_mode", "rebuild") not in ("rebuild", "batched")
+                    or (loading_options.get("build_cache_size", -65536) is not None and
+                        (type(loading_options.get("build_cache_size", -65536)) is not int or
+                         not -(2**31) <= loading_options.get("build_cache_size", -65536) < 2**31))
+                    or type(loading_options.get("deferred_indexes", True)) is not bool
+                    or ("get_targets" in loading_options and
+                        (not isinstance(loading_options["get_targets"], list) or
+                         len(loading_options["get_targets"]) != len(loading_options["requested_paths"]) or
+                         any(not isinstance(target, str) or not target for target in loading_options["get_targets"])))
                     or ("mid_request_path" in loading_options and
                         (not isinstance(loading_options["mid_request_path"], str) or not loading_options["mid_request_path"]))
                     or type(loading_options["transaction_bound"]) is not int
@@ -111,6 +119,11 @@ class Current:
             env["NORN_PERFORMANCE_TRANSACTION_BOUND"] = str(loading_options["transaction_bound"])
             env["NORN_PERFORMANCE_REQUESTED_PATHS"] = json.dumps(loading_options["requested_paths"])
             env["NORN_PERFORMANCE_FTS_MODE"] = loading_options.get("fts_mode", "rebuild")
+            cache = loading_options.get("build_cache_size", -65536)
+            env["NORN_PERFORMANCE_BUILD_CACHE_SIZE"] = "production" if cache is None else str(cache)
+            env["NORN_PERFORMANCE_DEFERRED_INDEXES"] = str(loading_options.get("deferred_indexes", True)).lower()
+            if "get_targets" in loading_options:
+                env["NORN_PERFORMANCE_GET_TARGETS"] = json.dumps(loading_options["get_targets"])
             if "mid_request_path" in loading_options:
                 env["NORN_PERFORMANCE_MID_REQUEST_PATH"] = loading_options["mid_request_path"]
         if public_mid_request is not None:

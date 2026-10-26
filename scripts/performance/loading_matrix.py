@@ -379,7 +379,7 @@ def cell_summary(documents, result):
     return '\n'.join(lines)
 
 
-def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_mode='rebuild', mid_request_offset_ns=None, integrity_binary=None):
+def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_mode='rebuild', build_cache_size=-65536, deferred_indexes=True, lab_get_targets=None, mid_request_offset_ns=None, integrity_binary=None):
     """One measured worker; validation and final audits use the existing harness code."""
     import os
     import time
@@ -456,6 +456,11 @@ def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_m
             write_json(ack, dict(sequence=index + 1, probe=stage['probe']))
             ack.replace(ack.with_suffix('.json'))
         elif arm.startswith('four-step'):
+            if name == 'four-step-field-projection':
+                validate_loading_flags(stage)
+                if (stage.get('current') is not True or stage['unsatisfied'] or
+                        stage['answer']['document'] != dict(path='bench/small.md', fields={'status': {'kind': 'scalar', 'raw': 'draft'}})):
+                    raise ValueError('early per-document projection differs from fixture')
             validate_lab_stage(stage, manifest)
             if name in ('four-step-get', 'four-step-find', 'four-step-search'):
                 kind = name.removeprefix('four-step-')
@@ -485,7 +490,10 @@ def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_m
             options['public_mid_request'] = dict(path=mid_target, offset_ns=mid_request_offset_ns)
     if arm.startswith('four-step'):
         options['loading_options'] = {'transaction_bound': 128, 'requested_paths': ['bench/small.md', LINK_TARGET],
-                                      'fts_mode': fts_mode, 'mid_request_path': mid_target}
+                                      'fts_mode': fts_mode, 'mid_request_path': mid_target,
+                                      'build_cache_size': build_cache_size, 'deferred_indexes': deferred_indexes}
+        if lab_get_targets is not None:
+            options['loading_options']['get_targets'] = lab_get_targets
     worker = Current(binary, root, **options)
     history, observations = [], []
     try:
@@ -626,7 +634,8 @@ def measure_cell(binary, root, manifest, arm, *, warm_write_repetitions=1, fts_m
     ready_at = [i for i, row in enumerate(transcript) if row.get('ready') is True]
     if len(ready_at) != 1 or transcript[ready_at[0] + 1:] != responses:
         raise ValueError('retained responses differ from raw native worker stream')
-    result = dict(arm=arm, fixture_sha256=manifest['tree_sha256'], document_count=manifest['document_count'],
+    result = dict(arm=arm, build_cache_size=build_cache_size if arm.startswith('four-step') else None,
+        deferred_indexes=deferred_indexes if arm.startswith('four-step') else None, lab_get_targets=lab_get_targets, fixture_sha256=manifest['tree_sha256'], document_count=manifest['document_count'],
         origin_monotonic_ns=origin, clock_scope='parent origin before Current construction in every arm; worker clocks separate, never added',
         public_ready=public_ready, ready=public_ready, health_complete=public_ready,
         first_get=describe_probe(probes['get'], arm, 'get'),
@@ -855,7 +864,7 @@ def record_host_load(path):
 
 
 def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_reference=None, *,
-               fts_mode='rebuild', mid_request_reference=None, mid_request_offset_ns=None, skip_warmup=False, row_start=0, warm_write_repetitions=1):
+               fts_mode='rebuild', mid_request_reference=None, mid_request_offset_ns=None, skip_warmup=False, row_start=0, warm_write_repetitions=1, build_cache_size=-65536, deferred_indexes=True, lab_get_targets=None):
     import shutil
     import subprocess
     import sys
@@ -917,7 +926,7 @@ def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_ref
             write_json(root / 'manifest.json', manifest)
             offset = (mid_request_offset_ns if mid_request_offset_ns is not None else seeds.get(documents, {}).get('offset_ns')) if arm == 'main' and not cell['discarded_warmup'] else None
             integrity_binary = builds['four-step'][0]['executable'] if arm != 'health-once' else None
-            spec = dict(warm_write_repetitions=warm_write_repetitions, fts_mode=fts_mode, mid_request_offset_ns=offset, integrity_binary=integrity_binary, arm=arm, binary=str(binary), source=str(source), manifest=manifest,
+            spec = dict(build_cache_size=build_cache_size, deferred_indexes=deferred_indexes, lab_get_targets=lab_get_targets, warm_write_repetitions=warm_write_repetitions, fts_mode=fts_mode, mid_request_offset_ns=offset, integrity_binary=integrity_binary, arm=arm, binary=str(binary), source=str(source), manifest=manifest,
                         root=str(root), build=receipt, harness_source_sha256=snapshot, cell=cell)
             write_json(root / 'cell.json', spec)
             await_idle(root / 'host-admission.json')
@@ -962,6 +971,9 @@ def main():
     parser.add_argument('--config', type=Path)
     parser.add_argument('--freeze-fixtures', type=Path, help='prepare linked frozen fixtures outside timing')
     parser.add_argument('--repetitions', type=int, help='Williams rows per size; defaults 2014=8, 10014=4, 314=1')
+    parser.add_argument('--build-cache-size', default='-65536', help='SQLite cache_size: pages, negative KiB, or production')
+    parser.add_argument('--no-deferred-indexes', action='store_true', help='keep secondary indexes during lab insertion')
+    parser.add_argument('--lab-get-targets', nargs=2, help='Get targets for the small and linked requested paths')
     parser.add_argument('--fts-mode', choices=('rebuild', 'batched'), default='rebuild', help='lab-only step-5 FTS construction')
     parser.add_argument('--mid-request-reference', type=Path, help='completed four-step run directory supplying per-size main wall offsets')
     parser.add_argument('--mid-request-offset-ns', type=int, help='explicit prior lab worker-clock request offset; one size only')
@@ -974,12 +986,18 @@ def main():
     parser.add_argument('--arms', choices=ARMS, nargs='+', default=list(ARMS))
     parser.add_argument('--cell', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    try:
+        cache_size = None if args.build_cache_size == 'production' else int(args.build_cache_size)
+        if cache_size is not None and not -(2**31) <= cache_size < 2**31:
+            raise ValueError('outside SQLite i32 range')
+    except ValueError:
+        parser.error('--build-cache-size requires production or a signed 32-bit integer')
     if args.cell:
         spec = json.loads(args.cell.read_text())
         if spec['arm'] == 'health-once':
             sys.path.insert(0, str(Path(spec['source']) / 'scripts/performance'))
         result = measure_cell(Path(spec['binary']), Path(spec['root']), spec['manifest'], spec['arm'],
-                              warm_write_repetitions=spec.get('warm_write_repetitions', 1), fts_mode=spec.get('fts_mode', 'rebuild'), mid_request_offset_ns=spec.get('mid_request_offset_ns'),
+                              build_cache_size=spec.get('build_cache_size', -65536), deferred_indexes=spec.get('deferred_indexes', True), lab_get_targets=spec.get('lab_get_targets'), warm_write_repetitions=spec.get('warm_write_repetitions', 1), fts_mode=spec.get('fts_mode', 'rebuild'), mid_request_offset_ns=spec.get('mid_request_offset_ns'),
                               integrity_binary=Path(spec['integrity_binary']) if spec.get('integrity_binary') else None)
         result['build'] = spec['build']
         result['harness_source_sha256'] = spec['harness_source_sha256']
@@ -999,7 +1017,7 @@ def main():
             parser.error('arms must be unique')
         run_matrix(json.loads(args.config.read_text()), args.fixtures, args.output.resolve(), args.sizes, args.arms, args.repetitions, args.gate_reference,
                    fts_mode=args.fts_mode, mid_request_reference=args.mid_request_reference,
-                   mid_request_offset_ns=args.mid_request_offset_ns, skip_warmup=args.skip_warmup, row_start=args.row_start, warm_write_repetitions=args.warm_write_repetitions)
+                   mid_request_offset_ns=args.mid_request_offset_ns, skip_warmup=args.skip_warmup, row_start=args.row_start, warm_write_repetitions=args.warm_write_repetitions, build_cache_size=cache_size, deferred_indexes=not args.no_deferred_indexes, lab_get_targets=args.lab_get_targets)
 
 
 if __name__ == '__main__':
