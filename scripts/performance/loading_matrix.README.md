@@ -12,6 +12,9 @@ The build step takes exact main and health-once revisions and the harness's
 current committed prototype revision. Each revision's `provenance.py` runs
 `rustup run` and retains compiler, Cargo, source, profile, feature, and binary
 identity. Each revision has its own Cargo target directory, immutable worker copy, and receipt.
+Separate targets prevent reuse of incompatible local-crate artifacts across revisions.
+At run time the prototype Rust sources must match this checkout; Python-only
+follow-up changes do not require recompilation.
 
 ```bash
 mkdir -p target/scratch
@@ -55,7 +58,8 @@ sample, with no statistical or speedup claim.
   record; health-once's full-build health boundary. `public_ready` separately
   retains the ordinary control record for every arm. These parent observations
   include delivery delay and, for the public control record, the worker's
-  accounting tail after observing Ready.
+  accounting tail after observing Ready. Console output names the selected
+  boundary and prints public Ready beside it.
 - `health_complete`: four-step relations-complete callback; public Ready for main;
   full-build health boundary for health-once.
 - `first_get` and `first_find`: the first validated answer. Main sends one real
@@ -90,7 +94,9 @@ sample, with no statistical or speedup claim.
   the actual final tree. `semantic_sha256` must match across arms sharing the
   original frozen fixture. Canonical identity, page map, and document construction
   hashes remain descriptive; physical differences do not fail the semantic gate.
-- `documents_layout`: read-only SQLite `dbstat`, documents B-tree only. Page count
+- `documents_layout`: read-only SQLite `dbstat` after the four warm writes, worker
+  shutdown, and final audit. It describes the post-workload layout; it does not
+  isolate the layout produced by loading alone. It covers the documents B-tree only. Page count
   includes interior, leaf, and overflow pages. Average fill is total payload bytes
   divided by total page bytes. Fragmentation is the fraction of consecutive pages
   in `dbstat.path` order whose physical page numbers are not adjacent. This is a

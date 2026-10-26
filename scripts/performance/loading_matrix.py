@@ -39,7 +39,7 @@ def documents_layout(path):
                 nonadjacent_transitions=breaks,
                 definitions={'average_fill': 'sum(payload)/sum(pgsize), all documents B-tree pages',
                              'fragmentation': 'fraction of successive dbstat path-order pages whose pageno is not previous+1',
-                             'scope': 'documents table only; includes interior, leaf and overflow pages'})
+                             'scope': 'post-warm writes, after worker close and final audit; documents table interior, leaf and overflow pages'})
 
 
 def validate_lab_stage(stage, manifest):
@@ -331,6 +331,17 @@ def prepare_builds(root, repo):
     return root / 'config.json'
 
 
+def check_prototype_source(repo, built_head):
+    """Permit Python-only follow-up commits without silently measuring different Rust."""
+    import subprocess
+    inputs = ['crates', 'vendor', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo']
+    changed = subprocess.run(['git', 'diff', '--quiet', built_head, '--', *inputs], cwd=repo)
+    untracked = subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard',
+                                        '--', *inputs], cwd=repo)
+    if changed.returncode or untracked:
+        raise ValueError('prototype Rust sources differ from the compiled receipt; commit and rebuild')
+
+
 def checked_build(config, arm):
     from provenance import verify_build
     role = 'prototype' if arm.startswith('four-step') else arm
@@ -345,6 +356,8 @@ def checked_build(config, arm):
         raise ValueError('source HEAD differs from the build receipt')
     if role in REVISIONS and not head.startswith(REVISIONS[role]):
         raise ValueError('arm source differs from its pinned revision')
+    if role == 'prototype':
+        check_prototype_source(Path(__file__).resolve().parents[2], head)
     return receipt, source
 
 
@@ -388,7 +401,9 @@ def run_matrix(config, fixtures, output, sizes, arms):
             result = json.loads((root / 'result.json').read_text())
             metadata['results'].append(str(root / 'result.json'))
             gate_semantics(references, result)
-            print(f"{documents} {arm}: Ready {result['ready']['parent_received_ns'] / 1e9:.6f}s "
+            boundary = result['ready'].get('source', 'public Ready control record')
+            print(f"{documents} {arm}: Ready[{boundary}] {result['ready']['parent_received_ns'] / 1e9:.6f}s "
+                  f"public_Ready {result['public_ready']['parent_received_ns'] / 1e9:.6f}s "
                   f"Get {result['first_get']['parent_received_ns'] / 1e9:.6f}s "
                   f"Find {result['first_find']['parent_received_ns'] / 1e9:.6f}s "
                   f"semantic {result['store']['semantic_sha256']}", flush=True)

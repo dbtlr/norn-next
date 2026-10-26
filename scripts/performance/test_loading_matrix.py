@@ -115,3 +115,28 @@ for line in sys.stdin:
         health_once_final_gate(validator, ['facts', 'health'], {'ready': True}, {},
                                {'counts': {'links': 73}})
         validator.assert_called_once_with('health-once', ['facts', 'health'], {'ready': True}, {}, stored_links=73)
+
+    def test_prototype_pin_allows_harness_edits_but_rejects_unbuilt_rust(self):
+        import subprocess
+        from loading_matrix import check_prototype_source
+        with tempfile.TemporaryDirectory() as folder:
+            repo = Path(folder)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            (repo / 'crates').mkdir()
+            rust = repo / 'crates/worker.rs'
+            rust.write_text('compiled')
+            (repo / 'driver.py').write_text('compiled driver')
+            subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
+            subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                            'commit', '-qm', 'fixture'], cwd=repo, check=True)
+            head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+            (repo / 'driver.py').write_text('new driver')
+            check_prototype_source(repo, head)
+            rust.write_text('not built')
+            with self.assertRaisesRegex(ValueError, 'prototype Rust'):
+                check_prototype_source(repo, head)
+            rust.write_text('compiled')
+            extra = repo / 'crates/new.rs'
+            extra.write_text('untracked and not built')
+            with self.assertRaisesRegex(ValueError, 'prototype Rust'):
+                check_prototype_source(repo, head)
