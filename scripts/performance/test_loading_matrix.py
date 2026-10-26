@@ -107,3 +107,11 @@ for line in sys.stdin:
         self.assertEqual(len(workload), 19)
         self.assertEqual([c['op'] for c in workload[3:11]], ['search'] * 4 + ['find'] + ['get'] * 3)
         self.assertEqual([c['op'] for c in workload[11:]], ['set', 'get', 'new', 'get', 'move', 'get', 'move', 'get'])
+
+    def test_health_once_runs_archived_exactly_once_gate_with_audited_count(self):
+        from loading_matrix import health_once_final_gate
+        from unittest.mock import Mock
+        validator = Mock()
+        health_once_final_gate(validator, ['facts', 'health'], {'ready': True}, {},
+                               {'counts': {'links': 73}})
+        validator.assert_called_once_with('health-once', ['facts', 'health'], {'ready': True}, {}, stored_links=73)

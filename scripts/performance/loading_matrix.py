@@ -218,10 +218,7 @@ def measure_cell(binary, root, manifest, arm):
                           markdown_bytes=sum((root / 'vault' / p).stat().st_size for p in final_paths))
     store = audit_store(binary, root, final_manifest)
     if arm == 'health-once':
-        # The receipt's exactly-once check needs the pre-mutation link count;
-        # semantic audit after rename may have changed it, so initial receipts are
-        # validated before warm writes, above, without inventing an initial count.
-        validate_receipts(arm, events, worker.ready, manifest)
+        health_once_final_gate(validate_receipts, events, worker.ready, manifest, store)
     layout = documents_layout(next((root / 'data').rglob('store.sqlite3')))
     write_json(root / 'request-history.json', history)
     write_json(root / 'observations.json', observations)
@@ -249,7 +246,11 @@ def measure_cell(binary, root, manifest, arm):
             event = stages['four-step-' + name]
             result[field] = dict(parent_received_ns=event['parent_received_ns'], worker_ns=event['elapsed_ns'],
                 resources=event.get('resources_when_observed'), source=event['startup_stage'])
+        if stages['four-step-relations']['reconciled'] is not False:
+            raise ValueError('source churn required an ordinary heal during the lab build')
         result['step_counters'] = stages['four-step-relations']['steps']
+        result['ready']['counters'] = {step: result['step_counters'][step] for step in ('names', 'content', 'structure')}
+        result['health_complete']['counters'] = result['step_counters']
         result['step_boundary_intervals_ns'] = {}
         result['step_durations_ns'] = None
         previous = 0
@@ -269,7 +270,20 @@ def measure_cell(binary, root, manifest, arm):
         result['ready'] = result['health_complete'] = dict(parent_received_ns=event['parent_received_ns'],
             worker_ns=event['stage_boundary_ns'], resources=event.get('resources_when_observed'),
             source='health-once-health full-build end', counters=event['health_once_work'])
+        result['health_once_stored_links_gate'] = dict(stored_links=store['counts']['links'],
+            source='post-close audit; validated fixed warm workload preserves link cardinality')
     return result
+
+
+def health_once_final_gate(validator, events, ready, manifest, store):
+    """Use the archived exactly-once check after the link-count-preserving warm suffix.
+
+    The fixed workload changes a scalar field, creates a link-free document, and
+    renames paths. verify_mutation checks unchanged moved bytes and every rewritten
+    referrer's bytes: each rewrite replaces only one link destination. No operation
+    adds or removes links, so the final audited count is also the initial count.
+    """
+    validator('health-once', events, ready, manifest, stored_links=store['counts']['links'])
 
 
 def cell_workload():
@@ -304,7 +318,7 @@ def prepare_builds(root, repo):
         receipt_path = root / f'{role}.build.json'
         # Outside each source checkout, inside the enclosing harness checkout.
         subprocess.run([sys.executable, str(source / 'scripts/performance/provenance.py'),
-            '--target-directory', str(root / 'cargo-target'), '--receipt', str(receipt_path),
+            '--target-directory', str(root / 'cargo-targets' / role), '--receipt', str(receipt_path),
             '--startup-profile'], cwd=source, check=True)
         receipt = verify_build(receipt_path, source)
         frozen_binary = root / f'{role}.worker'

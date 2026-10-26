@@ -11,7 +11,7 @@ All generated files and detached source checkouts stay under its ignored `target
 The build step takes exact main and health-once revisions and the harness's
 current committed prototype revision. Each revision's `provenance.py` runs
 `rustup run` and retains compiler, Cargo, source, profile, feature, and binary
-identity. The three immutable worker copies have separate receipts.
+identity. Each revision has its own Cargo target directory, immutable worker copy, and receipt.
 
 ```bash
 mkdir -p target/scratch
@@ -106,7 +106,9 @@ Health-once cells start a separate Python adapter process with the archived
 checkout's `scripts/performance` first on its import path. Its own `transport` and
 `loading.validate_receipts` select and validate `health-once`; they are not ported.
 The controller uses the same current shared provenance replay validator and layout
-inspection for the four arms. The archived final audit uses its own audit adapter.
+inspection for the four arms. The archived final audit uses its own audit adapter. Its exactly-once receipt gate
+uses the final audited link count: the fixed, validated warm workload changes no
+link cardinality, so this is also the initial stored link count.
 
 Run the Python checks with the repository's standard runner:
 
