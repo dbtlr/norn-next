@@ -342,6 +342,10 @@ order:
    document ids are assigned in path order; every vault-file row is written final. A `.md`
    path whose bytes prove in step 2 not to be a document is quarantined, its row removed
    through the ordinary removal path, and it leaves a gap in the ids, which is accepted. A
+   name a filesystem fact adds during construction is inserted through the ordinary add
+   path and takes the next id, as in any store, so ids follow path order only for the names
+   step 1 enumerated, and a build's ids equal an ordinary build's only where no name was
+   added during it. A
    directory the walk cannot list is withheld and marked, and the build continues
    ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)). The name-resolution
    indexes are created at the end of this step.
@@ -710,7 +714,8 @@ construction alone and are not comparable with these.
 | Ready at 2,014 documents | 5.15 s | 2.05 s |
 
 Warm reads are equal. The finished stores are equal under the store's semantic audit,
-in document ids, in schema text and in full-text integrity.
+in schema text and in full-text integrity, and — since no fact arrived during the measured
+builds — in document ids.
 
 ### Known limit
 

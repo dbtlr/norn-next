@@ -275,7 +275,11 @@ file is not judged ([ADR 0044](0044-a-from-zero-build-judges-link-health-once.md
 not empty: an empty readable document holds a content hash and an empty body, so the
 predicate tests the absent body, never a count of zero structure facts. A link that resolves
 to a document read before it broke is judged against the headings and blocks its row still
-holds.
+holds. The same holds for answers that read across documents: a links-to or backlinks
+answer is exact for the facts the store holds, a broken document the store has never read
+contributes no links to it, and its unreadable-document finding is where that gap is stated.
+This is the store's steady state at a broken path, the same after `Ready` as during a
+from-zero build, not an unfinished stage of construction, so it withholds no capability.
 
 **A repair fix cannot rest on evidence from a broken document.** A fix that reads evidence
 from a document the plan does not write — the heading a missing anchor is fixed to — carries
