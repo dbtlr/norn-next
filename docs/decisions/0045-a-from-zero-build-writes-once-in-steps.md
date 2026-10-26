@@ -479,6 +479,13 @@ touches, until its path is derived again:
   finding, and the walk that meets the same denial withholds and marks it, as ADR 0046
   rules. Its parent's watch reports a change to the directory's attributes, and that fact
   requeues the directory into construction as any fact requeues its path.
+- **A requeued directory that lists again ends its finding before step 4 judges.** Its
+  listing is a clean enumeration of that directory, so its unreadable-directory finding ends
+  in the transaction that writes the names beneath it, and step 4 judges over the restored
+  names; where it lists while step 4 runs, the finding ends before step 4 ends and the links
+  beneath it are judged again, as ADR 0044 rules. From step 5 on the fact waits for the
+  reconcile that precedes `Ready`, whose job-end prune ends the finding and re-decides those
+  links.
 
 The authority includes every relevant fact the subscription accepts after capture, wherever
 it is held: the coalescer's pending or unplaced batch, an open heal window, collected heal

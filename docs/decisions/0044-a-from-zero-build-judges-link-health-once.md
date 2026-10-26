@@ -19,7 +19,10 @@ link-health finding before the judgment has run, and no query's answer or write'
 reads one, so nothing needs the findings before every fact they are judged over exists.
 Every changeset after the judgment — the reconcile that precedes `Ready` included — keeps
 ADR 0027's per-changeset re-decision unchanged, and the store a from-zero build finishes
-holds exactly the findings per-changeset re-decision files over the same tree.
+holds exactly the findings per-changeset re-decision files over the same tree, save at the
+unreadable documents and directories where
+[ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md) leaves that bar knowingly
+short, each difference marked by the path's finding.
 
 ## The two lanes
 
@@ -39,7 +42,7 @@ ride the changeset is decided once, per family, and the bars test that what ride
 lane 1's four obligations, which all assume deterministic, bounded locality:
 
 - **atomicity** — the changeset is one transaction, scoped to the blast radius of what it
-  changes;
+  changes, and so is every other lane-1 transaction that re-decides, as ruled below;
 - **bounded working memory** — peak memory is a function of the working set, never of the
   vault;
 - **incremental equals rebuild** — incremental maintenance equals a from-zero rebuild over
@@ -70,9 +73,12 @@ link's health by:
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
   **missing anchor**; a link that resolves to one document the store has never read — a
   broken document ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) whose row
-  holds no content or structure fact, only the names its path derives — is not judged for its
-  anchor, because that document's headings and blocks are unknown rather than absent. A
-  broken document read before it broke keeps its headings and blocks, and a link to it is
+  holds no body, only the names its path derives — is not judged for its anchor, because
+  that document's headings and blocks are unknown rather than absent. Never read means the
+  body is absent, not empty: an empty readable document holds a content hash and an empty
+  body, and an anchor on a link to it is missing. The predicate tests the absent body, never
+  a count of zero headings and blocks, which a readable document can hold too. A broken
+  document read before it broke keeps its body, headings and blocks, and a link to it is
   judged against them;
 - a path-addressed link whose spelled path lies beneath a directory marked unreadable
   ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) is not judged, because its
@@ -145,6 +151,16 @@ another time, as the next section rules.
 - every path-addressed link whose key lies beneath a directory whose unreadable-directory
   finding the act files or ends, re-decided in the transaction that files or ends that
   finding, so a link left unjudged under a marked directory is judged once it lists again.
+  That act first discards the findings already keyed beneath the directory, by a prefix
+  range over path keys, and then files again: the equality discard on a written or killed
+  path does not reach a key beneath a directory.
+
+**The job-end prune's transaction is a lane-1 re-deciding transaction.** Where a walk's
+job-end prune ends an unreadable-directory finding
+([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)), the transaction that ends
+it discards and re-decides the links beneath that directory, under the five conditions
+below as a changeset is: the finding's end and the re-decision commit together or not at
+all, and the transaction's work is bounded by the re-decided set.
 
 Every link-health finding carries invalidation keys in the key space its link is addressed
 in, so the changeset's discard reaches it through the same keys the re-decided set is found
@@ -163,7 +179,7 @@ decision rules and does not yet exist. Within that family, the exception admits 
 3. **deterministic, in facts and in order** — the same facts yield the same findings, and the
    order of a path's findings is a function of the findings' facts — the link's position in
    its document, then the kind — never of when they were filed;
-4. **over facts the changeset's own transaction reads** — per-document facts lane 1 derives,
+4. **over facts the transaction that re-decides reads** — per-document facts lane 1 derives,
    and no lane-2 or engine output;
 5. **bounded by the re-decided set** — its work is the links in that set plus the candidates
    they resolve against and the directories their spelled paths name, with each distinct
@@ -217,7 +233,8 @@ judgment's routine.
 **During a from-zero build no changeset re-decides link health.** Once the structure facts
 of every document — its headings, blocks and links — have landed, the store judges every
 eligible link once, plus the links a requeued path reaches, in path order, in bounded
-chunks. The judgment is the one above:
+chunks; a requeued directory that lists again reaches the links beneath it, and its
+unreadable-directory finding ends before they are judged, as ADR 0045 rules. The judgment is the one above:
 the same SQL predicate, over the same summaries of the keys each link is read through,
 filing the same kinds with the same invalidation keys, in the same deterministic order. A
 path a filesystem fact requeues while the judgment runs is derived again first, and the
@@ -228,7 +245,10 @@ before `Ready` as ordinary changesets, under the per-changeset rule. The judgmen
 memory is a bounded chunk of links and the candidates they resolve against, never the vault.
 The finished store's findings equal the findings per-changeset re-decision files over the
 same tree, finding order included, so incremental equals rebuild holds for every store a
-reader can adopt.
+reader can adopt, short only where ADR 0046 carves it: a store maintained across a path's
+break keeps the facts it read there before, and judges links over them, where a from-zero
+build holds names alone, and each difference is marked by the path's finding and ends when
+the path reads again.
 
 **The four obligations hold for the pass as a from-zero build has them.** Atomicity protects
 a reader from a tear between a row and the findings judged over it. A from-zero build admits
