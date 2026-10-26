@@ -34,7 +34,10 @@ def validate_loading_flags(stage):
 
 def validate_mid_get(response, manifest, *, first_index=False):
     from results import whole_get_answer
-    whole_get_answer(response, first_index=first_index)
+    if first_index:
+        whole_get_answer(response, first_index=True)
+    else:
+        whole_get_answer(response)
     document = response['answer']['report']['document']
     body = manifest['mid_request_body']
     if (document['path'] != manifest['mid_request_path']

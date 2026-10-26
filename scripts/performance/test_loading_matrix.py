@@ -39,6 +39,17 @@ class MatrixTests(unittest.TestCase):
         with patch('results.whole_get_answer', side_effect=lambda row: whole_get_answer(row)):
             validate_link_get(response, manifest)
 
+    def test_mid_ready_get_keeps_the_archived_health_once_validator_signature(self):
+        import json
+        from unittest.mock import patch
+        from results import whole_get_answer
+        from loading_matrix import validate_mid_get
+        response = {'answer': json.loads(Path(__file__).with_name('testdata').joinpath('linked_get.json').read_text())}
+        document = response['answer']['report']['document']
+        manifest = dict(mid_request_path=document['path'], mid_request_body=document['body']['text'])
+        with patch('results.whole_get_answer', side_effect=lambda row: whole_get_answer(row)):
+            validate_mid_get(response, manifest)
+
     def test_linked_early_public_get_keeps_findings_while_warming(self):
         import json
         from loading_matrix import validate_link_get
