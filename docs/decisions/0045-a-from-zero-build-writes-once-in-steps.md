@@ -551,8 +551,8 @@ list are marked broken and skipped
 clears its mark and reaches `Ready`, and the vault is usable, with the findings naming each
 such path. What ends a first index is a failure of the environment as a whole — a vault
 schema that will not read, a store that will not open, a vault root that is gone or that
-coverage cannot be installed over, the machine's own exhausted resources or failing device
-— or an interruption. Either leaves the vault registered and initialization reports the
+coverage cannot be installed over, the process's own exhausted descriptors or memory — or an
+interruption. Either leaves the vault registered and initialization reports the
 failure. Where it ends construction before step 5's transaction commits, the mark stands and
 indexing restarts from zero on the vault's next use; after that commit, the next use opens
 the finished store and its attach heal converges it.
