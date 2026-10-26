@@ -21,12 +21,14 @@ the vault.
 **refusal** in the glossary's sense is a resolved outcome in which norn performs no requested
 mutation. A **walk refusal** is a root a walk deliberately passes over and reads nothing
 under. A **broken path** is one document the walk named and could not open, or one directory
-it reached and could not list, because that path's own access was denied — permission denied,
-or the operation not permitted on it. A **failure of the environment as a whole** is the
-fourth: a vault schema that will not read, a store that will not open, a vault root that is
-gone or that coverage cannot be installed over, and the machine's own failures — an exhausted
-descriptor table or memory, a failing device. Those end the job and keep their existing
-rules; this decision touches them only as a withholder.
+it reached and could not list, because opening, listing or reading that path failed — permission
+denied, the operation not permitted on it, or an I/O error on that path. A **failure of the
+environment as a whole** is the fourth: a vault schema that will not read, a store that will not
+open, a vault root that is gone or that coverage cannot be installed over, and the process's own
+resource failures — an exhausted descriptor table or memory — which say nothing about the path
+being read. Those end the job and keep their existing rules; this decision touches them only as a
+withholder. A device failing under many paths marks each path it fails as broken; the vault does
+not break because its files did.
 
 **Quarantine is for the causes that leave nothing derivable.** There are **three cause
 classes** — path bytes that are not UTF-8, a path spelling the document-path grammar refuses,
