@@ -68,7 +68,10 @@ link's health by:
   carries a bounded head of five candidates, the exact total, and a hint that names how to
   enumerate the rest;
 - a link that resolves to one document lacking the link's `#heading` or `#^block` has a
-  **missing anchor**.
+  **missing anchor**; a link that resolves to one document the store has never read — a
+  broken document ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)) that holds
+  only the row its path derives — is not judged for its anchor, because that document's
+  headings and blocks are unknown rather than absent.
 
 An embed is a link and carries the same kinds. Every link-health finding has warning
 severity.
@@ -190,12 +193,15 @@ any other rung that discards the database and derives the vault again. No reader
 the store as complete until its construction ends: the store carries an under-construction
 mark until then, and an open that finds the mark rebuilds from zero rather than resuming
 over what a crash left, as ADR 0045 rules. A full tree heal of an existing store, a recovery
-that does not rebuild from zero, a schema pin and every write after the build ends maintain
-an existing store; each keeps the per-changeset re-decision above unchanged.
+that does not rebuild from zero and every write after the build ends maintain an existing
+store; each keeps the per-changeset re-decision above unchanged. A schema pin keeps the
+obligation ruled above, whose mechanism stays open; that mechanism may reuse the single
+judgment's routine.
 
 **During a from-zero build no changeset re-decides link health.** Once the structure facts
 of every document — its headings, blocks and links — have landed, the store judges every
-eligible link exactly once, in path order, in bounded chunks. The judgment is the one above:
+eligible link once, plus the links a requeued path reaches, in path order, in bounded
+chunks. The judgment is the one above:
 the same SQL predicate, over the same summaries of the keys each link is read through,
 filing the same kinds with the same invalidation keys, in the same deterministic order. A
 path a filesystem fact requeues while the judgment runs is derived again first, and the
@@ -212,7 +218,8 @@ reader can adopt.
 a reader from a tear between a row and the findings judged over it. A from-zero build admits
 readers of the rows it has completed, but it withholds the findings surface, not the store,
 until the judgment has run: no reader reads a link-health finding before then, and an open
-after a crash discards the construction whole. Working memory is bounded by the chunk. The
+after a crash before the transaction that ends construction commits discards the
+construction whole. Working memory is bounded by the chunk. The
 work bar measures a write against its blast radius, and a from-zero build's blast radius is
 the whole vault: judging each link once is the least work that blast radius admits, where
 per-changeset re-decision exceeds it.
@@ -235,8 +242,9 @@ fixture, per-changeset re-decision during a from-zero build made 89,186 link jud
 59,969 links and wrote 32,874 link-health findings, most of which later changesets
 discarded. In a phase profile of that build alone, link health was about 9.3 s of about
 23.6 s; that profile measures construction, not the end-to-end time to `Ready` ADR 0045
-reports for a build that also served early reads. Judging once made exactly 59,969
-judgments and wrote 4,001 findings, the findings the finished store holds.
+reports for a build that also served early reads. Judging once over the same vault,
+with no fact accepted during the build, made exactly 59,969 judgments, one per link, and wrote
+4,001 findings, the findings the finished store holds.
 
 ## Lane 2 reads change through a feed
 

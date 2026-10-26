@@ -325,9 +325,12 @@ DDL fingerprint, path order and derivation version, and clears the mark in the t
 that ends step 5. The mark is a rebuild input beside those three
 ([ADR 0026](0026-a-derived-store-records-the-derivation-that-wrote-it.md)): an open that finds
 it rebuilds from zero through the same ceremony a fingerprint mismatch uses, and reports why.
-A crash during construction therefore restarts construction from zero and never resumes
-over what the crash left. A store whose recorded inputs match and which carries no mark is a
-finished store, and its open is the ordinary one.
+A crash or interruption before the transaction that ends step 5 commits therefore restarts
+construction from zero and never resumes over what it left. A crash or interruption after
+that commit leaves a finished store that may trail the vault — the reconcile before `Ready`
+had not run — and the next open is the ordinary one: the attach heal converges it, as it
+converges any store that trails the vault. A store whose recorded inputs match and which
+carries no mark is a finished store, and its open is the ordinary one.
 
 ### The canonical store is written once, in five steps
 
@@ -335,14 +338,19 @@ A from-zero build writes each document's row once and fills it progressively. No
 written to a store it does not stay in. The steps run in order over the vault, each in path
 order:
 
-1. **Names.** Every document row is written with its names only, in path order, so
-   document ids equal those of a store built document by document; every vault-file row is
-   written final. A `.md` path whose bytes prove not to be a document is removed later
-   through the ordinary removal path and leaves a gap in the ids, which is accepted. The
-   name-resolution indexes are created at the end of this step.
+1. **Names.** Every document row is written with only the names its path derives, and
+   document ids are assigned in path order; every vault-file row is written final. A `.md`
+   path whose bytes prove in step 2 not to be a document is quarantined, its row removed
+   through the ordinary removal path, and it leaves a gap in the ids, which is accepted. A
+   directory the walk cannot list is withheld and marked, and the build continues
+   ([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)). The name-resolution
+   indexes are created at the end of this step.
 2. **Content.** Each file is read once: its content hash, frontmatter projection, fields,
    and frontmatter link and tag facts are written, and its body is stored but not full-text
-   indexed. The field indexes are created at the end of this step.
+   indexed. A document the build cannot open is broken and skipped, as ADR 0046 rules: it
+   keeps its names-only row, a finding beside the row names the cause, it holds no content
+   or structure fact, and it has finished steps 2 and 3 as broken. The field indexes are
+   created at the end of this step.
 3. **Structure.** Each stored body is parsed. No file is read again: every fact comes from
    the bytes step 2 hashed. Headings, blocks, body links and inline tags are written. The
    indexes their readers seek are created at the end of this step.
@@ -350,6 +358,10 @@ order:
 5. **Full-text.** The full-text index is built from the stored bodies in bounded batches.
    The transaction that ends the step installs the full-text triggers and clears the
    under-construction mark.
+
+**A step ends only once every path requeued during it has run through it**, so no step
+starts while a requeued path is still in an earlier one: step 4 never ends with a requeued
+path's links unjudged, and step 5 never starts while a requeued path is still in steps 2–3.
 
 **Construction ends at step 5, and `Ready` follows in one order.** Step 5 installs the
 triggers; the facts accepted since step 5 began are then reconciled as ordinary
@@ -386,10 +398,12 @@ Each capability is admitted when every row it reads is complete, and not before:
   requested name itself is exact: every candidate it resolves among has been through step
   2, so an unknown or ambiguous answer is never given over a candidate that may yet prove
   not to be a document. Which document each of its links resolves to, and each link's
-  health, read as still loading until step 4 ends: resolution and health switch on
-  together, and a missing-anchor verdict needs the headings and blocks of every document,
-  which only the end of step 3 completes. Whether a path is a document is settled for
-  every path when step 2 ends. A projection of the document that reads other documents —
+  health, read as still loading until step 4 ends: health findings exist only when step 4
+  ends, and resolution is withheld with them so no Get shows a resolved link beside a
+  loading verdict. Whether a path is a document is settled for every path when step 2
+  ends; a document step 2 could not open stays a document. A Get of such a document
+  answers with the unreadable-document finding its own step 2 filed, never with an empty
+  body read as the document's. A projection of the document that reads other documents —
   its backlinks among them — is admitted when step 3 ends, and until then reads as still
   loading.
 - **Field and path Find** when every document has finished step 2: predicates, projections
@@ -457,7 +471,9 @@ touches, until its path is derived again:
   the watcher cannot cover, or any other loss of watcher fidelity withdraws every early
   capability, and neither draining a batch, finishing a heal window nor seeing a missing
   root return restores them. Construction continues, the store is reconciled with the
-  vault before `Ready`, and requests meanwhile keep the ordinary loading behavior.
+  vault before `Ready`, and requests meanwhile keep the ordinary loading behavior. A
+  directory below the root that coverage cannot be installed over because its own access is
+  denied is not such a loss: it is withheld and marked as ADR 0046 rules.
 
 The authority includes every relevant fact the subscription accepts after capture, wherever
 it is held: the coalescer's pending or unplaced batch, an open heal window, collected heal
@@ -501,9 +517,10 @@ only writer of `documents_fts`. A from-zero build is a deliberate exception: the
 not exist while it runs, step 5 builds the index from the stored bodies, and the
 transaction that ends step 5 installs the triggers. From then on they are again the only
 maintainer. No body changes while they are absent: a requeued path rewrites its body only
-during steps 1–4, before step 5 has indexed any body, and every later body change — the
-reconcile that precedes `Ready`, and the writes and repair admitted only at `Ready` — is a
-changeset that runs after the triggers exist. A body changed after the index took it,
+during steps 1–4, and step 5 starts only once every path requeued before it has run through
+steps 2 and 3, so no body is rewritten after step 5 has indexed any; every later body change
+— the reconcile that precedes `Ready`, and the writes and repair admitted only at `Ready` —
+is a changeset that runs after the triggers exist. A body changed after the index took it,
 without the triggers, would leave the external-content index holding text the body no
 longer holds and dropping text it never held. The finished store's schema equals an
 ordinary store's.
@@ -512,8 +529,8 @@ ordinary store's.
 
 - Each non-unique secondary index is created and committed at the end of the step after
   which its first reader is admitted, before that capability publishes, so an admitted
-  statement's `EXPLAIN` gate sees the index; none is maintained row by row during
-  construction. Unique indexes and primary keys stay.
+  statement's `EXPLAIN` gate sees the index; none is maintained row by row during the
+  normal passes. Unique indexes and primary keys stay.
 - An admitted early statement never scans a vault-sized table.
 - Host chunks stay bounded at 128 documents. A SQLite transaction spans up to 2,048
   documents, and commits at the next chunk boundary whenever a request is pending, so the
@@ -526,15 +543,19 @@ ordinary store's.
 
 Initializing a vault runs its from-zero build before it returns, so normal use has no cold
 start; it returns once the vault is `Ready`. Early admission serves a vault used before its
-initialization finishes. An environment error or an interruption that ends the build leaves
-the vault registered: initialization reports the failure, and that indexing restarts from
-zero on the vault's next use. A file whose bytes do not decode as a document is quarantined as one document,
-under a finding naming it, and is not an initialization failure. A document the build
-cannot open, such as one whose permission was denied, is refused as the architecture's
-permission-loss row rules: nothing was read, so nothing is known about what it holds, and
-the entry stays untrusted. For a foreground initialization that refusal is a failed first
-index, so the vault stays registered, initialization reports it, and indexing restarts from
-zero on the vault's next use.
+initialization finishes. One file never fails a first index. A file whose bytes do not
+decode as a document is quarantined as one document, under a finding naming it. A document
+the build cannot open, such as one whose permission was denied, and a directory it cannot
+list are marked broken and skipped
+([ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md)): construction continues,
+clears its mark and reaches `Ready`, and the vault is usable, with the findings naming each
+such path. What ends a first index is a failure of the environment as a whole — a vault
+schema that will not read, a store that will not open, a vault root that is gone or that
+coverage cannot be installed over, the machine's own exhausted resources or failing device
+— or an interruption. Either leaves the vault registered and initialization reports the
+failure. Where it ends construction before step 5's transaction commits, the mark stands and
+indexing restarts from zero on the vault's next use; after that commit, the next use opens
+the finished store and its attach heal converges it.
 
 ### Promotion, budget and answers
 
@@ -572,8 +593,9 @@ until step 3 ends. Its body, fields, headings, blocks and links are exact, as be
 
 **A rebuild serves early reads, and a crash restarts it.** ADR 0043 admitted early reads
 only during a fresh store's first attach, and a rebuild refused reads until `Ready`. Every
-from-zero build now admits them. A crash during any from-zero build leaves the under-construction mark,
-and the next open rebuilds from zero.
+from-zero build now admits them. A crash during any from-zero build before the transaction
+that ends step 5 commits leaves the under-construction mark, and the next open rebuilds
+from zero.
 
 **One fact no longer withdraws everything.** ADR 0043 withdrew every early capability on
 any accepted fact. A fact now withdraws the document it touches and holds the vault-wide
@@ -589,6 +611,18 @@ and damage judgment of a disposable source, the rule that physical temporary-fil
 no extra fair turns, cleanup receipts for temporary storage, and the promotion that retired
 published sources at `Ready`. A Get answered early no longer needs a rich projection derived
 apart from the store: the store's own rows are the projection.
+
+**The architecture's contract follows.** Rung 3's triggers gain the under-construction
+mark beside the fingerprint, derivation and path-order mismatches. The failure table's
+process-killed row gains a from-zero-build clause: a process killed during construction
+before step 5's transaction commits leaves the mark and is rebuilt from zero, link health is
+judged once rather than re-decided per changeset during that build
+([ADR 0044](0044-a-from-zero-build-judges-link-health-once.md)), and a process killed after
+that commit leaves a finished store the attach heal converges. The statement that the
+full-text triggers are the only writer of the full-text index gains the construction
+exception above. The permission-loss row changes as
+[ADR 0046](0046-one-unreadable-path-never-breaks-the-vault.md) rules: an unopenable document
+or unlistable directory no longer refuses the heal or fails a first index.
 
 ## Whole-vault and semantic readiness
 
