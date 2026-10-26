@@ -484,13 +484,20 @@ def prepare_builds(root, repo):
     from provenance import verify_build, sha256
     root.mkdir(parents=True, exist_ok=True)
     sources = root / 'sources'
-    sources.mkdir()
+    sources.mkdir(exist_ok=True)
     config = {'schema_version': 1, 'builds': {}}
     revisions = REVISIONS | {'prototype': subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()}
     for role in ('main', 'prototype', 'health-once'):
         source = sources / role
-        subprocess.run(['git', 'worktree', 'add', '--detach', str(source), revisions[role]], cwd=repo, check=True)
+        if source.exists():
+            clean = subprocess.check_output(['git', 'status', '--porcelain'], cwd=source, text=True)
+            detached = subprocess.run(['git', 'symbolic-ref', '-q', 'HEAD'], cwd=source, capture_output=True)
+            if clean or detached.returncode != 1:
+                raise ValueError('reused build sources must be clean detached worktrees')
+            subprocess.run(['git', 'checkout', '--detach', revisions[role]], cwd=source, check=True)
+        else:
+            subprocess.run(['git', 'worktree', 'add', '--detach', str(source), revisions[role]], cwd=repo, check=True)
         receipt_path = root / f'{role}.build.json'
         # Outside each source checkout, inside the enclosing harness checkout.
         subprocess.run([sys.executable, str(source / 'scripts/performance/provenance.py'),
@@ -557,7 +564,11 @@ def freeze_fixtures(config, destination, sizes, base=None):
     for size in sizes:
         frozen, manifest = prepare(SimpleNamespace(output=destination, fixtures=base,
                                   current=Path(receipt['executable'])), size - 14)
-        if base is not None and size == 2014 and manifest['tree_sha256'] != BASE_2014:
+        if manifest.get('matrix_fixture_version') is not None:
+            raise ValueError('base fixture is already enriched; freeze only an original base')
+        if any(raw in manifest['large_body'] for raw in ('[[small#Details]]', '[Small](small.md#Details)', '[[matrix-missing-target]]')):
+            raise ValueError('base fixture already contains injected links')
+        if size == 2014 and manifest['tree_sha256'] != BASE_2014:
             raise ValueError('existing n2014 base fixture does not match the known generator hash')
         manifest['base_fixture_sha256'] = manifest['tree_sha256']
         # Keep fourteen probes and the original small document. The second whole
@@ -605,7 +616,9 @@ def run_matrix(config, fixtures, output, sizes, arms, repetitions=None, gate_ref
             prepared[documents] = prepare(SimpleNamespace(output=output, fixtures=fixtures,
                 current=Path(builds['main'][0]['executable'])), documents - 14)
             manifest = prepared[documents][1]
-            if manifest['document_count'] != documents or manifest.get('matrix_fixture_version') != 2:
+            if (manifest['document_count'] != documents or manifest.get('matrix_fixture_version') != 2
+                    or any(manifest['large_body'].count(raw) != 1 for raw in
+                           ('[[small#Details]]', '[Small](small.md#Details)', '[[matrix-missing-target]]'))):
                 raise ValueError('fixture must have the requested count and linked-target version 2')
         for cell in cells:
             arm, documents = cell['arm'], cell['documents']

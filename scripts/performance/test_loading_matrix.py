@@ -67,6 +67,21 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(layout['page_count'] * 512, layout['file_size_bytes'])
             self.assertEqual(layout['freelist_count'], 0)
 
+    def test_cpu_admission_uses_own_and_parent_cgroup_quotas(self):
+        from loading_method import effective_cpus
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'slice/job').mkdir(parents=True)
+            (root / 'cpu.max').write_text('max 100000')
+            (root / 'slice/cpu.max').write_text('600000 100000')
+            (root / 'slice/job/cpu.max').write_text('800000 100000')
+            membership = root / 'membership'
+            membership.write_text('0::/slice/job\n')
+            self.assertEqual(effective_cpus(12, root, membership), 6)
+            self.assertEqual(effective_cpus(2, root, membership), 2)
+            (root / 'slice/job/cpu.max').write_text('150000 100000')
+            self.assertEqual(effective_cpus(12, root, membership), 1.5)
+
     def test_host_admission_rejects_each_busy_signal_and_records_bounded_refusal(self):
         from loading_method import busy_reasons, await_idle, BUSY_THRESHOLDS
         from unittest.mock import patch
@@ -140,6 +155,10 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual((vault / 'bench/small.md').read_text(), 'unchanged small')
             self.assertEqual(frozen['tree_sha256'], tree_digest(vault))
             self.assertNotEqual(frozen['tree_sha256'], frozen['base_fixture_sha256'])
+            with patch('loading_matrix.checked_build', return_value=({'executable': '/mock/worker'}, root)), \
+                    patch('baseline.prepare', return_value=(fixture, frozen)), \
+                    self.assertRaisesRegex(ValueError, 'already enriched'):
+                freeze_fixtures({}, root, [314])
             body = (vault / 'bench/large.md').read_text()
             for raw in ('[[small#Details]]', '[Small](small.md#Details)', '[[matrix-missing-target]]'):
                 self.assertIn(raw, body)

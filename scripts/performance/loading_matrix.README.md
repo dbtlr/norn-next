@@ -25,7 +25,9 @@ committed prototype HEAD, and health-once `e944a338`. Every role has its own
 checkout, target directory, frozen binary, and build receipt. Compiler identities
 must match. Source and binary hashes, features, profile, Cargo configuration, and
 prototype Rust source equality are checked again before and after the matrix.
-Python-only follow-up commits can reuse receipts.
+Python-only follow-up commits can reuse receipts. A repeated preparation can
+reuse clean detached sources and role-specific Cargo caches; it rebuilds and
+reissues every receipt in one invocation.
 
 `--freeze-fixtures` generates each background size exactly once before timing.
 To reuse a base fixture parent, add `--fixtures PATH`; its subdirectories use
@@ -39,7 +41,8 @@ rehashed against its manifest. Fixture manifests retain `base_fixture_sha256`.
 The version-2 matrix fixture extends `bench/large.md` with `[[small#Details]]`,
 `[Small](small.md#Details)`, and `[[matrix-missing-target]]`. It retains fourteen
 probe documents, keeps `small.md` unchanged, and records a new `tree_sha256`.
-The base digest and the measurement digest are deliberately distinct. Timed
+Re-freezing an already enriched base is refused. The base digest and the
+measurement digest are deliberately distinct. Timed
 runs require `--fixtures` and reject fixtures without this version. All selected
 fixtures are copied and verified before any timed cell, including the warmup.
 
@@ -71,7 +74,8 @@ Immediately before every cell the controller calls `sync`. It then records the
 raw load average and all fields of `/proc/pressure/{cpu,io,memory}`. Admission
 requires load1 per effective CPU at most 0.5, CPU `some avg10` at most 10%, IO
 `some avg10` at most 5%, and memory `some avg10` at most 1%. Effective CPU count
-is the minimum of process affinity and the current cgroup v2 quota, if present.
+is the minimum of process affinity and every quota on the process's cgroup-v2
+ancestry, resolved from `/proc/self/cgroup`.
 The controller waits at most 300 seconds, sampling every five seconds, then
 refuses the cell. Each `host-admission.json` records thresholds, samples, reasons,
 acceptance, and elapsed wait. A refused cell leaves `run.json` incomplete.
@@ -150,9 +154,10 @@ so the difference shows the vault-wide step-2 wait. Early Get is labelled
 findings. The whole linked Get checks both link families, an anchor, and a
 broken target. The post-Ready answer checks its broken-link finding.
 
-Pinned main and health-once workers expose only one early Get (`small`). Their
-second whole Get uses the public path after Ready and explicitly says so; no
-second early endpoint is inferred. Main's public Find retains
+Pinned main exposes one early Get (`small`) and Find. Its second whole Get
+uses the public path after Ready and explicitly says so. Health-once executes
+no early queries; all its first answers use the public path after Ready. No
+earlier endpoint is inferred. Main's public Find retains
 `query_started_ns`: it starts after the controller acknowledges Get.
 
 Relations boundary and busy time include `four_step::finish` teardown and the
@@ -174,3 +179,10 @@ Python checks use the repository runner:
 TMPDIR="$PWD/t" python3 -m unittest discover -s scripts/performance -v
 TMPDIR="$PWD/t" python3 -m unittest discover -s scripts/performance/live_mode -v
 ```
+
+The findings-order test compares ordinary and lab construction with a shared
+128-document bound on case-sensitive vaults, the measured Linux configuration.
+A separate folded-path singleton comparison kills removal of the order-restoring
+sort. Ordinary folded-path multi-document changesets file in byte order; lab
+chunks retain folded caller order. Their finding ID sequence is not asserted
+equivalent. This construction-order difference does not change semantic state.

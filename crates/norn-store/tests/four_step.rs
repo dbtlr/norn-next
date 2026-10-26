@@ -1084,7 +1084,7 @@ fn provisional_quarantine_has_the_same_semantics_as_an_ordinary_build_from_zero(
 }
 
 #[test]
-fn four_step_finding_ids_follow_ordinary_first_build_order() {
+fn four_step_finding_ids_match_sensitive_batches_and_folded_singletons() {
     use norn_store::{
         Change, DocumentFacts, IncrementProvenance, LinkAnchor, LinkFact, LinkFamily, Span,
     };

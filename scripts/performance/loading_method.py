@@ -71,6 +71,25 @@ def store_layout(path):
                     wal_size_bytes=Path(str(path) + '-wal').stat().st_size if Path(str(path) + '-wal').exists() else 0)
 
 
+def effective_cpus(affinity, root=Path('/sys/fs/cgroup'), membership=Path('/proc/self/cgroup')):
+    """Respect the tightest CPU quota on the process's cgroup-v2 ancestry."""
+    cpus = affinity
+    group = next((line.split('::', 1)[1] for line in membership.read_text().splitlines()
+                  if line.startswith('0::')), None)
+    if group is not None:
+        folder = root / group.lstrip('/')
+        while folder.is_relative_to(root):
+            quota = folder / 'cpu.max'
+            if quota.exists():
+                limit, period = quota.read_text().split()
+                if limit != 'max':
+                    cpus = min(cpus, int(limit) / int(period))
+            if folder == root:
+                break
+            folder = folder.parent
+    return cpus
+
+
 def host_sample():
     pressure = {}
     for kind in ('cpu', 'io', 'memory'):
@@ -78,13 +97,7 @@ def host_sample():
         pressure[kind] = {line.split()[0]: {key: float(value) for key, value in
                                           (field.split('=') for field in line.split()[1:])}
                           for line in raw.splitlines()}
-    cpus = len(os.sched_getaffinity(0))
-    # Respect the cgroup quota when the host exposes more logical CPUs than the job owns.
-    quota = Path('/sys/fs/cgroup/cpu.max')
-    if quota.exists():
-        limit, period = quota.read_text().split()
-        if limit != 'max':
-            cpus = min(cpus, int(limit) / int(period))
+    cpus = effective_cpus(len(os.sched_getaffinity(0)))
     return dict(monotonic_ns=time.monotonic_ns(), loadavg=Path('/proc/loadavg').read_text().strip(),
                 effective_cpus=cpus, pressure=pressure)
 
@@ -158,7 +171,7 @@ def summarize(results):
         descriptive.update({key: result[key] for key in ('step_boundary_ns', 'step_busy_ns', 'pull_ahead_ns',
                             'step_counters', 'requested_documents_structure') if key in result})
         descriptive['parent_clocks'] = {'public_ready': result['public_ready']['parent_received_ns']}
-        descriptive['lab_resources'] = result.get('ready', {}).get('resources') or {}
+        descriptive['lab_resources'] = (result.get('ready', {}).get('resources') or {}) if cell['arm'].startswith('four-step') else {}
         digests = {phase: {key: value for key, value in result[phase].items()
                                           if 'sha256' in key and key != 'semantic_sha256'}
                                    for phase in ('post_ready_store', 'store')}
