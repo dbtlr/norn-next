@@ -9,6 +9,17 @@ from loading_matrix import plan, gate_semantics, documents_layout, validate_lab_
 
 
 class MatrixTests(unittest.TestCase):
+    def test_linked_ready_get_retains_archived_health_once_oracle_signature(self):
+        import json
+        from unittest.mock import patch
+        from results import whole_get_answer
+        from loading_matrix import validate_link_get
+        response = {'answer': json.loads(Path(__file__).with_name('testdata').joinpath('linked_get.json').read_text())}
+        manifest = {'large_body': response['answer']['report']['document']['body']['text']}
+        # The archived health-once adapter has no first_index keyword.
+        with patch('results.whole_get_answer', side_effect=lambda row: whole_get_answer(row)):
+            validate_link_get(response, manifest)
+
     def test_linked_early_public_get_keeps_findings_while_warming(self):
         import json
         from loading_matrix import validate_link_get

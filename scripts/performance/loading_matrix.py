@@ -78,7 +78,10 @@ def validate_lab_stage(stage, manifest):
 def validate_link_get(response, manifest, health_loading=False, *, first_index=False):
     """Validate the authored whole record, including each link and finding handle."""
     from results import whole_get_answer
-    whole_get_answer(response, first_index=first_index)
+    if first_index:
+        whole_get_answer(response, first_index=True)
+    else:
+        whole_get_answer(response)
     doc = response['answer']['report']['document']
     body = manifest['large_body']
     source = '---\nstatus: draft\nperf_bucket: probe\n---\n' + body
