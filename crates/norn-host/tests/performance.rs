@@ -95,7 +95,12 @@ fn performance_worker() {
         "startup profiling requires the induced-failure build feature"
     );
     #[cfg(feature = "induced-failure")]
-    let recording = profiling.then(|| {
+    // The lab owns per-pass recordings, including when global profiling was
+    // requested; arming both would silently lose every lab span.
+    let recording = (profiling
+        && !std::env::var("NORN_PERFORMANCE_LOADING")
+            .is_ok_and(|mode| mode.starts_with("four-step")))
+    .then(|| {
         norn_store::profiling::start(&[
             "host.attach",
             "host.watch_start",

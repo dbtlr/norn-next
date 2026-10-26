@@ -291,7 +291,13 @@ pub fn names_with_refused(
     guard(&tx, declared)?;
     phase(&tx, 1)?;
     let mut counters = StepCounters::default();
-    let generation = 0_i64;
+    // Files are final facts at names; documents receive their only real stamp
+    // at content. A file's generation must exceed the pin's heal floor.
+    let file_generation = if files.is_empty() {
+        0
+    } else {
+        norn_db::meta::next_generation(&tx)?
+    };
     for (table, paths) in [("documents", documents), ("vault_files", files)] {
         let direction = if table == "documents" { "DESC" } else { "ASC" };
         let mut last: Option<String> = tx
@@ -348,7 +354,7 @@ pub fn names_with_refused(
                                 Option::<String>::None,
                                 Option::<String>::None,
                                 0_i64,
-                                generation,
+                                0_i64,
                                 request::unix_seconds()
                             ],
                             |r| r.get(0),
@@ -373,7 +379,7 @@ pub fn names_with_refused(
                             path.suffix_key(),
                             path.path_key(),
                             admitting as i64,
-                            generation
+                            file_generation
                         ])
                     })
                     .map_err(|e| error::sql("inserting a four-step file", e))?;
@@ -1415,6 +1421,50 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn name_only_files_are_judged_after_the_schema_pin_at_ready() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-file-generation",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let pin = store
+            .begin_request()
+            .pin_vault_schema(b"version: 1\n", "pin")
+            .unwrap();
+        begin(&mut store).unwrap();
+        names(
+            &mut store,
+            &[],
+            &[DocumentPath::new("media/picture.png").unwrap()],
+            &ContentModel::under("pin"),
+        )
+        .unwrap();
+        full_text(&mut store, FtsBuildMode::Rebuild, 128).unwrap();
+        finish(&mut store).unwrap();
+        let rows = store
+            .begin_request()
+            .stored_targets_in_range_after_ordered(
+                crate::SubjectScope::Vault,
+                None,
+                128,
+                crate::StoredPathOrder::Sensitive,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].document.is_none());
+        assert!(
+            rows[0].generation > pin.generation,
+            "a later heal must recognize this unchanged vault file as judged"
+        );
+    }
 
     #[test]
     fn chunk_failure_and_host_abort_do_not_publish_partial_groups() {

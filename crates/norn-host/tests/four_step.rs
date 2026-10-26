@@ -960,11 +960,19 @@ fn absent_quarantined_and_reconciled_requests_receive_explicit_refusals() {
 }
 
 #[derive(Default)]
-struct GroupProbe(Mutex<Option<FourStepReport>>);
+struct GroupProbe(Mutex<Option<FourStepReport>>, Mutex<Vec<(u64, u64)>>);
 impl FourStepObserver for GroupProbe {
     fn at(&self, event: FourStepEvent<'_>, _: &FourStepRead<'_>) -> Result<(), String> {
         if let FourStepEvent::Complete(report) = event {
             *self.0.lock().unwrap() = Some(report.clone());
+        }
+        if let FourStepEvent::Batch {
+            step: "relations",
+            completed,
+            total,
+        } = event
+        {
+            self.1.lock().unwrap().push((completed, total));
         }
         Ok(())
     }
@@ -1005,6 +1013,10 @@ fn absent_requests_group_host_chunks_into_at_most_2048_document_commits_in_every
             );
             assert!(report.build_commits[step] > 0);
         }
+        let progress = probe.1.lock().unwrap();
+        assert_eq!(progress.first(), Some(&(128, count)));
+        assert_eq!(progress.last(), Some(&(count, count)));
+        assert!(progress.windows(2).all(|pair| pair[0].0 < pair[1].0));
         assert_eq!(report.steps["content"]["files_read"], count);
         assert_eq!(report.steps["content"]["rows_rewritten"], count);
         assert_eq!(report.steps["full-text"]["fts_rows_inserted"], count);

@@ -599,6 +599,7 @@ impl Build<'_> {
             "content" => self.report.steps["content"]["files_read"],
             "structure" => self.structured_documents,
             "full-text" => self.report.steps["full-text"]["fts_rows_inserted"],
+            "relations" => self.report.steps["relations"]["documents_processed"],
             _ => self.report.steps[step]["commits"],
         };
         self.observe(
@@ -1029,6 +1030,7 @@ fn derived_findings(
 pub(crate) fn readings(counters: &StepCounters) -> BTreeMap<&'static str, u64> {
     BTreeMap::from([
         ("rows_inserted", counters.rows_inserted),
+        ("documents_processed", counters.documents_processed),
         ("rows_rewritten", counters.rows_rewritten),
         ("body_rows_rewritten", counters.body_rows_rewritten),
         ("rows_deleted", counters.rows_deleted),

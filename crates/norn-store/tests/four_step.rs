@@ -343,7 +343,10 @@ fn only_content_stamps_each_document_with_a_write_generation() {
         &ContentModel::none(),
     )
     .unwrap();
-    assert_eq!(store.begin_request().write_generation().unwrap(), before);
+    assert_eq!(
+        store.begin_request().write_generation().unwrap(),
+        before + 1
+    );
     for facts in &documents {
         assert_eq!(
             store
@@ -366,7 +369,7 @@ fn only_content_stamps_each_document_with_a_write_generation() {
     .unwrap();
     assert_eq!(
         store.begin_request().write_generation().unwrap(),
-        before + 1
+        before + 2
     );
     for facts in &documents {
         assert_eq!(
@@ -376,7 +379,7 @@ fn only_content_stamps_each_document_with_a_write_generation() {
                 .unwrap()
                 .unwrap()
                 .generation,
-            before + 1
+            before + 2
         );
     }
 }
