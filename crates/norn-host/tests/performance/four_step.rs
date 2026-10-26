@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use norn_host::{FourStepEvent, FourStepLoading, FourStepObserver, FourStepRead};
 use norn_wire::{
-    Column, FindParams, GetParams, Predicate, ResolutionTarget, VaultAddress, VaultName,
+    FindParams, GetParams, Predicate, ResolutionTarget, VaultAddress, VaultName,
 };
 use serde_json::json;
 
@@ -65,7 +65,6 @@ impl FourStepObserver for Probe {
         if matches!(event, FourStepEvent::ContentComplete) {
             let params = FindParams::new(VaultAddress::name(VaultName::new("notes").unwrap()))
                 .with_predicates([Predicate::equal_to("perf_bucket", "active")])
-                .with_columns([Column::path(), Column::field("perf_bucket")])
                 .with_limit(25);
             let started = self.began.elapsed().as_nanos();
             let answer = read.find(&params);

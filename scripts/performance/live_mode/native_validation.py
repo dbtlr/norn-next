@@ -44,17 +44,24 @@ def validate_cursor_provenance(report, epoch, generation, index):
         raise ValueError(f'invalid cursor provenance at response {index}') from problem
 
 
-def validate_provenance(root, history, responses, audit):
+def validate_provenance(root, history, responses, audit, *, workload=None):
     """Bind the exact private, no-recovery history to its post-close store audit."""
-    from warm_compare import validate_warm_history
-    validate_warm_history(history)
-    if len(responses) != 481 or not isinstance(audit, dict):
+    if workload is None:
+        from warm_compare import validate_warm_history
+        validate_warm_history(history)
+        expected_responses, expected_writes = 481, 120
+    else:
+        if history != workload:
+            raise ValueError('native history differs from the declared workload')
+        expected_responses = len(workload)
+        expected_writes = sum(command['op'] in ('set', 'new', 'move') for command in workload)
+    if len(responses) != expected_responses or not isinstance(audit, dict):
         raise ValueError('incomplete native provenance or final audit')
     epoch = provenance_epoch(audit.get('store_epoch'))
     final_generation = nonnegative_generation(audit.get('write_generation'))
     writes = sum(command['op'] in ('set', 'new', 'move') for command in history)
-    if writes != 120 or final_generation < writes:
-        raise ValueError('final audit cannot account for the 120 applied mutations')
+    if writes != expected_writes or final_generation < writes:
+        raise ValueError('final audit cannot account for the applied mutations')
     generation = final_generation - writes
     initial_generation = generation
     vault = (root / 'vault').stat()
@@ -97,7 +104,7 @@ def validate_provenance(root, history, responses, audit):
     if generation != final_generation:
         raise ValueError('native history does not reach the final audited generation')
     return dict(store_epoch=epoch, initial_generation=initial_generation,
-                final_generation=final_generation, responses=481, applied_mutations=writes,
+                final_generation=final_generation, responses=expected_responses, applied_mutations=writes,
                 root_identity=expected_root)
 
 

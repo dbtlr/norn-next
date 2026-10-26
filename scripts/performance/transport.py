@@ -88,13 +88,23 @@ def resources(pid: int) -> dict:
 
 class Current:
     def __init__(self, binary: Path, root: Path, *, changeset_size: int = 128, profiling: bool = False,
-                 loading: str | None = None, stage_handler=None):
+                 loading: str | None = None, stage_handler=None, loading_options: dict | None = None):
         token = issue_root(root)
         env = environment(root, token)
         env.update(NORN_PERFORMANCE_CHANGESET_SIZE=str(changeset_size),
                    NORN_PERFORMANCE_PROFILE="1" if profiling else "0")
         if loading is not None:
             env["NORN_PERFORMANCE_LOADING"] = loading
+        if loading_options is not None:
+            if (loading not in ("four-step", "four-step-no-body")
+                    or set(loading_options) != {"transaction_bound", "requested_paths"}
+                    or type(loading_options["transaction_bound"]) is not int
+                    or not 1 <= loading_options["transaction_bound"] <= 128
+                    or not isinstance(loading_options["requested_paths"], list)
+                    or any(not isinstance(path, str) for path in loading_options["requested_paths"])):
+                raise ValueError("invalid four-step loading controls")
+            env["NORN_PERFORMANCE_TRANSACTION_BOUND"] = str(loading_options["transaction_bound"])
+            env["NORN_PERFORMANCE_REQUESTED_PATHS"] = json.dumps(loading_options["requested_paths"])
         self.stderr = (root / "worker.stderr.log").open("w", encoding="utf-8")
         self.raw = (root / "worker.stdout.log").open("w", encoding="utf-8")
         self.messages = queue.Queue()
