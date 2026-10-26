@@ -10,6 +10,8 @@ pub struct FourStepReport {
     pub steps: BTreeMap<&'static str, BTreeMap<&'static str, u64>>,
     pub reconciled: bool,
     /// Descriptive timings from the lab build's start; they grant no read admission.
+    pub request_ns: BTreeMap<String, u128>,
+    pub delivery_ns: BTreeMap<String, u128>,
     pub requested_structure_ns: BTreeMap<String, u128>,
     pub content_complete_ns: u128,
     /// Monotonic time since the build began, captured before observer query work.
@@ -27,6 +29,13 @@ pub enum FourStepEvent<'a> {
     Structured(&'a str),
     GetReady(&'a str),
     StructureComplete,
+    RelationsComplete,
+    FullTextComplete,
+    Batch {
+        step: &'static str,
+        completed: u64,
+        total: u64,
+    },
     Complete(&'a FourStepReport),
 }
 
@@ -34,13 +43,55 @@ pub trait FourStepObserver: Send + Sync {
     fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String>;
 }
 
-/// The only lab controls: body variant, transaction bound, and explicit pull-ahead paths.
+/// Lab controls for batch size, body storage, FTS mode, and queued requests.
 #[derive(Clone)]
 pub struct FourStepLoading {
     bound: usize,
     no_body: bool,
-    requested: Vec<DocumentPath>,
+    requests: FourStepRequests,
+    fts_mode: four_step::FtsBuildMode,
     observer: Arc<dyn FourStepObserver>,
+}
+
+/// At most 256 distinct pending Get requests, drained at each committed batch.
+/// Clones share the queue; a full queue refuses rather than silently dropping work.
+#[derive(Clone, Default)]
+pub struct FourStepRequests {
+    pending: Arc<std::sync::Mutex<RequestQueue>>,
+}
+
+#[derive(Default)]
+struct RequestQueue {
+    closed: bool,
+    pending: std::collections::VecDeque<(DocumentPath, Instant)>,
+    in_flight: std::collections::BTreeSet<DocumentPath>,
+}
+
+impl FourStepRequests {
+    pub const MAX_PENDING: usize = 256;
+
+    pub fn request(&self, path: String) -> Result<(), String> {
+        let path = DocumentPath::new(&path).map_err(|error| error.to_string())?;
+        if !is_markdown(Path::new(path.as_str())) {
+            return Err("a requested path must name a Markdown document".into());
+        }
+        let mut pending = self.pending.lock().map_err(|error| error.to_string())?;
+        if pending.closed {
+            return Err("vault still indexing for the first time: lab intake is closed; retry through the public host after Ready".into());
+        }
+        if pending.in_flight.contains(&path)
+            || pending.pending.iter().any(|(queued, _)| queued == &path)
+        {
+            return Ok(());
+        }
+        if pending.pending.len() + pending.in_flight.len() == Self::MAX_PENDING {
+            return Err(
+                "vault still indexing for the first time: lab request queue is full (256)".into(),
+            );
+        }
+        pending.pending.push_back((path, Instant::now()));
+        Ok(())
+    }
 }
 
 impl FourStepLoading {
@@ -56,22 +107,25 @@ impl FourStepLoading {
                 "four-step transaction bound must be in 1..={maximum}"
             ));
         }
-        let mut paths = Vec::new();
+        let requests = FourStepRequests::default();
         for path in requested {
-            let path = DocumentPath::new(&path).map_err(|error| error.to_string())?;
-            if !is_markdown(Path::new(path.as_str())) {
-                return Err("a requested path must name a Markdown document".into());
-            }
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
+            requests.request(path)?;
         }
         Ok(Self {
             bound,
             no_body,
-            requested: paths,
+            requests,
+            fts_mode: four_step::FtsBuildMode::Rebuild,
             observer,
         })
+    }
+    pub fn requests(&self) -> FourStepRequests {
+        self.requests.clone()
+    }
+
+    pub fn with_fts_mode(mut self, mode: four_step::FtsBuildMode) -> Self {
+        self.fts_mode = mode;
+        self
     }
 }
 
@@ -86,16 +140,36 @@ pub struct FourStepRead<'a> {
     ready_path: Option<&'a str>,
     metadata_complete: bool,
     search_complete: bool,
+    relations_complete: bool,
 }
 
 impl FourStepRead<'_> {
+    pub fn link_resolution_loading(&self) -> bool {
+        !self.relations_complete
+    }
+
+    pub fn link_health_loading(&self) -> bool {
+        !self.relations_complete
+    }
+
+    /// The lab issues no writes; this is the same readiness admission it requires.
+    pub fn admit_write(&self) -> Result<(), String> {
+        if !self.search_complete {
+            return Err(
+                "vault still indexing for the first time: writes wait for full-text completion"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn search_complete(&self) -> bool {
         self.search_complete
     }
 
     pub fn search(&self, query: &norn_store::LexicalQuery) -> Result<norn_store::Searched, String> {
         if !self.search_complete || !norn_store::loading::supports_search(query) {
-            return Err("only a first lexical page with complete field/path data is available at this lab boundary".into());
+            return Err("vault still indexing for the first time: full-text search is unavailable at this lab boundary".into());
         }
         let result = self
             .snapshot()?
@@ -132,11 +206,8 @@ impl FourStepRead<'_> {
     }
 
     pub fn get(&self, params: &norn_wire::GetParams) -> Result<norn_store::Gotten, String> {
-        if !self.metadata_complete {
-            return Err("whole Get waits for vault-wide content eligibility".into());
-        }
         let Some(ready_path) = self.ready_path else {
-            return Err("no document finished structure at this boundary".into());
+            return Err("vault still indexing for the first time: no document finished structure at this boundary".into());
         };
         let snapshot = self.snapshot()?;
         let result = snapshot
@@ -154,14 +225,14 @@ impl FourStepRead<'_> {
             _ => return Err("unsupported lab Get report".into()),
         };
         if path != ready_path {
-            return Err("the requested document has not completed this structure callback".into());
+            return Err("vault still indexing for the first time: the requested document has not completed this structure callback".into());
         }
         Ok(result)
     }
 
     pub fn find(&self, params: &norn_wire::FindParams) -> Result<norn_store::Found, String> {
         if !self.metadata_complete || !norn_store::loading::supports_find(params) {
-            return Err("only complete field/path Find is available at this lab boundary".into());
+            return Err("vault still indexing for the first time: only complete field/path Find is available at this lab boundary".into());
         }
         let result = self
             .snapshot()?
@@ -209,13 +280,16 @@ impl ProductionEntryOps {
             changed: false,
             metadata_complete: false,
             search_complete: false,
+            relations_complete: false,
             skipped_links: SkippedLinks::default(),
             began: Instant::now(),
             observer_ns: std::cell::Cell::new(0),
+            total_documents: 0,
+            structured_documents: 0,
         };
         let counters = four_step::begin(build.store).map_err(store_effect)?;
 
-        for step in ["names", "content", "structure", "relations"] {
+        for step in ["names", "content", "structure", "relations", "full-text"] {
             build.add(step, StepCounters::default());
         }
         build.add("names", counters);
@@ -228,26 +302,10 @@ impl ProductionEntryOps {
         );
         build.boundary("names");
         build.observe(FourStepEvent::NamesComplete, None)?;
-        // Requested documents use exactly the same content and structure
-        // routines as the main passes. Persisted per-path state skips them later.
-        let pull_ahead_began = Instant::now();
-        let pull_ahead_observer = build.observer_ns.get();
-        for path in &loading.requested {
-            if let Some(document) =
-                four_step::pending_at(build.store, Step::Content, path).map_err(store_effect)?
-            {
-                build.content(vec![document])?;
-            }
-            if let Some(document) =
-                four_step::pending_at(build.store, Step::Structure, path).map_err(store_effect)?
-            {
-                build.structure(vec![document])?;
-            }
-        }
-        build.report.pull_ahead_ns =
-            pull_ahead_began.elapsed().as_nanos() - (build.observer_ns.get() - pull_ahead_observer);
+        build.drain_requests()?;
         let content_began = Instant::now();
         let content_observer = build.observer_ns.get();
+        let content_pull_ahead = build.report.pull_ahead_ns;
         loop {
             let documents = four_step::pending(build.store, Step::Content, loading.bound)
                 .map_err(store_effect)?;
@@ -255,35 +313,23 @@ impl ProductionEntryOps {
                 break;
             }
             build.content(documents)?;
+            build.batch("content")?;
+            build.drain_requests()?;
         }
         build.report.busy_ns.insert(
             "content",
-            content_began.elapsed().as_nanos() - (build.observer_ns.get() - content_observer),
+            content_began.elapsed().as_nanos()
+                - (build.observer_ns.get() - content_observer)
+                - (build.report.pull_ahead_ns - content_pull_ahead),
         );
         build.metadata_complete = true;
-        build.search_complete = !loading.no_body;
         build.boundary("content");
         build.report.content_complete_ns = build.began.elapsed().as_nanos();
         build.observe(FourStepEvent::ContentComplete, None)?;
-        // Step 3 completion alone never proves that provisional target names
-        // decode. Only after the global content pass may an already structured
-        // requested document answer through the ordinary canonical builder.
-        for path in &loading.requested {
-            if four_step::pending_at(build.store, Step::Structure, path)
-                .map_err(store_effect)?
-                .is_none()
-                && build
-                    .store
-                    .begin_request()
-                    .stored_document(path)
-                    .map_err(store_effect)?
-                    .is_some()
-            {
-                build.observe(FourStepEvent::GetReady(path.as_str()), Some(path.as_str()))?;
-            }
-        }
+        build.drain_requests()?;
         let structure_began = Instant::now();
         let structure_observer = build.observer_ns.get();
+        let structure_pull_ahead = build.report.pull_ahead_ns;
         loop {
             let documents = four_step::pending(build.store, Step::Structure, loading.bound)
                 .map_err(store_effect)?;
@@ -291,21 +337,28 @@ impl ProductionEntryOps {
                 // A fully pulled-ahead or empty vault can still owe refused spellings.
                 if four_step::has_refused(build.store).map_err(store_effect)? {
                     build.structure(Vec::new())?;
+                    build.batch("structure")?;
+                    build.drain_requests()?;
                     continue;
                 }
                 break;
             }
             build.structure(documents)?;
+            build.batch("structure")?;
+            build.drain_requests()?;
         }
         build.report.busy_ns.insert(
             "structure",
-            structure_began.elapsed().as_nanos() - (build.observer_ns.get() - structure_observer),
+            structure_began.elapsed().as_nanos()
+                - (build.observer_ns.get() - structure_observer)
+                - (build.report.pull_ahead_ns - structure_pull_ahead),
         );
-        build.search_complete = true;
         build.boundary("structure");
         build.observe(FourStepEvent::StructureComplete, None)?;
+        build.drain_requests()?;
         let relations_began = Instant::now();
         let relations_observer = build.observer_ns.get();
+        let relations_pull_ahead = build.report.pull_ahead_ns;
         loop {
             let counters = four_step::health(build.store, loading.bound, declared.content_model())
                 .map_err(store_effect)?;
@@ -313,6 +366,8 @@ impl ProductionEntryOps {
                 break;
             }
             build.add("relations", counters);
+            build.batch("relations")?;
+            build.drain_requests()?;
         }
         attachment.skipped_links = std::mem::take(&mut build.skipped_links);
         // Every surviving row has complete content/structure before ordinary
@@ -327,13 +382,41 @@ impl ProductionEntryOps {
             attachment.skipped_links =
                 heal_documents(build.store, root, &exclusions, self.policy, progress)?;
         }
-        let counters = four_step::finish(build.store).map_err(store_effect)?;
-        build.add("relations", counters);
         build.report.busy_ns.insert(
             "relations",
-            relations_began.elapsed().as_nanos() - (build.observer_ns.get() - relations_observer),
+            relations_began.elapsed().as_nanos()
+                - (build.observer_ns.get() - relations_observer)
+                - (build.report.pull_ahead_ns - relations_pull_ahead),
         );
+        build.relations_complete = true;
         build.boundary("relations");
+        build.observe(FourStepEvent::RelationsComplete, None)?;
+        build.drain_requests()?;
+        let fts_began = Instant::now();
+        let fts_observer = build.observer_ns.get();
+        let fts_pull_ahead = build.report.pull_ahead_ns;
+        loop {
+            let counters = four_step::full_text(build.store, loading.fts_mode, loading.bound)
+                .map_err(store_effect)?;
+            if counters.commits == 0 {
+                break;
+            }
+            build.add("full-text", counters);
+            build.batch("full-text")?;
+            build.drain_requests()?;
+        }
+        build.drain_and_close_requests()?;
+        let counters = four_step::finish(build.store).map_err(store_effect)?;
+        build.add("full-text", counters);
+        build.report.busy_ns.insert(
+            "full-text",
+            fts_began.elapsed().as_nanos()
+                - (build.observer_ns.get() - fts_observer)
+                - (build.report.pull_ahead_ns - fts_pull_ahead),
+        );
+        build.search_complete = true;
+        build.boundary("full-text");
+        build.observe(FourStepEvent::FullTextComplete, None)?;
         build.observe(FourStepEvent::Complete(&build.report), None)?;
         Ok(())
     }
@@ -353,12 +436,114 @@ struct Build<'a> {
     changed: bool,
     metadata_complete: bool,
     search_complete: bool,
+    relations_complete: bool,
     skipped_links: SkippedLinks,
     began: Instant,
     observer_ns: std::cell::Cell<u128>,
+    total_documents: u64,
+    structured_documents: u64,
 }
 
 impl Build<'_> {
+    fn batch(&self, step: &'static str) -> Result<(), JobFailure> {
+        let completed = match step {
+            "content" => self.report.steps["content"]["files_read"],
+            "structure" => self.structured_documents,
+            "full-text" => self.report.steps["full-text"]["fts_rows_inserted"],
+            _ => self.report.steps[step]["commits"],
+        };
+        self.observe(
+            FourStepEvent::Batch {
+                step,
+                completed,
+                total: self.total_documents,
+            },
+            None,
+        )
+    }
+
+    // Close only while the queue is empty under the intake lock. Requests
+    // accepted by final-batch delivery callbacks therefore still get a turn.
+    fn drain_and_close_requests(&mut self) -> Result<(), JobFailure> {
+        loop {
+            {
+                let mut pending = self
+                    .loading
+                    .requests
+                    .pending
+                    .lock()
+                    .map_err(|error| JobFailure::Environmental(error.to_string()))?;
+                if pending.pending.is_empty() && pending.in_flight.is_empty() {
+                    pending.closed = true;
+                    return Ok(());
+                }
+            }
+            self.drain_requests()?;
+        }
+    }
+
+    fn drain_requests(&mut self) -> Result<(), JobFailure> {
+        let requests = {
+            let mut pending = self
+                .loading
+                .requests
+                .pending
+                .lock()
+                .map_err(|error| JobFailure::Environmental(error.to_string()))?;
+            let requests = pending.pending.drain(..).collect::<Vec<_>>();
+            pending
+                .in_flight
+                .extend(requests.iter().map(|(path, _)| path.clone()));
+            requests
+        };
+        let began = Instant::now();
+        let observer = self.observer_ns.get();
+        for (path, requested_at) in requests {
+            let name = path.as_str().to_owned();
+            self.report.request_ns.insert(
+                name.clone(),
+                requested_at
+                    .checked_duration_since(self.began)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            if let Some(document) =
+                four_step::pending_at(self.store, Step::Content, &path).map_err(store_effect)?
+            {
+                self.content(vec![document])?;
+            }
+            if let Some(document) =
+                four_step::pending_at(self.store, Step::Structure, &path).map_err(store_effect)?
+            {
+                self.structure(vec![document])?;
+            } else if four_step::structure_ns(self.store, &path)
+                .map_err(store_effect)?
+                .is_some()
+            {
+                self.observe(FourStepEvent::GetReady(path.as_str()), Some(path.as_str()))?;
+            }
+            if let Some(structured_at) =
+                four_step::structure_ns(self.store, &path).map_err(store_effect)?
+            {
+                self.report
+                    .requested_structure_ns
+                    .insert(name.clone(), structured_at);
+                self.report
+                    .delivery_ns
+                    .insert(name, self.began.elapsed().as_nanos());
+            }
+            self.loading
+                .requests
+                .pending
+                .lock()
+                .map_err(|error| JobFailure::Environmental(error.to_string()))?
+                .in_flight
+                .remove(&path);
+        }
+        self.report.pull_ahead_ns +=
+            began.elapsed().as_nanos() - (self.observer_ns.get() - observer);
+        Ok(())
+    }
+
     fn boundary(&mut self, step: &'static str) {
         self.report
             .boundary_ns
@@ -392,6 +577,7 @@ impl Build<'_> {
                     ready_path,
                     metadata_complete: self.metadata_complete,
                     search_complete: self.search_complete,
+                    relations_complete: self.relations_complete,
                 },
             )
             .map_err(JobFailure::Environmental);
@@ -447,6 +633,7 @@ impl Build<'_> {
                 )
                 .map_err(store_effect)?;
 
+                self.total_documents += documents.len() as u64;
                 self.add("names", counters);
                 documents.clear();
                 files.clear();
@@ -463,6 +650,7 @@ impl Build<'_> {
             )
             .map_err(store_effect)?;
 
+            self.total_documents += documents.len() as u64;
             self.add("names", counters);
         }
         Ok(())
@@ -623,22 +811,31 @@ impl Build<'_> {
             },
         );
         let structured_at = self.began.elapsed().as_nanos();
+        four_step::record_structure_ns(
+            self.store,
+            &facts.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            structured_at,
+        )
+        .map_err(store_effect)?;
+        self.structured_documents += facts.len() as u64;
+        if !facts.is_empty() {
+            self.add(
+                "structure",
+                StepCounters {
+                    commits: 1,
+                    ..StepCounters::default()
+                },
+            );
+        }
         for fact in &facts {
-            if self.loading.requested.contains(&fact.path) {
-                self.report
-                    .requested_structure_ns
-                    .insert(fact.path.as_str().to_owned(), structured_at);
-            }
             self.observe(
                 FourStepEvent::Structured(fact.path.as_str()),
                 Some(fact.path.as_str()),
             )?;
-            if self.metadata_complete {
-                self.observe(
-                    FourStepEvent::GetReady(fact.path.as_str()),
-                    Some(fact.path.as_str()),
-                )?;
-            }
+            self.observe(
+                FourStepEvent::GetReady(fact.path.as_str()),
+                Some(fact.path.as_str()),
+            )?;
         }
         Ok(())
     }
@@ -678,6 +875,7 @@ pub(crate) fn readings(counters: &StepCounters) -> BTreeMap<&'static str, u64> {
         ("findings_discarded", counters.findings_discarded),
         ("commits", counters.commits),
         ("files_read", counters.files_read),
+        ("fts_rows_inserted", counters.fts_rows_inserted),
     ])
 }
 

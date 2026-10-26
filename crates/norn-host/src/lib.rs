@@ -51,6 +51,7 @@ pub use production::loading::{LoadingBoundary, LoadingProbe};
 #[cfg(feature = "induced-failure")]
 pub use production::four_step::{
     FourStepEvent, FourStepLoading, FourStepObserver, FourStepRead, FourStepReport,
+    FourStepRequests,
 };
 
 /// **Which targets of a resolved plan the applier copies another target

@@ -31,8 +31,8 @@ impl FourStepObserver for Probe {
                         ResolutionTarget::new("z-requested").unwrap(),
                     );
                     assert!(
-                        read.get(&params).is_err(),
-                        "step 3 alone never admits provisional targets"
+                        read.get(&params).is_ok(),
+                        "own step 3 admits Get while other documents still owe content"
                     );
                 }
             }
@@ -42,6 +42,8 @@ impl FourStepObserver for Probe {
                         VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
                         ResolutionTarget::new("z-requested").unwrap(),
                     );
+                    assert!(read.link_resolution_loading());
+                    assert!(read.link_health_loading());
                     let got = read.get(&params)?;
                     assert!(got.unsatisfied.is_empty());
                     *self.early.lock().unwrap() = Some(serde_json::to_value(got.report).unwrap());
@@ -66,7 +68,9 @@ impl FourStepObserver for Probe {
             norn_store::LexicalQuery::new("Requested").with_columns([norn_wire::Column::path()]);
         if matches!(
             event,
-            FourStepEvent::ContentComplete | FourStepEvent::StructureComplete
+            FourStepEvent::ContentComplete
+                | FourStepEvent::StructureComplete
+                | FourStepEvent::FullTextComplete
         ) {
             if read.search_complete() {
                 let (unsatisfied, advisories, report) = read.search(&query)?.into_report();
@@ -184,6 +188,14 @@ fn without_link_findings(mut report: serde_json::Value) -> serde_json::Value {
     let rows = findings["items"].as_array_mut().unwrap();
     rows.retain(|finding| !finding["kind"].as_str().unwrap().starts_with("link/"));
     findings["total"] = serde_json::json!(rows.len());
+    report
+}
+
+fn without_loading_link_resolution(mut report: serde_json::Value) -> serde_json::Value {
+    for link in report["document"]["links"]["items"].as_array_mut().unwrap() {
+        link.as_object_mut().unwrap().remove("health");
+        link.as_object_mut().unwrap().remove("targets");
+    }
     report
 }
 
@@ -342,13 +354,15 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     "the early answer includes its non-link findings"
                 );
                 assert_eq!(
-                    early,
-                    without_link_findings(final_get),
+                    without_loading_link_resolution(early.clone()),
+                    without_loading_link_resolution(without_link_findings(final_get)),
                     "same-store non-link finding ids and generations must remain unchanged"
                 );
                 assert_eq!(
-                    normalize_finding_provenance(early),
-                    normalize_finding_provenance(without_link_findings(ordinary_get.clone()))
+                    normalize_finding_provenance(without_loading_link_resolution(early)),
+                    normalize_finding_provenance(without_loading_link_resolution(
+                        without_link_findings(ordinary_get.clone())
+                    ))
                 );
                 assert_eq!(
                     probe.search.lock().unwrap().as_ref().unwrap(),
@@ -362,10 +376,10 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                         0
                     }
                 );
-                let boundaries = ["names", "content", "structure", "relations"]
+                let boundaries = ["names", "content", "structure", "relations", "full-text"]
                     .map(|step| report.boundary_ns[step]);
                 assert!(boundaries.windows(2).all(|pair| pair[0] <= pair[1]));
-                for step in ["names", "content", "structure", "relations"] {
+                for step in ["names", "content", "structure", "relations", "full-text"] {
                     assert!(report.busy_ns[step] <= report.boundary_ns[step]);
                 }
                 assert_eq!(probe.find.lock().unwrap().as_ref().unwrap(), &ordinary_find);
@@ -552,7 +566,7 @@ fn a_document_removed_after_content_matches_an_ordinary_build_of_the_final_tree(
             "a failed no-body reread is still a file-read attempt"
         );
         assert_eq!(
-            probe.1.lock().unwrap().as_ref().unwrap().steps["relations"]["tombstones_discarded"],
+            probe.1.lock().unwrap().as_ref().unwrap().steps["full-text"]["tombstones_discarded"],
             u64::from(!no_body)
         );
         let ordinary = vault.beside(&scratch.join("ordinary-final"));
@@ -597,12 +611,259 @@ fn refused_only_tail_drains_after_the_only_document_was_pulled_ahead() {
         let report = probe.report.lock().unwrap().clone().unwrap();
         assert_eq!(report.steps["structure"]["findings_written"], 5);
         assert_eq!(
-            report.steps["structure"]["commits"], 4,
-            "one pull-ahead commit and three bounded refused-only pages"
+            report.steps["structure"]["commits"], 5,
+            "one pull-ahead commit, one timing commit, and three bounded refused-only pages"
         );
         assert_eq!(report.steps["content"]["rows_rewritten"], 1);
         drop(demand);
         drop(host);
         vault.store().verify_integrity().unwrap();
+    }
+}
+
+#[derive(Default)]
+struct DynamicProbe {
+    requests: Mutex<Option<norn_host::FourStepRequests>>,
+    content_seen: std::sync::atomic::AtomicU64,
+    delivered: Mutex<Vec<(String, u64)>>,
+    report: Mutex<Option<FourStepReport>>,
+}
+
+impl FourStepObserver for DynamicProbe {
+    fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        let find = norn_wire::FindParams::new(VaultAddress::name(
+            norn_wire::VaultName::new("notes").unwrap(),
+        ));
+        match event {
+            FourStepEvent::Batch {
+                step: "content",
+                completed,
+                total,
+            } => {
+                self.content_seen.store(completed, Ordering::SeqCst);
+                if completed >= 2 && completed < total && self.requests.lock().unwrap().is_some() {
+                    self.requests
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .request("z-requested.md".into())?;
+                }
+            }
+            FourStepEvent::GetReady(path) if path == "z-requested.md" => {
+                assert!(!read.metadata_complete());
+                assert!(read.link_resolution_loading());
+                assert!(read.link_health_loading());
+                let params = GetParams::new(
+                    VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
+                    ResolutionTarget::new("/z-requested.md").unwrap(),
+                );
+                assert!(read.get(&params)?.unsatisfied.is_empty());
+                assert!(
+                    read.find(&find)
+                        .unwrap_err()
+                        .contains("vault still indexing for the first time")
+                );
+                self.delivered
+                    .lock()
+                    .unwrap()
+                    .push((path.into(), self.content_seen.load(Ordering::SeqCst)));
+            }
+            FourStepEvent::ContentComplete => {
+                assert!(read.find(&find).is_ok());
+            }
+            FourStepEvent::FullTextComplete => {
+                assert!(
+                    read.search(&norn_store::LexicalQuery::new("Requested"))
+                        .is_ok()
+                );
+                assert!(read.admit_write().is_ok());
+            }
+            FourStepEvent::Complete(report) => {
+                *self.report.lock().unwrap() = Some(report.clone());
+            }
+            _ => {}
+        }
+        if !read.search_complete() {
+            assert!(
+                read.search(&norn_store::LexicalQuery::new("Requested"))
+                    .unwrap_err()
+                    .contains("vault still indexing for the first time")
+            );
+            assert!(
+                read.admit_write()
+                    .unwrap_err()
+                    .contains("vault still indexing for the first time")
+            );
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_mid_content_request_finishes_own_structure_before_the_remaining_content_queue() {
+    let scratch = fixture("dynamic-request", false);
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(DynamicProbe::default());
+    let loading = FourStepLoading::new(2, false, vec![], probe.clone()).unwrap();
+    *probe.requests.lock().unwrap() = Some(loading.requests());
+    let host = vault.host_with_four_step(loading);
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, &vault);
+    assert_eq!(
+        *probe.delivered.lock().unwrap(),
+        vec![("z-requested.md".into(), 2)]
+    );
+    let report = probe.report.lock().unwrap();
+    let report = report.as_ref().unwrap();
+    assert!(report.request_ns["z-requested.md"] <= report.requested_structure_ns["z-requested.md"]);
+    assert!(
+        report.requested_structure_ns["z-requested.md"] <= report.delivery_ns["z-requested.md"]
+    );
+    assert!(report.delivery_ns["z-requested.md"] < report.boundary_ns["content"]);
+    drop(demand);
+}
+
+#[test]
+fn pending_get_requests_are_bounded_and_duplicate_paths_share_a_slot() {
+    let requests = norn_host::FourStepRequests::default();
+    for n in 0..norn_host::FourStepRequests::MAX_PENDING {
+        requests.request(format!("{n}.md")).unwrap();
+    }
+    requests.request("0.md".into()).unwrap();
+    assert!(
+        requests
+            .request("overflow.md".into())
+            .unwrap_err()
+            .contains("queue is full (256)")
+    );
+}
+
+#[derive(Default)]
+struct DoneProbe {
+    requests: Mutex<Option<norn_host::FourStepRequests>>,
+    report: Mutex<Option<FourStepReport>>,
+    redelivered: std::sync::atomic::AtomicBool,
+}
+impl FourStepObserver for DoneProbe {
+    fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
+        match event {
+            FourStepEvent::StructureComplete => {
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .request("z-requested.md".into())?;
+            }
+            FourStepEvent::GetReady("z-requested.md")
+                if self.requests.lock().unwrap().is_some() && read.metadata_complete() =>
+            {
+                let params = GetParams::new(
+                    VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
+                    ResolutionTarget::new("/z-requested.md").unwrap(),
+                );
+                assert!(read.get(&params)?.unsatisfied.is_empty());
+                self.redelivered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            FourStepEvent::Complete(report) => {
+                *self.report.lock().unwrap() = Some(report.clone());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+#[test]
+fn a_request_for_an_already_structured_document_needs_no_second_derivation() {
+    let scratch = fixture("done-request", false);
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(DoneProbe::default());
+    let loading =
+        FourStepLoading::new(2, false, vec!["z-requested.md".into()], probe.clone()).unwrap();
+    *probe.requests.lock().unwrap() = Some(loading.requests());
+    let host = vault.host_with_four_step(loading);
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, &vault);
+    let guard = probe.report.lock().unwrap();
+    let report = guard.as_ref().unwrap();
+    assert!(probe.redelivered.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(report.requested_structure_ns["z-requested.md"] < report.request_ns["z-requested.md"]);
+    assert_eq!(report.steps["content"]["rows_rewritten"], 12);
+    assert_eq!(report.steps["content"]["files_read"], 12);
+    assert_eq!(report.steps["structure"]["files_read"], 0);
+    drop(demand);
+}
+
+#[derive(Default)]
+struct TailProbe {
+    requests: Mutex<Option<norn_host::FourStepRequests>>,
+    tail: std::sync::atomic::AtomicBool,
+    deliveries: Mutex<Vec<String>>,
+    report: Mutex<Option<FourStepReport>>,
+}
+impl FourStepObserver for TailProbe {
+    fn at(&self, event: FourStepEvent<'_>, _: &FourStepRead<'_>) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        match event {
+            FourStepEvent::Batch {
+                step: "full-text",
+                completed,
+                total,
+            } if completed == total => {
+                self.tail.store(true, Ordering::SeqCst);
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .request("hub.md".into())?;
+            }
+            FourStepEvent::GetReady(path) if self.tail.load(Ordering::SeqCst) => {
+                self.deliveries.lock().unwrap().push(path.into());
+                if path == "hub.md" {
+                    self.requests
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .request("z-requested.md".into())?;
+                }
+            }
+            FourStepEvent::Complete(report) => {
+                *self.report.lock().unwrap() = Some(report.clone());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+#[test]
+fn requests_accepted_while_delivering_the_final_batch_are_drained_before_ready() {
+    for mode in [
+        norn_store::four_step::FtsBuildMode::Rebuild,
+        norn_store::four_step::FtsBuildMode::Batched,
+    ] {
+        let scratch = fixture("tail-request", false);
+        let vault = attach::Vault::adopt(scratch.root());
+        let probe = Arc::new(TailProbe::default());
+        let loading = FourStepLoading::new(2, false, vec![], probe.clone())
+            .unwrap()
+            .with_fts_mode(mode);
+        *probe.requests.lock().unwrap() = Some(loading.requests());
+        let host = vault.host_with_four_step(loading);
+        let demand = host.demand(vault.name()).unwrap();
+        wait_ready(&host, &vault);
+        assert_eq!(
+            *probe.deliveries.lock().unwrap(),
+            vec!["hub.md", "z-requested.md"]
+        );
+        let guard = probe.report.lock().unwrap();
+        let report = guard.as_ref().unwrap();
+        assert!(report.delivery_ns.contains_key("z-requested.md"));
+        assert!(report.delivery_ns["z-requested.md"] <= report.boundary_ns["full-text"]);
+        drop(demand);
     }
 }
