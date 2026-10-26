@@ -163,6 +163,16 @@ class MatrixTests(unittest.TestCase):
             for raw in ('[[small#Details]]', '[Small](small.md#Details)', '[[matrix-missing-target]]'):
                 self.assertIn(raw, body)
 
+    def test_generated_2014_base_is_also_hash_bound(self):
+        from unittest.mock import patch
+        from loading_matrix import freeze_fixtures
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch('loading_matrix.checked_build', return_value=({'executable': '/mock/worker'}, root)), \
+                    patch('baseline.prepare', return_value=(root, {'tree_sha256': 'wrong', 'large_body': 'body'})), \
+                    self.assertRaisesRegex(ValueError, 'generator hash'):
+                freeze_fixtures({}, root, [2014])
+
     def test_summary_excludes_warmup_and_retains_individual_warm_costs(self):
         import copy
         from loading_method import summarize
