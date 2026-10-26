@@ -250,9 +250,15 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
         drop(host);
         let expected =
             norn_store::startup_audit::audit(&ordinary.database(), |_, _, _| Ok(())).unwrap();
-        for no_body in [false, true] {
+        for (no_body, fts_mode) in [
+            (false, norn_store::four_step::FtsBuildMode::Rebuild),
+            (false, norn_store::four_step::FtsBuildMode::Batched),
+            (true, norn_store::four_step::FtsBuildMode::Rebuild),
+            (true, norn_store::four_step::FtsBuildMode::Batched),
+        ] {
             for pull_ahead in [false, true] {
-                let machine = vault.beside(&scratch.join(format!("lab-{no_body}-{pull_ahead}")));
+                let machine =
+                    vault.beside(&scratch.join(format!("lab-{no_body}-{pull_ahead}-{fts_mode:?}")));
                 let probe = Arc::new(Probe::default());
                 let loading = FourStepLoading::new(
                     2,
@@ -264,7 +270,8 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
                     },
                     probe.clone(),
                 )
-                .unwrap();
+                .unwrap()
+                .with_fts_mode(fts_mode);
                 let host = machine.host_with_four_step(loading);
                 let demand = host.demand(machine.name()).unwrap();
                 wait_ready(&host, &machine);
@@ -614,6 +621,8 @@ fn refused_only_tail_drains_after_the_only_document_was_pulled_ahead() {
             report.steps["structure"]["commits"], 5,
             "one pull-ahead commit, one timing commit, and three bounded refused-only pages"
         );
+        assert_eq!(report.timing_commits["structure"], 1);
+        assert!(report.timing_ns["structure"] > 0);
         assert_eq!(report.steps["content"]["rows_rewritten"], 1);
         drop(demand);
         drop(host);
@@ -866,4 +875,71 @@ fn requests_accepted_while_delivering_the_final_batch_are_drained_before_ready()
         assert!(report.delivery_ns["z-requested.md"] <= report.boundary_ns["full-text"]);
         drop(demand);
     }
+}
+
+struct MissingProbe {
+    requests: Mutex<Option<norn_host::FourStepRequests>>,
+    root: std::path::PathBuf,
+    refusals: Mutex<Vec<String>>,
+}
+impl FourStepObserver for MissingProbe {
+    fn at(&self, event: FourStepEvent<'_>, read: &FourStepRead<'_>) -> Result<(), String> {
+        match event {
+            FourStepEvent::ContentComplete => {
+                std::fs::write(self.root.join("new.md"), "# Reconciled\n").unwrap();
+                let until = Instant::now() + Duration::from_secs(5);
+                while read.is_current() {
+                    assert!(Instant::now() < until);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let requests = self.requests.lock().unwrap();
+                requests.as_ref().unwrap().request("absent.md".into())?;
+                requests.as_ref().unwrap().request("a.md".into())?;
+            }
+            FourStepEvent::RelationsComplete => {
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .request("new.md".into())?;
+            }
+            FourStepEvent::RequestRefused { path, reason } => {
+                assert!(reason.contains("vault still indexing for the first time"));
+                self.refusals.lock().unwrap().push(path.into());
+            }
+            FourStepEvent::Complete(report) => {
+                for path in ["absent.md", "a.md", "new.md"] {
+                    assert!(
+                        report.request_refusals[path]
+                            .contains("vault still indexing for the first time")
+                    );
+                    assert!(report.request_ns[path] <= report.refused_ns[path]);
+                    assert!(!report.delivery_ns.contains_key(path));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+#[test]
+fn absent_quarantined_and_reconciled_requests_receive_explicit_refusals() {
+    let scratch = fixture("missing-request", true);
+    let vault = attach::Vault::adopt(scratch.root());
+    let probe = Arc::new(MissingProbe {
+        requests: Mutex::new(None),
+        root: scratch.join("vault"),
+        refusals: Mutex::new(vec![]),
+    });
+    let loading = FourStepLoading::new(2, false, vec![], probe.clone()).unwrap();
+    *probe.requests.lock().unwrap() = Some(loading.requests());
+    let host = vault.host_with_four_step(loading);
+    let demand = host.demand(vault.name()).unwrap();
+    wait_ready(&host, &vault);
+    assert_eq!(
+        *probe.refusals.lock().unwrap(),
+        vec!["absent.md", "a.md", "new.md"]
+    );
+    drop(demand);
 }

@@ -11,6 +11,11 @@ pub struct FourStepReport {
     pub reconciled: bool,
     /// Descriptive timings from the lab build's start; they grant no read admission.
     pub request_ns: BTreeMap<String, u128>,
+    pub refused_ns: BTreeMap<String, u128>,
+    pub request_refusals: BTreeMap<String, String>,
+    /// Timing bookkeeping is a subset of total commits and elapsed busy time.
+    pub timing_commits: BTreeMap<&'static str, u64>,
+    pub timing_ns: BTreeMap<&'static str, u128>,
     pub delivery_ns: BTreeMap<String, u128>,
     pub requested_structure_ns: BTreeMap<String, u128>,
     pub content_complete_ns: u128,
@@ -28,6 +33,10 @@ pub enum FourStepEvent<'a> {
     ContentComplete,
     Structured(&'a str),
     GetReady(&'a str),
+    RequestRefused {
+        path: &'a str,
+        reason: &'a str,
+    },
     StructureComplete,
     RelationsComplete,
     FullTextComplete,
@@ -176,7 +185,10 @@ impl FourStepRead<'_> {
             .search(query, self.model)
             .map_err(|error| error.to_string());
         if !self.is_current() {
-            return Err("four-step source changed during search".into());
+            return Err(
+                "vault still indexing for the first time: four-step source changed during search"
+                    .into(),
+            );
         }
         result
     }
@@ -192,7 +204,7 @@ impl FourStepRead<'_> {
 
     fn snapshot(&self) -> Result<Snapshot, String> {
         if !self.is_current() {
-            return Err("four-step source changed".into());
+            return Err("vault still indexing for the first time: four-step source changed".into());
         }
         self.reader
             .acquire(
@@ -200,7 +212,10 @@ impl FourStepRead<'_> {
                 Instant::now() + Duration::from_secs(5),
             )
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "four-step reader capacity unavailable".to_owned())?
+            .ok_or_else(|| {
+                "vault still indexing for the first time: four-step reader capacity unavailable"
+                    .to_owned()
+            })?
             .establish()
             .map_err(|error| error.to_string())
     }
@@ -214,7 +229,10 @@ impl FourStepRead<'_> {
             .get(params, self.model, &crate::text::TextLayer)
             .map_err(|error| error.to_string());
         if !self.is_current() {
-            return Err("four-step source changed during Get".into());
+            return Err(
+                "vault still indexing for the first time: four-step source changed during Get"
+                    .into(),
+            );
         }
         let result = result?;
         let path = match &result.report {
@@ -239,7 +257,10 @@ impl FourStepRead<'_> {
             .find(params, self.model)
             .map_err(|error| error.to_string());
         if !self.is_current() {
-            return Err("four-step source changed during Find".into());
+            return Err(
+                "vault still indexing for the first time: four-step source changed during Find"
+                    .into(),
+            );
         }
         result
     }
@@ -530,6 +551,21 @@ impl Build<'_> {
                 self.report
                     .delivery_ns
                     .insert(name, self.began.elapsed().as_nanos());
+            } else {
+                let reason = "vault still indexing for the first time: requested path has no current completed construction row";
+                self.observe(
+                    FourStepEvent::RequestRefused {
+                        path: path.as_str(),
+                        reason,
+                    },
+                    None,
+                )?;
+                self.report
+                    .request_refusals
+                    .insert(name.clone(), reason.to_owned());
+                self.report
+                    .refused_ns
+                    .insert(name, self.began.elapsed().as_nanos());
             }
             self.loading
                 .requests
@@ -811,6 +847,7 @@ impl Build<'_> {
             },
         );
         let structured_at = self.began.elapsed().as_nanos();
+        let timing_began = Instant::now();
         four_step::record_structure_ns(
             self.store,
             &facts.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
@@ -819,6 +856,9 @@ impl Build<'_> {
         .map_err(store_effect)?;
         self.structured_documents += facts.len() as u64;
         if !facts.is_empty() {
+            *self.report.timing_ns.entry("structure").or_default() +=
+                timing_began.elapsed().as_nanos();
+            *self.report.timing_commits.entry("structure").or_default() += 1;
             self.add(
                 "structure",
                 StepCounters {
