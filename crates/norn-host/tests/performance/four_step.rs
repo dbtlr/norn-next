@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use norn_host::{FourStepEvent, FourStepLoading, FourStepObserver, FourStepRead};
-use norn_wire::{
-    FindParams, GetParams, Predicate, ResolutionTarget, VaultAddress, VaultName,
-};
+use norn_wire::{FindParams, GetParams, Predicate, ResolutionTarget, VaultAddress, VaultName};
 use serde_json::json;
 
 struct Probe {
@@ -72,13 +70,18 @@ impl FourStepObserver for Probe {
             let finished = self.began.elapsed().as_nanos();
             match answer {
                 Ok(answer) => {
-                    let work = answer.work.readings().collect::<std::collections::BTreeMap<_,_>>();
+                    let work = answer
+                        .work
+                        .readings()
+                        .collect::<std::collections::BTreeMap<_, _>>();
                     let snapshot = answer.snapshot.clone();
                     let (unsatisfied, advisories, report) = answer.into_report();
-                    super::emit(json!({"startup_stage":"four-step-find", "availability_scope":"lab canonical read hook",
+                    super::emit(
+                        json!({"startup_stage":"four-step-find", "availability_scope":"lab canonical read hook",
                     "answer":report,"unsatisfied":unsatisfied,"advisories":advisories,"snapshot":snapshot,
                     "query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
-                    "builder_work":work,"current":true}));
+                    "builder_work":work,"current":true}),
+                    );
                 }
                 Err(error) => super::emit(
                     json!({"startup_stage":"four-step-find","current":false,"error":error}),

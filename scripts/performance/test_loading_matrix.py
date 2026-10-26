@@ -52,3 +52,58 @@ class MatrixTests(unittest.TestCase):
         validate_lab_stage(stage, manifest)
         with self.assertRaisesRegex(ValueError, 'current'):
             validate_lab_stage({**stage, 'current': False}, manifest)
+
+    def test_explicit_lab_controls_reach_worker_without_inheriting_foreign_controls(self):
+        import json
+        import os
+        import sys
+        from unittest.mock import patch
+        from transport import Current, PREFIX
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            binary = root / 'worker'
+            binary.write_text(f'#!{sys.executable}\n' + '''import os, json, sys
+assert os.environ['NORN_PERFORMANCE_TRANSACTION_BOUND'] == '128'
+assert json.loads(os.environ['NORN_PERFORMANCE_REQUESTED_PATHS']) == ['bench/small.md']
+assert os.environ['NORN_PERFORMANCE_LOADING'] == 'four-step-no-body'
+assert 'NORN_FOREIGN' not in os.environ
+print('NORN_PERFORMANCE ' + json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    if json.loads(line)['op'] == 'stop': break
+''')
+            binary.chmod(0o755)
+            with patch.dict(os.environ, NORN_FOREIGN='ignored', NORN_PERFORMANCE_TRANSACTION_BOUND='999'):
+                worker = Current(binary, root, loading='four-step-no-body',
+                    loading_options={'transaction_bound': 128, 'requested_paths': ['bench/small.md']})
+                worker.close()
+            with self.assertRaisesRegex(ValueError, 'controls'):
+                Current(binary, root, loading='four-step',
+                    loading_options={'transaction_bound': 129, 'requested_paths': []})
+
+    def test_short_workload_reuses_native_provenance_gate_and_rejects_stale_generations(self):
+        import sys
+        import copy
+        sys.path.insert(0, str(Path(__file__).parent / 'live_mode'))
+        from native_validation import validate_provenance
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'vault').mkdir()
+            history = [{'op': 'find'}]
+            response = {'answer': {'reading': {'trust': {'state': 'ready'}, 'epoch': 'test', 'generation': 4},
+                                  'report': {'page': {'next': None}}}, 'counters': {}, 'host_ns': 10}
+            audit = {'store_epoch': 'test', 'write_generation': 4}
+            result = validate_provenance(root, history, [response], audit, workload=history)
+            self.assertEqual(result['responses'], 1)
+            wrong = copy.deepcopy(response)
+            wrong['answer']['reading']['generation'] = 3
+            with self.assertRaisesRegex(ValueError, 'provenance'):
+                validate_provenance(root, history, [wrong], audit, workload=history)
+            with self.assertRaisesRegex(ValueError, 'workload'):
+                validate_provenance(root, history, [response], audit, workload=[{'op': 'search'}])
+
+    def test_workload_contains_all_twelve_operations_and_exactly_four_readbacks(self):
+        from loading_matrix import cell_workload
+        workload = cell_workload()
+        self.assertEqual(len(workload), 19)
+        self.assertEqual([c['op'] for c in workload[3:11]], ['search'] * 4 + ['find'] + ['get'] * 3)
+        self.assertEqual([c['op'] for c in workload[11:]], ['set', 'get', 'new', 'get', 'move', 'get', 'move', 'get'])
