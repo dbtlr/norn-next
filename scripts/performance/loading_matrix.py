@@ -51,7 +51,8 @@ def validate_lab_stage(stage, manifest):
     if stage.get('current') is not True:
         raise ValueError('lab hook lost its current source')
     report = stage['answer']
-    wrapped = {'answer': {'report': report, 'unsatisfied': [], 'advisories': []}}
+    wrapped = {'answer': {'report': report, 'unsatisfied': stage['unsatisfied'],
+                           'advisories': stage.get('advisories', [])}}
     if name == 'four-step-get':
         if stage.get('path') != 'bench/small.md':
             raise ValueError('lab hook answered the wrong target')
@@ -249,16 +250,25 @@ def measure_cell(binary, root, manifest, arm):
             result[field] = dict(parent_received_ns=event['parent_received_ns'], worker_ns=event['elapsed_ns'],
                 resources=event.get('resources_when_observed'), source=event['startup_stage'])
         result['step_counters'] = stages['four-step-relations']['steps']
-        result['step_durations_ns'] = {}
+        result['step_boundary_intervals_ns'] = {}
+        result['step_durations_ns'] = None
         previous = 0
         for name in ('names', 'content', 'structure', 'relations'):
             boundary = stages['four-step-' + name]['elapsed_ns']
-            result['step_durations_ns'][name] = boundary - previous
+            result['step_boundary_intervals_ns'][name] = boundary - previous
             previous = boundary
         result['step_duration_scope'] = 'worker boundary intervals; names includes host setup; later intervals include observer probes and serialization'
         result['content_complete'] = stages['four-step-content']
+        result['unavailable']['pure_step_durations'] = ('Existing observer clocks only completed boundaries; '
+            'requested-document content/structure run before the global content pass. Intervals include probes and cannot isolate step CPU or elapsed work.')
+        result['unavailable'].pop('commits')
         result['unavailable']['step_2_search_answer'] = ('FourStepRead exposes get/find only; text Find is rejected; '
             'no allowed worker-only route to lexical search at this boundary. Actual public search recorded after health-complete.')
+    elif arm == 'health-once':
+        event = events[-1]
+        result['ready'] = result['health_complete'] = dict(parent_received_ns=event['parent_received_ns'],
+            worker_ns=event['stage_boundary_ns'], resources=event.get('resources_when_observed'),
+            source='health-once-health full-build end', counters=event['health_once_work'])
     return result
 
 

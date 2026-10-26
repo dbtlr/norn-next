@@ -44,7 +44,7 @@ class MatrixTests(unittest.TestCase):
 
     def test_lab_probe_rejects_wrong_target_and_incomplete_metadata_page(self):
         manifest = {'active_paths': ['a.md', 'b.md']}
-        stage = {'startup_stage': 'four-step-find', 'current': True,
+        stage = {'startup_stage': 'four-step-find', 'current': True, 'unsatisfied': [], 'advisories': [],
                  'answer': {'page': {'rows': [{'path': 'a.md'}], 'next': None, 'moved': []}, 'rule_sets': []}}
         with self.assertRaisesRegex(ValueError, 'answer size'):
             validate_lab_stage(stage, manifest)

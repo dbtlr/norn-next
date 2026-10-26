@@ -40,6 +40,7 @@ impl FourStepObserver for Probe {
                         Ok(answer) => {
                             super::emit(json!({"startup_stage":"four-step-get", "path":path,
                             "availability_scope":"lab canonical read hook", "answer":answer.report,
+                            "unsatisfied":answer.unsatisfied,"snapshot":answer.snapshot,
                             "query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
                             "builder_work":answer.work.readings().collect::<std::collections::BTreeMap<_,_>>(),
                             "current":true}))
@@ -70,11 +71,15 @@ impl FourStepObserver for Probe {
             let answer = read.find(&params);
             let finished = self.began.elapsed().as_nanos();
             match answer {
-                Ok(answer) => super::emit(
-                    json!({"startup_stage":"four-step-find", "availability_scope":"lab canonical read hook",
-                    "answer":answer.rows,"query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
-                    "builder_work":answer.work.readings().collect::<std::collections::BTreeMap<_,_>>(),"current":true}),
-                ),
+                Ok(answer) => {
+                    let work = answer.work.readings().collect::<std::collections::BTreeMap<_,_>>();
+                    let snapshot = answer.snapshot.clone();
+                    let (unsatisfied, advisories, report) = answer.into_report();
+                    super::emit(json!({"startup_stage":"four-step-find", "availability_scope":"lab canonical read hook",
+                    "answer":report,"unsatisfied":unsatisfied,"advisories":advisories,"snapshot":snapshot,
+                    "query_started_ns":started,"query_finished_ns":finished,"query_host_ns":finished-started,
+                    "builder_work":work,"current":true}));
+                }
                 Err(error) => super::emit(
                     json!({"startup_stage":"four-step-find","current":false,"error":error}),
                 ),
