@@ -1,17 +1,20 @@
-//! Disposable four-pass construction experiments. Nothing here is a warm write path.
+//! Disposable phased construction experiments. Nothing here is a warm write path.
 
 use crate::{ContentModel, DocumentPath, OpenOutcome, Store, StoreError};
 use crate::{error, hash, request, write_path::WriteStatement};
 use norn_db::rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(crate) const MARKER: &str = "four_step_incomplete";
+const FTS_CURSOR: &str = "four_step_fts_cursor";
+const FTS_MODE: &str = "four_step_fts_mode";
 
 /// Actual committed work. Row counts cover documents/files; fact counts include
 /// link keys and stem trigrams. Lab bookkeeping rows are excluded. The host
 /// supplies `files_read`; marker creation/removal each report their own commit.
 /// `rows_rewritten` counts the content/metadata transition; `body_rows_rewritten`
 /// counts the separate payload update when content omitted the body. SQLite's
-/// internal FTS trigger and shadow-table writes are not included in these counts.
+/// internal FTS shadow-table writes are not included in these counts.
+/// `fts_rows_inserted` counts the document rows indexed by the full-text pass.
 /// `keys_resolved` and `candidates_read` are final health's key resolutions and
 /// the candidates they read, as the ordinary judge counts them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -19,6 +22,7 @@ pub struct StepCounters {
     pub rows_inserted: u64,
     pub rows_rewritten: u64,
     pub body_rows_rewritten: u64,
+    pub fts_rows_inserted: u64,
     pub rows_deleted: u64,
     pub tombstones_discarded: u64,
     pub fact_rows_written: u64,
@@ -31,7 +35,8 @@ pub struct StepCounters {
     pub files_read: u64,
 }
 
-/// Persist the nonadoption guard and private progress table in one commit.
+/// Persist the nonadoption guard, remove FTS triggers, and create private progress
+/// in one commit. Bodies remain at rest while full-text indexing is deferred.
 pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
     if !matches!(store.open_outcome(), OpenOutcome::Created) {
         return Err(refused(
@@ -60,6 +65,12 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         ));
     }
     norn_db::meta::put_meta(&tx, MARKER, 1_i64)?;
+    tx.execute_batch(
+        "DROP TRIGGER documents_fts_insert;
+         DROP TRIGGER documents_fts_delete;
+         DROP TRIGGER documents_fts_update;",
+    )
+    .map_err(|e| error::sql("deferring four-step full-text indexing", e))?;
     // A valid empty body can equal the sentinel. Private progress state makes
     // pull-ahead skipping unambiguous and retains source-line/append offsets;
     // dropping it at completion preserves the production schema fingerprint.
@@ -68,6 +79,7 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         path TEXT PRIMARY KEY REFERENCES documents(path) ON DELETE CASCADE,
         content_done INTEGER NOT NULL DEFAULT 0,
         structure_done INTEGER NOT NULL DEFAULT 0,
+        structure_ns INTEGER NOT NULL DEFAULT 0,
         health_done INTEGER NOT NULL DEFAULT 0,
         body_line_offset INTEGER NOT NULL DEFAULT 0,
         body_column_offset INTEGER NOT NULL DEFAULT 0,
@@ -816,6 +828,52 @@ fn require_complete(tx: &Connection, column: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Retain a committed structure chunk's elapsed time for later request timings.
+/// This private bookkeeping transaction does not advance the write generation.
+pub fn record_structure_ns(
+    store: &mut Store,
+    paths: &[DocumentPath],
+    ns: u128,
+) -> Result<(), StoreError> {
+    bounded(paths.len())?;
+    let ns = i64::try_from(ns)
+        .map_err(|_| refused("four-step structure time exceeds SQLite's integer range"))?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let tx = store
+        .database
+        .immediate_transaction("recording four-step structure time")?;
+    for path in paths {
+        let changed = tx
+            .prepare_cached(
+                "UPDATE four_step_state SET structure_ns = ?1 WHERE path = ?2 AND structure_done = 1",
+            )
+            .and_then(|mut query| query.execute(params![ns, path.as_str()]))
+            .map_err(|e| error::sql("recording a four-step structure time", e))?;
+        if changed != 1 {
+            return Err(refused(
+                "four-step structure time requires a completed document",
+            ));
+        }
+    }
+    tx.commit()
+        .map_err(|e| error::sql("committing four-step structure times", e))
+}
+
+/// Read the retained time only when this document's structure is complete.
+pub fn structure_ns(store: &Store, path: &DocumentPath) -> Result<Option<u128>, StoreError> {
+    store
+        .connection()
+        .prepare_cached(
+            "SELECT structure_ns FROM four_step_state WHERE path = ?1 AND structure_done = 1",
+        )
+        .and_then(|mut query| query.query_row([path.as_str()], |row| row.get::<_, u64>(0)))
+        .optional()
+        .map(|value| value.map(u128::from))
+        .map_err(|e| error::sql("reading a four-step structure time", e))
+}
+
 /// Judge the next bounded chunk of completed documents, once per eligible link.
 /// The chunk's links and findings are paged across its documents in the
 /// ordinary judge, which shares one key-summary set for the transaction.
@@ -886,14 +944,124 @@ pub fn health(
     committed(tx, counters)
 }
 
+/// The isolated full-text construction strategy used by the lab's fifth pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FtsBuildMode {
+    Rebuild,
+    Batched,
+}
+
+/// Build full text from every current document, including reconciled additions.
+/// Rebuild runs once; Batched commits at most `bound` document rows per call,
+/// seeking by ID without materializing bodies in Rust. The final write installs
+/// the production triggers atomically. Call again for zero commits at exhaustion;
+/// the host can drain requests after every nonzero result. Mode cannot change
+/// after construction starts. A rebuild deliberately has no internal boundary.
+pub fn full_text(
+    store: &mut Store,
+    mode: FtsBuildMode,
+    bound: usize,
+) -> Result<StepCounters, StoreError> {
+    bounded(bound)?;
+    if bound == 0 {
+        return Err(refused("a four-step page must be nonempty"));
+    }
+    let current: i64 = norn_db::meta::get_meta(store.connection(), MARKER)?
+        .ok_or_else(|| refused("four-step construction has not begun"))?;
+    let mode_name = match mode {
+        FtsBuildMode::Rebuild => "rebuild",
+        FtsBuildMode::Batched => "batched",
+    };
+    let previous_mode: Option<String> = norn_db::meta::get_meta(store.connection(), FTS_MODE)?;
+    if previous_mode
+        .as_deref()
+        .is_some_and(|previous| previous != mode_name)
+    {
+        return Err(refused("four-step full-text build mode cannot change"));
+    }
+    if current == 6 {
+        return Ok(StepCounters::default());
+    }
+    require_complete(store.connection(), "content_done")?;
+    require_complete(store.connection(), "structure_done")?;
+    require_complete(store.connection(), "health_done")?;
+    if refused_pending(store.connection())? {
+        return Err(refused("four-step refused spellings remain queued"));
+    }
+    let tx = store
+        .database
+        .immediate_transaction("building four-step full text")?;
+    phase(&tx, 5)?;
+    norn_db::meta::put_meta(&tx, FTS_MODE, mode_name)?;
+    let (fts_rows_inserted, complete) = match mode {
+        FtsBuildMode::Rebuild => {
+            let rows: u64 = tx
+                .query_row("SELECT count(*) FROM documents", [], |row| row.get(0))
+                .map_err(|e| error::sql("counting four-step full-text documents", e))?;
+            tx.execute(
+                "INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')",
+                [],
+            )
+            .map_err(|e| error::sql("rebuilding four-step full text", e))?;
+            (rows, true)
+        }
+        FtsBuildMode::Batched => {
+            let cursor = norn_db::meta::get_meta::<i64>(&tx, FTS_CURSOR)?.unwrap_or(0);
+            let last: i64 = tx
+                .query_row(
+                    "SELECT coalesce(max(id), ?1) FROM
+                     (SELECT id FROM documents WHERE id > ?1 ORDER BY id LIMIT ?2)",
+                    params![cursor, bound as i64],
+                    |row| row.get(0),
+                )
+                .map_err(|e| error::sql("seeking a four-step full-text batch", e))?;
+            let rows = tx
+                .execute(
+                    "INSERT INTO documents_fts(rowid, body)
+                     SELECT id, body FROM documents WHERE id > ?1 ORDER BY id LIMIT ?2",
+                    params![cursor, bound as i64],
+                )
+                .map_err(|e| error::sql("inserting a four-step full-text batch", e))?;
+            norn_db::meta::put_meta(&tx, FTS_CURSOR, last)?;
+            let more: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE id > ?1)",
+                    [last],
+                    |row| row.get(0),
+                )
+                .map_err(|e| error::sql("checking remaining four-step full-text documents", e))?;
+            (rows as u64, !more)
+        }
+    };
+    if complete {
+        for statement in crate::ddl::fts::statements()
+            .into_iter()
+            .filter(|statement| statement.starts_with("CREATE TRIGGER "))
+        {
+            tx.execute_batch(&statement)
+                .map_err(|e| error::sql("restoring production full-text triggers", e))?;
+        }
+        phase(&tx, 6)?;
+    }
+    committed(
+        tx,
+        StepCounters {
+            fts_rows_inserted,
+            ..StepCounters::default()
+        },
+    )
+}
+
 /// Remove the private table before clearing the marker, atomically. A crash
 /// before this commit still rebuilds; a crash after it can adopt a normal store.
 pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
     let tx = store
         .database
         .immediate_transaction("finishing four-step construction")?;
-    if norn_db::meta::get_meta::<i64>(&tx, MARKER)?.is_none() {
-        return Err(refused("four-step construction has not begun"));
+    match norn_db::meta::get_meta::<i64>(&tx, MARKER)? {
+        None => return Err(refused("four-step construction has not begun")),
+        Some(6) => {}
+        Some(_) => return Err(refused("four-step full-text construction is incomplete")),
     }
     require_complete(&tx, "content_done")?;
     require_complete(&tx, "structure_done")?;
@@ -910,8 +1078,11 @@ pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
             .map_err(|e| error::sql("discarding construction-only tombstones", e))? as u64;
     tx.execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
         .map_err(|e| error::sql("dropping four-step progress", e))?;
-    tx.execute("DELETE FROM meta WHERE key = ?1", [MARKER])
-        .map_err(|e| error::sql("clearing four-step construction marker", e))?;
+    tx.execute(
+        "DELETE FROM meta WHERE key IN (?1, ?2, ?3)",
+        [MARKER, FTS_CURSOR, FTS_MODE],
+    )
+    .map_err(|e| error::sql("clearing four-step construction marker", e))?;
     committed(
         tx,
         StepCounters {
@@ -953,6 +1124,191 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn full_text_restores_exact_schema_text_and_preserves_document_ids() {
+        fn schema(store: &Store) -> Vec<(String, String, String, Option<String>)> {
+            store
+                .connection()
+                .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+        fn identities(store: &Store) -> Vec<(String, i64)> {
+            store
+                .connection()
+                .prepare("SELECT path, id FROM documents ORDER BY path")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+        for mode in [FtsBuildMode::Rebuild, FtsBuildMode::Batched] {
+            let scratch = norn_testkit::scratch::Scratch::under(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+                "four-step-schema-fts",
+            )
+            .unwrap();
+            let mut lab = Store::open(
+                scratch.join("lab.sqlite3"),
+                crate::StoredPathOrder::Sensitive,
+                crate::DerivationVersion::new(1),
+            )
+            .unwrap();
+            let mut ordinary = Store::open(
+                scratch.join("ordinary.sqlite3"),
+                crate::StoredPathOrder::Sensitive,
+                crate::DerivationVersion::new(1),
+            )
+            .unwrap();
+            let model = ContentModel::none();
+            let facts = ["a.md", "b.md", "z.md"].map(|path| {
+                crate::DocumentFacts::new(DocumentPath::new(path).unwrap(), path, "body", 4)
+            });
+            ordinary
+                .begin_request()
+                .apply_increment(
+                    crate::IncrementProvenance::Derived,
+                    facts.iter().cloned().map(crate::Change::Upsert),
+                    &[],
+                    &model,
+                )
+                .unwrap();
+            let expected_schema = schema(&ordinary);
+            begin(&mut lab).unwrap();
+            names(
+                &mut lab,
+                &facts
+                    .iter()
+                    .map(|facts| facts.path.clone())
+                    .collect::<Vec<_>>(),
+                &[],
+                &model,
+            )
+            .unwrap();
+            content(&mut lab, &facts, &[], &model, false, &[(0, 0); 3]).unwrap();
+            let pending = pending(&lab, Step::Structure, 3).unwrap();
+            structure(&mut lab, &facts, &pending, &[], &model, false).unwrap();
+            health(&mut lab, 3, &model).unwrap();
+            let first = full_text(&mut lab, mode, 2).unwrap();
+            assert_eq!(first.commits, 1);
+            if mode == FtsBuildMode::Batched {
+                let indexed = lab
+                    .connection()
+                    .prepare("SELECT id FROM documents_fts_docsize ORDER BY id")
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, i64>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(indexed, [1, 2], "batches advance in document ID order");
+                let triggers: u64 = lab.connection().query_row("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'documents_fts_%'", [], |row| row.get(0)).unwrap();
+                assert_eq!(triggers, 0, "triggers wait for the final batch");
+            }
+            while full_text(&mut lab, mode, 2).unwrap().commits != 0 {}
+            finish(&mut lab).unwrap();
+            assert_eq!(schema(&lab), expected_schema);
+            assert_eq!(identities(&lab), identities(&ordinary));
+            lab.verify_integrity().unwrap();
+            for store in [&mut lab, &mut ordinary] {
+                store
+                    .begin_request()
+                    .apply_increment(
+                        crate::IncrementProvenance::Derived,
+                        [
+                            crate::Change::Upsert(crate::DocumentFacts::new(
+                                facts[0].path.clone(),
+                                "changed",
+                                "changed body",
+                                12,
+                            )),
+                            crate::Change::Death {
+                                path: facts[1].path.clone(),
+                                provenance: crate::Provenance::WatcherRemoval,
+                            },
+                            crate::Change::Upsert(crate::DocumentFacts::new(
+                                DocumentPath::new("zz.md").unwrap(),
+                                "new",
+                                "new body",
+                                8,
+                            )),
+                        ],
+                        &[],
+                        &model,
+                    )
+                    .unwrap();
+                store.verify_integrity().unwrap();
+            }
+            assert_eq!(identities(&lab), identities(&ordinary));
+        }
+    }
+
+    #[test]
+    fn first_four_passes_store_bodies_without_indexing() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-deferred-fts",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        begin(&mut store).unwrap();
+        let triggers: u64 = store
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN
+                 ('documents_fts_insert', 'documents_fts_delete', 'documents_fts_update')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 0, "lab construction defers all FTS writes");
+        let model = ContentModel::none();
+        let facts = crate::DocumentFacts::new(
+            DocumentPath::new("a.md").unwrap(),
+            "hash",
+            "deferred searchable body",
+            24,
+        );
+        names(&mut store, std::slice::from_ref(&facts.path), &[], &model).unwrap();
+        content(
+            &mut store,
+            std::slice::from_ref(&facts),
+            &[],
+            &model,
+            false,
+            &[(0, 0)],
+        )
+        .unwrap();
+        let pending = pending(&store, Step::Structure, 1).unwrap();
+        structure(&mut store, &[facts], &pending, &[], &model, false).unwrap();
+        health(&mut store, 1, &model).unwrap();
+        let (body, indexed_rows, terms): (String, u64, u64) = store
+            .connection()
+            .query_row(
+                "SELECT body, (SELECT count(*) FROM documents_fts_docsize),
+                 (SELECT count(*) FROM documents_fts_vocab) FROM documents",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(body, "deferred searchable body");
+        assert_eq!((indexed_rows, terms), (0, 0));
+        assert!(
+            store.verify_integrity().is_err(),
+            "rank 1 detects unbuilt FTS"
+        );
+    }
 
     #[test]
     fn an_empty_document_set_with_existing_death_history_is_not_a_new_lab_store() {
@@ -1011,6 +1367,12 @@ mod tests {
             .connection()
             .execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
             .unwrap();
+        for statement in crate::ddl::fts::statements()
+            .into_iter()
+            .filter(|statement| statement.starts_with("CREATE TRIGGER "))
+        {
+            store.connection().execute_batch(&statement).unwrap();
+        }
         drop(store);
         let mut reopened = Store::open(
             &path,

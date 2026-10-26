@@ -30,6 +30,267 @@ fn complete_structure(
     four_step::structure(store, documents, &pending, &[], model, no_body)
 }
 
+fn complete_full_text(store: &mut Store, mode: four_step::FtsBuildMode) {
+    while four_step::full_text(store, mode, 2).unwrap().commits != 0 {}
+}
+
+#[test]
+fn structure_timing_remains_available_to_later_requests_for_completed_documents() {
+    let scratch = scratch();
+    let mut store = open(&scratch.join("store.sqlite3"));
+    let model = ContentModel::none();
+    let facts = mixed_facts();
+    four_step::begin(&mut store).unwrap();
+    four_step::names(&mut store, std::slice::from_ref(&facts.path), &[], &model).unwrap();
+    assert_eq!(four_step::structure_ns(&store, &facts.path).unwrap(), None);
+    assert!(
+        four_step::record_structure_ns(&mut store, std::slice::from_ref(&facts.path), 42).is_err()
+    );
+    four_step::content(
+        &mut store,
+        std::slice::from_ref(&facts),
+        &[],
+        &model,
+        false,
+        &[(0, 0)],
+    )
+    .unwrap();
+    assert_eq!(four_step::structure_ns(&store, &facts.path).unwrap(), None);
+    complete_structure(&mut store, std::slice::from_ref(&facts), &model, false).unwrap();
+    four_step::record_structure_ns(&mut store, std::slice::from_ref(&facts.path), 123_456_789)
+        .unwrap();
+    four_step::health(&mut store, 1, &model).unwrap();
+    assert_eq!(
+        four_step::structure_ns(&store, &facts.path).unwrap(),
+        Some(123_456_789)
+    );
+    assert_eq!(
+        four_step::structure_ns(&store, &DocumentPath::new("absent.md").unwrap()).unwrap(),
+        None
+    );
+    assert!(
+        four_step::record_structure_ns(&mut store, std::slice::from_ref(&facts.path), u128::MAX)
+            .is_err()
+    );
+    assert_eq!(
+        four_step::structure_ns(&store, &facts.path).unwrap(),
+        Some(123_456_789)
+    );
+}
+
+#[test]
+fn full_text_builds_in_one_rebuild_or_bounded_commits_and_finish_waits() {
+    use four_step::FtsBuildMode;
+    for mode in [FtsBuildMode::Rebuild, FtsBuildMode::Batched] {
+        let scratch = scratch();
+        let path = scratch.join("store.sqlite3");
+        let mut store = open(&path);
+        let model = ContentModel::none();
+        let documents = ["a.md", "b.md", "c.md"].map(|path| {
+            norn_store::DocumentFacts::new(DocumentPath::new(path).unwrap(), path, "body", 4)
+        });
+        four_step::begin(&mut store).unwrap();
+        assert!(four_step::full_text(&mut store, mode, 0).is_err());
+        assert!(four_step::full_text(&mut store, mode, norn_store::MAX_PAGE + 1).is_err());
+        four_step::names(
+            &mut store,
+            &documents
+                .iter()
+                .map(|facts| facts.path.clone())
+                .collect::<Vec<_>>(),
+            &[],
+            &model,
+        )
+        .unwrap();
+        assert!(four_step::full_text(&mut store, mode, 2).is_err());
+        four_step::content(&mut store, &documents, &[], &model, false, &[(0, 0); 3]).unwrap();
+        complete_structure(&mut store, &documents, &model, false).unwrap();
+        assert!(four_step::full_text(&mut store, mode, 2).is_err());
+        four_step::health(&mut store, 3, &model).unwrap();
+        assert!(
+            four_step::finish(&mut store).is_err(),
+            "health alone cannot finish FTS"
+        );
+        let first = four_step::full_text(&mut store, mode, 2).unwrap();
+        assert_eq!(first.commits, 1);
+        assert_eq!(
+            first.fts_rows_inserted,
+            if mode == FtsBuildMode::Rebuild { 3 } else { 2 }
+        );
+        if mode == FtsBuildMode::Batched {
+            assert!(four_step::finish(&mut store).is_err());
+            assert!(four_step::full_text(&mut store, FtsBuildMode::Rebuild, 2).is_err());
+            let second = four_step::full_text(&mut store, mode, 2).unwrap();
+            assert_eq!((second.commits, second.fts_rows_inserted), (1, 1));
+        }
+        assert_eq!(
+            four_step::full_text(&mut store, mode, 2).unwrap(),
+            four_step::StepCounters::default()
+        );
+        store.verify_integrity().unwrap();
+        four_step::finish(&mut store).unwrap();
+        store.verify_integrity().unwrap();
+        drop(store);
+        assert!(matches!(open(&path).open_outcome(), OpenOutcome::Reused));
+    }
+}
+
+#[test]
+fn empty_full_text_builds_still_restore_triggers_before_finishing() {
+    for mode in [
+        four_step::FtsBuildMode::Rebuild,
+        four_step::FtsBuildMode::Batched,
+    ] {
+        let scratch = scratch();
+        let path = scratch.join("store.sqlite3");
+        let mut store = open(&path);
+        four_step::begin(&mut store).unwrap();
+        assert!(four_step::finish(&mut store).is_err());
+        let built = four_step::full_text(&mut store, mode, 1).unwrap();
+        assert_eq!((built.commits, built.fts_rows_inserted), (1, 0));
+        assert_eq!(
+            four_step::full_text(&mut store, mode, 1).unwrap().commits,
+            0
+        );
+        four_step::finish(&mut store).unwrap();
+        store.verify_integrity().unwrap();
+        drop(store);
+        assert!(matches!(open(&path).open_outcome(), OpenOutcome::Reused));
+    }
+}
+
+#[test]
+fn full_text_preserves_bom_and_line_endings_and_indexes_reconciled_rows() {
+    use norn_store::{Change, DocumentFacts, IncrementProvenance};
+    for mode in [
+        four_step::FtsBuildMode::Rebuild,
+        four_step::FtsBuildMode::Batched,
+    ] {
+        for no_body in [false, true] {
+            let scratch = scratch();
+            let mut lab = open(&scratch.join("lab.sqlite3"));
+            let mut ordinary = open(&scratch.join("ordinary.sqlite3"));
+            let model = ContentModel::none();
+            let documents = [
+                ("a.md", "\u{feff}# Café\r\nBOM body\r\n"),
+                ("b.md", "---\rtitle: cr\r---\rCR body\rnext\r"),
+                ("c.md", "---\r\ntitle: crlf\r\n---\r\nCRLF body\r\nnext\r\n"),
+                ("empty.md", ""),
+                ("modified.md", "old body"),
+                ("vanished.md", "obsolete body"),
+            ]
+            .map(|(path, source)| {
+                let parsed = norn_text::Document::parse(source);
+                let mut facts = DocumentFacts::new(
+                    DocumentPath::new(path).unwrap(),
+                    path,
+                    parsed.body(),
+                    source.len() as u64,
+                );
+                facts.body_offset = parsed.body_start() as u64;
+                facts
+            });
+            four_step::begin(&mut lab).unwrap();
+            four_step::names(
+                &mut lab,
+                &documents
+                    .iter()
+                    .map(|facts| facts.path.clone())
+                    .collect::<Vec<_>>(),
+                &[],
+                &model,
+            )
+            .unwrap();
+            four_step::content(&mut lab, &documents, &[], &model, no_body, &[(0, 0); 6]).unwrap();
+            complete_structure(&mut lab, &documents, &model, no_body).unwrap();
+            four_step::health(&mut lab, 6, &model).unwrap();
+            let added = DocumentFacts::new(
+                DocumentPath::new("z.md").unwrap(),
+                "new",
+                "reconciled addition",
+                19,
+            );
+            let replacement = DocumentFacts::new(
+                documents[4].path.clone(),
+                "changed",
+                "reconciled replacement\r\n",
+                24,
+            );
+            lab.begin_request()
+                .apply_increment(
+                    IncrementProvenance::Derived,
+                    [
+                        Change::Death {
+                            path: documents[5].path.clone(),
+                            provenance: norn_store::Provenance::WatcherRemoval,
+                        },
+                        Change::Upsert(added.clone()),
+                        Change::Upsert(replacement.clone()),
+                    ],
+                    &[],
+                    &model,
+                )
+                .unwrap();
+            ordinary
+                .begin_request()
+                .apply_increment(
+                    IncrementProvenance::Derived,
+                    documents[..4]
+                        .iter()
+                        .cloned()
+                        .chain([replacement, added])
+                        .map(Change::Upsert),
+                    &[],
+                    &model,
+                )
+                .unwrap();
+            let mut inserted = 0;
+            loop {
+                let counters = four_step::full_text(&mut lab, mode, 2).unwrap();
+                inserted += counters.fts_rows_inserted;
+                if counters.commits == 0 {
+                    break;
+                }
+            }
+            assert_eq!(
+                inserted, 6,
+                "all current documents, including the empty body, are indexed"
+            );
+            four_step::finish(&mut lab).unwrap();
+            lab.verify_integrity().unwrap();
+            for facts in &documents[..4] {
+                assert_eq!(
+                    lab.begin_request()
+                        .stored_facts(&facts.path)
+                        .unwrap()
+                        .unwrap()
+                        .body,
+                    facts.body
+                );
+            }
+            drop(lab);
+            drop(ordinary);
+            let lab =
+                norn_store::startup_audit::audit(&scratch.join("lab.sqlite3"), |_, _, _| Ok(()))
+                    .unwrap();
+            let ordinary =
+                norn_store::startup_audit::audit(&scratch.join("ordinary.sqlite3"), |_, _, _| {
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(lab["semantic_sha256"], ordinary["semantic_sha256"]);
+            assert_eq!(
+                lab["tables"]["documents_fts_vocab"],
+                ordinary["tables"]["documents_fts_vocab"]
+            );
+            assert_eq!(
+                lab["tables"]["documents_fts_docsize"],
+                ordinary["tables"]["documents_fts_docsize"]
+            );
+        }
+    }
+}
+
 #[test]
 fn content_retains_body_column_and_frontmatter_tag_names_for_structure() {
     let scratch = scratch();
@@ -183,6 +444,7 @@ fn requested_structure_can_precede_remaining_content_but_health_waits_for_all_st
     assert!(four_step::content(&mut store, &[], &[], &ContentModel::none(), false, &[]).is_err());
     assert!(complete_structure(&mut store, &[], &ContentModel::none(), false).is_err());
     four_step::health(&mut store, 1, &ContentModel::none()).unwrap();
+    complete_full_text(&mut store, four_step::FtsBuildMode::Rebuild);
     four_step::finish(&mut store).unwrap();
 }
 
@@ -555,6 +817,7 @@ fn forgetting_a_vanished_name_or_changed_no_body_source_discards_only_its_own_fa
     complete_structure(&mut store, &[other], &ContentModel::none(), true).unwrap();
     four_step::health(&mut store, 1, &ContentModel::none()).unwrap();
     assert!(four_step::forget(&mut store, &source.path).is_err());
+    complete_full_text(&mut store, four_step::FtsBuildMode::Rebuild);
     four_step::finish(&mut store).unwrap();
     store.verify_integrity().unwrap();
 }
@@ -663,6 +926,7 @@ fn refused_spellings_are_withheld_after_content_and_consumed_in_bounded_structur
         assert_eq!(actual.severity, finding.severity.as_str());
     }
     four_step::health(&mut store, 1, &model).unwrap();
+    complete_full_text(&mut store, four_step::FtsBuildMode::Rebuild);
     four_step::finish(&mut store).unwrap();
     store.verify_integrity().unwrap();
 }
@@ -994,6 +1258,7 @@ fn final_health_judges_eligible_links_once_across_link_pages_and_seals_for_reuse
             .len(),
         300
     );
+    complete_full_text(&mut store, four_step::FtsBuildMode::Rebuild);
     assert_eq!(four_step::finish(&mut store).unwrap().commits, 1);
     store.verify_integrity().unwrap();
     drop(store);
@@ -1062,6 +1327,7 @@ fn provisional_quarantine_has_the_same_semantics_as_an_ordinary_build_from_zero(
             .is_empty()
     );
     four_step::health(&mut store, 8, &ContentModel::none()).unwrap();
+    complete_full_text(&mut store, four_step::FtsBuildMode::Rebuild);
     four_step::finish(&mut store).unwrap();
     let request = store.begin_request();
     assert!(request.stored_document(&path).unwrap().is_none());
@@ -1197,6 +1463,7 @@ fn four_step_finding_ids_match_sensitive_batches_and_folded_singletons() {
             .commits
             != 0
         {}
+        complete_full_text(&mut lab, four_step::FtsBuildMode::Rebuild);
         four_step::finish(&mut lab).unwrap();
         assert_eq!(
             sequence(&mut lab),
@@ -1255,12 +1522,13 @@ fn four_step_finding_ids_match_sensitive_batches_and_folded_singletons() {
         .commits
         != 0
     {}
+    complete_full_text(&mut lab_batch, four_step::FtsBuildMode::Rebuild);
     four_step::finish(&mut lab_batch).unwrap();
     assert_eq!(sequence(&mut lab_batch), sequence(&mut ordinary_batch));
 }
 
 #[test]
-fn complete_four_steps_equal_ordinary_derivation_including_late_target_anchors() {
+fn complete_five_steps_equal_ordinary_derivation_including_late_target_anchors() {
     use norn_store::{
         AnchorReadings, BlockFact, Change, DocumentFacts, HeadingFact, IncrementProvenance,
         LinkAnchor, LinkFact, LinkFamily, Span,
@@ -1270,7 +1538,12 @@ fn complete_four_steps_equal_ordinary_derivation_including_late_target_anchors()
         StoredPathOrder::Sensitive,
         StoredPathOrder::AsciiCaseInsensitive,
     ] {
-        for no_body in [false, true] {
+        for (no_body, mode) in [
+            (false, four_step::FtsBuildMode::Rebuild),
+            (false, four_step::FtsBuildMode::Batched),
+            (true, four_step::FtsBuildMode::Rebuild),
+            (true, four_step::FtsBuildMode::Batched),
+        ] {
             let scratch = scratch();
             let mut lab = Store::open(
                 scratch.join("lab.sqlite3"),
@@ -1390,11 +1663,27 @@ fn complete_four_steps_equal_ordinary_derivation_including_late_target_anchors()
             assert_eq!(health.links_judged, 5);
             assert_eq!(health.findings_written, 3);
             four_step::health(&mut lab, 1, &ContentModel::none()).unwrap();
+            complete_full_text(&mut lab, mode);
             four_step::finish(&mut lab).unwrap();
+            lab.verify_integrity().unwrap();
             StoreProjection::read(&mut lab).unwrap().assert_equivalent(
                 &StoreProjection::read(&mut ordinary).unwrap(),
                 "four-step ordinary equality",
             );
+            drop(lab);
+            drop(ordinary);
+            let lab =
+                norn_store::startup_audit::audit(&scratch.join("lab.sqlite3"), |_, _, _| Ok(()))
+                    .unwrap();
+            let ordinary =
+                norn_store::startup_audit::audit(&scratch.join("ordinary.sqlite3"), |_, _, _| {
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(lab["semantic_sha256"], ordinary["semantic_sha256"]);
+            for table in ["documents_fts_vocab", "documents_fts_docsize"] {
+                assert_eq!(lab["tables"][table], ordinary["tables"][table]);
+            }
         }
     }
 }
