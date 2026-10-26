@@ -518,6 +518,16 @@ fn a_document_removed_after_content_matches_an_ordinary_build_of_the_final_tree(
         wait_ready(&host, &lab);
         drop(demand);
         drop(host);
+        let report = probe.1.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            report.steps["structure"]["files_read"],
+            if no_body {
+                report.steps["content"]["rows_rewritten"]
+            } else {
+                0
+            },
+            "a failed no-body reread is still a file-read attempt"
+        );
         assert_eq!(
             probe.1.lock().unwrap().as_ref().unwrap().steps["relations"]["tombstones_discarded"],
             u64::from(!no_body)
