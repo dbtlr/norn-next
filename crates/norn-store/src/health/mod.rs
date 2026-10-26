@@ -105,7 +105,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use norn_db::rusqlite::types::Value;
-use norn_db::rusqlite::{Connection, Transaction, params_from_iter};
+use norn_db::rusqlite::{Connection, params_from_iter};
 use norn_wire::{FindingKind, LinkHealth, VAULT_PROTOCOL};
 
 use crate::error::StoreError;
@@ -553,7 +553,7 @@ pub(crate) struct Redecided {
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 pub(crate) fn redecide(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
     generation: i64,
@@ -765,7 +765,7 @@ fn reached_by_a_class(held: &Held, classes: &BTreeSet<ClassKey>) -> bool {
 
 /// Discard the findings whose row ids `findings` holds, and report how many
 /// went.
-fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u64, StoreError> {
+fn discard(transaction: &Connection, findings: &BTreeSet<i64>) -> Result<u64, StoreError> {
     #[cfg(feature = "induced-failure")]
     let _timing = norn_db::profiling::span("health.discard");
     if findings.is_empty() {
@@ -1338,7 +1338,7 @@ fn written(link: &LinkFact) -> String {
 /// retain the single mapping and resolution rule.
 #[cfg(feature = "induced-failure")]
 pub(crate) fn four_step_documents(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
     documents: &[DocumentPath],
@@ -1393,7 +1393,7 @@ pub(crate) fn four_step_documents(
 /// `summaries` for its whole transaction.
 #[cfg(feature = "induced-failure")]
 fn four_step_page(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     work: &ReadWork,
     ignore: &AmbiguityIgnore,
     ids: &[i64],

@@ -450,6 +450,40 @@ impl Snapshot {
         self.run_get(params, declared, text, &mut Lookups::default())
     }
 
+    /// Lab Get over the exact completed path. Targets must be rooted paths;
+    /// outgoing targets/health are placeholders while the caller reports loading.
+    /// This reads no resolution class or outgoing-link candidate SQL.
+    #[cfg(feature = "induced-failure")]
+    pub fn four_step_get(
+        &self,
+        params: &GetParams,
+        path: &crate::DocumentPath,
+        declared: &ContentModel,
+        text: &dyn DocumentText,
+        metadata_complete: bool,
+    ) -> Result<Gotten, PageRefusal> {
+        if !metadata_complete
+            && params
+                .columns
+                .iter()
+                .any(|column| matches!(column, norn_wire::Column::Field { .. }))
+        {
+            return Err(PageRefusal::PartNotTaken {
+                part: RequestPart::Column,
+                answer: AnswerShape::Record,
+            });
+        }
+        if params.target.address() != format!("/{}", path.as_str()) {
+            return Err(PageRefusal::UnknownTarget {
+                target: params.target.clone(),
+            });
+        }
+        let mut lookups = Lookups::default();
+        lookups.completed_path = Some(path.as_str().to_owned());
+        lookups.unresolved_links = true;
+        self.run_get(params, declared, text, &mut lookups)
+    }
+
     /// Every statement [`Snapshot::get`] runs for `params`, in the order it
     /// runs them, each with the plan SQLite reported for it.
     ///
@@ -507,6 +541,23 @@ impl Snapshot {
             _ => 0,
         };
         self.declaration_pinned(declared, lookups)?;
+        #[cfg(feature = "induced-failure")]
+        let named = if let Some(path) = lookups.completed_path.clone() {
+            let path = crate::DocumentPath::new(&path)?;
+            let (document, _) = self.read_holder(&path, &mut lookups.ran)?.ok_or_else(|| {
+                PageRefusal::UnknownTarget {
+                    target: params.target.clone(),
+                }
+            })?;
+            Named {
+                document,
+                wire: wire_path(path.as_str())?,
+                path: path.as_str().to_owned(),
+            }
+        } else {
+            self.named(&params.target, declared, lookups)?
+        };
+        #[cfg(not(feature = "induced-failure"))]
         let named = self.named(&params.target, declared, lookups)?;
         let snapshot = self.reading_facts(None, lookups)?;
         let mut work = GetWork::default();
@@ -769,6 +820,7 @@ impl Snapshot {
                     declared.ambiguity_ignore(),
                     &mut lookups.ran,
                     &mut work.link_candidates_read,
+                    !lookups.unresolved_links,
                 )?;
                 CollectionPage::links(Page::new(rows, next, moved))
             }
@@ -950,5 +1002,133 @@ impl HeldBody {
 fn outside(what: &str, at: usize) -> StoreError {
     StoreError::Damaged {
         what: format!("the document reader named {what} at {at}, outside the document"),
+    }
+}
+
+#[cfg(all(test, feature = "induced-failure"))]
+mod loading_plan_tests {
+    use super::*;
+    use crate::{
+        ContentModel, DerivationVersion, DocumentFacts, DocumentPath, Store, StoredPathOrder,
+        four_step,
+    };
+
+    struct Text;
+    impl DocumentText for Text {
+        fn section(&self, _: &[HeadingFact], _: &str, _: usize, _: &str) -> Option<SectionAt> {
+            None
+        }
+        fn block(&self, body: &str, _: usize, _: u64) -> Range<usize> {
+            0..body.len()
+        }
+    }
+
+    #[test]
+    fn completed_get_uses_only_point_or_document_bounded_plans_before_resolution_indexes() {
+        for order in [
+            StoredPathOrder::Sensitive,
+            StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            let scratch = norn_testkit::scratch::Scratch::under(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+                "four-step-get-plans",
+            )
+            .unwrap();
+            let mut store = Store::open(
+                scratch.join("store.sqlite3"),
+                order,
+                DerivationVersion::new(1),
+            )
+            .unwrap();
+            let model = ContentModel::none();
+            four_step::begin(&mut store).unwrap();
+            for start in (0..1024).step_by(128) {
+                let names = (start..start + 128)
+                    .map(|n| DocumentPath::new(&format!("d{n:04}.md")).unwrap())
+                    .collect::<Vec<_>>();
+                four_step::names(&mut store, &names, &[], &model).unwrap();
+            }
+            let mut facts =
+                DocumentFacts::new(DocumentPath::new("d0000.md").unwrap(), "hash", "body", 4);
+            facts.links.push(crate::LinkFact {
+                family: crate::LinkFamily::Wikilink,
+                embed: false,
+                protocol: None,
+                target: "d0001".into(),
+                title: None,
+                anchor: None,
+                span: None,
+                field: None,
+            });
+            four_step::content(
+                &mut store,
+                std::slice::from_ref(&facts),
+                &[],
+                &model,
+                false,
+                &[(0, 0)],
+            )
+            .unwrap();
+            let pending = four_step::pending_at(&store, four_step::Step::Structure, &facts.path)
+                .unwrap()
+                .unwrap();
+            four_step::structure(&mut store, &[facts], &[pending], &[], &model, false).unwrap();
+            assert!(!store.connection().query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='documents_suffix_key')", [], |r| r.get::<_, bool>(0)).unwrap());
+            let reader = std::sync::Arc::new(store.open_reader().reader.unwrap());
+            let snapshot = reader.try_take().unwrap().establish().unwrap();
+            let base = GetParams::new(
+                norn_wire::VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
+                ResolutionTarget::new("/d0000.md").unwrap(),
+            );
+            for params in [
+                base.clone(),
+                base.clone().with_collection(CollectionSelector::Links),
+                GetParams::new(
+                    base.vault.clone(),
+                    ResolutionTarget::new("/d0000.md#Missing").unwrap(),
+                ),
+                GetParams::new(
+                    base.vault.clone(),
+                    ResolutionTarget::new("/d0000.md#^missing").unwrap(),
+                ),
+            ] {
+                let mut lookups = Lookups::default();
+                lookups.completed_path = Some("d0000.md".into());
+                lookups.unresolved_links = true;
+                snapshot
+                    .run_get(&params, &model, &Text, &mut lookups)
+                    .unwrap();
+                for ran in &lookups.ran {
+                    assert_eq!(ran.stepped.full_scan_steps, 0, "{}", ran.sql());
+                    assert!(!matches!(
+                        ran.statement,
+                        ReadStatement::Find(
+                            FindStatement::ClassHead
+                                | FindStatement::LinkTargets
+                                | FindStatement::CandidateSuffixes
+                        )
+                    ));
+                }
+                let plans = snapshot.explained(lookups.ran, |_, _, plan| plan).unwrap();
+                for plan in plans {
+                    for step in plan.steps {
+                        let detail = step.detail.to_ascii_lowercase();
+                        for table in [
+                            "documents",
+                            "vault_files",
+                            "links",
+                            "headings",
+                            "blocks",
+                            "document_tags",
+                            "findings",
+                            "document_fields",
+                        ] {
+                            assert!(!detail.contains(&format!("scan {table}")), "{detail}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -874,6 +874,7 @@ impl Snapshot {
             fields,
             findings_under.as_deref(),
             declared.ambiguity_ignore(),
+            !lookups.unresolved_links,
             work,
             &mut lookups.ran,
         )

@@ -2,13 +2,62 @@
 
 use crate::{ContentModel, DocumentPath, OpenOutcome, Store, StoreError};
 use crate::{error, hash, request, write_path::WriteStatement};
-use norn_db::rusqlite::{Connection, OptionalExtension, Transaction, params};
+use norn_db::rusqlite::{Connection, OptionalExtension, params};
 
 pub(crate) const MARKER: &str = "four_step_incomplete";
 const FTS_CURSOR: &str = "four_step_fts_cursor";
 const FTS_MODE: &str = "four_step_fts_mode";
 
-/// Actual committed work. Row counts cover documents/files; fact counts include
+/// Fixed inclusive timing vocabulary for isolated loading workers.
+pub const PROFILE_LABELS: &[&str] = &[
+    "lab.commit",
+    "lab.index_build",
+    "lab.trigrams",
+    "lab.checkpoint",
+    "lab.fts",
+    "lab.read_hash",
+    "lab.parse_derive",
+    "lab.sql",
+    "lab.rows.documents",
+    "lab.rows.vault_files",
+    "lab.rows.links",
+    "lab.rows.link_keys",
+    "lab.rows.headings",
+    "lab.rows.blocks",
+    "lab.rows.document_tags",
+    "lab.rows.document_fields",
+    "store.increment",
+    "store.link_health",
+    "store.commit",
+    "store.upsert",
+    "store.document_row",
+    "health.discard",
+    "health.prepare_discard",
+    "health.judge",
+    "health.read_links",
+    "health.resolve_keys",
+    "health.anchors",
+    "health.candidate_names",
+    "store.prepare_read",
+    "store.write_finding",
+    "store.finding_metadata",
+    "host.heal",
+    "host.watch_start",
+    "host.store_open",
+    "host.watch_sync_wait",
+    "host.schema_pin",
+    "host.attach",
+    "host.reconcile",
+    "host.document_read",
+    "host.close_job",
+    "host.parse_map",
+    "host.frontmatter_parse",
+    "host.body_scan",
+    "host.document_plan",
+];
+
+/// Chunk work; commits counts published SQLite transactions. Row counts cover
+/// documents/files; fact counts include
 /// link keys and stem trigrams. Lab bookkeeping rows are excluded. The host
 /// supplies `files_read`; marker creation/removal each report their own commit.
 /// `rows_rewritten` counts the content/metadata transition; `body_rows_rewritten`
@@ -20,6 +69,7 @@ const FTS_MODE: &str = "four_step_fts_mode";
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StepCounters {
     pub rows_inserted: u64,
+    pub documents_processed: u64,
     pub rows_rewritten: u64,
     pub body_rows_rewritten: u64,
     pub fts_rows_inserted: u64,
@@ -43,13 +93,19 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
             "four-step construction requires a newly created store",
         ));
     }
+    let cache: i64 = store
+        .connection()
+        .pragma_query_value(None, "cache_size", |r| r.get(0))
+        .map_err(|e| error::sql("reading build cache setting", e))?;
+    let wal: i64 = store
+        .connection()
+        .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+        .map_err(|e| error::sql("reading build WAL setting", e))?;
     let path_order = match store.path_order() {
         crate::StoredPathOrder::Sensitive => "path",
         crate::StoredPathOrder::AsciiCaseInsensitive => "path COLLATE NOCASE, path",
     };
-    let tx = store
-        .database
-        .immediate_transaction("starting four-step construction")?;
+    let tx = Chunk::new(store.connection(), "starting four-step construction")?;
     let empty: bool = tx
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM documents) AND NOT EXISTS(SELECT 1 FROM vault_files)
@@ -64,6 +120,10 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
             "four-step construction requires empty documents, files and tombstones",
         ));
     }
+    norn_db::meta::put_meta(&tx, "four_step_cache", cache)?;
+    norn_db::meta::put_meta(&tx, "four_step_wal", wal)?;
+    tx.execute_batch("PRAGMA wal_autocheckpoint=10000; PRAGMA cache_size=-65536")
+        .map_err(|e| error::sql("tuning build connection", e))?;
     norn_db::meta::put_meta(&tx, MARKER, 1_i64)?;
     tx.execute_batch(
         "DROP TRIGGER documents_fts_insert;
@@ -71,23 +131,55 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
          DROP TRIGGER documents_fts_update;",
     )
     .map_err(|e| error::sql("deferring four-step full-text indexing", e))?;
+    tx.execute_batch("CREATE TABLE four_step_indexes(name TEXT PRIMARY KEY, sql TEXT NOT NULL, boundary INTEGER NOT NULL) WITHOUT ROWID;
+        CREATE TEMP TABLE four_step_trigrams(trigram TEXT NOT NULL, document INTEGER NOT NULL);")
+        .map_err(|e| error::sql("creating deferred build state", e))?;
+    for sql in crate::ddl::statements()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE INDEX "))
+    {
+        let name = sql.split_whitespace().nth(2).expect("index name");
+        // Findings are admitted by the first per-document Get. Their indexes
+        // also bound per-document finding replacement during content derivation.
+        let boundary = if matches!(name, "findings_path" | "findings_rule_set") {
+            1
+        } else if name.starts_with("document_fields_") || name == "documents_path_nocase" {
+            2
+        } else if name.starts_with("documents_")
+            && name != "documents_change_feed"
+            && name != "documents_content_hash"
+            || name.starts_with("vault_files_")
+            || name.starts_with("link_keys_")
+            || name.starts_with("headings_")
+            || name.starts_with("blocks_")
+        {
+            3
+        } else {
+            5
+        };
+        tx.execute(
+            "INSERT INTO four_step_indexes VALUES (?1, ?2, ?3)",
+            params![name, sql, boundary],
+        )
+        .map_err(|e| error::sql("retaining production index SQL", e))?;
+        tx.execute_batch(&format!("DROP INDEX {name}"))
+            .map_err(|e| error::sql("deferring secondary index", e))?;
+    }
     // A valid empty body can equal the sentinel. Private progress state makes
     // pull-ahead skipping unambiguous and retains source-line/append offsets;
     // dropping it at completion preserves the production schema fingerprint.
     tx.execute_batch(&format!(
         "CREATE TABLE four_step_state (
         path TEXT PRIMARY KEY REFERENCES documents(path) ON DELETE CASCADE,
-        content_done INTEGER NOT NULL DEFAULT 0,
-        structure_done INTEGER NOT NULL DEFAULT 0,
+        stage INTEGER NOT NULL DEFAULT 0,
         structure_ns INTEGER NOT NULL DEFAULT 0,
-        health_done INTEGER NOT NULL DEFAULT 0,
         body_line_offset INTEGER NOT NULL DEFAULT 0,
         body_column_offset INTEGER NOT NULL DEFAULT 0,
         frontmatter_tag_names TEXT NOT NULL DEFAULT '[]',
         frontmatter_links INTEGER NOT NULL DEFAULT 0,
         frontmatter_tags INTEGER NOT NULL DEFAULT 0,
         frontmatter_fields INTEGER NOT NULL DEFAULT 0
-    );
+    ) WITHOUT ROWID;
     CREATE TABLE four_step_refused (
         id INTEGER PRIMARY KEY,
         path TEXT NOT NULL,
@@ -95,12 +187,75 @@ pub fn begin(store: &mut Store) -> Result<StepCounters, StoreError> {
         message TEXT NOT NULL,
         detail TEXT
     );
-    CREATE INDEX four_step_content ON four_step_state(content_done, {path_order});
-    CREATE INDEX four_step_structure ON four_step_state(structure_done, {path_order});
-    CREATE INDEX four_step_health ON four_step_state(health_done, {path_order});"
+    CREATE INDEX four_step_pending ON four_step_state(stage, {path_order});"
     ))
     .map_err(|e| error::sql("creating four-step progress", e))?;
     committed(tx, StepCounters::default())
+}
+
+fn build_indexes(store: &mut Store, boundary: i64) -> Result<StepCounters, StoreError> {
+    let indexes = store
+        .connection()
+        .prepare_cached(
+            "SELECT name, sql FROM four_step_indexes WHERE boundary <= ?1 ORDER BY name",
+        )
+        .and_then(|mut q| {
+            q.query_map([boundary], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| error::sql("reading deferred indexes", e))?;
+    if indexes.is_empty() {
+        return Ok(StepCounters::default());
+    }
+    let tx = Chunk::new(store.connection(), "building capability indexes")?;
+    for (name, sql) in indexes {
+        let _span = norn_db::profiling::span("lab.index_build");
+        tx.execute_batch(&sql)
+            .map_err(|e| error::sql("building production index", e))?;
+        tx.execute("DELETE FROM four_step_indexes WHERE name = ?1", [name])
+            .map_err(|e| error::sql("completing deferred index", e))?;
+    }
+    committed(tx, StepCounters::default())
+}
+
+/// Seal name-only construction before any per-document read is admitted.
+pub fn names_complete(store: &mut Store) -> Result<StepCounters, StoreError> {
+    build_indexes(store, 1)
+}
+
+/// Build the metadata indexes before admitting field/path Find.
+pub fn content_complete(store: &mut Store) -> Result<StepCounters, StoreError> {
+    require_complete(store.connection(), "content_done")?;
+    build_indexes(store, 2)
+}
+
+/// Build resolution indexes and sorted trigrams before the first health judgment.
+pub fn structure_complete(store: &mut Store) -> Result<StepCounters, StoreError> {
+    require_complete(store.connection(), "structure_done")?;
+    let mut counters = build_indexes(store, 3)?;
+    let empty: bool = store
+        .connection()
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM temp.four_step_trigrams)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| error::sql("checking buffered trigrams", e))?;
+    if empty {
+        return Ok(counters);
+    }
+    let tx = Chunk::new(store.connection(), "sorting build trigrams")?;
+    let _span = norn_db::profiling::span("lab.trigrams");
+    tx.execute_batch(
+        "INSERT OR IGNORE INTO document_trigrams SELECT t.trigram, t.document
+        FROM temp.four_step_trigrams t JOIN documents d ON d.id = t.document
+        ORDER BY t.trigram, t.document; DELETE FROM temp.four_step_trigrams",
+    )
+    .map_err(|e| error::sql("writing sorted trigrams", e))?;
+    counters.commits += tx.commit()?;
+    Ok(counters)
 }
 
 /// Insert one host-bounded, strictly path-ordered name chunk. File names use
@@ -123,6 +278,7 @@ pub fn names_with_refused(
     refused_findings: &[crate::FindingFacts],
     declared: &ContentModel,
 ) -> Result<StepCounters, StoreError> {
+    let _sql_span = norn_db::profiling::span("lab.sql");
     bounded(refused_findings.len())?;
     for finding in refused_findings {
         check_refused_spelling(finding)?;
@@ -130,18 +286,17 @@ pub fn names_with_refused(
     bounded(documents.len())?;
     bounded(files.len())?;
     let order = store.path_order();
-    let collation = order.collation();
-    let tx = store
-        .database
-        .immediate_transaction("writing four-step names")?;
+
+    let tx = Chunk::new(store.connection(), "writing four-step names")?;
     guard(&tx, declared)?;
     phase(&tx, 1)?;
     let mut counters = StepCounters::default();
-    let generation = norn_db::meta::next_generation(&tx)?;
+    let generation = 0_i64;
     for (table, paths) in [("documents", documents), ("vault_files", files)] {
+        let direction = if table == "documents" { "DESC" } else { "ASC" };
         let mut last: Option<String> = tx
             .prepare_cached(&format!(
-                "SELECT path FROM {table} ORDER BY path{collation} DESC, path DESC LIMIT 1"
+                "SELECT path FROM {table} ORDER BY id {direction} LIMIT 1"
             ))
             .and_then(|mut q| q.query_row([], |r| r.get(0)))
             .optional()
@@ -170,6 +325,11 @@ pub fn names_with_refused(
             let admitting = declared
                 .ambiguity_ignore()
                 .admitting_segments(path.as_str());
+            let _row_span = norn_db::profiling::span(if table == "documents" {
+                "lab.rows.documents"
+            } else {
+                "lab.rows.vault_files"
+            });
             if table == "documents" {
                 let id: i64 = tx
                     .prepare_cached(WriteStatement::UpsertDocument.sql())
@@ -200,7 +360,7 @@ pub fn names_with_refused(
                     .map_err(|e| error::sql("tracking a provisional document", e))?;
                 for trigram in crate::similarity::trigrams(path.stem()) {
                     counters.fact_rows_written += tx
-                        .prepare_cached(WriteStatement::InsertStemTrigram.sql())
+                        .prepare_cached("INSERT INTO temp.four_step_trigrams VALUES (?1, ?2)")
                         .and_then(|mut q| q.execute(params![trigram, id]))
                         .map_err(|e| error::sql("writing a stem trigram", e))?
                         as u64;
@@ -277,7 +437,7 @@ fn refused_pending(connection: &Connection) -> Result<bool, StoreError> {
 }
 
 fn drain_refused(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     limit: usize,
     counters: &mut StepCounters,
 ) -> Result<(), StoreError> {
@@ -375,11 +535,109 @@ fn guard(connection: &Connection, declared: &ContentModel) -> Result<(), StoreEr
     }
     Ok(())
 }
-fn committed(tx: Transaction<'_>, mut counters: StepCounters) -> Result<StepCounters, StoreError> {
-    tx.commit()
-        .map_err(|e| error::sql("committing a four-step chunk", e))?;
-    counters.commits += 1;
+// A failed chunk rolls back its writes even inside a larger host transaction.
+// Ordinary store writes still use the substrate's immediate transactions.
+struct Chunk<'a> {
+    connection: &'a Connection,
+    grouped: bool,
+    complete: bool,
+}
+impl<'a> Chunk<'a> {
+    fn new(connection: &'a Connection, operation: &'static str) -> Result<Self, StoreError> {
+        let grouped = !connection.is_autocommit();
+        connection
+            .execute_batch(if grouped {
+                "SAVEPOINT four_step_chunk"
+            } else {
+                "BEGIN IMMEDIATE"
+            })
+            .map_err(|e| error::sql(operation, e))?;
+        Ok(Self {
+            connection,
+            grouped,
+            complete: false,
+        })
+    }
+    fn commit(mut self) -> Result<u64, StoreError> {
+        let _span = if self.grouped {
+            None
+        } else {
+            norn_db::profiling::span("lab.commit")
+        };
+        self.connection
+            .execute_batch(if self.grouped {
+                "RELEASE four_step_chunk"
+            } else {
+                "COMMIT"
+            })
+            .map_err(|e| error::sql("committing a four-step chunk", e))?;
+        self.complete = true;
+        Ok(u64::from(!self.grouped))
+    }
+}
+impl std::ops::Deref for Chunk<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.connection
+    }
+}
+impl Drop for Chunk<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.connection.execute_batch(if self.grouped {
+                "ROLLBACK TO four_step_chunk; RELEASE four_step_chunk"
+            } else {
+                "ROLLBACK"
+            });
+        }
+    }
+}
+fn committed(tx: Chunk<'_>, mut counters: StepCounters) -> Result<StepCounters, StoreError> {
+    counters.commits += tx.commit()?;
     Ok(counters)
+}
+
+/// Start a bounded host group. Each chunk remains separately rollback-safe.
+pub fn begin_group(store: &mut Store) -> Result<u64, StoreError> {
+    store
+        .connection()
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| error::sql("starting a four-step transaction group", e))?;
+    Ok(store.connection().total_changes())
+}
+
+/// Publish the group's chunks to snapshot readers, reporting actual commits.
+pub fn commit_group(store: &mut Store, changes_at_start: u64) -> Result<StepCounters, StoreError> {
+    if store.connection().is_autocommit() {
+        return Ok(StepCounters::default());
+    }
+    if store.connection().total_changes() == changes_at_start {
+        store
+            .connection()
+            .execute_batch("ROLLBACK")
+            .map_err(|e| error::sql("closing an empty four-step group", e))?;
+        return Ok(StepCounters::default());
+    }
+    let _span = norn_db::profiling::span("lab.commit");
+    store
+        .connection()
+        .execute_batch("COMMIT")
+        .map_err(|e| error::sql("committing a four-step transaction group", e))?;
+    Ok(StepCounters {
+        commits: 1,
+        ..StepCounters::default()
+    })
+}
+
+/// Roll back an unfinished host group on error or unwind.
+pub fn rollback_group(store: &mut Store) -> Result<(), StoreError> {
+    if !store.connection().is_autocommit() {
+        store
+            .connection()
+            .execute_batch("ROLLBACK")
+            .map_err(|e| error::sql("rolling back four-step construction", e))?;
+    }
+    Ok(())
 }
 
 /// The next pass whose incomplete rows the host wants to drive.
@@ -468,9 +726,9 @@ fn pending_rows(
         return Err(refused("four-step construction has not begun"));
     }
     let condition = match step {
-        Step::Content => "s.content_done = 0",
-        Step::Structure => "s.structure_done = 0 AND s.content_done = 1",
-        Step::Health => "s.health_done = 0 AND s.structure_done = 1",
+        Step::Content => "s.stage = 0",
+        Step::Structure => "s.stage = 1",
+        Step::Health => "s.stage = 2",
     };
     let point = if path.is_some() {
         "s.path = ?2"
@@ -556,14 +814,14 @@ pub fn content(
     no_body: bool,
     body_origins: &[(u64, u64)],
 ) -> Result<StepCounters, StoreError> {
+    let _sql_span = norn_db::profiling::span("lab.sql");
     bounded(documents.len())?;
     if documents.len() != body_origins.len() {
         return Err(refused("body origins must match the content chunk"));
     }
     crate::increment::check_derived_findings(findings)?;
-    let tx = store
-        .database
-        .immediate_transaction("writing four-step content")?;
+    names_complete(store)?;
+    let tx = Chunk::new(store.connection(), "writing four-step content")?;
     guard(&tx, declared)?;
     phase(&tx, 2)?;
     let pinned: Option<String> =
@@ -586,7 +844,7 @@ pub fn content(
             .map_err(|e| error::sql("preparing four-step content", e))?;
         let mut progress = tx
             .prepare_cached(
-                "UPDATE four_step_state SET content_done = 1, body_line_offset = ?1,
+                "UPDATE four_step_state SET stage = 1, body_line_offset = ?1,
             frontmatter_links = ?2, frontmatter_tags = ?3, frontmatter_fields = ?4,
             body_column_offset = ?6, frontmatter_tag_names = ?7 WHERE path = ?5",
             )
@@ -603,6 +861,7 @@ pub fn content(
                 .map(crate::json::canonical_json)
                 .transpose()?;
             let body = if no_body { "" } else { &facts.body };
+            let row_span = norn_db::profiling::span("lab.rows.documents");
             update
                 .execute(params![
                     facts.content_hash,
@@ -618,6 +877,7 @@ pub fn content(
                     document
                 ])
                 .map_err(|e| error::sql("updating four-step content", e))?;
+            drop(row_span);
             counters.rows_rewritten += 1;
             counters.fact_rows_written += crate::increment::insert_fact_rows(
                 &mut statements,
@@ -655,11 +915,11 @@ pub fn content(
     {
         let path = &finding.facts.path;
         let done: Option<i64> = tx
-            .prepare_cached("SELECT content_done FROM four_step_state WHERE path = ?1")
+            .prepare_cached("SELECT stage FROM four_step_state WHERE path = ?1")
             .and_then(|mut q| q.query_row([path.as_str()], |r| r.get(0)))
             .optional()
             .map_err(|e| error::sql("checking a provisional quarantine", e))?;
-        if done == Some(1) {
+        if done.is_some_and(|stage| stage >= 1) {
             return Err(refused("a completed content row cannot be quarantined"));
         }
         if done.is_some() {
@@ -693,15 +953,15 @@ fn incomplete_document(
     let sql = match step {
         Step::Content => {
             "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
-            WHERE d.path = ?1 AND s.content_done = 0"
+            WHERE d.path = ?1 AND s.stage = 0"
         }
         Step::Structure => {
             "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
-            WHERE d.path = ?1 AND s.content_done = 1 AND s.structure_done = 0"
+            WHERE d.path = ?1 AND s.stage = 1"
         }
         Step::Health => {
             "SELECT d.id FROM documents d JOIN four_step_state s ON s.path = d.path
-            WHERE d.path = ?1 AND s.structure_done = 1 AND s.health_done = 0"
+            WHERE d.path = ?1 AND s.stage = 2"
         }
     };
     tx.prepare_cached(sql)
@@ -740,6 +1000,7 @@ pub fn structure_with_refused(
     no_body: bool,
     refused_limit: usize,
 ) -> Result<StepCounters, StoreError> {
+    let _sql_span = norn_db::profiling::span("lab.sql");
     bounded(refused_limit)?;
     bounded(documents.len())?;
     if documents.len() != pending.len() {
@@ -756,9 +1017,7 @@ pub fn structure_with_refused(
             ));
         }
     }
-    let tx = store
-        .database
-        .immediate_transaction("writing four-step structure")?;
+    let tx = Chunk::new(store.connection(), "writing four-step structure")?;
     guard(&tx, declared)?;
     if refused_limit > 0 {
         require_complete(&tx, "content_done")?;
@@ -801,7 +1060,7 @@ pub fn structure_with_refused(
                     .map_err(|e| error::sql("filling the four-step body", e))?;
                 counters.body_rows_rewritten += 1;
             }
-            tx.prepare_cached("UPDATE four_step_state SET structure_done = 1 WHERE path = ?1")
+            tx.prepare_cached("UPDATE four_step_state SET stage = 2 WHERE path = ?1")
                 .and_then(|mut q| q.execute([facts.path.as_str()]))
                 .map_err(|e| error::sql("completing four-step structure row", e))?;
         }
@@ -815,9 +1074,15 @@ pub fn structure_with_refused(
 }
 
 fn require_complete(tx: &Connection, column: &str) -> Result<(), StoreError> {
+    let stage = match column {
+        "content_done" => 1,
+        "structure_done" => 2,
+        "health_done" => 3,
+        _ => unreachable!(),
+    };
     let incomplete: bool = tx
         .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM four_step_state WHERE {column} = 0)"),
+            &format!("SELECT EXISTS(SELECT 1 FROM four_step_state WHERE stage < {stage})"),
             [],
             |r| r.get(0),
         )
@@ -841,13 +1106,11 @@ pub fn record_structure_ns(
     if paths.is_empty() {
         return Ok(());
     }
-    let tx = store
-        .database
-        .immediate_transaction("recording four-step structure time")?;
+    let tx = Chunk::new(store.connection(), "recording four-step structure time")?;
     for path in paths {
         let changed = tx
             .prepare_cached(
-                "UPDATE four_step_state SET structure_ns = ?1 WHERE path = ?2 AND structure_done = 1",
+                "UPDATE four_step_state SET structure_ns = ?1 WHERE path = ?2 AND stage >= 2",
             )
             .and_then(|mut query| query.execute(params![ns, path.as_str()]))
             .map_err(|e| error::sql("recording a four-step structure time", e))?;
@@ -857,17 +1120,14 @@ pub fn record_structure_ns(
             ));
         }
     }
-    tx.commit()
-        .map_err(|e| error::sql("committing four-step structure times", e))
+    tx.commit().map(|_| ())
 }
 
 /// Read the retained time only when this document's structure is complete.
 pub fn structure_ns(store: &Store, path: &DocumentPath) -> Result<Option<u128>, StoreError> {
     store
         .connection()
-        .prepare_cached(
-            "SELECT structure_ns FROM four_step_state WHERE path = ?1 AND structure_done = 1",
-        )
+        .prepare_cached("SELECT structure_ns FROM four_step_state WHERE path = ?1 AND stage >= 2")
         .and_then(|mut query| query.query_row([path.as_str()], |row| row.get::<_, u64>(0)))
         .optional()
         .map(|value| value.map(u128::from))
@@ -883,6 +1143,7 @@ pub fn health(
     limit: usize,
     declared: &ContentModel,
 ) -> Result<StepCounters, StoreError> {
+    let _sql_span = norn_db::profiling::span("lab.sql");
     bounded(limit)?;
     if limit == 0 {
         return Err(refused("a four-step page must be nonempty"));
@@ -899,7 +1160,7 @@ pub fn health(
         let mut query = store
             .connection()
             .prepare_cached(&format!(
-                "SELECT path FROM four_step_state WHERE health_done = 0
+                "SELECT path FROM four_step_state WHERE stage = 2
                  ORDER BY path{collation}, path LIMIT ?1"
             ))
             .map_err(|e| error::sql("preparing four-step health documents", e))?;
@@ -916,9 +1177,8 @@ pub fn health(
     if documents.is_empty() {
         return Ok(StepCounters::default());
     }
-    let tx = store
-        .database
-        .immediate_transaction("writing four-step link health")?;
+    structure_complete(store)?;
+    let tx = Chunk::new(store.connection(), "writing four-step link health")?;
     guard(&tx, declared)?;
     phase(&tx, 4)?;
     let work = request::ReadWork::default();
@@ -935,10 +1195,11 @@ pub fn health(
         &mut summaries,
     )?;
     for document in &documents {
-        tx.prepare_cached("UPDATE four_step_state SET health_done = 1 WHERE path = ?1")
+        tx.prepare_cached("UPDATE four_step_state SET stage = 3 WHERE path = ?1")
             .and_then(|mut q| q.execute([document.as_str()]))
             .map_err(|e| error::sql("completing four-step link health row", e))?;
     }
+    counters.documents_processed = documents.len() as u64;
     counters.keys_resolved = summaries.keys_resolved();
     counters.candidates_read = summaries.candidates_read();
     committed(tx, counters)
@@ -962,6 +1223,7 @@ pub fn full_text(
     mode: FtsBuildMode,
     bound: usize,
 ) -> Result<StepCounters, StoreError> {
+    let _sql_span = norn_db::profiling::span("lab.sql");
     bounded(bound)?;
     if bound == 0 {
         return Err(refused("a four-step page must be nonempty"));
@@ -988,11 +1250,10 @@ pub fn full_text(
     if refused_pending(store.connection())? {
         return Err(refused("four-step refused spellings remain queued"));
     }
-    let tx = store
-        .database
-        .immediate_transaction("building four-step full text")?;
+    let tx = Chunk::new(store.connection(), "building four-step full text")?;
     phase(&tx, 5)?;
     norn_db::meta::put_meta(&tx, FTS_MODE, mode_name)?;
+    let fts_span = norn_db::profiling::span("lab.fts");
     let (fts_rows_inserted, complete) = match mode {
         FtsBuildMode::Rebuild => {
             let rows: u64 = tx
@@ -1033,6 +1294,7 @@ pub fn full_text(
             (rows as u64, !more)
         }
     };
+    drop(fts_span);
     if complete {
         for statement in crate::ddl::fts::statements()
             .into_iter()
@@ -1052,12 +1314,16 @@ pub fn full_text(
     )
 }
 
+/// Restore every ordinary access path before falling back to churn healing.
+pub fn prepare_reconcile(store: &mut Store) -> Result<StepCounters, StoreError> {
+    build_indexes(store, 5)
+}
+
 /// Remove the private table before clearing the marker, atomically. A crash
 /// before this commit still rebuilds; a crash after it can adopt a normal store.
 pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
-    let tx = store
-        .database
-        .immediate_transaction("finishing four-step construction")?;
+    let indexes = build_indexes(store, 5)?;
+    let tx = Chunk::new(store.connection(), "finishing four-step construction")?;
     match norn_db::meta::get_meta::<i64>(&tx, MARKER)? {
         None => return Err(refused("four-step construction has not begun")),
         Some(6) => {}
@@ -1076,29 +1342,54 @@ pub fn finish(store: &mut Store) -> Result<StepCounters, StoreError> {
     let tombstones_discarded =
         tx.execute("DELETE FROM tombstones", [])
             .map_err(|e| error::sql("discarding construction-only tombstones", e))? as u64;
-    tx.execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
-        .map_err(|e| error::sql("dropping four-step progress", e))?;
+    tx.execute_batch(
+        "DROP TABLE four_step_state; DROP TABLE four_step_refused; DROP TABLE four_step_indexes",
+    )
+    .map_err(|e| error::sql("dropping four-step progress", e))?;
     tx.execute(
         "DELETE FROM meta WHERE key IN (?1, ?2, ?3)",
         [MARKER, FTS_CURSOR, FTS_MODE],
     )
     .map_err(|e| error::sql("clearing four-step construction marker", e))?;
-    committed(
+    let cache: i64 = norn_db::meta::get_meta(&tx, "four_step_cache")?.expect("saved cache setting");
+    let wal: i64 = norn_db::meta::get_meta(&tx, "four_step_wal")?.expect("saved WAL setting");
+    tx.execute(
+        "DELETE FROM meta WHERE key IN ('four_step_cache', 'four_step_wal')",
+        [],
+    )
+    .map_err(|e| error::sql("clearing build settings", e))?;
+    let counters = committed(
         tx,
         StepCounters {
             tombstones_discarded,
+            commits: indexes.commits,
             ..StepCounters::default()
         },
-    )
+    )?;
+    store
+        .connection()
+        .execute_batch(&format!(
+            "PRAGMA cache_size={cache}; PRAGMA wal_autocheckpoint={wal}"
+        ))
+        .map_err(|e| error::sql("restoring build connection", e))?;
+    let _span = norn_db::profiling::span("lab.checkpoint");
+    let (busy, _, _): (i64, i64, i64) = store
+        .connection()
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(|e| error::sql("checkpointing completed construction", e))?;
+    if busy != 0 {
+        return Err(refused("completed construction checkpoint is busy"));
+    }
+    Ok(counters)
 }
 
 /// Discard an initial-build row whose source vanished or changed before it
 /// became authoritative. This is no observed document death, so no tombstone
 /// is recorded. Its progress and facts cascade with the provisional row.
 pub fn forget(store: &mut Store, path: &DocumentPath) -> Result<StepCounters, StoreError> {
-    let tx = store
-        .database
-        .immediate_transaction("forgetting a four-step source")?;
+    let tx = Chunk::new(store.connection(), "forgetting a four-step source")?;
     let current: i64 = norn_db::meta::get_meta(&tx, MARKER)?
         .ok_or_else(|| refused("four-step construction has not begun"))?;
     if current >= 4 {
@@ -1124,6 +1415,154 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn chunk_failure_and_host_abort_do_not_publish_partial_groups() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-group-rollback",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        begin(&mut store).unwrap();
+        let model = ContentModel::none();
+        let a = DocumentPath::new("a.md").unwrap();
+        let changes = begin_group(&mut store).unwrap();
+        assert_eq!(
+            names(&mut store, std::slice::from_ref(&a), &[], &model)
+                .unwrap()
+                .commits,
+            0
+        );
+        assert!(names(&mut store, std::slice::from_ref(&a), &[], &model).is_err());
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT count(*) FROM documents", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        let other = norn_db::open_read_only(store.path()).adopted.unwrap();
+        assert_eq!(
+            other
+                .connection()
+                .query_row("SELECT count(*) FROM documents", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        rollback_group(&mut store).unwrap();
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT count(*) FROM documents", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        let _ = changes;
+        let changes = begin_group(&mut store).unwrap();
+        names(&mut store, &[a], &[], &model).unwrap();
+        assert_eq!(commit_group(&mut store, changes).unwrap().commits, 1);
+        assert_eq!(
+            other
+                .connection()
+                .query_row("SELECT count(*) FROM documents", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Inspect the test store's WAL, never vault files.
+    fn ready_restores_connection_settings_and_has_no_checkpoint_tail() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-checkpoint",
+        )
+        .unwrap();
+        let path = scratch.join("store.sqlite3");
+        let mut store = Store::open(
+            &path,
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        let pragma = |store: &Store, name| {
+            store
+                .connection()
+                .pragma_query_value(None, name, |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let cache = pragma(&store, "cache_size");
+        let wal = pragma(&store, "wal_autocheckpoint");
+        let sync = pragma(&store, "synchronous");
+        begin(&mut store).unwrap();
+        assert_eq!(pragma(&store, "cache_size"), -65536);
+        assert_eq!(pragma(&store, "wal_autocheckpoint"), 10000);
+        assert_eq!(pragma(&store, "synchronous"), sync);
+        full_text(&mut store, FtsBuildMode::Rebuild, 128).unwrap();
+        finish(&mut store).unwrap();
+        assert_eq!(pragma(&store, "cache_size"), cache);
+        assert_eq!(pragma(&store, "wal_autocheckpoint"), wal);
+        assert_eq!(pragma(&store, "synchronous"), sync);
+        assert_eq!(
+            std::fs::metadata(path.with_extension("sqlite3-wal"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn secondary_indexes_wait_for_their_first_capability() {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch"),
+            "four-step-index-boundaries",
+        )
+        .unwrap();
+        let mut store = Store::open(
+            scratch.join("store.sqlite3"),
+            crate::StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .unwrap();
+        begin(&mut store).unwrap();
+        fn exists(store: &Store, name: &str) -> bool {
+            store
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                    [name],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap()
+        }
+        assert!(exists(&store, "documents_path"));
+        assert!(!exists(&store, "documents_content_hash"));
+        assert!(!exists(&store, "document_fields_raw"));
+        assert!(!exists(&store, "documents_suffix_key"));
+        names_complete(&mut store).unwrap();
+        assert!(exists(&store, "findings_path"));
+        assert!(!exists(&store, "document_fields_raw"));
+        content_complete(&mut store).unwrap();
+        assert!(exists(&store, "documents_path_nocase"));
+        assert!(exists(&store, "document_fields_raw"));
+        assert!(!exists(&store, "documents_suffix_key"));
+        structure_complete(&mut store).unwrap();
+        assert!(exists(&store, "documents_suffix_key"));
+        assert!(exists(&store, "vault_files_path_key"));
+        assert!(exists(&store, "link_keys_key"));
+        assert!(!exists(&store, "documents_content_hash"));
+        full_text(&mut store, FtsBuildMode::Rebuild, 128).unwrap();
+        finish(&mut store).unwrap();
+        assert!(exists(&store, "documents_content_hash"));
+        assert!(exists(&store, "document_trigrams_document_trigram"));
+        assert!(!exists(&store, "four_step_indexes"));
+    }
 
     #[test]
     fn full_text_restores_exact_schema_text_and_preserves_document_ids() {
@@ -1361,11 +1800,12 @@ mod tests {
             &ContentModel::none(),
         )
         .unwrap();
+        build_indexes(&mut store, 5).unwrap();
         // Isolate the persisted guard from schema-digest rebuilding: a removed
         // progress table restores the production schema but not complete data.
         store
             .connection()
-            .execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused")
+            .execute_batch("DROP TABLE four_step_state; DROP TABLE four_step_refused; DROP TABLE four_step_indexes")
             .unwrap();
         for statement in crate::ddl::fts::statements()
             .into_iter()
@@ -1424,16 +1864,21 @@ mod tests {
                     if !matches!(step, Step::Content) {
                         // Leave only the final two rows pending. A planner choosing
                         // another phase's index would walk every completed row.
-                        store.connection().execute("UPDATE four_step_state SET content_done=1, structure_done=1, health_done=1", []).unwrap();
-                        let column = if matches!(step, Step::Structure) {
-                            "structure_done"
+                        store
+                            .connection()
+                            .execute("UPDATE four_step_state SET stage=3", [])
+                            .unwrap();
+                        let stage = if matches!(step, Step::Structure) {
+                            1
                         } else {
-                            "health_done"
+                            2
                         };
                         store
                             .connection()
                             .execute(
-                                &format!("UPDATE four_step_state SET {column}=0 WHERE path >= ?1"),
+                                &format!(
+                                    "UPDATE four_step_state SET stage={stage} WHERE path >= ?1"
+                                ),
                                 [format!("d{:05}.md", size - 2)],
                             )
                             .unwrap();

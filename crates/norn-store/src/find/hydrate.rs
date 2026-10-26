@@ -206,6 +206,7 @@ impl Snapshot {
         fields: &[&str],
         findings_under: Option<&str>,
         ignore: &AmbiguityIgnore,
+        resolve_links: bool,
         work: &mut FindWork,
         record: &mut Vec<Ran>,
     ) -> Result<Vec<DocumentRow>, StoreError> {
@@ -255,7 +256,13 @@ impl Snapshot {
                     let totals: Vec<u64> = carried.iter().map(|(_, total)| *total).collect();
                     let every = carried.into_iter().flat_map(|(items, _)| items).collect();
                     let mut resolved = self
-                        .link_rows(every, ignore, record, &mut work.link_candidates_read)?
+                        .link_rows(
+                            every,
+                            ignore,
+                            record,
+                            &mut work.link_candidates_read,
+                            resolve_links,
+                        )?
                         .into_iter();
                     for ((row, count), total) in rows.iter_mut().zip(counts).zip(totals) {
                         let links: Vec<LinkRow> = resolved.by_ref().take(count).collect();

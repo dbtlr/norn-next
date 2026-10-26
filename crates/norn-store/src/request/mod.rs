@@ -1936,7 +1936,7 @@ pub(crate) fn check_finding_paths(finding: &FindingFacts) -> Result<(), StoreErr
 /// judgment in derivation files the findings that cite rules and judge
 /// values; every other producer's carry neither.
 pub(crate) fn write_finding(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     finding: &FindingFacts,
 ) -> Result<(), StoreError> {
     #[cfg(feature = "induced-failure")]
@@ -2049,7 +2049,7 @@ pub(crate) fn check_content_finding(finding: &FindingFacts) -> Result<(), StoreE
 /// The finding is a content finding: the changeset checked it before its
 /// transaction ([`check_content_finding`]).
 pub(crate) fn record_content_quarantine(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     finding: &FindingFacts,
     hash: &str,
 ) -> Result<(), StoreError> {
@@ -2067,7 +2067,7 @@ pub(crate) fn record_content_quarantine(
 /// which tells every two sets apart however their names are spelled, and is
 /// held as that spelling alone: its names are read back off it.
 fn cited_rule_set(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     fingerprint: &str,
     rules: &BTreeSet<String>,
 ) -> Result<Option<i64>, StoreError> {
@@ -2099,7 +2099,7 @@ fn cited_rule_set(
 /// through a transaction a caller is composing rather than through the
 /// connection's autocommit.
 pub(crate) fn discard_about_in(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &rusqlite::Connection,
     path: &DocumentPath,
     scope: DiscardScope<'_>,
 ) -> Result<u64, StoreError> {

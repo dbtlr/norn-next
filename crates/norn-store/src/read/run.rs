@@ -113,6 +113,9 @@ pub(crate) struct Lookups {
     pub(super) known: BTreeMap<String, bool>,
     pub(crate) ran: Vec<Ran>,
     pub(crate) capture_results: bool,
+    pub(crate) unresolved_links: bool,
+    #[cfg(feature = "induced-failure")]
+    pub(crate) completed_path: Option<String>,
     #[cfg(feature = "induced-failure")]
     pub(crate) count_source_only: bool,
 }

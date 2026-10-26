@@ -28,7 +28,7 @@ impl FourStepObserver for Probe {
                 if path == "z-requested.md" && !read.metadata_complete() {
                     let params = GetParams::new(
                         VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
-                        ResolutionTarget::new("z-requested").unwrap(),
+                        ResolutionTarget::new("/z-requested.md").unwrap(),
                     );
                     assert!(
                         read.get(&params).is_ok(),
@@ -40,8 +40,19 @@ impl FourStepObserver for Probe {
                 if path == "z-requested.md" {
                     let params = GetParams::new(
                         VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
-                        ResolutionTarget::new("z-requested").unwrap(),
+                        ResolutionTarget::new("/z-requested.md").unwrap(),
                     );
+                    if !read.metadata_complete() {
+                        assert!(
+                            read.get(
+                                &params
+                                    .clone()
+                                    .with_columns([norn_wire::Column::field("missing")])
+                            )
+                            .unwrap_err()
+                            .contains("complete field universe")
+                        );
+                    }
                     assert!(read.link_resolution_loading());
                     assert!(read.link_health_loading());
                     let got = read.get(&params)?;
@@ -221,7 +232,7 @@ fn four_step_matches_ordinary_semantics_and_judges_each_link_once() {
         wait_ready(&host, &ordinary);
         let params = GetParams::new(
             VaultAddress::name(ordinary.name().clone()),
-            ResolutionTarget::new("z-requested").unwrap(),
+            ResolutionTarget::new("/z-requested.md").unwrap(),
         );
         let ordinary_answer = host.get(&params).unwrap().answer;
         assert!(ordinary_answer.unsatisfied.is_empty());
@@ -429,7 +440,7 @@ impl FourStepObserver for Mutation {
         {
             let params = GetParams::new(
                 VaultAddress::name(norn_wire::VaultName::new("notes").unwrap()),
-                ResolutionTarget::new("z-requested").unwrap(),
+                ResolutionTarget::new("/z-requested.md").unwrap(),
             );
             assert!(
                 read.get(&params).is_err(),
@@ -618,10 +629,10 @@ fn refused_only_tail_drains_after_the_only_document_was_pulled_ahead() {
         let report = probe.report.lock().unwrap().clone().unwrap();
         assert_eq!(report.steps["structure"]["findings_written"], 5);
         assert_eq!(
-            report.steps["structure"]["commits"], 5,
-            "one pull-ahead commit, one timing commit, and three bounded refused-only pages"
+            report.steps["structure"]["commits"], 2,
+            "one requested transaction and one transaction for all refused-only chunks"
         );
-        assert_eq!(report.timing_commits["structure"], 1);
+        assert_eq!(report.timing_commits["structure"], 0);
         assert!(report.timing_ns["structure"] > 0);
         assert_eq!(report.steps["content"]["rows_rewritten"], 1);
         drop(demand);
@@ -726,6 +737,10 @@ fn a_mid_content_request_finishes_own_structure_before_the_remaining_content_que
     );
     let report = probe.report.lock().unwrap();
     let report = report.as_ref().unwrap();
+    assert_eq!(
+        report.build_commits["content"], 2,
+        "the first two-document chunk is forced visible before requested work; the remaining content is one group"
+    );
     assert!(report.request_ns["z-requested.md"] <= report.requested_structure_ns["z-requested.md"]);
     assert!(
         report.requested_structure_ns["z-requested.md"] <= report.delivery_ns["z-requested.md"]
@@ -942,4 +957,58 @@ fn absent_quarantined_and_reconciled_requests_receive_explicit_refusals() {
         vec!["absent.md", "a.md", "new.md"]
     );
     drop(demand);
+}
+
+#[derive(Default)]
+struct GroupProbe(Mutex<Option<FourStepReport>>);
+impl FourStepObserver for GroupProbe {
+    fn at(&self, event: FourStepEvent<'_>, _: &FourStepRead<'_>) -> Result<(), String> {
+        if let FourStepEvent::Complete(report) = event {
+            *self.0.lock().unwrap() = Some(report.clone());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn absent_requests_group_host_chunks_into_at_most_2048_document_commits_in_every_pass() {
+    for mode in [
+        norn_store::four_step::FtsBuildMode::Rebuild,
+        norn_store::four_step::FtsBuildMode::Batched,
+    ] {
+        let scratch = norn_testkit::scratch::Scratch::under(
+            &std::env::current_dir().unwrap().join(".scratch"),
+            "four-step-commit-groups",
+        )
+        .unwrap();
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        let count: u64 = 2051;
+        for n in 0..count {
+            std::fs::write(root.join(format!("d{n:04}.md")), "# Body\n[[missing]]\n").unwrap();
+        }
+        let vault = attach::Vault::adopt(scratch.root());
+        let probe = Arc::new(GroupProbe::default());
+        let loading = FourStepLoading::new(128, false, vec![], probe.clone())
+            .unwrap()
+            .with_fts_mode(mode);
+        let host = vault.host_with_four_step(loading);
+        let demand = host.demand(vault.name()).unwrap();
+        wait_ready(&host, &vault);
+        let report = probe.0.lock().unwrap().clone().unwrap();
+        for step in ["names", "content", "structure", "relations", "full-text"] {
+            assert!(
+                report.build_commits[step] <= count.div_ceil(2048),
+                "{step}: {:?}",
+                report.build_commits
+            );
+            assert!(report.build_commits[step] > 0);
+        }
+        assert_eq!(report.steps["content"]["files_read"], count);
+        assert_eq!(report.steps["content"]["rows_rewritten"], count);
+        assert_eq!(report.steps["full-text"]["fts_rows_inserted"], count);
+        drop(demand);
+        drop(host);
+    }
 }

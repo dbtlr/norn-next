@@ -164,9 +164,14 @@ impl Snapshot {
         ignore: &AmbiguityIgnore,
         record: &mut Vec<Ran>,
         candidates_read: &mut u64,
+        resolve: bool,
     ) -> Result<Vec<LinkRow>, StoreError> {
         let ids: Vec<i64> = links.iter().map(|(id, _)| *id).collect();
-        let mut named = self.link_targets(&ids, record, candidates_read)?;
+        let mut named = if resolve {
+            self.link_targets(&ids, record, candidates_read)?
+        } else {
+            HashMap::new()
+        };
         let heads: Vec<Head> = ids
             .iter()
             .map(|id| named.remove(id).unwrap_or_default())

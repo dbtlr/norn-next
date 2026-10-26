@@ -9,6 +9,10 @@ use norn_store::{DocumentFacts, Snapshot, SnapshotReader};
 pub struct FourStepReport {
     pub steps: BTreeMap<&'static str, BTreeMap<&'static str, u64>>,
     pub reconciled: bool,
+    pub host_chunk_bound: usize,
+    pub transaction_bound: usize,
+    /// Nonempty grouped transactions; setup/index/finish commits stay in steps.
+    pub build_commits: BTreeMap<&'static str, u64>,
     /// Descriptive timings from the lab build's start; they grant no read admission.
     pub request_ns: BTreeMap<String, u128>,
     pub refused_ns: BTreeMap<String, u128>,
@@ -24,9 +28,12 @@ pub struct FourStepReport {
     /// Main-pass work only; requested-document pull-ahead is recorded separately.
     pub busy_ns: BTreeMap<&'static str, u128>,
     pub pull_ahead_ns: u128,
+    /// Inclusive span calls and nanoseconds, recorded separately for each pass.
+    pub profiles: BTreeMap<&'static str, BTreeMap<&'static str, (u64, u128)>>,
 }
 
-/// All callbacks run after the named transaction committed, outside host gates.
+/// Document/capability callbacks observe committed data, outside host gates.
+/// Batch callbacks report chunk progress and may enqueue requests before commit.
 #[derive(Clone, Copy, Debug)]
 pub enum FourStepEvent<'a> {
     NamesComplete,
@@ -62,7 +69,7 @@ pub struct FourStepLoading {
     observer: Arc<dyn FourStepObserver>,
 }
 
-/// At most 256 distinct pending Get requests, drained at each committed batch.
+/// At most 256 distinct pending Get requests, drained at each host chunk boundary.
 /// Clones share the queue; a full queue refuses rather than silently dropping work.
 #[derive(Clone, Default)]
 pub struct FourStepRequests {
@@ -113,7 +120,7 @@ impl FourStepLoading {
         let maximum = MAX_CHANGESET_SIZE.min(norn_store::MAX_PAGE);
         if bound == 0 || bound > maximum {
             return Err(format!(
-                "four-step transaction bound must be in 1..={maximum}"
+                "four-step host chunk bound must be in 1..={maximum}"
             ));
         }
         let requests = FourStepRequests::default();
@@ -224,10 +231,27 @@ impl FourStepRead<'_> {
         let Some(ready_path) = self.ready_path else {
             return Err("vault still indexing for the first time: no document finished structure at this boundary".into());
         };
+        if !self.metadata_complete
+            && params
+                .columns
+                .iter()
+                .any(|column| matches!(column, norn_wire::Column::Field { .. }))
+        {
+            return Err("vault still indexing for the first time: individual field projections wait for the complete field universe".into());
+        }
         let snapshot = self.snapshot()?;
-        let result = snapshot
-            .get(params, self.model, &crate::text::TextLayer)
-            .map_err(|error| error.to_string());
+        let result = if self.relations_complete {
+            snapshot.get(params, self.model, &crate::text::TextLayer)
+        } else {
+            snapshot.four_step_get(
+                params,
+                &DocumentPath::new(ready_path).map_err(|e| e.to_string())?,
+                self.model,
+                &crate::text::TextLayer,
+                self.metadata_complete,
+            )
+        }
+        .map_err(|error| error.to_string());
         if !self.is_current() {
             return Err(
                 "vault still indexing for the first time: four-step source changed during Get"
@@ -297,7 +321,11 @@ impl ProductionEntryOps {
             loading,
             authority: authority.as_ref(),
             reader: &reader,
-            report: FourStepReport::default(),
+            report: FourStepReport {
+                host_chunk_bound: loading.bound,
+                transaction_bound: 2048,
+                ..FourStepReport::default()
+            },
             changed: false,
             metadata_complete: false,
             search_complete: false,
@@ -307,7 +335,12 @@ impl ProductionEntryOps {
             observer_ns: std::cell::Cell::new(0),
             total_documents: 0,
             structured_documents: 0,
+            group_step: None,
+            group_documents: 0,
+            group_changes: 0,
+            deliveries: Vec::new(),
         };
+        let mut profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
         let counters = four_step::begin(build.store).map_err(store_effect)?;
 
         for step in ["names", "content", "structure", "relations", "full-text"] {
@@ -317,11 +350,16 @@ impl ProductionEntryOps {
         let names_began = Instant::now();
         let names_observer = build.observer_ns.get();
         build.names()?;
+        let counters = four_step::names_complete(build.store).map_err(store_effect)?;
+        build.add("names", counters);
+        build.flush()?;
         build.report.busy_ns.insert(
             "names",
             names_began.elapsed().as_nanos() - (build.observer_ns.get() - names_observer),
         );
+        build.finish_profile("names", profile.take());
         build.boundary("names");
+        profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
         build.observe(FourStepEvent::NamesComplete, None)?;
         build.drain_requests()?;
         let content_began = Instant::now();
@@ -333,10 +371,14 @@ impl ProductionEntryOps {
             if documents.is_empty() {
                 break;
             }
+            build.chunk("content", documents.len())?;
             build.content(documents)?;
             build.batch("content")?;
             build.drain_requests()?;
         }
+        let counters = four_step::content_complete(build.store).map_err(store_effect)?;
+        build.add("content", counters);
+        build.flush()?;
         build.report.busy_ns.insert(
             "content",
             content_began.elapsed().as_nanos()
@@ -344,7 +386,9 @@ impl ProductionEntryOps {
                 - (build.report.pull_ahead_ns - content_pull_ahead),
         );
         build.metadata_complete = true;
+        build.finish_profile("content", profile.take());
         build.boundary("content");
+        profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
         build.report.content_complete_ns = build.began.elapsed().as_nanos();
         build.observe(FourStepEvent::ContentComplete, None)?;
         build.drain_requests()?;
@@ -357,6 +401,7 @@ impl ProductionEntryOps {
             if documents.is_empty() {
                 // A fully pulled-ahead or empty vault can still owe refused spellings.
                 if four_step::has_refused(build.store).map_err(store_effect)? {
+                    build.chunk("structure", loading.bound)?;
                     build.structure(Vec::new())?;
                     build.batch("structure")?;
                     build.drain_requests()?;
@@ -364,32 +409,40 @@ impl ProductionEntryOps {
                 }
                 break;
             }
+            build.chunk("structure", documents.len())?;
             build.structure(documents)?;
             build.batch("structure")?;
             build.drain_requests()?;
         }
+        let counters = four_step::structure_complete(build.store).map_err(store_effect)?;
+        build.add("structure", counters);
+        build.flush()?;
         build.report.busy_ns.insert(
             "structure",
             structure_began.elapsed().as_nanos()
                 - (build.observer_ns.get() - structure_observer)
                 - (build.report.pull_ahead_ns - structure_pull_ahead),
         );
+        build.finish_profile("structure", profile.take());
         build.boundary("structure");
+        profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
         build.observe(FourStepEvent::StructureComplete, None)?;
         build.drain_requests()?;
         let relations_began = Instant::now();
         let relations_observer = build.observer_ns.get();
         let relations_pull_ahead = build.report.pull_ahead_ns;
         loop {
+            build.chunk("relations", loading.bound)?;
             let counters = four_step::health(build.store, loading.bound, declared.content_model())
                 .map_err(store_effect)?;
-            if counters.commits == 0 {
+            if counters.documents_processed == 0 {
                 break;
             }
             build.add("relations", counters);
             build.batch("relations")?;
             build.drain_requests()?;
         }
+        build.flush()?;
         attachment.skipped_links = std::mem::take(&mut build.skipped_links);
         // Every surviving row has complete content/structure before ordinary
         // hash-based reconciliation can skip it. A changed no-body source was
@@ -400,6 +453,8 @@ impl ProductionEntryOps {
                 .is_none_or(|proof| !proof.check_root() || !proof.admits())
         {
             build.report.reconciled = true;
+            let counters = four_step::prepare_reconcile(build.store).map_err(store_effect)?;
+            build.add("relations", counters);
             attachment.skipped_links =
                 heal_documents(build.store, root, &exclusions, self.policy, progress)?;
         }
@@ -410,22 +465,27 @@ impl ProductionEntryOps {
                 - (build.report.pull_ahead_ns - relations_pull_ahead),
         );
         build.relations_complete = true;
+        build.finish_profile("relations", profile.take());
         build.boundary("relations");
+        profile = norn_store::profiling::start(four_step::PROFILE_LABELS).ok();
         build.observe(FourStepEvent::RelationsComplete, None)?;
         build.drain_requests()?;
         let fts_began = Instant::now();
         let fts_observer = build.observer_ns.get();
         let fts_pull_ahead = build.report.pull_ahead_ns;
         loop {
+            build.chunk("full-text", loading.bound)?;
             let counters = four_step::full_text(build.store, loading.fts_mode, loading.bound)
                 .map_err(store_effect)?;
-            if counters.commits == 0 {
+            if counters.fts_rows_inserted == 0 {
+                build.add("full-text", counters);
                 break;
             }
             build.add("full-text", counters);
             build.batch("full-text")?;
             build.drain_requests()?;
         }
+        build.flush()?;
         build.drain_and_close_requests()?;
         let counters = four_step::finish(build.store).map_err(store_effect)?;
         build.add("full-text", counters);
@@ -436,6 +496,7 @@ impl ProductionEntryOps {
                 - (build.report.pull_ahead_ns - fts_pull_ahead),
         );
         build.search_complete = true;
+        build.finish_profile("full-text", profile.take());
         build.boundary("full-text");
         build.observe(FourStepEvent::FullTextComplete, None)?;
         build.observe(FourStepEvent::Complete(&build.report), None)?;
@@ -463,10 +524,77 @@ struct Build<'a> {
     observer_ns: std::cell::Cell<u128>,
     total_documents: u64,
     structured_documents: u64,
+    group_step: Option<&'static str>,
+    group_documents: usize,
+    group_changes: u64,
+    deliveries: Vec<DocumentPath>,
+}
+
+impl Drop for Build<'_> {
+    fn drop(&mut self) {
+        // Chunk savepoints protect local writes; this owns the outer group
+        // if an environmental error, callback refusal or unwind ends the build.
+        let _ = four_step::rollback_group(self.store);
+    }
 }
 
 impl Build<'_> {
-    fn batch(&self, step: &'static str) -> Result<(), JobFailure> {
+    fn finish_profile(
+        &mut self,
+        step: &'static str,
+        recording: Option<norn_store::profiling::Recording>,
+    ) {
+        if let Some(recording) = recording {
+            let report = recording.finish();
+            self.report.profiles.insert(
+                step,
+                report
+                    .entries
+                    .into_iter()
+                    .map(|entry| (entry.label, (entry.calls, entry.elapsed_ns)))
+                    .collect(),
+            );
+        }
+    }
+
+    // Keep parse/read allocations at the host chunk bound while SQLite owns
+    // at most 2048 documents of uncommitted work.
+    fn chunk(&mut self, step: &'static str, documents: usize) -> Result<(), JobFailure> {
+        if self.group_step.is_some_and(|active| active != step)
+            || self.group_documents + documents > 2048
+        {
+            self.flush()?;
+        }
+        if self.group_step.is_none() {
+            self.group_changes = four_step::begin_group(self.store).map_err(store_effect)?;
+            self.group_step = Some(step);
+        }
+        self.group_documents += documents;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), JobFailure> {
+        if let Some(step) = self.group_step.take() {
+            let counters =
+                four_step::commit_group(self.store, self.group_changes).map_err(store_effect)?;
+            *self.report.build_commits.entry(step).or_default() += counters.commits;
+            self.add(step, counters);
+            self.group_documents = 0;
+        }
+        for path in std::mem::take(&mut self.deliveries) {
+            self.observe(
+                FourStepEvent::Structured(path.as_str()),
+                Some(path.as_str()),
+            )?;
+            self.observe(FourStepEvent::GetReady(path.as_str()), Some(path.as_str()))?;
+        }
+        Ok(())
+    }
+
+    fn batch(&mut self, step: &'static str) -> Result<(), JobFailure> {
+        if self.group_documents >= 2048 {
+            self.flush()?;
+        }
         let completed = match step {
             "content" => self.report.steps["content"]["files_read"],
             "structure" => self.structured_documents,
@@ -517,9 +645,14 @@ impl Build<'_> {
                 .extend(requests.iter().map(|(path, _)| path.clone()));
             requests
         };
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.flush()?;
         let began = Instant::now();
         let observer = self.observer_ns.get();
         for (path, requested_at) in requests {
+            self.chunk("structure", 1)?;
             let name = path.as_str().to_owned();
             self.report.request_ns.insert(
                 name.clone(),
@@ -540,8 +673,10 @@ impl Build<'_> {
                 .map_err(store_effect)?
                 .is_some()
             {
+                self.flush()?;
                 self.observe(FourStepEvent::GetReady(path.as_str()), Some(path.as_str()))?;
             }
+            self.flush()?;
             if let Some(structured_at) =
                 four_step::structure_ns(self.store, &path).map_err(store_effect)?
             {
@@ -660,6 +795,7 @@ impl Build<'_> {
                 }
             }
             if documents.len() + files.len() + refused.len() >= self.loading.bound {
+                self.chunk("names", documents.len() + files.len() + refused.len())?;
                 let counters = four_step::names_with_refused(
                     self.store,
                     &documents,
@@ -677,6 +813,7 @@ impl Build<'_> {
             }
         }
         if !documents.is_empty() || !files.is_empty() || !refused.is_empty() {
+            self.chunk("names", documents.len() + files.len() + refused.len())?;
             let counters = four_step::names_with_refused(
                 self.store,
                 &documents,
@@ -693,6 +830,7 @@ impl Build<'_> {
     }
 
     fn read(&mut self, path: &DocumentPath) -> Result<Option<norn_fs::ReadFile>, JobFailure> {
+        let _span = norn_store::profiling::span("lab.read_hash");
         match self.source.fact(Path::new(path.as_str())).map_err(effect)? {
             norn_fs::WalkFact::File(file) => file.read_optional().map_err(effect),
             norn_fs::WalkFact::Skipped(_) => Ok(None),
@@ -716,6 +854,7 @@ impl Build<'_> {
             };
             count_document_derived();
             let hash = read.content_hash().to_string();
+            let parse_span = norn_store::profiling::span("lab.parse_derive");
             let (plan, origin) = crate::derivation::plan_four_step_content(
                 &document.path,
                 read.bytes(),
@@ -723,6 +862,7 @@ impl Build<'_> {
                 self.declared,
                 self.store.path_order().glob_case(),
             );
+            drop(parse_span);
             count_rule_work(plan.rule_work);
             if let Some(Change::Upsert(document)) = plan.change {
                 let origin = origin.expect("decoded content carries its origin");
@@ -787,6 +927,7 @@ impl Build<'_> {
                 document.byte_length,
             );
             fact.body_offset = document.body_offset;
+            let _span = norn_store::profiling::span("lab.parse_derive");
             crate::derivation::four_step_structure(
                 &mut fact,
                 norn_text::SourceSpan {
@@ -858,25 +999,10 @@ impl Build<'_> {
         if !facts.is_empty() {
             *self.report.timing_ns.entry("structure").or_default() +=
                 timing_began.elapsed().as_nanos();
-            *self.report.timing_commits.entry("structure").or_default() += 1;
-            self.add(
-                "structure",
-                StepCounters {
-                    commits: 1,
-                    ..StepCounters::default()
-                },
-            );
+            *self.report.timing_commits.entry("structure").or_default() += 0;
         }
-        for fact in &facts {
-            self.observe(
-                FourStepEvent::Structured(fact.path.as_str()),
-                Some(fact.path.as_str()),
-            )?;
-            self.observe(
-                FourStepEvent::GetReady(fact.path.as_str()),
-                Some(fact.path.as_str()),
-            )?;
-        }
+        self.deliveries
+            .extend(facts.iter().map(|fact| fact.path.clone()));
         Ok(())
     }
 }

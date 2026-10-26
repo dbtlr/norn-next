@@ -324,7 +324,7 @@ fn content_retains_body_column_and_frontmatter_tag_names_for_structure() {
 }
 
 #[test]
-fn each_name_or_content_chunk_shares_one_write_generation() {
+fn only_content_stamps_each_document_with_a_write_generation() {
     let scratch = scratch();
     let mut store = open(&scratch.join("store.sqlite3"));
     let documents = [
@@ -343,10 +343,7 @@ fn each_name_or_content_chunk_shares_one_write_generation() {
         &ContentModel::none(),
     )
     .unwrap();
-    assert_eq!(
-        store.begin_request().write_generation().unwrap(),
-        before + 1
-    );
+    assert_eq!(store.begin_request().write_generation().unwrap(), before);
     for facts in &documents {
         assert_eq!(
             store
@@ -355,7 +352,7 @@ fn each_name_or_content_chunk_shares_one_write_generation() {
                 .unwrap()
                 .unwrap()
                 .generation,
-            before + 1
+            before
         );
     }
     four_step::content(
@@ -369,7 +366,7 @@ fn each_name_or_content_chunk_shares_one_write_generation() {
     .unwrap();
     assert_eq!(
         store.begin_request().write_generation().unwrap(),
-        before + 2
+        before + 1
     );
     for facts in &documents {
         assert_eq!(
@@ -379,7 +376,7 @@ fn each_name_or_content_chunk_shares_one_write_generation() {
                 .unwrap()
                 .unwrap()
                 .generation,
-            before + 2
+            before + 1
         );
     }
 }

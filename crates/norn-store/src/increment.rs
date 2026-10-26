@@ -8,9 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use norn_db::rusqlite::{
-    CachedStatement, OptionalExtension, Transaction, params, params_from_iter,
-};
+use norn_db::rusqlite::{CachedStatement, Connection, OptionalExtension, params, params_from_iter};
 use norn_wire::{FindingKind, fold_tag};
 
 use crate::counters::{Counter, DerivationCounters};
@@ -543,7 +541,9 @@ impl FindingsDiscard {
 }
 
 impl<'t> Statements<'t> {
-    pub(crate) fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
+    pub(crate) fn prepare(
+        transaction: &'t norn_db::rusqlite::Connection,
+    ) -> Result<Self, StoreError> {
         // Every statement but the three findings discards is taken from the
         // registry, which is the one place a write statement's text is spelled:
         // see [`crate::write_path`]. The discards are the plan seam's own
@@ -1009,6 +1009,8 @@ pub(crate) fn insert_fact_rows(
             Some(LinkAnchor::Block { id }) => (None, None, Some(id)),
             None => (None, None, None),
         };
+        #[cfg(feature = "induced-failure")]
+        let link_span = norn_db::profiling::span("lab.rows.links");
         let row: i64 = statements
             .insert_link
             .insert(params![
@@ -1030,9 +1032,13 @@ pub(crate) fn insert_fact_rows(
                 link.field,
             ])
             .map_err(|error| error::sql("writing a link row", error))?;
+        #[cfg(feature = "induced-failure")]
+        drop(link_span);
         count += 1;
         for key in link_keys(link, &facts.path) {
             count += 1;
+            #[cfg(feature = "induced-failure")]
+            let _row_span = norn_db::profiling::span("lab.rows.link_keys");
             statements
                 .insert_link_key
                 .execute(params![row, document, key.key, key.segments])
@@ -1042,6 +1048,8 @@ pub(crate) fn insert_fact_rows(
 
     for (ordinal, heading) in facts.headings.iter().filter(|_| part.body()).enumerate() {
         count += 1;
+        #[cfg(feature = "induced-failure")]
+        let _row_span = norn_db::profiling::span("lab.rows.headings");
         statements
             .insert_heading
             .execute(params![
@@ -1062,6 +1070,8 @@ pub(crate) fn insert_fact_rows(
 
     for (ordinal, block) in facts.blocks.iter().filter(|_| part.body()).enumerate() {
         count += 1;
+        #[cfg(feature = "induced-failure")]
+        let _row_span = norn_db::profiling::span("lab.rows.blocks");
         statements
             .insert_block
             .execute(params![
@@ -1077,6 +1087,8 @@ pub(crate) fn insert_fact_rows(
 
     for (ordinal, tag) in facts.tags.iter().filter(|tag| part.tags(tag)).enumerate() {
         count += 1;
+        #[cfg(feature = "induced-failure")]
+        let _row_span = norn_db::profiling::span("lab.rows.document_tags");
         statements
             .insert_tag
             .execute(params![
@@ -1132,6 +1144,8 @@ pub(crate) fn insert_fact_rows(
             facts.path.as_str(),
             "a field row carries the path of the document it was derived for"
         );
+        #[cfg(feature = "induced-failure")]
+        let _row_span = norn_db::profiling::span("lab.rows.document_fields");
         statements
             .insert_field
             .execute(params![
@@ -1172,7 +1186,7 @@ pub(crate) fn check_derived_findings(findings: &[DerivedFinding<'_>]) -> Result<
 }
 
 pub(crate) fn write_derived_findings(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     findings: &[DerivedFinding<'_>],
 ) -> Result<u64, StoreError> {
     let mut discarded = 0;
