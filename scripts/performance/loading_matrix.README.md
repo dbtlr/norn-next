@@ -13,8 +13,8 @@ Run from the harness checkout after committing Rust changes. Keep `TMPDIR` short
 for the filesystem socket tests. All outputs stay inside this checkout.
 
 ```bash
-mkdir -p t target
-export TMPDIR="$PWD/t" CARGO_TARGET_DIR="$PWD/target"
+mkdir -p target/t
+export TMPDIR="$PWD/target/t" CARGO_TARGET_DIR="$PWD/target"
 python3 scripts/performance/loading_matrix.py --prepare-builds "$PWD/target/loading-builds"
 python3 scripts/performance/loading_matrix.py --prepare-plan --sizes 2014 10014 > target/loading-plan.json
 python3 scripts/performance/loading_matrix.py --config target/loading-builds/config.json --freeze-fixtures target/frozen --sizes 314 2014 10014
