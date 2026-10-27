@@ -2073,6 +2073,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/path-bytes-not-utf8",
         "document/path-names-no-document",
         "document/body-bytes-not-utf8",
+        "document/unreadable",
         "document/frontmatter-too-large",
         "document/frontmatter-unclosed",
         "document/frontmatter-unreadable",
@@ -2099,7 +2100,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         assert_eq!(FindingKind::try_from(string), Ok(kind));
     }
     assert_eq!(
-        FindingKind::try_from("document/unreadable"),
+        FindingKind::try_from("directory/unreadable"),
         Err(UnknownFindingKind)
     );
 }
@@ -2138,6 +2139,7 @@ fn the_two_scopes_partition_the_finding_kinds() {
             "document/misplaced",
             "document/rules-conflict",
             "document/undeclared-tag",
+            "document/unreadable",
             "field/forbidden",
             "field/not-one-of",
             "field/required-missing",
@@ -2535,7 +2537,7 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
         "a null phase read back as a phase"
     );
     assert!(
-        serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),
+        serde_json::from_str::<FindingKind>(r#""directory/unreadable""#).is_err(),
         "a finding kind nobody minted read back as one"
     );
     assert!(
@@ -2956,7 +2958,7 @@ fn a_predicate_refuses_a_target_outside_the_grammar() {
         "a part carrying an addressless target read back as one"
     );
     assert!(
-        serde_json::from_str::<Predicate>(r#"{"op":"has_finding","kind":"document/unreadable"}"#)
+        serde_json::from_str::<Predicate>(r#"{"op":"has_finding","kind":"directory/unreadable"}"#)
             .is_err(),
         "a part carrying a finding kind nobody minted read back as one"
     );
@@ -4747,7 +4749,7 @@ fn an_unprojected_column_is_absent_from_the_row() {
     let projected = bare.clone().with_body(body("hello", 5));
     assert_eq!(
         wire(&projected),
-        r#"{"path":"notes/a.md","body":{"text":"hello","byte_length":5}}"#
+        r#"{"path":"notes/a.md","body":{"state":"known","value":{"text":"hello","byte_length":5}}}"#
     );
     let read: DocumentRow =
         serde_json::from_str(r#"{"path":"notes/a.md"}"#).expect("a row projecting nothing");
@@ -4794,8 +4796,8 @@ fn a_present_null_is_not_an_absent_field() {
     assert_eq!(
         wire(&row),
         concat!(
-            r#"{"path":"notes/a.md","fields":{"area":{"kind":"absent"},"#,
-            r#""due":{"kind":"null"}}}"#
+            r#"{"path":"notes/a.md","fields":{"state":"known","value":{"area":{"kind":"absent"},"#,
+            r#""due":{"kind":"null"}}}}"#
         )
     );
     round_trip(&row);
@@ -5692,8 +5694,8 @@ fn a_block_anchor_is_answered_with_the_block_it_named() {
         wire(&report),
         concat!(
             r#"{"shape":"block","path":"notes/a.md","#,
-            r#""block":{"id":"a1","span":{"line":3,"column":1,"byte_offset":42}},"#,
-            r#""body":{"text":"the block body","byte_length":14}}"#
+            r#""block":{"state":"known","value":{"id":"a1","span":{"line":3,"column":1,"byte_offset":42}}},"#,
+            r#""body":{"state":"known","value":{"text":"the block body","byte_length":14}}}"#
         )
     );
     assert_eq!(
@@ -6152,7 +6154,7 @@ fn every_validate_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","predicates":"##,
             PINNED_PREDICATES,
-            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","link/vault-scheme","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/unreadable","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","link/vault-scheme","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]
@@ -6185,7 +6187,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12,"rule_set":null,"value":null}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"state":"known","value":{"type":{"kind":"scalar","raw":"note"}}},"body":{"state":"known","value":{"text":"Design\n","byte_length":4096}},"links":{"state":"known","value":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9}},"headings":{"state":"known","value":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"blocks":{"state":"known","value":{"items":[{"id":"a1","span":null}],"total":1}},"tags":{"state":"known","value":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1}},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12,"rule_set":null,"value":null}],"total":1}}"##,
         ]
         .concat()
     );
@@ -11729,6 +11731,7 @@ fn a_skip_reason_is_one_of_the_closed_snake_case_reasons() {
         (SkipReason::Tie, "tie"),
         (SkipReason::BelowThreshold, "below_threshold"),
         (SkipReason::Unreadable, "unreadable"),
+        (SkipReason::UnreadableTarget, "unreadable_target"),
         (SkipReason::ConflictingDefaults, "conflicting_defaults"),
         (
             SkipReason::BringsInRequiredFields,
@@ -12521,4 +12524,111 @@ fn a_rewrite_tag_round_trips_with_its_fields() {
         serde_json::from_value::<Operation>(json).expect("an operation"),
         operation
     );
+}
+
+#[test]
+fn unreadable_content_is_distinct_from_unprojected_and_empty_content() {
+    use norn_wire::{Content, UnknownReason};
+
+    let bare = DocumentRow::new(path("locked.md"));
+    let empty = bare.clone().with_body(body("", 0));
+    let broken = bare
+        .clone()
+        .with_fields(Content::unknown(UnknownReason::Unreadable))
+        .with_body(Content::unknown(UnknownReason::Unreadable))
+        .with_links(Content::unknown(UnknownReason::Unreadable))
+        .with_headings(Content::unknown(UnknownReason::Unreadable))
+        .with_blocks(Content::unknown(UnknownReason::Unreadable))
+        .with_tags(Content::unknown(UnknownReason::Unreadable))
+        .with_findings(collection(
+            vec![FindingRow::new(
+                1,
+                FindingKind::UnreadableDocument,
+                Severity::Error,
+                path("locked.md"),
+                None,
+                None,
+                no_head(),
+                None,
+                "Permission denied (os error 13)",
+                12,
+            )],
+            1,
+        ));
+    let json = serde_json::to_value(&broken).expect("a broken document");
+    for column in ["fields", "body", "links", "headings", "blocks", "tags"] {
+        assert_eq!(
+            json[column],
+            serde_json::json!({"state":"unknown","reason":"unreadable"})
+        );
+    }
+    assert_eq!(json["findings"]["items"][0]["kind"], "document/unreadable");
+    assert_eq!(json["findings"]["items"][0]["severity"], "error");
+    assert_eq!(
+        json["findings"]["items"][0]["message"],
+        "Permission denied (os error 13)"
+    );
+    assert_eq!(wire(&bare), r#"{"path":"locked.md"}"#);
+    assert_eq!(
+        wire(&empty),
+        r#"{"path":"locked.md","body":{"state":"known","value":{"text":"","byte_length":0}}}"#
+    );
+    assert_ne!(broken, empty);
+    round_trip(&broken);
+    round_trip(&Content::known(body("", 0)));
+    round_trip(&Content::<BodyText>::unknown(UnknownReason::Unreadable));
+    let null: DocumentRow =
+        serde_json::from_str(r#"{"path":"locked.md","body":null}"#).expect("unprojected null");
+    assert_eq!(null, bare);
+    assert!(
+        serde_json::from_str::<Content<BodyText>>(r#"{"state":"unknown","reason":"loading"}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn anchored_gets_carry_unknown_unreadable_content() {
+    use norn_wire::{Content, UnknownReason};
+
+    for report in [
+        GetReport::section(
+            path("locked.md"),
+            Content::unknown(UnknownReason::Unreadable),
+            Content::unknown(UnknownReason::Unreadable),
+        ),
+        GetReport::block(
+            path("locked.md"),
+            Content::unknown(UnknownReason::Unreadable),
+            Content::unknown(UnknownReason::Unreadable),
+        ),
+    ] {
+        let json = serde_json::to_value(&report).expect("an anchored get");
+        let metadata = if json["shape"] == "section" {
+            "heading"
+        } else {
+            "block"
+        };
+        for column in [metadata, "body"] {
+            assert_eq!(
+                json[column],
+                serde_json::json!({"state":"unknown","reason":"unreadable"})
+            );
+        }
+        round_trip(&report);
+    }
+}
+
+#[test]
+fn an_unreadable_document_finding_stands_beside_its_names_only_row() {
+    let kind: FindingKind =
+        serde_json::from_str(r#""document/unreadable""#).expect("unreadable document kind");
+    assert_eq!(kind, FindingKind::UnreadableDocument);
+    assert_eq!(kind.scope(), FindingScope::Document);
+    assert_eq!(kind.default_severity(), Severity::Error);
+    round_trip(&kind);
+    assert_eq!(
+        wire(&SkipReason::UnreadableTarget),
+        r#""unreadable_target""#
+    );
+    round_trip(&SkipReason::UnreadableTarget);
 }

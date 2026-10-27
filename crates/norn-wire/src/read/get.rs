@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page};
 use crate::document::{
-    BlockRow, BodyText, Column, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
+    BlockRow, BodyText, Column, Content, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
 };
 use crate::finding_row::FindingRow;
 use crate::read::validate::RuleSet;
@@ -175,21 +175,21 @@ pub enum GetReport {
     Section {
         /// The document the section is in.
         path: DocumentPath,
-        /// The heading that opens it.
-        heading: HeadingRow,
+        /// The heading that opens it, or why it is unknown.
+        heading: Content<HeadingRow>,
         /// The section body, from the heading to the start of the line
-        /// holding the next one at its level or above.
-        body: BodyText,
+        /// holding the next one at its level or above, or why it is unknown.
+        body: Content<BodyText>,
     },
     /// The block the target's block anchor named.
     #[non_exhaustive]
     Block {
         /// The document the block is in.
         path: DocumentPath,
-        /// The block identifier the anchor named, and where it is defined.
-        block: BlockRow,
-        /// The block body.
-        body: BodyText,
+        /// The block identifier and its position, or why they are unknown.
+        block: Content<BlockRow>,
+        /// The block body, or why it is unknown.
+        body: Content<BodyText>,
     },
     /// One page of one nested collection.
     #[non_exhaustive]
@@ -211,17 +211,29 @@ impl GetReport {
     }
 
     /// The section `heading` opens in the document at `path`, holding `body`.
-    pub const fn section(path: DocumentPath, heading: HeadingRow, body: BodyText) -> Self {
+    pub fn section(
+        path: DocumentPath,
+        heading: impl Into<Content<HeadingRow>>,
+        body: impl Into<Content<BodyText>>,
+    ) -> Self {
         GetReport::Section {
             path,
-            heading,
-            body,
+            heading: heading.into(),
+            body: body.into(),
         }
     }
 
     /// The `block` in the document at `path`, holding `body`.
-    pub const fn block(path: DocumentPath, block: BlockRow, body: BodyText) -> Self {
-        GetReport::Block { path, block, body }
+    pub fn block(
+        path: DocumentPath,
+        block: impl Into<Content<BlockRow>>,
+        body: impl Into<Content<BodyText>>,
+    ) -> Self {
+        GetReport::Block {
+            path,
+            block: block.into(),
+            body: body.into(),
+        }
     }
 
     /// The `page` of one collection on the document at `path`.
