@@ -298,8 +298,8 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     },
     ManifestFile {
         path: "crates/norn-host/tests/kill_recovery.rs",
-        why: "the crash-convergence case: what the next attach after a process died mid-increment \
-              is required to converge on",
+        why: "the crash-convergence cases: what the next attach after a process died mid-increment \
+              converges on, and what it rebuilds from zero after one died mid-build",
     },
     ManifestFile {
         path: "crates/norn-fs/tests/lockdown.rs",

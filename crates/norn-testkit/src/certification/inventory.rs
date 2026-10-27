@@ -460,6 +460,16 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-full-disk-first-build-rebuilds",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "a first build a full disk refused leaves its under-construction mark, and the \
+                 next attach builds the vault from zero",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_first_build_refused_for_a_full_disk_leaves_the_mark_and_the_next_attach_rebuilds",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-unreadable-document-recovers",
         suite: Suite::InducedFailure,
         lane: Lane::RealWatcher,
@@ -555,6 +565,16 @@ pub const REQUIRED_CASES: &[Case] = &[
                  tear lost returns through the heal's ordinary content-hash comparison",
         carrier: "crates/norn-host/tests/kill_recovery.rs::\
                   next_attach_converges_after_process_death_mid_increment",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-kill-mid-build-rebuilds-from-zero",
+        suite: Suite::InducedFailure,
+        lane: Lane::RealWatcher,
+        states: "the next attach after a process died mid-way through a first build finds the \
+                 under-construction mark and builds from zero rather than resuming",
+        carrier: "crates/norn-host/tests/kill_recovery.rs::\
+                  next_attach_rebuilds_from_zero_after_process_death_mid_build",
         feature: Some(INDUCED_FAILURE),
     },
     Case {

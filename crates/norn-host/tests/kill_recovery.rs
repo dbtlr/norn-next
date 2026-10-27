@@ -11,11 +11,16 @@ mod attach;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
-use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead};
+use norn_host::{
+    Host, LifecyclePolicy, LoadingBoundary, LoadingProbe, ProductionEntryOps, ProductionPolicy,
+    RegistryRead,
+};
 use norn_store::induced_failure::{ARM_HITS, INCREMENT_SEAM};
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
@@ -29,7 +34,12 @@ use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";
 const VAULT_ENV: &str = "NORN_HOST_TORN_INCREMENT_VAULT";
+const BUILD_CHILD_ENV: &str = "NORN_HOST_KILLED_BUILD_CHILD";
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// The documents the killed build is over: enough for the build to cross
+/// several pages of two.
+const BUILD_DOCUMENTS: usize = 8;
 
 #[test]
 #[ignore = "fault-lane case: induced recovery runs in full regression"]
@@ -139,6 +149,152 @@ fn next_attach_converges_after_process_death_mid_increment() {
     }
 }
 
+/// Ends the process at the second canonical page of the build it is installed on.
+///
+/// The canonical page boundary is the only one that counts: intake changesets
+/// into the disposable metadata database advance the same changeset counter as
+/// the canonical store's, so a counter-armed abort would fire inside them.
+struct DieAtTheSecondPage(AtomicUsize);
+
+impl LoadingProbe for DieAtTheSecondPage {
+    fn at(&self, boundary: LoadingBoundary<'_>) {
+        if matches!(boundary, LoadingBoundary::CanonicalPage)
+            && self.0.fetch_add(1, Ordering::SeqCst) + 1 == 2
+        {
+            std::process::abort();
+        }
+    }
+}
+
+fn body_of(index: usize) -> String {
+    format!("# Document {index}\n\nA body for document {index}.\n")
+}
+
+/// **A process killed mid-way through a vault's first build leaves the mark, and
+/// the next attach builds from zero instead of resuming.**
+///
+/// The child attaches a fresh vault of eight documents through the real host,
+/// two to a page, and ends at the second canonical page: at least one changeset
+/// of the build has committed and the build has not ended. The parent reads the
+/// store through a read-only handle before any attach — so the case cannot pass
+/// by killing the child before it wrote anything, or after it finished — and
+/// finds the mark standing over some but not all of the rows. The next attach
+/// opens a rebuilt store (a new epoch, so no row was carried), reaches `Ready`,
+/// and holds every document at the hash of its bytes with the mark gone.
+#[test]
+#[ignore = "fault-lane case: induced recovery runs in full regression"]
+fn next_attach_rebuilds_from_zero_after_process_death_mid_build() {
+    if let Some(root) = std::env::var_os(BUILD_CHILD_ENV) {
+        die_mid_build(Path::new(&root));
+    }
+
+    let mut fixture = Fixture::unleased(Scratch::new("norn-host-kill-mid-build"));
+    for index in 0..BUILD_DOCUMENTS {
+        fixture.write(&format!("doc-{index}.md"), &body_of(index));
+    }
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "next_attach_rebuilds_from_zero_after_process_death_mid_build",
+            "--nocapture",
+            "--include-ignored",
+        ])
+        .env(BUILD_CHILD_ENV, fixture.root.root())
+        .output()
+        .expect("run killed-build subprocess");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            output.status.signal(),
+            Some(6),
+            "the child ended some way other than the abort the probe raises\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // Read before any attach, through a handle that cannot write: the mark
+    // stands over a partial derivation.
+    let (marked, rows, epoch) = read_the_store_raw(&fixture.database);
+    assert!(marked, "the killed build left no mark");
+    assert!(
+        0 < rows && rows < BUILD_DOCUMENTS,
+        "the child ended with {rows} of {BUILD_DOCUMENTS} rows, so the kill did not land mid-build"
+    );
+
+    fixture.lease();
+    attach_and_wait(fixture.host(), &fixture.name);
+
+    let mut store = Store::open(
+        &fixture.database,
+        proven_order(&fixture.vault),
+        norn_host::DERIVATION_VERSION,
+    )
+    .expect("open the rebuilt store");
+    assert_eq!(*store.open_outcome(), norn_store::OpenOutcome::Reused);
+    assert!(!store.under_construction());
+    assert_ne!(
+        store.epoch(),
+        epoch,
+        "the attach resumed over the killed build's store"
+    );
+    let rows = store
+        .begin_request()
+        .stored_documents_after_ordered(None, 16, StoredPathOrder::Sensitive)
+        .expect("read stored documents");
+    assert_eq!(rows.len(), BUILD_DOCUMENTS);
+    for index in 0..BUILD_DOCUMENTS {
+        let row = rows
+            .iter()
+            .find(|row| row.path.as_str() == format!("doc-{index}.md"))
+            .expect("a derived document");
+        assert_eq!(
+            row.content_hash,
+            Some(norn_fs::ContentHash::of(body_of(index).as_bytes()).to_string())
+        );
+    }
+}
+
+/// Whether the mark stands, how many document rows the store holds, and its
+/// epoch — read through a read-only handle.
+fn read_the_store_raw(database: &Path) -> (bool, usize, String) {
+    let open = norn_db::open_read_only(database);
+    let database = open.adopted.expect("a read-only open of the killed store");
+    let connection = database.connection();
+    let marked = norn_db::meta::get_meta::<norn_db::rusqlite::types::Value>(
+        connection,
+        "under_construction",
+    )
+    .expect("reading the mark")
+    .is_some();
+    let rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+        .expect("counting rows");
+    let epoch: String = norn_db::meta::get_meta(connection, norn_db::meta::STORE_EPOCH)
+        .expect("reading the epoch")
+        .expect("a created store has an epoch");
+    (marked, rows as usize, epoch)
+}
+
+/// The child: attach the vault under `root` and be killed by the probe.
+fn die_mid_build(root: &Path) -> ! {
+    let _lease = Lease::hold(
+        isolation::REAL_WATCHER,
+        isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
+    );
+    let name = VaultName::new("notes").expect("vault name");
+    let host = production_host(
+        root,
+        &root.join("vault"),
+        &name,
+        ProductionPolicy::new(2, 2).unwrap(),
+        |ops| ops.with_loading_probe(Arc::new(DieAtTheSecondPage(AtomicUsize::new(0)))),
+    );
+    attach_and_wait(host, &name);
+    panic!("the build finished instead of being killed")
+}
+
 fn tear_increment() -> ! {
     let database =
         PathBuf::from(std::env::var_os(DATABASE_ENV).expect("database passed to child process"));
@@ -235,16 +391,30 @@ struct Fixture {
     //
     // The child this case spawns takes none of its own: it opens the derived
     // store and dies inside a changeset, and it never attaches.
-    _watcher_lease: Lease,
+    //
+    // A case whose child attaches takes none up front: the child holds the
+    // machine's one live watcher while it runs, and the parent takes it back
+    // with [`Fixture::lease`] once the child is gone.
+    _watcher_lease: Option<Lease>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let lease = Lease::hold(
+        let mut fixture = Self::unleased(Scratch::new("norn-host-kill-recovery"));
+        fixture.lease();
+        fixture
+    }
+
+    /// Take the real-watcher lease, for the rest of the fixture's life.
+    fn lease(&mut self) {
+        self._watcher_lease = Some(Lease::hold(
             isolation::REAL_WATCHER,
             isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
-        );
-        let root = Scratch::new("norn-host-kill-recovery");
+        ));
+    }
+
+    /// A fixture over `root` that holds no lease yet.
+    fn unleased(root: Scratch) -> Self {
         let vault = root.join("vault");
         fs::create_dir_all(vault.join(".norn")).expect("create vault");
         fs::write(vault.join(".norn/schema.yaml"), "version: 1\n").expect("write schema");
@@ -259,7 +429,7 @@ impl Fixture {
             database,
             hits,
             name,
-            _watcher_lease: lease,
+            _watcher_lease: None,
         }
     }
 
@@ -268,25 +438,41 @@ impl Fixture {
     }
 
     fn host(&self) -> Host<ProductionEntryOps> {
-        let entry = Entry::new(
-            self.name.clone(),
-            VaultRoot::new(&self.vault).expect("vault root"),
-        );
-        let registry = RegistryRead::from_entries([entry.clone()]);
-        let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
-            .expect("config directories");
-        Host::new(
-            registry,
-            // Eight exceeds this fixture's three documents, so healing uses
-            // one increment and the generation assertion remains exact.
-            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 8).unwrap()),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_millis(5),
-                read_settle_bound: norn_host::READ_SETTLE_BOUND,
-            },
-        )
-        .expect("production host")
+        // Eight exceeds this fixture's three documents, so healing uses
+        // one increment and the generation assertion remains exact.
+        self.host_over(ProductionPolicy::new(2, 8).unwrap(), |ops| ops)
     }
+
+    /// A host whose entry operations `shape` may adjust, such as to install a probe.
+    fn host_over(
+        &self,
+        policy: ProductionPolicy,
+        shape: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
+    ) -> Host<ProductionEntryOps> {
+        production_host(self.root.root(), &self.vault, &self.name, policy, shape)
+    }
+}
+
+/// A production host over `vault`, with the machine-local directories under `root`.
+fn production_host(
+    root: &Path,
+    vault: &Path,
+    name: &VaultName,
+    policy: ProductionPolicy,
+    shape: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
+) -> Host<ProductionEntryOps> {
+    let entry = Entry::new(name.clone(), VaultRoot::new(vault).expect("vault root"));
+    let registry = RegistryRead::from_entries([entry]);
+    let dirs = ConfigDirs::new(root.join("config"), root.join("data")).expect("config directories");
+    Host::new(
+        registry,
+        shape(ProductionEntryOps::new(dirs, policy)),
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(60),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_millis(5),
+            read_settle_bound: norn_host::READ_SETTLE_BOUND,
+        },
+    )
+    .expect("production host")
 }

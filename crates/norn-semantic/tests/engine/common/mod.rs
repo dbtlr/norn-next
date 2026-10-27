@@ -37,13 +37,19 @@ impl Scratch {
         self.root.join("derived").join("semantic.sqlite3")
     }
 
+    /// The fixture's store, finished: a second handle opened on it adopts it
+    /// rather than rebuilding the store an unfinished build left.
     pub fn store(&self) -> Store {
-        Store::open(
+        let mut store = Store::open(
             self.store_path(),
             norn_store::StoredPathOrder::Sensitive,
             norn_store::DerivationVersion::new(1),
         )
-        .expect("opening a store")
+        .expect("opening a store");
+        store
+            .finish_construction()
+            .expect("finishing the fixture's construction");
+        store
     }
 
     pub fn engine(&self, embedder: Arc<dyn Embedder>) -> Engine {

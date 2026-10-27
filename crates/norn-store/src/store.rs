@@ -1097,8 +1097,14 @@ impl Store {
     ///
     /// The parent directory is prepared if it is missing. A database that is not
     /// the shape this build writes, whose rows were derived under another
-    /// order, or whose rows another derivation wrote, is rebuilt from zero, and
-    /// [`Store::open_outcome`] says whether that happened and why.
+    /// order, whose rows another derivation wrote, or whose construction never
+    /// finished, is rebuilt from zero, and [`Store::open_outcome`] says whether
+    /// that happened and why.
+    ///
+    /// A store the open created or rebuilt is under construction
+    /// ([`Store::under_construction`]): the caller derives the vault into it and
+    /// ends the build with [`Store::finish_construction`], and a store whose
+    /// build never ended is rebuilt by the next open rather than resumed.
     pub fn open(
         path: impl AsRef<Path>,
         order: StoredPathOrder,
@@ -1862,6 +1868,9 @@ impl Store {
     /// database beside it, holding what a fresh create holds: **nothing**.
     /// Everything the discarded database held is derived state, and the caller's
     /// next act is deriving it again from the vault.
+    ///
+    /// The replacement is a create, so it is under construction until the
+    /// caller's build ends it ([`Store::finish_construction`]).
     ///
     /// The store handed back is opened under `order`, which is the case
     /// behaviour its root is proven to have now: a store rebuilt because that
