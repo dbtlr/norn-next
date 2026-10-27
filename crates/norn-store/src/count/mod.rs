@@ -19,11 +19,15 @@
 //! groups**: the tallies of a page can sum past the documents the conjunction
 //! matches.
 //!
-//! **`null` is a document holding no scalar value under the key**: the key
-//! missing, a map, an empty sequence, a sequence of nulls, and — under a key
-//! the declaration gives a typed order — no value that reads as the declared
-//! type. A document holding any value under the key is in that value's group
-//! and not in `null`'s.
+//! **`null` is a readable document holding no scalar value under the key**:
+//! the key missing, a map, an empty sequence, a sequence of nulls, and — under
+//! a key the declaration gives a typed order — no value that reads as the
+//! declared type. A document holding any value under the key is in that
+//! value's group and not in `null`'s.
+//!
+//! **Broken content is unknown, never absent.** A broken document belongs to
+//! no field or tag group, including `null` in any tuple position. Ungrouped
+//! counts include it when their predicates require only its path or nothing.
 //!
 //! **A key with a typed order groups by typed equality.** Where the
 //! declaration gives the key a typed order, a group is the values sharing one

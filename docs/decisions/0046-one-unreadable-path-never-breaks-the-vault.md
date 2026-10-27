@@ -300,8 +300,11 @@ columns and pages project normally, including the unreadable-document finding. T
 phase 6. This breaking wire change is accepted before 1.0 and reaches the JSON schema and
 every client and consumer in the workspace.
 
-A field, tag or link Find predicate does not match the document, because those facts are
-gone. A path-only Find lists it, and links to its name still resolve. An anchor on it is
+A field, tag or link Find predicate does not match the document, because its content is
+unknown. This includes absence and negation: unknown content establishes neither. Count
+grouped by a field or tag excludes the document; ungrouped and path-only counts include it.
+No extra wire carrier is used for these groupings. A path-only Find lists it, and links to
+its name still resolve. An anchor on it is
 unjudged: `body IS NULL` means its headings and blocks are unknown, whether it was read
 before or never read. An empty readable document holds a hash and body `''`, so its
 missing anchors are still judged. The predicate tests the absent body by one primary-key
@@ -320,7 +323,8 @@ written. Repair skips that fix with `SkipReason::UnreadableTarget`, spelled
 reads a tree becomes `Before::Unread`, not a failed repair. A fix that reads no evidence
 from the broken document proceeds, and once the document reads again the skipped fix is proposed as any fix is. The
 write protocol's check of a target's before-state still refuses a write to the broken path
-itself.
+itself. Preview and apply of an already-resolved plan keep the `vault/write-failed` code
+when a target file cannot be read; path classification does not change their refusal codes.
 
 **A finding whose subject the vault no longer holds is reached by the next walk whose clean
 scope covers its place.** The gap ADR 0019 recorded is closed on the subject axis: the stale

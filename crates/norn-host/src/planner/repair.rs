@@ -441,12 +441,14 @@ impl<V: VaultView, I: Following + ?Sized> Reading for Over<'_, V, I> {
     /// composes a document's fixes onto.
     fn before(&self, path: &DocumentPath) -> Result<Before, Self::Error> {
         let at = self.place(path);
-        Ok(match self.view.entry(&at).map_err(Unread::View)? {
-            Entry::Document {
+        Ok(match self.view.entry(&at) {
+            Ok(Entry::Document {
                 body: Body::Held(bytes),
                 ..
-            } => Before::Held(bytes),
-            _ => Before::Unread,
+            }) => Before::Held(bytes),
+            Ok(_) => Before::Unread,
+            Err(error) if V::is_unreadable(&error) => Before::Unread,
+            Err(error) => return Err(Unread::View(error)),
         })
     }
 
@@ -734,6 +736,76 @@ mod tests {
     use super::*;
     use crate::planner::compose::content_hash;
 
+    /// A path failure met by repair's tree read skips that document's fix,
+    /// while an independent document still contributes its fix.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the files repair reads.
+    fn a_path_failure_during_a_repair_tree_read_skips_only_that_documents_fix() {
+        use crate::planner::control::SchemaPlace;
+        use crate::planner::links::testing::EmptyStore;
+        use crate::planner::view::{Remembered, TreeView};
+
+        let scratch = norn_testkit::scratch::Scratch::new("repair-tree-unreadable");
+        for name in ["a.md", "b.md"] {
+            std::fs::write(scratch.join(name), "---\ntype: task\n---\n# Task\n").unwrap();
+        }
+        let tree = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).unwrap();
+        let view = Remembered::over(&tree);
+        let index = (
+            EmptyStore::new(),
+            std::marker::PhantomData::<std::convert::Infallible>,
+        );
+        let declared = Declared::pinned(
+            norn_config::schema::VaultSchema::parse(
+                b"version: 1\nrules:\n  tasks:\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n",
+            )
+            .unwrap(),
+            "a fingerprint",
+        );
+        let clock = || panic!("a literal default reads no clock");
+        let reading = OneReading::of(&clock);
+        let repairing = Repairing {
+            work: std::cell::Cell::default(),
+            declared: &declared,
+            case: CaseFold::Exact,
+            clock: &reading,
+            rule_sets: &[],
+            threshold: Confidence::DEFAULT_THRESHOLD,
+        };
+        let rows = [(1, "a.md"), (2, "b.md")].map(|(id, path)| {
+            let mut row = row(id, FindingKind::RequiredMissing, path, None);
+            row.target = Some("status".to_owned());
+            row
+        });
+        let _denied = norn_fs::deny_document_opens(&scratch.join("a.md"));
+
+        let planned = super::plan(
+            &rows,
+            &BTreeMap::new(),
+            &repairing,
+            &Over {
+                view: &view,
+                index: &index,
+            },
+        )
+        .expect("one unreadable document does not fail repair");
+
+        assert_eq!(
+            planned.skipped,
+            vec![SkippedFinding::new(1, SkipReason::Unreadable)]
+        );
+        assert_eq!(planned.operations.len(), 1);
+        assert_eq!(
+            planned.operations[0].kind,
+            norn_wire::OperationKind::set_frontmatter(
+                norn_wire::WriteTarget::path(DocumentPath::new("b.md").unwrap()),
+                "status",
+                norn_wire::AuthoredValue::string("todo"),
+            )
+        );
+    }
+
     fn row(id: u64, kind: FindingKind, at: &str, value: Option<&str>) -> FindingRow {
         let row = FindingRow::new(
             id,
@@ -882,6 +954,7 @@ mod tests {
     #[test]
     fn a_finding_about_a_document_nothing_read_is_skipped_as_unreadable() {
         let unreadable = [
+            FindingKind::UnreadableDocument,
             FindingKind::PathBytesNotUtf8,
             FindingKind::PathNamesNoDocument,
             FindingKind::BodyBytesNotUtf8,

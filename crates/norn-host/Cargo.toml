@@ -74,7 +74,8 @@ norn-wire = { path = "../norn-wire" }
 norn-db = { path = "../norn-db" }
 norn-fixtures = { path = "../norn-fixtures" }
 # The planner's in-memory vault states a root's case behavior outright, so its
-# identity rules are judged on a folding root from any host.
-norn-fs = { path = "../norn-fs", features = ["test-support"] }
+# identity rules are judged on a folding root from any host. The semantic
+# failure-leg cases also arm file-specific descriptor exhaustion across workers.
+norn-fs = { path = "../norn-fs", features = ["test-support", "induced-failure"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

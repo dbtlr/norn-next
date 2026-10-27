@@ -880,6 +880,102 @@ fn tally(group: &[Option<&str>], count: u64) -> Tally {
 
 // ---- what a tally counts ----
 
+/// Unknown content belongs to no field or tag group, including `null`.
+/// Names-only documents still contribute to totals and path-only matches.
+#[test]
+fn broken_content_is_excluded_from_groups_but_its_name_still_counts() {
+    use norn_store::{Change, DerivedFinding, IncrementProvenance};
+    use norn_wire::FindingKind;
+
+    let scratch = Scratch::new("count-broken-content");
+    let mut store = scratch.open();
+    store
+        .begin_request()
+        .pin_vault_schema(COUNT_SCHEMA.as_bytes(), COUNT_SCHEMA)
+        .unwrap();
+    let declared = declared();
+    let positive = |at| {
+        tagged(
+            document(at, "hash", "body\n").with_frontmatter(
+                Some(map(vec![("status", string("open")), ("n", string("9"))])),
+                &declared,
+            ),
+            &["draft"],
+        )
+    };
+    write_documents(
+        &mut store.begin_request(),
+        &[
+            positive("scope/broken.md"),
+            positive("scope/positive.md"),
+            document("scope/missing.md", "hash", "body\n")
+                .with_frontmatter(Some(map(vec![("n", string("9"))])), &declared),
+        ],
+    );
+    let mut finding = crate::common::unread_block("scope/broken.md");
+    finding.kind = FindingKind::UnreadableDocument;
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Unreadable {
+                path: crate::common::path("scope/broken.md"),
+            }],
+            &[DerivedFinding {
+                facts: finding,
+                replaces: None,
+                bytes_hash: None,
+            }],
+            &declared,
+        )
+        .unwrap();
+    let reader = Arc::new(store.open_reader().reader.unwrap());
+    let snapshot = reader.try_take().unwrap().establish().unwrap();
+
+    for predicates in [Vec::new(), vec![Predicate::path("scope/**")]] {
+        let count = |by| {
+            snapshot
+                .count(&counting(by).with_predicates(predicates.clone()), &declared)
+                .unwrap()
+                .tallies
+        };
+        assert_eq!(count(Vec::new()), vec![tally(&[], 3)]);
+        for (key, label) in [(field("status"), "open"), (GroupKey::tag(), "draft")] {
+            assert_eq!(
+                count(vec![key.clone()]),
+                vec![tally(&[None], 1), tally(&[Some(label)], 1)],
+                "{key:?} under {predicates:?}"
+            );
+            assert_eq!(
+                count(vec![key.clone(), field("n")]),
+                vec![
+                    tally(&[None, Some("9")], 1),
+                    tally(&[Some(label), Some("9")], 1),
+                ],
+                "leading {key:?} under {predicates:?}"
+            );
+            assert_eq!(
+                count(vec![field("n"), key.clone()]),
+                vec![
+                    tally(&[Some("9"), None], 1),
+                    tally(&[Some("9"), Some(label)], 1),
+                ],
+                "trailing {key:?} under {predicates:?}"
+            );
+        }
+    }
+    assert_eq!(
+        snapshot
+            .count(
+                &counting(Vec::new()).with_predicates([Predicate::path("scope/broken.md")]),
+                &declared,
+            )
+            .unwrap()
+            .tallies,
+        vec![tally(&[], 1)]
+    );
+}
+
 /// **A set-valued field groups a document once per element**, and a key
 /// holding no scalar value groups with a missing key under `null`. `aliases`
 /// holds `[x, y]` on `a.md`, so it is counted under both; `f.md` repeats `x`
@@ -1276,14 +1372,14 @@ fn member_part(key: &GroupKey, label: &str) -> Predicate {
 /// `eq key:<label>` for a field, `tag:<label>` for a tag — holds number exactly
 /// the tally's count.
 ///
-/// A `null` member is no single find part: it holds the documents that carry
-/// no scalar value for the key, which is a missing key, a map, an empty
-/// sequence or, under a typed key, no value that reads as the type. The
-/// equivalent this states is the complement: the documents the find of the
-/// other members holds, less every document a find of this key's labels
-/// holds. The labels are every label the count returned for the key, which is
-/// every value the matched documents carry under it, since a document carrying
-/// a value is counted in that value's group.
+/// A `null` member is no single find part: it holds the readable documents
+/// that carry no scalar value for the key, which is a missing key, a map, an
+/// empty sequence or, under a typed key, no value that reads as the type. For
+/// this readable fixture, the equivalent is the complement: the documents
+/// the find of the other members holds, less every document a find of this
+/// key's labels holds. The labels are every label the count returned for the
+/// key, which is every value the matched documents carry under it, since a
+/// document carrying a value is counted in that value's group.
 #[test]
 fn every_tally_agrees_with_a_find_of_its_members() {
     let counting_store = Counting::new("count-agreement");

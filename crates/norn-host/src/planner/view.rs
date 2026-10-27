@@ -34,6 +34,12 @@ pub(crate) trait VaultView {
     /// Why the view could not answer: a machine failure, never absence.
     type Error;
 
+    /// Whether a read failed at one document, so repair can skip its fixes.
+    /// Root, directory and environmental failures must remain errors.
+    fn is_unreadable(_error: &Self::Error) -> bool {
+        false
+    }
+
     /// The root's identity rule.
     fn normalizer(&self) -> &PathNormalizer;
 
@@ -283,6 +289,10 @@ impl<'view, V> Remembered<'view, V> {
 impl<V: VaultView> VaultView for Remembered<'_, V> {
     type Error = V::Error;
 
+    fn is_unreadable(error: &Self::Error) -> bool {
+        V::is_unreadable(error)
+    }
+
     fn normalizer(&self) -> &PathNormalizer {
         self.view.normalizer()
     }
@@ -417,6 +427,13 @@ pub(crate) enum TreeViewError {
     Walk(WalkError),
     /// A document's read failed.
     Read(Refusal),
+    /// A path failure prevented reading one document's bytes. Repair skips
+    /// its fixes; a resolved plan's recheck still refuses with a read error.
+    Unreadable {
+        operation: &'static str,
+        path: PathBuf,
+        cause: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for TreeViewError {
@@ -424,6 +441,11 @@ impl std::fmt::Display for TreeViewError {
         match self {
             TreeViewError::Walk(error) => error.fmt(formatter),
             TreeViewError::Read(refusal) => refusal.fmt(formatter),
+            TreeViewError::Unreadable {
+                operation,
+                path,
+                cause,
+            } => write!(formatter, "{operation} {}: {cause}", path.display()),
         }
     }
 }
@@ -433,6 +455,7 @@ impl std::error::Error for TreeViewError {
         match self {
             TreeViewError::Walk(error) => Some(error),
             TreeViewError::Read(refusal) => Some(refusal),
+            TreeViewError::Unreadable { cause, .. } => Some(cause),
         }
     }
 }
@@ -571,10 +594,13 @@ impl TreeView {
                     // Taken away between the descent and the read: nothing
                     // stands there now.
                     norn_fs::Opened::Nothing => self.spelled_where_absent(path)?,
-                    norn_fs::Opened::Unreadable { operation, cause } => Entry::Blocked {
-                        detail: format!("{operation}: {cause}"),
-                        barrier: Barrier::Occupied,
-                    },
+                    norn_fs::Opened::Unreadable { operation, cause } => {
+                        return Err(TreeViewError::Unreadable {
+                            operation,
+                            path: self.root.join(at.as_path()),
+                            cause,
+                        });
+                    }
                     norn_fs::Opened::Read((hash, body)) => Entry::Document {
                         at: spelling,
                         hash,
@@ -588,6 +614,10 @@ impl TreeView {
 
 impl VaultView for TreeView {
     type Error = TreeViewError;
+
+    fn is_unreadable(error: &Self::Error) -> bool {
+        matches!(error, TreeViewError::Unreadable { .. })
+    }
 
     fn normalizer(&self) -> &PathNormalizer {
         self.vault.normalizer()

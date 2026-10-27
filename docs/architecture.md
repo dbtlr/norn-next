@@ -1014,9 +1014,11 @@ its key — whose count is of documents and not of those rows, so the page walks
 the ceiling though the drain stays linear: its rounds to the ceiling, windows counted in
 its own rows and counts, come to a few times the rows the page passes, and each row past
 them is walked once; no index holds such a part's documents in a page's order.
-Inequality and absence seek the documents a page must not hold, so a page they alone
-narrow seeks its order index as a page with no filter does and tests each row against
-them at its key. Two bars hold this, one on the
+Content predicates match only readable documents, including absence and negation of
+fields, tags or links: unknown content establishes neither a value nor its absence.
+Path-only predicates still match a broken document's name. Inequality and absence seek
+the documents a page must not hold, so a page they alone narrow seeks its order index
+as a page with no filter does and tests each row against them at its key. Two bars hold this, one on the
 work SQLite counted running the page: no page statement reads `documents` end to end or
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
@@ -1072,8 +1074,10 @@ applied, except that a `resolves` part is reported as not applicable and filters
 nothing — and groups the matched documents into tallies. A key holding a set groups a
 document once per element, a tag grouping once per tag under the tag fold, and several keys by their cross
 product, so a tally counts documents and one document may stand in several groups; a
-key the declaration gives a typed order groups by typed equality. A member is `null`
-where the document carries no scalar value under its key — and, under a key with a typed
+key the declaration gives a typed order groups by typed equality. Broken documents are
+excluded from field and tag groupings, including every `null` member: unknown content
+is never absent. Ungrouped and path-only counts include their names-only rows. A member
+is `null` where a readable document carries no scalar value under its key — and, under a key with a typed
 order, where no scalar it carries reads as that type. A grouping by a key with a dated
 order is advised as a grouping where the key holds both offset spellings, since it decides
 which dates are one tally. It names four
@@ -3150,6 +3154,8 @@ unresolved operation. Evidence from a broken target cannot support a fix: repair
 with `SkipReason::UnreadableTarget` (`unreadable_target`) and continues the rest of the
 plan. A path failure while the planner reads a tree becomes `Before::Unread`, rather than
 a failed repair. The applier's before-state check still refuses writing the broken path.
+Preview and apply of an already-resolved plan keep `vault/write-failed` when a target file
+cannot be read; path classification does not change their refusal codes.
 Block references and headings whose syntax's written form is empty or starts with `^` have no such suggestion. A target whose body the batch changes with
 `rewrite_tag`, its holder included, is not scored from its snapshot headings; a below-threshold
 tag proposal excludes it too. Each holder matches anchor rows through one map of written

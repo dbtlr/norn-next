@@ -31,12 +31,12 @@ pub enum CountStatement {
     /// through its narrowest index, and with one it reaches the documents the
     /// filter's seek hands it by row id.
     Total,
-    /// The tallies whose leading member is `null`: the documents carrying no
-    /// value under the leading key, grouped by the rest of the tuple. It walks
-    /// the documents — the matched ones whenever a part keeps what it seeks,
-    /// every one otherwise — and probes each for a value under the leading key,
-    /// so no read of the leading key's rows passes a document that does not
-    /// hold it. The member names what the leading key is read from.
+    /// The tallies whose leading member is `null`: the readable documents
+    /// carrying no value under the leading key, grouped by the rest of the
+    /// tuple. It walks the documents — the matched ones whenever a part keeps
+    /// what it seeks, every one otherwise — and probes each for a value under
+    /// the leading key, so no read of the leading key's rows passes a document
+    /// that does not hold it. The member names what the leading key is read from.
     NullLead(GroupMember),
     /// The tallies whose leading member holds a value, grouped by the whole
     /// tuple. A part keeping at most the page drive's budget drives from its
@@ -297,6 +297,9 @@ pub(crate) fn compose_tallies(tallies: &Tallies<'_>) -> (String, Vec<Value>) {
             Some("d.path"),
         ),
         (CountStatement::NullLead(_), Some(lead)) => {
+            // Unknown content is not absence. Keep readability a test of the
+            // documents the existing drive reaches, rather than a new range.
+            conditions.push("+d.content_hash IS NOT NULL".to_string());
             let probe = lead.of_document("m", "d.id", &mut binder);
             conditions.push(format!(
                 "NOT EXISTS (SELECT 1 FROM {table} AS m WHERE {probe})",

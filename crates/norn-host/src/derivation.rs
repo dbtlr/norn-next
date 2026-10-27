@@ -2589,6 +2589,7 @@ rules:
                 "document/misplaced",
                 "document/rules-conflict",
                 "document/undeclared-tag",
+                "document/unreadable",
                 "field/forbidden",
                 "field/not-one-of",
                 "field/required-missing",
