@@ -871,14 +871,13 @@ title: abcdefgh
 ";
 
 /// What one judgment of [`PARAMETER_PROBE`] under `rules` paid: a vault
-/// holding that one document, attached by a fresh host, whose account is
-/// then that one derivation's.
+/// attached empty so first-index metadata and canonical construction finish
+/// before the probe is written. Only its watcher derivation is counted.
 fn judged_under(label: &str, rules: &str) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let root = sandbox.work_dir().join("judged");
     let tree = root.join("vault");
     std::fs::create_dir_all(tree.join(".norn")).expect("creating the vault");
-    std::fs::write(tree.join("probe.md"), PARAMETER_PROBE).expect("writing the probe");
     std::fs::write(
         tree.join(".norn/schema.yaml"),
         format!("version: 1\nrules:\n{rules}"),
@@ -887,19 +886,19 @@ fn judged_under(label: &str, rules: &str) -> CounterSnapshot {
     let vault = attach::Vault::adopt(&root);
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
-    wait_until(
-        &format!("the host to judge the probe under `{label}`"),
-        attach::state_budget(DERIVATION_LIMIT),
-        || {
-            let spent = judged_work(&host);
-            if spent.get("rule_rules_evaluated") > 0 {
-                Observed::Met(spent)
-            } else {
-                Observed::pending(format!("the host's account reads {spent:?}"))
-            }
-        },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"))
+    let spent = the_host_judges(
+        &host,
+        || std::fs::write(tree.join("probe.md"), PARAMETER_PROBE).expect("writing the probe"),
+        &format!("judge the probe under `{label}`"),
+    );
+    for count in ["document_opens", "changesets_applied", "documents_upserted"] {
+        assert_eq!(
+            spent.get(count),
+            1,
+            "the probe's derivation counted `{count}` other than once: {spent:?}"
+        );
+    }
+    spent
 }
 
 /// The rule counts of `snapshot`, every count but `varied` — the ones a
@@ -973,8 +972,8 @@ fn follows_the_parameter(
 
 /// **The logical rule counters follow each declared parameter, and only
 /// proportionally.** One document is judged under schemas differing in one
-/// parameter at a time, each by a fresh host over a vault of that document
-/// alone:
+/// parameter at a time, each written under a live attachment after the empty
+/// vault's first-index construction finishes:
 ///
 /// - **rule count R**: R rules none of which selects the document evaluate R
 ///   rules and R selector terms, and read each term's ten bytes;
