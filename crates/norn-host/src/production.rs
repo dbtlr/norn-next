@@ -9585,8 +9585,7 @@ mod tests {
         /// Write `path` as a document and hold its opens exhausted with `EMFILE`.
         ///
         /// A heal that reaches the document refuses environmentally. The
-        /// watcher only reports a change at the file: no backend adds a watch
-        /// for a file, so its mode cannot fail the watcher.
+        /// injected document-open failure does not affect watcher coverage.
         #[cfg(unix)]
         fn exhausted_document(path: &Path) -> impl Drop {
             fs::write(path, "omega omega\n").unwrap();

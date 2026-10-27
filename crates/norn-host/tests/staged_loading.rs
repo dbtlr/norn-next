@@ -1629,6 +1629,7 @@ fn root_loss_before_binding_declines_provisional_waiters_while_canonical_work_is
     let registered = fixture.scratch.join("registered");
     std::os::unix::fs::symlink(&fixture.root, &registered).unwrap();
     let probe = Probe::new([Point::AuthorityCaptured, Point::CanonicalPage]);
+    norn_fs::watch::settle_prior_changes(fixture.scratch.root(), BUDGET.work()).unwrap();
     let host = Host::new(
         RegistryRead::from_entries([Registration::new(
             name(),

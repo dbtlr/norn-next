@@ -2428,6 +2428,22 @@ mod tests {
 
     #[cfg(feature = "induced-failure")]
     #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement under the owned scratch tree.
+    fn an_open_denial_keeps_a_final_symlink_distinct_from_its_target() {
+        let scratch = Scratch::new("open-denied-final-symlink");
+        scratch.place("target.md", b"body");
+        std::os::unix::fs::symlink("target.md", scratch.at("link.md")).unwrap();
+        let root = fs::canonicalize(scratch.at("")).unwrap();
+        let vault = Vault::open(&root, &[]).unwrap();
+        let _denied = crate::deny_document_opens(&root.join("link.md"));
+        assert!(matches!(
+            vault.fact(Path::new("target.md")),
+            Ok(WalkFact::File(_))
+        ));
+    }
+
+    #[cfg(feature = "induced-failure")]
+    #[test]
     fn a_document_open_failure_has_a_known_regular_file_kind() {
         let scratch = Scratch::new("fact-open-known-kind");
         let note = scratch.place("note.md", b"body");
