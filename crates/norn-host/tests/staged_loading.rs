@@ -1211,15 +1211,19 @@ impl LoadingProbe for BrokenConstructor {
 #[test]
 fn a_failed_constructor_waits_for_first_index_expiry_and_keeps_failure_receipts() {
     let fixture = Fixture::new("public-stage-constructor-failure");
-    let construction = Probe::new([Point::MetadataComplete]);
+    let construction = Probe::new([Point::CatalogueComplete, Point::MetadataComplete]);
     let failure = Arc::new(BrokenConstructor {
         inner: construction.clone(),
         broke: std::sync::atomic::AtomicBool::new(false),
     });
     let host = fixture.host_bound(failure.clone(), Duration::from_millis(200));
+    let _demand = host.demand(&name()).unwrap();
     std::thread::scope(|scope| {
         let _release = Release(&construction);
+        construction.wait(Point::CatalogueComplete);
         let first = spawn_get(scope, &host, "first");
+        waits(&host, 1);
+        construction.release();
         construction.wait(Point::MetadataComplete);
         assert!(failure.broke.load(std::sync::atomic::Ordering::SeqCst));
         let error = first.recv_timeout(BUDGET.work()).unwrap().unwrap_err();
