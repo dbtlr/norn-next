@@ -116,7 +116,9 @@ impl ProductionEntryOps {
     /// **The mark clears only when the derivation has completed**, after the
     /// watcher coverage window has closed cleanly, so a failure of any kind —
     /// damage, the environment, lost maintainership, a watcher failure, a full
-    /// disk — leaves it for the next open to rebuild over. This is its own
+    /// disk — leaves it for the next open to rebuild over. Rung 3 alone clears
+    /// it later still, after its integrity verification
+    /// ([`Self::construct_from_zero`]). This is its own
     /// transaction until the five steps give the build a final transaction to
     /// carry it.
     ///
@@ -132,6 +134,23 @@ impl ProductionEntryOps {
         progress: &ProgressReporter<ProductionAttachment>,
         admission: EarlyReads,
     ) -> Result<(), JobFailure> {
+        self.construct_from_zero(attachment, progress, admission)?;
+        attachment.store.finish_construction().map_err(store_effect)
+    }
+
+    /// Count a from-zero build and derive the vault into the store under
+    /// construction, leaving the under-construction mark standing.
+    ///
+    /// The one construction path: [`Self::build_from_zero`] clears the mark
+    /// after it, and a caller that owes the result a verification first
+    /// (rung 3) clears it only once that passes, so a store that fails the
+    /// verification is rebuilt again by the next open rather than adopted.
+    pub(super) fn construct_from_zero(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        admission: EarlyReads,
+    ) -> Result<(), JobFailure> {
         debug_assert!(
             attachment.store.under_construction(),
             "a from-zero build ran over a finished store"
@@ -139,8 +158,7 @@ impl ProductionEntryOps {
         self.evidence.count_from_zero_build();
         Self::under_coverage(attachment, |attachment| {
             self.derive_into_empty(attachment, progress, admission)
-        })?;
-        attachment.store.finish_construction().map_err(store_effect)
+        })
     }
 
     /// Derive the vault into the store the caller holds: a build from zero if

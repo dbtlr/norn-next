@@ -1524,15 +1524,17 @@ impl ProductionEntryOps {
     /// no row; the heal that follows is the same hash-authoritative walk an
     /// attach over an empty database runs, reading every document under the
     /// registered root through the same code path. There is nothing here that a
-    /// first attach does not do — it is the same [`Self::build_from_zero`], and
-    /// it clears the replacement's under-construction mark when that build ends
-    /// — which is what makes the result equal to a first attach's rather than
-    /// merely close to it.
+    /// first attach does not do — it is the same [`Self::construct_from_zero`]
+    /// that [`Self::build_from_zero`] runs — which is what makes the result
+    /// equal to a first attach's rather than merely close to it.
     ///
     /// The verification afterwards is the other half: a rebuilt database that
     /// cannot answer for itself is not derived state anything may be published
     /// over, and reporting damage here rather than `Ready` is what keeps a
-    /// second damaged store from being served as a sound one.
+    /// second damaged store from being served as a sound one. The
+    /// replacement's under-construction mark is cleared only after that
+    /// verification passes, so a store that fails it stays marked and the next
+    /// open rebuilds it from zero instead of adopting it.
     ///
     /// Coverage stands through all of it. The watcher and the maintainer lock
     /// were not what was damaged, and the facts the watcher reports during the
@@ -1584,7 +1586,7 @@ impl ProductionEntryOps {
         Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         attachment.read_pinned_model()?;
         let derived = self
-            .build_from_zero(&mut attachment, progress, EarlyReads::Declined)
+            .construct_from_zero(&mut attachment, progress, EarlyReads::Declined)
             .and_then(|()| {
                 attachment
                     .store
@@ -1596,7 +1598,8 @@ impl ProductionEntryOps {
                         )),
                         other => other,
                     })
-            });
+            })
+            .and_then(|()| attachment.store.finish_construction().map_err(store_effect));
         match derived {
             Ok(()) => Ok(attachment),
             Err(failure) => {
@@ -13810,6 +13813,74 @@ mod tests {
             "the replacement was built outside the entry"
         );
         assert!(stood.iter().all(|stood| *stood), "{stood:?}");
+        assert!(!mark_stands(attachment.store.path()));
+        ops.detach(&name, attachment);
+    }
+
+    /// Writes a row that references no document into the store at `database`
+    /// the instant its build's canonical walk completes, through a handle that
+    /// is none of the attachment's: the rebuilt store then fails the
+    /// foreign-key half of `verify_integrity`.
+    #[cfg(feature = "induced-failure")]
+    struct OrphanAtBuildEnd {
+        database: PathBuf,
+    }
+
+    #[cfg(feature = "induced-failure")]
+    impl crate::LoadingProbe for OrphanAtBuildEnd {
+        fn at(&self, boundary: crate::LoadingBoundary<'_>) {
+            if matches!(boundary, crate::LoadingBoundary::CanonicalComplete) {
+                norn_db::rusqlite::Connection::open(&self.database)
+                    .expect("opening the store out of band")
+                    .execute_batch(
+                        "PRAGMA foreign_keys = OFF;
+                         INSERT INTO document_trigrams (trigram, document) VALUES ('zzz', 999999999)",
+                    )
+                    .expect("writing the orphan row");
+            }
+        }
+    }
+
+    /// **A rung-3 rebuild that fails verification keeps its mark.** The
+    /// replacement is only a finished store once it has answered for itself;
+    /// a damaged one left unmarked would be adopted by the next attach and
+    /// healed without an integrity check.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_rung_three_rebuild_that_fails_verification_keeps_its_mark() {
+        let f = Fixture::new("rung-three-verification-fails");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(16);
+        let progress = ProgressReporter::disconnected();
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        ops.detach(&name, attachment);
+        corrupt_the_document_pages(&f, &database);
+
+        let (ops, _) = f.ops(16);
+        let ops = ops.with_loading_probe(Arc::new(OrphanAtBuildEnd {
+            database: database.clone(),
+        }));
+        let failure = ops
+            .attach(&f.registration(), &progress)
+            .err()
+            .expect("a rung 3 whose rebuilt store fails verification");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "{failure:?}"
+        );
+        assert!(mark_stands(&database), "the damaged rebuild lost its mark");
+
+        let (ops, name) = f.ops(16);
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            matches!(
+                attachment.store.open_outcome(),
+                OpenOutcome::RebuiltFromZero(_)
+            ),
+            "{:?}",
+            attachment.store.open_outcome()
+        );
         assert!(!mark_stands(attachment.store.path()));
         ops.detach(&name, attachment);
     }

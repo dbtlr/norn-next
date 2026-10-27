@@ -149,7 +149,7 @@ may not be added.
 - **A from-zero build that did not finish** — at any time. The store records an
   under-construction mark in `meta` when it is created, in the transaction that records its
   fingerprint, path order and derivation version, as a rebuild input beside them, and clears
-  it when the build ends. An open that finds the mark rebuilds from zero and reports the
+  it when the build ends — rung 3's, once its integrity verification has passed. An open that finds the mark rebuilds from zero and reports the
   store's own rebuild reason, so an interrupted build is never resumed over what it left. Every
   from-zero build — a first build, an open-time rebuild, rung 3 and the deferred first build
   of a vault whose declaration this build could not read — runs one construction path; the
