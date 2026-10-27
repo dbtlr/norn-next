@@ -2043,6 +2043,8 @@ pub(crate) fn write_finding(
     }
 
     if finding.kind == FindingKind::UnreadableDirectory {
+        // Directories named `..md` or `...md` use rendered subject keys; path links
+        // beneath them keep `link/broken` while marked.
         transaction
             .prepare_cached(WriteStatement::InsertDirectoryMark.sql())
             .and_then(|mut insert| {
